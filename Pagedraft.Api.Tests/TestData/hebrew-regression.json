@@ -1,0 +1,62 @@
+[
+  {
+    "id": "norm-1",
+    "input": "  טקסט   עם   רווחים   כפולים  ",
+    "expectedNormalized": "טקסט עם רווחים כפולים",
+    "language": "he-IL"
+  },
+  {
+    "id": "norm-2",
+    "input": "שורה אחת.\n\n\n\nשורה שנייה.",
+    "expectedNormalized": "שורה אחת.\n\nשורה שנייה.",
+    "language": "he-IL"
+  },
+  {
+    "id": "norm-3",
+    "input": "משפט עם \"מרכאות אנגליות\".",
+    "expectedNormalized": "משפט עם ״מרכאות אנגליות״.",
+    "language": "he-IL"
+  },
+  {
+    "id": "norm-4",
+    "input": "גם 'גרש' בודד.",
+    "expectedNormalized": "גם ׳גרש׳ בודד.",
+    "language": "he-IL"
+  },
+  {
+    "id": "norm-5",
+    "input": "טקסט נקי ללא שינוי.",
+    "expectedNormalized": "טקסט נקי ללא שינוי.",
+    "language": "he-IL"
+  },
+  {
+    "id": "norm-6",
+    "input": "Zero\u200Bwidth\u200Cchars",
+    "expectedNormalized": "Zerowidthchars",
+    "language": "he-IL"
+  },
+  {
+    "id": "detect-1",
+    "input": "זה משפט תקין בעברית.",
+    "expectedIssueCategories": [],
+    "language": "he-IL"
+  },
+  {
+    "id": "detect-2",
+    "input": "משפט עם אולי שגיאה דקדוקית או כתיב.",
+    "expectedIssueCategories": [],
+    "language": "he-IL"
+  },
+  {
+    "id": "rewrite-1",
+    "input": "שלום עולם.",
+    "expectedRewriteSnippet": null,
+    "language": "he-IL"
+  },
+  {
+    "id": "full-1",
+    "input": "  שלום.   \"מרכאות\" וטקסט.  ",
+    "expectedNormalized": "שלום. ״מרכאות״ וטקסט.",
+    "language": "he-IL"
+  }
+]
