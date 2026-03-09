@@ -351,27 +351,27 @@ public class AnalysisController : ControllerBase
                     progress.SetStatus(jobId, AnalysisProgressStatus.Failed, ex.Message);
                 }
             }
-        catch (Exception ex)
-        {
-            // Use the same AnalysisProgressTracker to mark the job as failed if the scoped execution setup fails.
-            try
+            catch (Exception ex)
             {
-                _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Async analysis job failed to start.");
-            }
-            catch
-            {
-                // Swallow to avoid crashing the background task if progress tracking is unavailable.
-            }
+                // Use the same AnalysisProgressTracker to mark the job as failed if the scoped execution setup fails.
+                try
+                {
+                    _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Async analysis job failed to start.");
+                }
+                catch
+                {
+                    // Swallow to avoid crashing the background task if progress tracking is unavailable.
+                }
 
-            try
-            {
-                _logger.LogError(ex, "Failed to execute async analysis job {JobId}", jobId);
+                try
+                {
+                    _logger.LogError(ex, "Failed to execute async analysis job {JobId}", jobId);
+                }
+                catch
+                {
+                    // Logging should not crash the background task.
+                }
             }
-            catch
-            {
-                // Logging should not crash the background task.
-            }
-        }
         }, CancellationToken.None);
 
         var response = new StartAnalysisJobResponse(jobId, analysisType.ToString(), scope.ToString());
@@ -395,6 +395,12 @@ public class AnalysisController : ControllerBase
         if (analysis == null)
             return NotFound();
 
-        return Ok(ToDto(analysis));
+        // Load suggestion outcomes for this analysis so the DTO matches the list endpoint behavior.
+        var outcomes = await _db.SuggestionOutcomeRecords.AsNoTracking()
+            .Where(o => o.AnalysisResultId == analysis.Id)
+            .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
+            .ToListAsync(ct);
+
+        return Ok(ToDto(analysis, outcomes.Count > 0 ? outcomes : null));
     }
 }
