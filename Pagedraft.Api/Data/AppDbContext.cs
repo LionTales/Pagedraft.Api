@@ -14,6 +14,8 @@ public class AppDbContext : DbContext
     public DbSet<PromptTemplate> PromptTemplates => Set<PromptTemplate>();
     public DbSet<ChunkSummary> ChunkSummaries => Set<ChunkSummary>();
     public DbSet<BookProfile> BookProfiles => Set<BookProfile>();
+    public DbSet<BookBible> BookBibles => Set<BookBible>();
+    public DbSet<SceneEmbedding> SceneEmbeddings => Set<SceneEmbedding>();
     public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
     public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
 
@@ -59,6 +61,7 @@ public class AppDbContext : DbContext
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.StructuredJson).IsRequired(false);
             e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.BookId, x.ChapterId }).IsUnique();
@@ -70,6 +73,49 @@ public class AppDbContext : DbContext
             e.Property(x => x.Language).HasMaxLength(10);
             e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.BookId).IsUnique();
+        });
+
+        modelBuilder.Entity<BookBible>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.StyleProfileJson).IsRequired(false);
+            e.Property(x => x.CharacterRegisterJson).IsRequired(false);
+            e.Property(x => x.ThemesJson).IsRequired(false);
+            e.Property(x => x.TimelineJson).IsRequired(false);
+            e.Property(x => x.WorldBuildingJson).IsRequired(false);
+
+            e.HasOne(x => x.Book)
+                .WithOne()
+                .HasForeignKey<BookBible>(x => x.BookId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasIndex(x => x.BookId).IsUnique();
+        });
+
+        modelBuilder.Entity<SceneEmbedding>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.EmbeddingVector)
+                .IsRequired()
+                .HasColumnType("varbinary(max)");
+            e.Property(x => x.ModelName).HasMaxLength(200);
+
+            e.HasOne(x => x.Scene)
+                .WithMany()
+                .HasForeignKey(x => x.SceneId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(x => x.Chapter)
+                .WithMany()
+                .HasForeignKey(x => x.ChapterId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(x => x.Book)
+                .WithMany()
+                .HasForeignKey(x => x.BookId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.BookId);
         });
 
         modelBuilder.Entity<PromptTemplate>(e =>
@@ -163,6 +209,15 @@ public class AppDbContext : DbContext
             else if (entry.Entity is ChunkSummary cs)
             {
                 if (entry.State == EntityState.Added) cs.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookBible bb)
+            {
+                if (entry.State == EntityState.Added) bb.CreatedAt = bb.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) bb.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is SceneEmbedding se)
+            {
+                if (entry.State == EntityState.Added) se.CreatedAt = DateTimeOffset.UtcNow;
             }
             else if (entry.Entity is AnalysisResult ar)
             {

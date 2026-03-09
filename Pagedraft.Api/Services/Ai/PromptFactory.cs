@@ -1,3 +1,5 @@
+using System.Text;
+using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
 
 namespace Pagedraft.Api.Services.Ai;
@@ -91,6 +93,154 @@ public class PromptFactory
             AnalysisType.Custom         => isHe ? "השב בעברית בלבד לפי ההנחיות שניתנו." : "Respond according to the instructions given.",
             _ => isHe ? "השב בעברית בלבד." : "Respond in English."
         };
+    }
+
+    // ─── Context-aware analysis prompt ──────────────────────────────
+
+    /// <summary>
+    /// Returns a context-enriched instruction for the given analysis type.
+    /// When context is null or has no relevant optional fields, falls back to the base prompt.
+    /// Context sections use [SECTION_NAME]...[/SECTION_NAME] delimiters so the LLM can
+    /// distinguish injected context from the analysis instruction itself.
+    /// </summary>
+    public string GetAnalysisPrompt(AnalysisType analysisType, string language, AnalysisContext? context)
+    {
+        var basePrompt = GetAnalysisPrompt(analysisType, language);
+        if (context == null)
+            return basePrompt;
+
+        var preamble = BuildContextPreamble(context, analysisType);
+        if (string.IsNullOrEmpty(preamble))
+            return basePrompt;
+
+        return preamble + basePrompt;
+    }
+
+    // ─── Context preamble builder ───────────────────────────────────
+
+    [Flags]
+    private enum ContextField
+    {
+        None             = 0,
+        StyleProfile     = 1 << 0,
+        Characters       = 1 << 1,
+        ChapterBrief     = 1 << 2,
+        BookBrief        = 1 << 3,
+        PrecedingContext  = 1 << 4,
+        FollowingContext  = 1 << 5,
+    }
+
+    /// <summary>Which optional context fields are relevant for each analysis type.</summary>
+    private static ContextField GetRelevantFields(AnalysisType type) => type switch
+    {
+        AnalysisType.Proofread          => ContextField.StyleProfile | ContextField.PrecedingContext,
+        AnalysisType.LineEdit           => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.FollowingContext,
+        AnalysisType.LinguisticAnalysis => ContextField.StyleProfile,
+        AnalysisType.LiteraryAnalysis   => ContextField.StyleProfile | ContextField.Characters | ContextField.ChapterBrief | ContextField.BookBrief,
+        AnalysisType.Summarization      => ContextField.ChapterBrief | ContextField.PrecedingContext,
+        AnalysisType.QA                 => ContextField.BookBrief | ContextField.Characters,
+        AnalysisType.StoryAnalysis      => ContextField.BookBrief,
+        AnalysisType.Synopsis           => ContextField.Characters,
+        // BookOverview, CharacterAnalysis, Custom — no extra context needed
+        _ => ContextField.None,
+    };
+
+    private static string BuildContextPreamble(AnalysisContext ctx, AnalysisType type)
+    {
+        var fields = GetRelevantFields(type);
+        if (fields == ContextField.None)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+
+        if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style));
+
+        if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
+            AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
+
+        if (fields.HasFlag(ContextField.BookBrief) && ctx.BookBrief is { } book)
+            AppendSection(sb, "BOOK_CONTEXT", FormatBookBrief(book));
+
+        if (fields.HasFlag(ContextField.ChapterBrief) && ctx.ChapterBrief is { } chapter)
+            AppendSection(sb, "CHAPTER_CONTEXT", FormatChapterBrief(chapter));
+
+        if (fields.HasFlag(ContextField.PrecedingContext) && !string.IsNullOrWhiteSpace(ctx.PrecedingContext))
+            AppendSection(sb, "PRECEDING_CONTEXT", ctx.PrecedingContext.Trim());
+
+        if (fields.HasFlag(ContextField.FollowingContext) && !string.IsNullOrWhiteSpace(ctx.FollowingContext))
+            AppendSection(sb, "FOLLOWING_CONTEXT", ctx.FollowingContext.Trim());
+
+        return sb.ToString();
+    }
+
+    private static void AppendSection(StringBuilder sb, string name, string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return;
+        sb.Append('[').Append(name).Append("]\n");
+        sb.Append(content.Trim());
+        sb.Append("\n[/").Append(name).Append("]\n\n");
+    }
+
+    private static string FormatStyleProfile(StyleProfileData s)
+    {
+        var sb = new StringBuilder();
+        if (s.DominantTone != null)    sb.AppendLine($"Dominant tone: {s.DominantTone}");
+        if (s.Pov != null)             sb.AppendLine($"POV: {s.Pov}");
+        if (s.TensePattern != null)    sb.AppendLine($"Tense: {s.TensePattern}");
+        if (s.VocabularyLevel != null)  sb.AppendLine($"Vocabulary: {s.VocabularyLevel}");
+        if (s.DialogueStyle != null)   sb.AppendLine($"Dialogue style: {s.DialogueStyle}");
+        if (s.AverageSentenceLength.HasValue) sb.AppendLine($"Avg sentence length: {s.AverageSentenceLength:F1} words");
+        if (s.FormalityScore.HasValue) sb.AppendLine($"Formality: {s.FormalityScore:F2}");
+        if (s.RecurringMotifs.Count > 0) sb.AppendLine($"Motifs: {string.Join(", ", s.RecurringMotifs)}");
+        return sb.ToString();
+    }
+
+    private static string FormatCharacters(CharacterRegister reg)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in reg.Characters)
+        {
+            sb.Append($"- {c.Name}");
+            if (c.Role != null) sb.Append($" ({c.Role})");
+            if (c.Gender != null) sb.Append($" [{c.Gender}]");
+            if (c.Description != null) sb.Append($": {c.Description}");
+            if (c.Aliases.Count > 0) sb.Append($" (aliases: {string.Join(", ", c.Aliases)})");
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatBookBrief(BookBrief b)
+    {
+        var sb = new StringBuilder();
+        if (b.Genre != null) sb.AppendLine($"Genre: {b.Genre}{(b.SubGenre != null ? $" / {b.SubGenre}" : "")}");
+        if (b.TargetAudience != null) sb.AppendLine($"Audience: {b.TargetAudience}");
+        if (b.LiteratureLevel.HasValue) sb.AppendLine($"Literature level: {b.LiteratureLevel}/10");
+        if (b.Themes.Count > 0) sb.AppendLine($"Themes: {string.Join(", ", b.Themes)}");
+        if (b.Synopsis != null) sb.AppendLine($"Synopsis: {b.Synopsis}");
+        return sb.ToString();
+    }
+
+    private static string FormatChapterBrief(ChapterBrief ch)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Chapter {ch.Order}: {ch.Title}");
+        if (ch.Summary != null) sb.AppendLine(ch.Summary);
+        if (ch.PlotEvents.Count > 0) sb.AppendLine($"Plot events: {string.Join("; ", ch.PlotEvents)}");
+        if (ch.CharacterStates.Count > 0)
+        {
+            foreach (var cs in ch.CharacterStates)
+            {
+                sb.Append($"  {cs.Name}");
+                if (cs.State != null) sb.Append($" — {cs.State}");
+                if (cs.EmotionalArc != null) sb.Append($" ({cs.EmotionalArc})");
+                sb.AppendLine();
+            }
+        }
+        if (ch.OpenThreads.Count > 0) sb.AppendLine($"Open threads: {string.Join("; ", ch.OpenThreads)}");
+        if (ch.ToneNotes != null) sb.AppendLine($"Tone: {ch.ToneNotes}");
+        return sb.ToString();
     }
 
     // ── Proofread ────────────────────────────────────────────────────

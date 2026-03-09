@@ -4,6 +4,7 @@ using Pagedraft.Api.Data;
 using Pagedraft.Api.Hubs;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
+using Pagedraft.Api.Services.Analysis;
 using Pagedraft.Api.Services.LanguageEngine;
 using Pagedraft.Api.Services.LanguageEngine.Contracts;
 using Pagedraft.Api.Services.LanguageEngine.Detect;
@@ -41,12 +42,15 @@ builder.Services.AddScoped<ChapterService>();
 builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
 builder.Services.AddScoped<AiAnalysisService>();
-builder.Services.AddScoped<Pagedraft.Api.Services.Analysis.UnifiedAnalysisService>();
-builder.Services.AddScoped<Pagedraft.Api.Services.Analysis.BookIntelligenceService>();
-builder.Services.AddSingleton<Pagedraft.Api.Services.Analysis.AnalysisProgressTracker>();
+builder.Services.AddScoped<UnifiedAnalysisService>();
+builder.Services.AddScoped<BookIntelligenceService>();
+builder.Services.AddSingleton<AnalysisProgressTracker>();
+builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 builder.Services.AddSingleton<PromptFactory>();
+builder.Services.AddSingleton<IEmbeddingService, StubEmbeddingService>();
+builder.Services.AddSingleton<IEmbeddingStore, StubEmbeddingStore>();
 
 builder.Services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddHttpClient("LanguageTool", (sp, client) =>

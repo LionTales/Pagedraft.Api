@@ -27,6 +27,7 @@ public class UnifiedAnalysisService
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<UnifiedAnalysisService> _logger;
     private readonly AnalysisProgressTracker _progress;
+    private readonly IAnalysisContextService _contextService;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -41,7 +42,8 @@ public class UnifiedAnalysisService
         SfdtConversionService sfdtConversion,
         IOptions<AiOptions> aiOptions,
         ILogger<UnifiedAnalysisService> logger,
-        AnalysisProgressTracker progress)
+        AnalysisProgressTracker progress,
+        IAnalysisContextService contextService)
     {
         _db = db;
         _router = router;
@@ -50,6 +52,7 @@ public class UnifiedAnalysisService
         _aiOptions = aiOptions;
         _logger = logger;
         _progress = progress;
+        _contextService = contextService;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -70,7 +73,11 @@ public class UnifiedAnalysisService
         Guid? jobId = null,
         CancellationToken ct = default)
     {
-        var (inputText, bookId, chapterId, sceneId) = await ResolveTarget(scope, targetId, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var inputText = context.TargetText;
+        var bookId = context.BookId;
+        var chapterId = context.ChapterId;
+        var sceneId = context.SceneId;
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
@@ -90,7 +97,8 @@ public class UnifiedAnalysisService
         }
 
         var taskType = MapToTaskType(analysisType);
-        var instruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(analysisType, language);
+        var instruction = customPrompt
+            ?? _promptFactory.GetAnalysisPrompt(analysisType, language, context);
 
         var request = new AiRequest
         {
@@ -228,12 +236,17 @@ public class UnifiedAnalysisService
         string language,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        var (inputText, bookId, chapterId, sceneId) = await ResolveTarget(scope, targetId, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var inputText = context.TargetText;
+        var bookId = context.BookId;
+        var chapterId = context.ChapterId;
+        var sceneId = context.SceneId;
         if (analysisType == AnalysisType.Proofread && inputText.Length > MaxProofreadInputLength)
             throw new InvalidOperationException($"Proofread text is too long ({inputText.Length} characters). Please select a shorter section (e.g. one scene or a few paragraphs). Maximum is {MaxProofreadInputLength:N0} characters.");
 
         var taskType = MapToTaskType(analysisType);
-        var instruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(analysisType, language);
+        var instruction = customPrompt
+            ?? _promptFactory.GetAnalysisPrompt(analysisType, language, context);
 
         var request = new AiRequest
         {
