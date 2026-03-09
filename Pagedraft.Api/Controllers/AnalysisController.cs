@@ -79,7 +79,7 @@ public class AnalysisController : ControllerBase
         }
     }
 
-    private static AnalysisResultDto ToDto(AnalysisResult a, List<SuggestionOutcomeDto>? suggestionOutcomes = null) =>
+    internal static AnalysisResultDto ToDto(AnalysisResult a, List<SuggestionOutcomeDto>? suggestionOutcomes = null) =>
         new(a.Id, a.ChapterId, a.JobId, a.Type, a.ResultText, a.ModelName, a.CreatedAt,
             StructuredResult: a.StructuredResult,
             Scope: a.Scope.ToString(),
