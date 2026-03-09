@@ -202,7 +202,7 @@ public class AnalysisController : ControllerBase
         if (analysis == null || analysis.ChapterId != chapterId)
             return NotFound();
 
-        if (string.IsNullOrEmpty(request?.OriginalText) && string.IsNullOrEmpty(request?.SuggestedText))
+        if (string.IsNullOrEmpty(request?.OriginalText) || string.IsNullOrEmpty(request?.SuggestedText))
             return BadRequest("OriginalText and SuggestedText are required.");
 
         var originalText = request!.OriginalText ?? string.Empty;
@@ -332,8 +332,8 @@ public class AnalysisController : ControllerBase
         {
             try
             {
-                using var scopeFactory = _scopeFactory.CreateScope();
-                var services = scopeFactory.ServiceProvider;
+                using var scope = _scopeFactory.CreateScope();
+                var services = scope.ServiceProvider;
                 var unified = services.GetRequiredService<UnifiedAnalysisService>();
                 var progress = services.GetRequiredService<AnalysisProgressTracker>();
                 var logger = services.GetRequiredService<ILogger<AnalysisController>>();
