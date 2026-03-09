@@ -293,8 +293,6 @@ public class AnalysisController : ControllerBase
 
         if (sceneId.HasValue)
             query = query.Where(o => o.AnalysisResult.SceneId == sceneId);
-        else
-            query = query.Where(o => o.AnalysisResult.SceneId == null);
 
         var list = await query
             .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
