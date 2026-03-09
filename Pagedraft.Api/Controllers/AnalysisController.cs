@@ -260,7 +260,23 @@ public class AnalysisController : ControllerBase
             });
         }
 
-        await _db.SaveChangesAsync(ct);
+        try
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Handle rare race where another request inserted the same (AnalysisResultId, OriginalText, SuggestedText)
+            // between our read and write. Reload and update instead of creating a duplicate.
+            _db.ChangeTracker.Clear();
+            var concurrent = await _db.SuggestionOutcomeRecords
+                .FirstOrDefaultAsync(
+                    x => x.AnalysisResultId == analysisId && x.OriginalText == originalText && x.SuggestedText == suggestedText,
+                    ct);
+            if (concurrent == null) throw;
+            concurrent.Outcome = outcome;
+            await _db.SaveChangesAsync(ct);
+        }
         return Ok();
     }
 
