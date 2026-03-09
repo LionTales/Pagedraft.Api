@@ -188,7 +188,14 @@ public class AnalysisController : ControllerBase
     {
         var a = await _db.AnalysisResults.FirstOrDefaultAsync(x => x.ChapterId == chapterId && x.Id == id, ct);
         if (a == null) return NotFound();
-        return Ok(ToDto(a));
+
+        // Load suggestion outcomes for this analysis so the DTO matches other endpoints.
+        var outcomes = await _db.SuggestionOutcomeRecords.AsNoTracking()
+            .Where(o => o.AnalysisResultId == a.Id)
+            .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
+            .ToListAsync(ct);
+
+        return Ok(ToDto(a, outcomes.Count > 0 ? outcomes : null));
     }
 
     /// <summary>Save or update the outcome (Accepted/Dismissed) for one suggestion of an analysis run.</summary>
