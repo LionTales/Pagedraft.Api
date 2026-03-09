@@ -332,8 +332,8 @@ public class AnalysisController : ControllerBase
         {
             try
             {
-                using var scope = _scopeFactory.CreateScope();
-                var services = scope.ServiceProvider;
+                using var serviceScope = _scopeFactory.CreateScope();
+                var services = serviceScope.ServiceProvider;
                 var unified = services.GetRequiredService<UnifiedAnalysisService>();
                 var progress = services.GetRequiredService<AnalysisProgressTracker>();
                 var logger = services.GetRequiredService<ILogger<AnalysisController>>();
