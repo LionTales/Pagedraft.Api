@@ -9,6 +9,8 @@
 ### Local databases and backups
 *.db
 *.db.back
+*.db-shm
+*.db-wal
 
 ### Other generated artifacts
 *.log
