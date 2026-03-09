@@ -37,11 +37,12 @@ public class BooksController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<List<BookDto>>> GetAll(CancellationToken ct)
     {
-        // SQLite does not support ordering by DateTimeOffset on the server,
-        // so we materialize first and then order in memory.
-        var list = await _db.Books.AsNoTracking().ToListAsync(ct);
-        var ordered = list.OrderBy(b => b.UpdatedAt).ToList();
-        return Ok(ordered.Select(ToDto).ToList());
+        var orderedBooks = await _db.Books
+            .AsNoTracking()
+            .OrderBy(b => b.UpdatedAt)
+            .ToListAsync(ct);
+
+        return Ok(orderedBooks.Select(ToDto).ToList());
     }
 
     [HttpGet("{bookId:guid}")]
