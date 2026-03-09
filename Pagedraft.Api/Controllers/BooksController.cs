@@ -37,11 +37,12 @@ public class BooksController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<List<BookDto>>> GetAll(CancellationToken ct)
     {
-        // SQLite does not support ordering by DateTimeOffset on the server,
-        // so we materialize first and then order in memory.
-        var list = await _db.Books.AsNoTracking().ToListAsync(ct);
-        var ordered = list.OrderBy(b => b.UpdatedAt).ToList();
-        return Ok(ordered.Select(ToDto).ToList());
+        var orderedBooks = await _db.Books
+            .AsNoTracking()
+            .OrderBy(b => b.UpdatedAt)
+            .ToListAsync(ct);
+
+        return Ok(orderedBooks.Select(ToDto).ToList());
     }
 
     [HttpGet("{bookId:guid}")]
@@ -107,6 +108,17 @@ public class BooksController : ControllerBase
     {
         var book = await _db.Books.FindAsync(new object[] { bookId }, ct);
         if (book == null) return NotFound();
+
+        // Explicitly remove dependent ChunkSummaries to satisfy the Restrict FK on BookId.
+        var chunkSummaries = await _db.ChunkSummaries.Where(cs => cs.BookId == bookId).ToListAsync(ct);
+        if (chunkSummaries.Count > 0)
+            _db.ChunkSummaries.RemoveRange(chunkSummaries);
+
+        // Clean up document history snapshots for this book to avoid orphaned versions.
+        var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);
+        if (documentVersions.Count > 0)
+            _db.DocumentVersions.RemoveRange(documentVersions);
+
         _db.Books.Remove(book);
         await _db.SaveChangesAsync(ct);
         return NoContent();

@@ -8,23 +8,30 @@ public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<AppDbConte
 {
     public AppDbContext CreateDbContext(string[] args)
     {
-        // Resolve project directory so we use the same fixed DB location as at runtime (project dir + pagedraft.db).
         var projectDir = ResolveProjectDirectory();
         var config = new ConfigurationBuilder()
             .SetBasePath(projectDir)
             .AddJsonFile("appsettings.json", optional: false)
             .AddJsonFile("appsettings.Development.json", optional: true)
             .Build();
-        var connectionString = config.GetConnectionString("DefaultConnection");
-        if (string.IsNullOrEmpty(connectionString) || connectionString.TrimStart().StartsWith("Data Source=pagedraft.db", StringComparison.OrdinalIgnoreCase))
+
+        var dbProvider = config.GetValue<string>("DatabaseProvider") ?? "SqlServer";
+        if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("DatabaseProvider=Sqlite is no longer supported for design-time context. The current EF Core model and migrations target SQL Server only.");
+        var connectionString = config.GetConnectionString("DefaultConnection")
+            ?? throw new InvalidOperationException("Missing ConnectionStrings:DefaultConnection for design-time context.");
+
+        var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+        optionsBuilder.UseSqlServer(connectionString, sqlOptions =>
         {
-            var dbPath = Path.Combine(projectDir, "pagedraft.db");
-            connectionString = $"Data Source={dbPath};Cache=Shared";
-        }
-        var options = new DbContextOptionsBuilder<AppDbContext>()
-            .UseSqlite(connectionString)
-            .Options;
-        return new AppDbContext(options);
+            sqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 3,
+                maxRetryDelay: TimeSpan.FromSeconds(5),
+                errorNumbersToAdd: null);
+            sqlOptions.CommandTimeout(60);
+        });
+
+        return new AppDbContext(optionsBuilder.Options);
     }
 
     private static string ResolveProjectDirectory()
