@@ -68,7 +68,7 @@ public class AnalysisContextService : IAnalysisContextService
         var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == chapterId, ct)
             ?? throw new InvalidOperationException("Chapter not found");
 
-        var text = StripSyncfusionWatermark(chapter.ContentText ?? "");
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
         if (string.IsNullOrWhiteSpace(text))
             throw new InvalidOperationException("No chapter text to analyze. Save the chapter first so the analysis has content.");
 
@@ -86,7 +86,7 @@ public class AnalysisContextService : IAnalysisContextService
 
         var sfdt = scene.ContentSfdt ?? "{}";
         var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
-        var text = StripSyncfusionWatermark(plainText);
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(plainText);
         if (string.IsNullOrWhiteSpace(text))
             throw new InvalidOperationException("Scene has no content to analyze. Edit the scene and save first.");
 
@@ -108,7 +108,7 @@ public class AnalysisContextService : IAnalysisContextService
         var sb = new StringBuilder();
         foreach (var ch in chapters)
         {
-            var text = StripSyncfusionWatermark(ch.ContentText ?? "");
+            var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(ch.ContentText ?? "");
             if (!string.IsNullOrWhiteSpace(text))
             {
                 sb.AppendLine($"## {ch.Title}");
@@ -120,27 +120,5 @@ public class AnalysisContextService : IAnalysisContextService
         return (sb.ToString(), bookId, null, null);
     }
 
-    // ─── Shared sanitization helpers (kept in sync with UnifiedAnalysisService) ─
-
-    private static string StripSyncfusionWatermark(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        const StringComparison ci = StringComparison.OrdinalIgnoreCase;
-        var result = text;
-        int searchStart = 0;
-        while (true)
-        {
-            var startIdx = result.IndexOf("Created with a trial version of Syncfusion", searchStart, ci);
-            if (startIdx < 0) break;
-            const string keyPhrase = "to obtain the valid key.";
-            var keyEnd = result.IndexOf(keyPhrase, startIdx, ci);
-            int endIdx = keyEnd >= 0 ? keyEnd + keyPhrase.Length : result.Length;
-            result = result.Remove(startIdx, endIdx - startIdx);
-            searchStart = startIdx;
-        }
-        result = Regex.Replace(result, @"[\r\n]+", "\n");
-        result = Regex.Replace(result, @"[ \t]+", " ").Trim();
-        return result;
-    }
 }
 

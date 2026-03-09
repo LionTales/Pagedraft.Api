@@ -20,34 +20,6 @@ public class AiAnalysisService
         _languageEngine = languageEngine;
     }
 
-    private static string StripSyncfusionWatermark(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        const StringComparison ci = StringComparison.OrdinalIgnoreCase;
-        var result = text;
-        int searchStart = 0;
-        while (true)
-        {
-            var startIdx = result.IndexOf("Created with a trial version of Syncfusion", searchStart, ci);
-            if (startIdx < 0) break;
-            const string keyPhrase = "to obtain the valid key.";
-            var keyEnd = result.IndexOf(keyPhrase, startIdx, ci);
-            int endIdx;
-            if (keyEnd >= 0)
-                endIdx = keyEnd + keyPhrase.Length;
-            else
-            {
-                var dotIdx = result.IndexOf(".", startIdx + 1, ci);
-                endIdx = dotIdx >= 0 ? dotIdx + 1 : result.Length;
-            }
-            result = result.Remove(startIdx, endIdx - startIdx);
-            searchStart = startIdx;
-        }
-        result = System.Text.RegularExpressions.Regex.Replace(result, @"[\r\n]+", "\n");
-        result = System.Text.RegularExpressions.Regex.Replace(result, @"[ \t]+", " ").Trim();
-        return result;
-    }
-
     private static string StripCjkFromResponse(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
@@ -156,7 +128,7 @@ public class AiAnalysisService
         var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == chapterId, ct);
         if (chapter == null) throw new InvalidOperationException("Chapter not found");
 
-        var chapterText = StripSyncfusionWatermark(chapter.ContentText ?? "");
+        var chapterText = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
         if (string.IsNullOrWhiteSpace(chapterText))
             throw new InvalidOperationException("No chapter text to analyze. Save the chapter first so the analysis has content.");
 
@@ -195,7 +167,7 @@ public class AiAnalysisService
         var chapter = await _db.Chapters.Include(c => c.Book).FirstOrDefaultAsync(c => c.Id == chapterId, ct);
         if (chapter == null) throw new InvalidOperationException("Chapter not found");
 
-        var inputText = StripSyncfusionWatermark(chapter.ContentText ?? "");
+        var inputText = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
         if (string.IsNullOrWhiteSpace(inputText))
             throw new InvalidOperationException("Chapter has no content text");
 
