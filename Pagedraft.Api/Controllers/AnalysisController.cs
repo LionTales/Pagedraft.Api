@@ -207,10 +207,11 @@ public class AnalysisController : ControllerBase
 
         var originalText = request!.OriginalText ?? string.Empty;
         var suggestedText = request.SuggestedText ?? string.Empty;
-        SuggestionOutcome outcome = request!.Outcome?.Trim() switch
+        var outcomeText = (request.Outcome ?? string.Empty).Trim();
+        SuggestionOutcome outcome = outcomeText switch
         {
-            _ when request.Outcome!.Trim().Equals("Dismissed", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Dismissed,
-            _ when request.Outcome!.Trim().Equals("Reverted", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Reverted,
+            _ when outcomeText.Equals("Dismissed", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Dismissed,
+            _ when outcomeText.Equals("Reverted", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Reverted,
             _ => SuggestionOutcome.Accepted
         };
 
