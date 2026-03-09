@@ -107,6 +107,10 @@ public class BooksController : ControllerBase
     {
         var book = await _db.Books.FindAsync(new object[] { bookId }, ct);
         if (book == null) return NotFound();
+        // Explicitly remove dependent ChunkSummaries to satisfy the Restrict FK on BookId.
+        var chunkSummaries = await _db.ChunkSummaries.Where(cs => cs.BookId == bookId).ToListAsync(ct);
+        if (chunkSummaries.Count > 0)
+            _db.ChunkSummaries.RemoveRange(chunkSummaries);
         _db.Books.Remove(book);
         await _db.SaveChangesAsync(ct);
         return NoContent();

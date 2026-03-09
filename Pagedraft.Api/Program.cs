@@ -18,27 +18,22 @@ var builder = WebApplication.CreateBuilder(args);
 SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JGaF5cXGpCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWX1feHVQRGheUUF+WUtWYEs=");
 
 var dbProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "SqlServer";
+if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
+    throw new InvalidOperationException("DatabaseProvider=Sqlite is no longer supported. The current EF Core model and migrations target SQL Server only.");
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 if (string.IsNullOrWhiteSpace(connectionString))
     throw new InvalidOperationException("Connection string 'DefaultConnection' is missing or empty.");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
-    if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
+    options.UseSqlServer(connectionString, sqlOptions =>
     {
-        options.UseSqlite(connectionString);
-    }
-    else
-    {
-        options.UseSqlServer(connectionString, sqlOptions =>
-        {
-            sqlOptions.EnableRetryOnFailure(
-                maxRetryCount: 3,
-                maxRetryDelay: TimeSpan.FromSeconds(5),
-                errorNumbersToAdd: null);
-            sqlOptions.CommandTimeout(60);
-        });
-    }
+        sqlOptions.EnableRetryOnFailure(
+            maxRetryCount: 3,
+            maxRetryDelay: TimeSpan.FromSeconds(5),
+            errorNumbersToAdd: null);
+        sqlOptions.CommandTimeout(60);
+    });
 });
 builder.Services.AddScoped<DocxParserService>();
 builder.Services.AddScoped<SfdtConversionService>();
