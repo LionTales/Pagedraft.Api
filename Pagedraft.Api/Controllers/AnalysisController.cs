@@ -340,6 +340,13 @@ public class AnalysisController : ControllerBase
             return BadRequest(new { error = "Async analysis jobs are currently supported only for Proofread type." });
         }
 
+        // If the application is already stopping, don't enqueue new jobs that can never run.
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+        {
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new analysis job." });
+        }
+
         var jobId = Guid.NewGuid();
 
         // Initialize progress so the client can start polling immediately.
@@ -353,8 +360,8 @@ public class AnalysisController : ControllerBase
             "Queued proofread job…");
 
         // Fire-and-forget background task that runs the actual analysis using a new DI scope.
-        // Tie the task's lifetime to the host application's lifetime so we can cooperate with shutdown.
-        var shutdownToken = _appLifetime.ApplicationStopping;
+        // Tie the inner work to the host's shutdown token, but always start the task so we can
+        // transition the job out of "Queued" even if shutdown happens right after StartJob.
         _ = Task.Run(async () =>
         {
             try
@@ -401,7 +408,7 @@ public class AnalysisController : ControllerBase
                     // Logging should not crash the background task.
                 }
             }
-        }, shutdownToken);
+        }, CancellationToken.None);
 
         var response = new StartAnalysisJobResponse(jobId, analysisType.ToString(), scope.ToString());
         return Ok(response);
