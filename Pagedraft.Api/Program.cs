@@ -17,16 +17,28 @@ var builder = WebApplication.CreateBuilder(args);
 // TODO: Move this trial key to a secure location (user secrets / env var) before committing.
 SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JGaF5cXGpCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWX1feHVQRGheUUF+WUtWYEs=");
 
-// Use a fixed DB path under the application content root so the same database is used regardless of working directory.
-// To use a specific file (e.g. an existing DB elsewhere), set ConnectionStrings:DefaultConnection in appsettings.Development.json to an absolute path.
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-if (string.IsNullOrEmpty(connectionString) || connectionString.TrimStart().StartsWith("Data Source=pagedraft.db", StringComparison.OrdinalIgnoreCase))
-{
-    var dbPath = Path.Combine(builder.Environment.ContentRootPath, "pagedraft.db");
-    connectionString = $"Data Source={dbPath};Cache=Shared";
-}
+var dbProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "SqlServer";
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("Missing ConnectionStrings:DefaultConnection");
+
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseSqlite(connectionString));
+{
+    if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
+    {
+        options.UseSqlite(connectionString);
+    }
+    else
+    {
+        options.UseSqlServer(connectionString, sqlOptions =>
+        {
+            sqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 3,
+                maxRetryDelay: TimeSpan.FromSeconds(5),
+                errorNumbersToAdd: null);
+            sqlOptions.CommandTimeout(60);
+        });
+    }
+});
 builder.Services.AddScoped<DocxParserService>();
 builder.Services.AddScoped<SfdtConversionService>();
 builder.Services.AddScoped<ChapterService>();

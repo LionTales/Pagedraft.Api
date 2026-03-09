@@ -59,7 +59,7 @@ public class AppDbContext : DbContext
         {
             e.HasKey(x => x.Id);
             e.Property(x => x.Language).HasMaxLength(10);
-            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.BookId, x.ChapterId }).IsUnique();
         });
@@ -128,8 +128,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<SuggestionOutcomeRecord>(e =>
         {
             e.HasKey(x => x.Id);
-            e.Property(x => x.OriginalText).HasMaxLength(2000).IsRequired();
-            e.Property(x => x.SuggestedText).HasMaxLength(2000).IsRequired();
+            e.Property(x => x.OriginalText).HasMaxLength(450).IsRequired();
+            e.Property(x => x.SuggestedText).HasMaxLength(450).IsRequired();
             e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(20);
             e.HasOne(x => x.AnalysisResult).WithMany().HasForeignKey(x => x.AnalysisResultId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.AnalysisResultId, x.OriginalText, x.SuggestedText }).IsUnique();
