@@ -10,6 +10,7 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
 {
     // Stop sequences to avoid model rambling. Exclude instruction echoes (e.g. "בדוק את הטקסט הבא")
     // so proofread output is not truncated to empty when the model repeats the task.
+    // Do NOT add the think-close tag here: we need the text after the thinking block; StripThinkBlock in UnifiedAnalysisService handles it.
     private static readonly string[] StopSequences =
     {
         "\n\n\n", "以下是修正后的", "Ensure accuracy and fluency", "但由于", "请提供", "在此文本",
@@ -40,16 +41,16 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         var client = _httpFactory.CreateClient("Ollama");
         client.BaseAddress = new Uri(baseUrl);
 
-        var tuning = GetTuning("Ollama");
+        var tuning = GetTuning("Ollama", request.TaskType);
         var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
-        var payload = new { model, prompt, stream = false, options, stop = StopSequences };
+        var payload = new { model, prompt, stream = false, think = false, options, stop = StopSequences };
 
         var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
             response.Dispose();
             model = defaultModel;
-            payload = new { model, prompt, stream = false, options, stop = StopSequences };
+            payload = new { model, prompt, stream = false, think = false, options, stop = StopSequences };
             response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         }
 
@@ -88,15 +89,15 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         var client = _httpFactory.CreateClient("Ollama");
         client.BaseAddress = new Uri(baseUrl);
 
-        var tuning = GetTuning("Ollama");
+        var tuning = GetTuning("Ollama", request.TaskType);
         var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
-        var payload = new { model, prompt, stream = true, options, stop = StopSequences };
+        var payload = new { model, prompt, stream = true, think = false, options, stop = StopSequences };
 
         using var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
             model = defaultModel;
-            payload = new { model, prompt, stream = true, options, stop = StopSequences };
+            payload = new { model, prompt, stream = true, think = false, options, stop = StopSequences };
             using var retryResponse = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
             if (!retryResponse.IsSuccessStatusCode)
             {
@@ -139,8 +140,12 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         return $"<system>{request.SystemMessage}</system>\n<user>{userContent}</user>";
     }
 
-    private ProviderTuningOptions GetTuning(string providerName)
+    private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType = AiTaskType.GenericChat)
     {
+        // Proofread needs a higher output limit so the full corrected text isn't truncated (e.g. long Hebrew chapter).
+        if (taskType == AiTaskType.Proofread && _options.ProviderSettings != null &&
+            _options.ProviderSettings.TryGetValue(providerName + "_Proofread", out var proofreadTuning))
+            return proofreadTuning;
         if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
             return t;
         return new ProviderTuningOptions { Temperature = 0.2, NumPredict = 2048 };

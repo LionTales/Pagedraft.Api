@@ -14,6 +14,8 @@ public class AppDbContext : DbContext
     public DbSet<PromptTemplate> PromptTemplates => Set<PromptTemplate>();
     public DbSet<ChunkSummary> ChunkSummaries => Set<ChunkSummary>();
     public DbSet<BookProfile> BookProfiles => Set<BookProfile>();
+    public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
+    public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -115,6 +117,23 @@ public class AppDbContext : DbContext
                 }
             );
         });
+
+        modelBuilder.Entity<DocumentVersion>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Label).HasMaxLength(200);
+            e.HasIndex(x => new { x.BookId, x.ChapterId, x.SceneId });
+        });
+
+        modelBuilder.Entity<SuggestionOutcomeRecord>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.OriginalText).HasMaxLength(2000).IsRequired();
+            e.Property(x => x.SuggestedText).HasMaxLength(2000).IsRequired();
+            e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(20);
+            e.HasOne(x => x.AnalysisResult).WithMany().HasForeignKey(x => x.AnalysisResultId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.AnalysisResultId, x.OriginalText, x.SuggestedText }).IsUnique();
+        });
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
@@ -148,6 +167,14 @@ public class AppDbContext : DbContext
             else if (entry.Entity is AnalysisResult ar)
             {
                 if (entry.State == EntityState.Added) ar.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is DocumentVersion dv)
+            {
+                if (entry.State == EntityState.Added) dv.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is SuggestionOutcomeRecord so)
+            {
+                if (entry.State == EntityState.Added) so.CreatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);

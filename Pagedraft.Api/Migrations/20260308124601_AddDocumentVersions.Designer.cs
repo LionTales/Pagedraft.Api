@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pagedraft.Api.Data;
 
@@ -10,9 +11,11 @@ using Pagedraft.Api.Data;
 namespace Pagedraft.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260308124601_AddDocumentVersions")]
+    partial class AddDocumentVersions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.11");
@@ -35,9 +38,6 @@ namespace Pagedraft.Api.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid?>("JobId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Language")
@@ -257,9 +257,6 @@ namespace Pagedraft.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<Guid?>("AnalysisResultId")
-                        .HasColumnType("TEXT");
-
                     b.Property<Guid>("BookId")
                         .HasColumnType("TEXT");
 
@@ -277,13 +274,7 @@ namespace Pagedraft.Api.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("OriginalText")
-                        .HasColumnType("TEXT");
-
                     b.Property<Guid?>("SceneId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SuggestedText")
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
@@ -398,41 +389,6 @@ namespace Pagedraft.Api.Migrations
                     b.ToTable("Scenes");
                 });
 
-            modelBuilder.Entity("Pagedraft.Api.Models.SuggestionOutcomeRecord", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("AnalysisResultId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("OriginalText")
-                        .IsRequired()
-                        .HasMaxLength(2000)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Outcome")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SuggestedText")
-                        .IsRequired()
-                        .HasMaxLength(2000)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("AnalysisResultId", "OriginalText", "SuggestedText")
-                        .IsUnique();
-
-                    b.ToTable("SuggestionOutcomeRecords");
-                });
-
             modelBuilder.Entity("Pagedraft.Api.Models.AnalysisResult", b =>
                 {
                     b.HasOne("Pagedraft.Api.Models.Chapter", "Chapter")
@@ -501,17 +457,6 @@ namespace Pagedraft.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("Chapter");
-                });
-
-            modelBuilder.Entity("Pagedraft.Api.Models.SuggestionOutcomeRecord", b =>
-                {
-                    b.HasOne("Pagedraft.Api.Models.AnalysisResult", "AnalysisResult")
-                        .WithMany()
-                        .HasForeignKey("AnalysisResultId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("AnalysisResult");
                 });
 
             modelBuilder.Entity("Pagedraft.Api.Models.Book", b =>

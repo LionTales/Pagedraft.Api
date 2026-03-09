@@ -86,6 +86,8 @@ public class SfdtConversionService
 
     /// <summary>
     /// Extracts plain text and word count from SFDT JSON (e.g. for ContentText on save).
+    /// Normalizes text by stripping Unicode bidi control characters so analysis and proofread
+    /// diff stay consistent with the client (avoids punctuation / "identical" suggestion issues for RTL/Hebrew).
     /// </summary>
     public (string PlainText, int WordCount) GetTextFromSfdt(string sfdtJson)
     {
@@ -95,12 +97,20 @@ public class SfdtConversionService
         {
             using var docIoDocument = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(sfdtJson);
             var text = docIoDocument.GetText().Trim();
+            text = NormalizeTextForAnalysis(text);
             return (text, CountWords(text));
         }
         catch
         {
             return ("", 0);
         }
+    }
+
+    /// <summary>Strip Unicode bidi control characters so plain text matches client normalization (LRM, RLM, embeddings, isolates).</summary>
+    private static string NormalizeTextForAnalysis(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "");
     }
 
     /// <summary>

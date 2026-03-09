@@ -36,7 +36,7 @@ public class PromptFactory
         {
             var system = isHebrew ? HebrewSystemBase : EnglishProofreadSystem;
             var instruction = isHebrew
-                ? "קבל קטע טקסט בעברית והחזר **רק** את הגרסה המתוקנת שלו, ללא הסברים, הערות או תוספות. אל תשנה את מבנה הפסקאות אלא אם כן יש טעות ברורה. אל תוסיף תוכן חדש."
+                ? "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. אם אין שגיאות, החזר את הטקסט כפי שהוא. החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים או תוספות. אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש."
                 : "Receive a text and return **only** the corrected version, with no explanations or additions. Do not change paragraph structure unless there is a clear error. Do not add new content.";
             return (system, instruction);
         }
@@ -96,12 +96,17 @@ public class PromptFactory
     // ── Proofread ────────────────────────────────────────────────────
 
     private const string ProofreadHe =
-        "קבל קטע טקסט בעברית והחזר **רק** את הגרסה המתוקנת שלו, ללא הסברים, הערות או תוספות. " +
-        "אל תשנה את מבנה הפסקאות אלא אם כן יש טעות ברורה. אל תוסיף תוכן חדש.";
+        "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. " +
+        "אם אין שגיאות, החזר את הטקסט כפי שהוא. " +
+        "החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים, הערות או תוספות. " +
+        "אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש. " +
+        "אל תכתוב המשך לסיפור, אל תכתוב פרק חדש, ואל תתחיל טקסט חדש — הפלט חייב להיות אותו טקסט עם תיקונים בלבד. " +
+        "חשוב: הפלט שלך חייב להיות אך ורק הטקסט המתוקן עצמו — שורה ראשונה של התגובה = תחילת הטקסט המתוקן, בלי פתיחות כמו \"הטקסט המתוקן:\" או תוויות.";
 
     private const string ProofreadEn =
         "Receive a text and return **only** the corrected version, with no explanations or additions. " +
-        "Do not change paragraph structure unless there is a clear error. Do not add new content.";
+        "Do not change paragraph structure unless there is a clear error. Do not add new content. " +
+        "Do not continue the story, write a new chapter, or start new text — output must be the same text with only corrections.";
 
     // ── LineEdit ─────────────────────────────────────────────────────
 

@@ -8,4 +8,6 @@ public record ResolvedAiRequest
     public required string InputText { get; init; }
     public string Language { get; init; } = "he-IL";
     public required AiModelSelection Selection { get; init; }
+    /// <summary>Task type (e.g. Proofread) so providers can apply task-specific limits (e.g. higher NumPredict).</summary>
+    public AiTaskType TaskType { get; init; }
 }

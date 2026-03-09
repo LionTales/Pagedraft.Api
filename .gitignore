@@ -1,0 +1,16 @@
+### Build output
+**/bin/
+**/obj/
+
+### User-specific / IDE files
+.vscode/
+*.user
+
+### Local databases and backups
+*.db
+*.db.back
+
+### Other generated artifacts
+*.log
+*.cache
+
