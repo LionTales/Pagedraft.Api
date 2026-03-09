@@ -18,8 +18,9 @@ var builder = WebApplication.CreateBuilder(args);
 SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JGaF5cXGpCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWX1feHVQRGheUUF+WUtWYEs=");
 
 var dbProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "SqlServer";
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? throw new InvalidOperationException("Missing ConnectionStrings:DefaultConnection");
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+if (string.IsNullOrWhiteSpace(connectionString))
+    throw new InvalidOperationException("Connection string 'DefaultConnection' is missing or empty.");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
