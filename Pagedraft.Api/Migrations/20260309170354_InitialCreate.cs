@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -215,8 +215,8 @@ namespace Pagedraft.Api.Migrations
                 {
                     Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
                     AnalysisResultId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    OriginalText = table.Column<string>(type: "nvarchar(450)", maxLength: 450, nullable: false),
-                    SuggestedText = table.Column<string>(type: "nvarchar(450)", maxLength: 450, nullable: false),
+                    OriginalText = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: false),
+                    SuggestedText = table.Column<string>(type: "nvarchar(400)", maxLength: 400, nullable: false),
                     Outcome = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
                     CreatedAt = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: false)
                 },
