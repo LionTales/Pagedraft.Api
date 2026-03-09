@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
@@ -19,19 +20,22 @@ public class AnalysisController : ControllerBase
     private readonly AnalysisProgressTracker _progress;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AnalysisController> _logger;
+    private readonly IHostApplicationLifetime _appLifetime;
 
     public AnalysisController(
         AppDbContext db,
         UnifiedAnalysisService unifiedAnalysis,
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
-        ILogger<AnalysisController> logger)
+        ILogger<AnalysisController> logger,
+        IHostApplicationLifetime appLifetime)
     {
         _db = db;
         _unifiedAnalysis = unifiedAnalysis;
         _progress = progress;
         _scopeFactory = scopeFactory;
         _logger = logger;
+        _appLifetime = appLifetime;
     }
 
     [HttpPost("analyze")]
@@ -217,12 +221,23 @@ public class AnalysisController : ControllerBase
         var originalText = request!.OriginalText!;
         var suggestedText = request.SuggestedText!;
         var outcomeText = (request.Outcome ?? string.Empty).Trim();
-        SuggestionOutcome outcome = outcomeText switch
+        SuggestionOutcome outcome;
+        if (outcomeText.Equals("Accepted", StringComparison.OrdinalIgnoreCase))
         {
-            _ when outcomeText.Equals("Dismissed", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Dismissed,
-            _ when outcomeText.Equals("Reverted", StringComparison.OrdinalIgnoreCase) => SuggestionOutcome.Reverted,
-            _ => SuggestionOutcome.Accepted
-        };
+            outcome = SuggestionOutcome.Accepted;
+        }
+        else if (outcomeText.Equals("Dismissed", StringComparison.OrdinalIgnoreCase))
+        {
+            outcome = SuggestionOutcome.Dismissed;
+        }
+        else if (outcomeText.Equals("Reverted", StringComparison.OrdinalIgnoreCase))
+        {
+            outcome = SuggestionOutcome.Reverted;
+        }
+        else
+        {
+            return BadRequest("Invalid Outcome. Must be Accepted, Dismissed, or Reverted.");
+        }
 
         var existing = await _db.SuggestionOutcomeRecords
             .FirstOrDefaultAsync(
@@ -338,6 +353,8 @@ public class AnalysisController : ControllerBase
             "Queued proofread job…");
 
         // Fire-and-forget background task that runs the actual analysis using a new DI scope.
+        // Tie the task's lifetime to the host application's lifetime so we can cooperate with shutdown.
+        var shutdownToken = _appLifetime.ApplicationStopping;
         _ = Task.Run(async () =>
         {
             try
@@ -350,7 +367,12 @@ public class AnalysisController : ControllerBase
 
                 try
                 {
-                    await unified.RunAsync(scope, analysisType, targetId, customPrompt, language, jobId, CancellationToken.None);
+                    await unified.RunAsync(scope, analysisType, targetId, customPrompt, language, jobId, shutdownToken);
+                }
+                catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+                {
+                    // Mark the job as canceled when the host is shutting down.
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Canceled, "Analysis job canceled due to application shutdown.");
                 }
                 catch (Exception ex)
                 {
@@ -379,7 +401,7 @@ public class AnalysisController : ControllerBase
                     // Logging should not crash the background task.
                 }
             }
-        }, CancellationToken.None);
+        }, shutdownToken);
 
         var response = new StartAnalysisJobResponse(jobId, analysisType.ToString(), scope.ToString());
         return Ok(response);
