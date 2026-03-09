@@ -11,6 +11,11 @@ public class AiOptions
     // Provider-specific blocks (Ollama, OpenAI, Azure, Anthropic) are read via IConfiguration["Ai:Providers:{Name}"]
     public Dictionary<string, ProviderTuningOptions>? ProviderSettings { get; set; }
     public Dictionary<string, FeatureModelOptions>? FeatureModels { get; set; }
+
+    /// <summary>Proofread chunking: when text exceeds ChunkTargetWords, split and run in parallel.</summary>
+    public int ProofreadChunkTargetWords { get; set; } = 500;
+    /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
+    public int MaxParallelProofreadChunks { get; set; } = 2;
 }
 
 public class OllamaProviderOptions

@@ -7,6 +7,7 @@ public class AnalysisResult
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ChapterId { get; set; }
     public Guid? TemplateId { get; set; }
+    public Guid? JobId { get; set; }
 
     /// <summary>Legacy display label — kept for backward compatibility until UI migrates.</summary>
     public string Type { get; set; } = string.Empty;
@@ -26,6 +27,9 @@ public class AnalysisResult
     public string? StructuredResult { get; set; }
 
     public string Language { get; set; } = "he";
+
+    /// <summary>Set by UnifiedAnalysisService for Proofread when result is nearly identical to input (possible truncation or model failure).</summary>
+    public bool ProofreadNoChangesHint { get; set; }
 
     // ── Navigation ──
     public Chapter Chapter { get; set; } = null!;

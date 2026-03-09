@@ -38,7 +38,8 @@ public class AiRouter : IAiRouter
             Instruction = resolvedInstruction,
             InputText = request.InputText,
             Language = request.Language,
-            Selection = selection
+            Selection = selection,
+            TaskType = request.TaskType
         };
 
         return await provider.CompleteAsync(resolved, cancellationToken).ConfigureAwait(false);
@@ -66,7 +67,8 @@ public class AiRouter : IAiRouter
             Instruction = resolvedInstruction,
             InputText = request.InputText,
             Language = request.Language,
-            Selection = selection
+            Selection = selection,
+            TaskType = request.TaskType
         };
 
         await foreach (var token in streaming.StreamCompleteAsync(resolved, cancellationToken).WithCancellation(cancellationToken))
@@ -78,6 +80,20 @@ public class AiRouter : IAiRouter
         // Future: experiment/feature-flag override by (UserId, SourceId, TaskType) here
 
         var taskKey = request.TaskType.ToString();
+        var language = request.Language?.Trim() ?? "";
+
+        // For Proofread (and LineEdit, which maps to Proofread), prefer a language-specific model so English uses an English-capable model (e.g. Qwen) instead of DictaLM.
+        var isEnglish = language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
+        if (opt.FeatureModels != null && request.TaskType == AiTaskType.Proofread && isEnglish)
+        {
+            var langKey = taskKey + "_en";
+            if (opt.FeatureModels.TryGetValue(langKey, out var featureEn) &&
+                !string.IsNullOrEmpty(featureEn.Provider) && !string.IsNullOrEmpty(featureEn.Model))
+            {
+                return new AiModelSelection { Provider = featureEn.Provider, Model = featureEn.Model };
+            }
+        }
+
         if (opt.FeatureModels != null && opt.FeatureModels.TryGetValue(taskKey, out var feature) &&
             !string.IsNullOrEmpty(feature.Provider) && !string.IsNullOrEmpty(feature.Model))
         {

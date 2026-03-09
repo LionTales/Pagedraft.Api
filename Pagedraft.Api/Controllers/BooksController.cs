@@ -87,7 +87,7 @@ public class BooksController : ControllerBase
         if (string.IsNullOrWhiteSpace(req.Question)) return BadRequest("Question is required.");
         var language = req.Language ?? "he";
         var result = await _bookIntelligence.AskAsync(bookId, req.Question.Trim(), language, ct);
-        return Ok(ToAnalysisResultDto(result));
+        return Ok(AnalysisController.ToDto(result));
     }
 
     [HttpPut("{bookId:guid}")]
@@ -115,11 +115,18 @@ public class BooksController : ControllerBase
     private static BookDto ToDto(Book b) => new(b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt);
 
     private static BookProfileDto ToProfileDto(BookProfile p) => new(
-        p.Id, p.BookId, p.Genre, p.SubGenre, p.Synopsis, p.TargetAudience,
-        p.LiteratureLevel, p.LanguageRegister, p.CharactersJson, p.StoryStructureJson,
-        p.Language, p.CreatedAt, p.UpdatedAt);
+        p.Id,
+        p.BookId,
+        p.Genre,
+        p.SubGenre,
+        p.Synopsis,
+        p.TargetAudience,
+        p.LiteratureLevel,
+        p.LanguageRegister,
+        p.CharactersJson,
+        p.StoryStructureJson,
+        p.Language,
+        p.CreatedAt,
+        p.UpdatedAt);
 
-    private static AnalysisResultDto ToAnalysisResultDto(AnalysisResult r) => new(
-        r.Id, r.ChapterId, r.Type, r.ResultText, r.ModelName, r.CreatedAt,
-        r.StructuredResult, r.Scope.ToString(), r.AnalysisType.ToString(), r.SceneId, r.BookId, r.Language);
 }
