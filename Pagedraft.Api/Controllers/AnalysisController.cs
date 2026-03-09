@@ -233,7 +233,8 @@ public class AnalysisController : ControllerBase
                 AnalysisResultId = analysisId,
                 OriginalText = originalText,
                 SuggestedText = suggestedText,
-                Outcome = outcome
+                Outcome = outcome,
+                CreatedAt = DateTimeOffset.UtcNow
             });
         }
 
