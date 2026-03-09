@@ -28,8 +28,7 @@ public class AnalysisResult
 
     public string Language { get; set; } = "he";
 
-    /// <summary>Set by UnifiedAnalysisService for Proofread when result is nearly identical to input (possible truncation or model failure). Not persisted.</summary>
-    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    /// <summary>Set by UnifiedAnalysisService for Proofread when result is nearly identical to input (possible truncation or model failure).</summary>
     public bool ProofreadNoChangesHint { get; set; }
 
     // ── Navigation ──
