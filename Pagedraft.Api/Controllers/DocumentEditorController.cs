@@ -51,7 +51,8 @@ public class DocumentEditorController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { error = "Failed to convert clipboard content to document format.", detail = ex.Message });
+            // Return a generic error to avoid leaking internal details (paths, stack traces) to clients.
+            return StatusCode(500, new { error = "Failed to convert clipboard content to document format." });
         }
     }
 

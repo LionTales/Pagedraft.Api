@@ -50,8 +50,12 @@ public class AnalysisController : ControllerBase
             {
                 Response.ContentType = "text/event-stream";
                 await foreach (var token in _unifiedAnalysis.RunStreamingAsync(scope, analysisType, targetId, customPrompt, language, ct))
-                    await Response.WriteAsync($"data: {{\"token\":\"{EscapeJson(token)}\"}}\n\n", ct);
-                await Response.WriteAsync("data: {\"token\":\"\",\"done\":true}\n\n", ct);
+                {
+                    var payload = System.Text.Json.JsonSerializer.Serialize(new { token });
+                    await Response.WriteAsync($"data: {payload}\n\n", ct);
+                }
+                var donePayload = System.Text.Json.JsonSerializer.Serialize(new { token = string.Empty, done = true });
+                await Response.WriteAsync($"data: {donePayload}\n\n", ct);
                 return new EmptyResult();
             }
             var result = await _unifiedAnalysis.RunAsync(scope, analysisType, targetId, customPrompt, language, null, ct);
@@ -140,8 +144,6 @@ public class AnalysisController : ControllerBase
         return lang.Length <= 5 ? lang : lang[..2];
     }
 
-    private static string EscapeJson(string s) => System.Text.Json.JsonSerializer.Serialize(s);
-
     [HttpGet("analyses")]
     public async Task<ActionResult<List<AnalysisResultDto>>> GetAnalyses(Guid bookId, Guid chapterId, [FromQuery] Guid? sceneId = null, [FromQuery] string? analysisType = null, CancellationToken ct = default)
     {
@@ -205,8 +207,8 @@ public class AnalysisController : ControllerBase
         if (string.IsNullOrEmpty(request?.OriginalText) || string.IsNullOrEmpty(request?.SuggestedText))
             return BadRequest("OriginalText and SuggestedText are required.");
 
-        var originalText = request!.OriginalText ?? string.Empty;
-        var suggestedText = request.SuggestedText ?? string.Empty;
+        var originalText = request!.OriginalText!;
+        var suggestedText = request.SuggestedText!;
         var outcomeText = (request.Outcome ?? string.Empty).Trim();
         SuggestionOutcome outcome = outcomeText switch
         {
@@ -348,11 +350,27 @@ public class AnalysisController : ControllerBase
                     progress.SetStatus(jobId, AnalysisProgressStatus.Failed, ex.Message);
                 }
             }
-            catch (Exception ex)
+        catch (Exception ex)
+        {
+            // Use the same AnalysisProgressTracker to mark the job as failed if the scoped execution setup fails.
+            try
             {
-                _logger.LogError(ex, "Failed to execute async analysis job {JobId}", jobId);
                 _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Async analysis job failed to start.");
             }
+            catch
+            {
+                // Swallow to avoid crashing the background task if progress tracking is unavailable.
+            }
+
+            try
+            {
+                _logger.LogError(ex, "Failed to execute async analysis job {JobId}", jobId);
+            }
+            catch
+            {
+                // Logging should not crash the background task.
+            }
+        }
         }, CancellationToken.None);
 
         var response = new StartAnalysisJobResponse(jobId, analysisType.ToString(), scope.ToString());
