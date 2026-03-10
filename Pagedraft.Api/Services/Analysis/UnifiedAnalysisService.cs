@@ -614,7 +614,7 @@ public class UnifiedAnalysisService
         AnalysisContext context,
         CancellationToken ct)
     {
-        var baseInstruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.Proofread, language);
+        string? firstChunkInstruction = null;
         var taskType = MapToTaskType(AnalysisType.Proofread);
         var chunks = ChunkForProofread(inputText, chunkTargetWords);
 
@@ -653,6 +653,10 @@ public class UnifiedAnalysisService
 
                 var instruction = customPrompt
                     ?? _promptFactory.BuildProofreadChunkPrompt(language, context.Characters, chunk.OverlapPrefix);
+                if (firstChunkInstruction == null)
+                {
+                    firstChunkInstruction = instruction;
+                }
                 var wrappedText = customPrompt is null
                     ? $"[TEXT_TO_CORRECT]{text}[/TEXT_TO_CORRECT]"
                     : text;
@@ -732,7 +736,9 @@ public class UnifiedAnalysisService
             Scope = scope,
             AnalysisType = AnalysisType.Proofread,
             Type = nameof(AnalysisType.Proofread),
-            PromptUsed = TruncateForAudit(baseInstruction),
+            PromptUsed = TruncateForAudit(
+                firstChunkInstruction
+                ?? (customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.Proofread, language, context))),
             ResultText = mergedResultText,
             StructuredResult = null,
             Language = language,

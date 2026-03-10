@@ -49,8 +49,8 @@ builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 builder.Services.AddSingleton<PromptFactory>();
-builder.Services.AddSingleton<IEmbeddingService, StubEmbeddingService>();
-builder.Services.AddSingleton<IEmbeddingStore, StubEmbeddingStore>();
+builder.Services.AddScoped<IEmbeddingService, StubEmbeddingService>();
+builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
 
 builder.Services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddHttpClient("LanguageTool", (sp, client) =>

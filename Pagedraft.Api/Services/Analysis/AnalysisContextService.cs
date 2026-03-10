@@ -57,7 +57,10 @@ public class AnalysisContextService : IAnalysisContextService
         };
 
         CharacterRegister? characters = null;
-        if (analysisType == AnalysisType.Proofread && bookId.HasValue)
+        if (bookId.HasValue && analysisType is AnalysisType.Proofread
+            or AnalysisType.LiteraryAnalysis
+            or AnalysisType.QA
+            or AnalysisType.Synopsis)
         {
             characters = await LoadCharacterRegisterAsync(bookId.Value, text, ct);
         }
