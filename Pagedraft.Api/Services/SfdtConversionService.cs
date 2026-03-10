@@ -97,7 +97,7 @@ public class SfdtConversionService
         {
             using var docIoDocument = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(sfdtJson);
             var text = docIoDocument.GetText().Trim();
-            text = TextNormalization.NormalizeTextForAnalysis(text);
+            text = TextNormalization.NormalizeTextForStorage(text);
             return (text, CountWords(text));
         }
         catch

@@ -161,50 +161,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        if (analysisType == AnalysisType.Proofread)
-        {
-            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
-            if (invalidResult)
-            {
-                _logger.LogWarning("Proofread result appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}", inputText.Length, TruncateForAudit(cleanContent, 150));
-                cleanContent = inputText;
-                noChanges = true;
-            }
-            result.ProofreadNoChangesHint = noChanges;
-            result.ResultText = cleanContent;
-            if (noChanges)
-                _logger.LogWarning("Proofread result is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.", inputText.Length, cleanContent.Length);
-
-            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
-            for (var i = 0; i < suggestions.Count; i++)
-            {
-                suggestions[i].OrderIndex = i;
-                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                result.Suggestions.Add(suggestions[i]);
-            }
-        }
-        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
-        {
-            try
-            {
-                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
-                if (parsed is not null)
-                {
-                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
-                    for (var i = 0; i < suggestions.Count; i++)
-                    {
-                        suggestions[i].OrderIndex = i;
-                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                        result.Suggestions.Add(suggestions[i]);
-                    }
-                }
-            }
-            catch (System.Text.Json.JsonException)
-            {
-                // Ignore malformed structured result; we still persist raw text.
-            }
-        }
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: false);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -267,54 +224,7 @@ public class UnifiedAnalysisService
             ModelName = $"{response.Provider}:{response.Model}",
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
-        if (analysisType == AnalysisType.Proofread)
-        {
-            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
-            if (invalidResult)
-            {
-                _logger.LogWarning("Proofread result (RunWithInputAsync) appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}", inputText.Length, TruncateForAudit(cleanContent, 150));
-                cleanContent = inputText;
-                noChanges = true;
-            }
-
-            result.ProofreadNoChangesHint = noChanges;
-            result.ResultText = cleanContent;
-
-            if (noChanges)
-            {
-                _logger.LogWarning("Proofread result (RunWithInputAsync) is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.", inputText.Length, cleanContent.Length);
-            }
-
-            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
-            for (var i = 0; i < suggestions.Count; i++)
-            {
-                suggestions[i].OrderIndex = i;
-                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                result.Suggestions.Add(suggestions[i]);
-            }
-        }
-        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
-        {
-            try
-            {
-                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
-                if (parsed is not null)
-                {
-                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
-                    for (var i = 0; i < suggestions.Count; i++)
-                    {
-                        suggestions[i].OrderIndex = i;
-                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                        result.Suggestions.Add(suggestions[i]);
-                    }
-                }
-            }
-            catch (System.Text.Json.JsonException)
-            {
-                // Ignore malformed structured result; we still persist raw text.
-            }
-        }
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: true);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -401,52 +311,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        if (analysisType == AnalysisType.Proofread)
-        {
-            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
-            if (invalidResult)
-            {
-                _logger.LogWarning("Proofread (streaming) result appears unrelated to input. Persisting original text.");
-                cleanContent = inputText;
-                noChanges = true;
-            }
-            result.ProofreadNoChangesHint = noChanges;
-            result.ResultText = cleanContent;
-            if (noChanges)
-                _logger.LogWarning("Proofread (streaming) result nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit.", inputText.Length, cleanContent.Length);
-        }
-
-        if (analysisType == AnalysisType.Proofread)
-        {
-            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
-            for (var i = 0; i < suggestions.Count; i++)
-            {
-                suggestions[i].OrderIndex = i;
-                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                result.Suggestions.Add(suggestions[i]);
-            }
-        }
-        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
-        {
-            try
-            {
-                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
-                if (parsed is not null)
-                {
-                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
-                    for (var i = 0; i < suggestions.Count; i++)
-                    {
-                        suggestions[i].OrderIndex = i;
-                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-                        result.Suggestions.Add(suggestions[i]);
-                    }
-                }
-            }
-            catch (System.Text.Json.JsonException)
-            {
-            }
-        }
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: true, isRunWithInput: false);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -884,13 +749,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
-        for (var i = 0; i < suggestions.Count; i++)
-        {
-            suggestions[i].OrderIndex = i;
-            suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
-            result.Suggestions.Add(suggestions[i]);
-        }
+        AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -1164,5 +1023,82 @@ public class UnifiedAnalysisService
             return true;
         }
         return false;
+    }
+
+    private void AttachSuggestions(
+        AnalysisResult result,
+        string inputText,
+        AnalysisType analysisType,
+        string? structuredJson,
+        string cleanContent,
+        bool isStreaming,
+        bool isRunWithInput)
+    {
+        if (analysisType == AnalysisType.Proofread)
+        {
+            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
+            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
+            if (invalidResult)
+            {
+                var contextLabel = isStreaming
+                    ? "Proofread (streaming)"
+                    : isRunWithInput
+                        ? "Proofread result (RunWithInputAsync)"
+                        : "Proofread result";
+                _logger.LogWarning(
+                    "{ContextLabel} appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}",
+                    contextLabel,
+                    inputText.Length,
+                    TruncateForAudit(cleanContent, 150));
+                cleanContent = inputText;
+                noChanges = true;
+            }
+
+            result.ProofreadNoChangesHint = noChanges;
+            result.ResultText = cleanContent;
+
+            if (noChanges)
+            {
+                var contextLabel = isStreaming
+                    ? "Proofread (streaming)"
+                    : isRunWithInput
+                        ? "Proofread result (RunWithInputAsync)"
+                        : "Proofread result";
+                _logger.LogWarning(
+                    "{ContextLabel} is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.",
+                    contextLabel,
+                    inputText.Length,
+                    cleanContent.Length);
+            }
+
+            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+            for (var i = 0; i < suggestions.Count; i++)
+            {
+                suggestions[i].OrderIndex = i;
+                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                result.Suggestions.Add(suggestions[i]);
+            }
+        }
+        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+                if (parsed is not null)
+                {
+                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
+                    for (var i = 0; i < suggestions.Count; i++)
+                    {
+                        suggestions[i].OrderIndex = i;
+                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                        result.Suggestions.Add(suggestions[i]);
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Ignore malformed structured result; we still persist raw text.
+            }
+        }
     }
 }
