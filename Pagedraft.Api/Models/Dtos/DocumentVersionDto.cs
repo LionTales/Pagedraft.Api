@@ -9,7 +9,9 @@ public record DocumentVersionDto(
     string? Label,
     Guid? AnalysisResultId = null,
     string? OriginalText = null,
-    string? SuggestedText = null);
+    string? SuggestedText = null,
+    /// <summary>Status of the linked analysis result, when present (Active/Archived).</summary>
+    string? AnalysisStatus = null);
 
 public record DocumentVersionDetailDto(
     Guid Id,
@@ -21,6 +23,8 @@ public record DocumentVersionDetailDto(
     string ContentSfdt,
     Guid? AnalysisResultId = null,
     string? OriginalText = null,
-    string? SuggestedText = null);
+    string? SuggestedText = null,
+    /// <summary>Status of the linked analysis result, when present (Active/Archived).</summary>
+    string? AnalysisStatus = null);
 
 public record CreateDocumentVersionRequest(string ContentSfdt, string? Label = null, Guid? AnalysisId = null, string? OriginalText = null, string? SuggestedText = null);

@@ -17,6 +17,7 @@ public class AppDbContext : DbContext
     public DbSet<BookBible> BookBibles => Set<BookBible>();
     public DbSet<SceneEmbedding> SceneEmbeddings => Set<SceneEmbedding>();
     public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
+    public DbSet<AnalysisSuggestion> AnalysisSuggestions => Set<AnalysisSuggestion>();
     public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -53,6 +54,7 @@ public class AppDbContext : DbContext
             e.HasOne(x => x.Template).WithMany(x => x.Results).HasForeignKey(x => x.TemplateId).OnDelete(DeleteBehavior.SetNull);
             e.Property(x => x.Scope).HasConversion<string>().HasMaxLength(20);
             e.Property(x => x.AnalysisType).HasConversion<string>().HasMaxLength(30);
+            e.Property(x => x.Status).HasConversion<string>().HasMaxLength(20);
             e.Property(x => x.Language).HasMaxLength(10).HasDefaultValue("he");
             e.HasIndex(x => new { x.BookId, x.Scope, x.AnalysisType });
         });
@@ -179,6 +181,21 @@ public class AppDbContext : DbContext
             e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(20);
             e.HasOne(x => x.AnalysisResult).WithMany().HasForeignKey(x => x.AnalysisResultId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.AnalysisResultId, x.OriginalText, x.SuggestedText }).IsUnique();
+        });
+
+        modelBuilder.Entity<AnalysisSuggestion>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.OriginalText).IsRequired();
+            e.Property(x => x.SuggestedText).IsRequired();
+            e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(20);
+            e.Property(x => x.Reason).HasMaxLength(400);
+            e.Property(x => x.Category).HasMaxLength(100);
+            e.HasOne(x => x.AnalysisResult)
+                .WithMany(r => r.Suggestions)
+                .HasForeignKey(x => x.AnalysisResultId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => x.AnalysisResultId);
         });
     }
 

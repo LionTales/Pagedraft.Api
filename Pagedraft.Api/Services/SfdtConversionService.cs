@@ -106,11 +106,14 @@ public class SfdtConversionService
         }
     }
 
-    /// <summary>Strip Unicode bidi control characters so plain text matches client normalization (LRM, RLM, embeddings, isolates).</summary>
+    /// <summary>
+    /// Strip Unicode bidi control characters and hard line breaks so plain text matches
+    /// the client normalization used for analysis/diff (LRM, RLM, embeddings, isolates, \r, \n).
+    /// </summary>
     private static string NormalizeTextForAnalysis(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
-        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "");
+        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069\r\n]", "");
     }
 
     /// <summary>

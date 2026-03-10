@@ -343,6 +343,51 @@ public class PromptFactory
             : CharacterExtractionPromptEn;
     }
 
+    /// <summary>
+    /// Builds a short prompt asking the model to explain why a specific suggestion was made.
+    /// Used by POST suggestions/{id}/explain.
+    /// </summary>
+    public string GetExplainSuggestionPrompt(string originalText, string suggestedText, string? reason, string language)
+    {
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        if (isHe)
+        {
+            return
+                """
+                הסבר בקצרה (1–3 משפטים) למה שווה לשקול את השינוי הזה.
+                כתוב בגובה העיניים, כאילו אתה עורך שמסביר לסופר.
+
+                טקסט מקורי:
+                """ + originalText + """
+
+                הצעה:
+                """ + suggestedText + """
+
+                סיבת שינוי (אם צוינה):
+                """ + (reason ?? "לא צוינה") + """
+
+                התייחס לבהירות, זרימה, דיוק לשוני או סגנון — מה שרלוונטי. אל תצטט את המשפטים במלואם.
+                """;
+        }
+
+        return
+            """
+            In 1–3 sentences, explain why this change is worth considering.
+            Write as a friendly editor talking to the author.
+
+            Original:
+            """ + originalText + """
+
+            Suggestion:
+            """ + suggestedText + """
+
+            Reason (if provided):
+            """ + (reason ?? "not provided") + """
+
+            Focus on whichever aspects matter most: clarity, flow, word choice, or style. Don't repeat the full sentences.
+            """;
+    }
+
     // ── LineEdit ─────────────────────────────────────────────────────
 
     private const string LineEditHe =

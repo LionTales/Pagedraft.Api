@@ -28,6 +28,7 @@ public class UnifiedAnalysisService
     private readonly ILogger<UnifiedAnalysisService> _logger;
     private readonly AnalysisProgressTracker _progress;
     private readonly IAnalysisContextService _contextService;
+    private readonly SuggestionDiffService _suggestionDiff;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -43,7 +44,8 @@ public class UnifiedAnalysisService
         IOptions<AiOptions> aiOptions,
         ILogger<UnifiedAnalysisService> logger,
         AnalysisProgressTracker progress,
-        IAnalysisContextService contextService)
+        IAnalysisContextService contextService,
+        SuggestionDiffService suggestionDiff)
     {
         _db = db;
         _router = router;
@@ -53,6 +55,7 @@ public class UnifiedAnalysisService
         _logger = logger;
         _progress = progress;
         _contextService = contextService;
+        _suggestionDiff = suggestionDiff;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -135,6 +138,13 @@ public class UnifiedAnalysisService
 
         var structuredJson = TryParseStructured(analysisType, cleanContent);
 
+        await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, analysisType, ct);
+
+        if (analysisType == AnalysisType.Proofread)
+        {
+            cleanContent = StripTextToCorrectMarkers(cleanContent);
+        }
+
         var result = new AnalysisResult
         {
             ChapterId = chapterId ?? Guid.Empty,
@@ -147,7 +157,8 @@ public class UnifiedAnalysisService
             ResultText = cleanContent,
             StructuredResult = structuredJson,
             Language = language,
-            ModelName = $"{response.Provider}:{response.Model}"
+            ModelName = $"{response.Provider}:{response.Model}",
+            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
         };
 
         if (analysisType == AnalysisType.Proofread)
@@ -164,6 +175,35 @@ public class UnifiedAnalysisService
             result.ResultText = cleanContent;
             if (noChanges)
                 _logger.LogWarning("Proofread result is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.", inputText.Length, cleanContent.Length);
+
+            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+            for (var i = 0; i < suggestions.Count; i++)
+            {
+                suggestions[i].OrderIndex = i;
+                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                result.Suggestions.Add(suggestions[i]);
+            }
+        }
+        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+                if (parsed is not null)
+                {
+                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
+                    for (var i = 0; i < suggestions.Count; i++)
+                    {
+                        suggestions[i].OrderIndex = i;
+                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                        result.Suggestions.Add(suggestions[i]);
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Ignore malformed structured result; we still persist raw text.
+            }
         }
 
         _db.AnalysisResults.Add(result);
@@ -205,6 +245,13 @@ public class UnifiedAnalysisService
         var cleanContent = SanitizeResponse(response.Content);
         var structuredJson = TryParseStructured(analysisType, cleanContent);
 
+        await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, analysisType, ct);
+
+        if (analysisType == AnalysisType.Proofread)
+        {
+            cleanContent = StripTextToCorrectMarkers(cleanContent);
+        }
+
         var result = new AnalysisResult
         {
             ChapterId = chapterId ?? Guid.Empty,
@@ -217,7 +264,8 @@ public class UnifiedAnalysisService
             ResultText = cleanContent,
             StructuredResult = structuredJson,
             Language = language,
-            ModelName = $"{response.Provider}:{response.Model}"
+            ModelName = $"{response.Provider}:{response.Model}",
+            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
         };
 
         _db.AnalysisResults.Add(result);
@@ -282,6 +330,13 @@ public class UnifiedAnalysisService
 
         var structuredJson = TryParseStructured(analysisType, cleanContent);
 
+        await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, analysisType, ct);
+
+        if (analysisType == AnalysisType.Proofread)
+        {
+            cleanContent = StripTextToCorrectMarkers(cleanContent);
+        }
+
         var result = new AnalysisResult
         {
             ChapterId = chapterId ?? Guid.Empty,
@@ -294,7 +349,8 @@ public class UnifiedAnalysisService
             ResultText = cleanContent,
             StructuredResult = structuredJson,
             Language = language,
-            ModelName = "stream"
+            ModelName = "stream",
+            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
         };
 
         if (analysisType == AnalysisType.Proofread)
@@ -311,6 +367,37 @@ public class UnifiedAnalysisService
             result.ResultText = cleanContent;
             if (noChanges)
                 _logger.LogWarning("Proofread (streaming) result nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit.", inputText.Length, cleanContent.Length);
+        }
+
+        if (analysisType == AnalysisType.Proofread)
+        {
+            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+            for (var i = 0; i < suggestions.Count; i++)
+            {
+                suggestions[i].OrderIndex = i;
+                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                result.Suggestions.Add(suggestions[i]);
+            }
+        }
+        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+                if (parsed is not null)
+                {
+                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
+                    for (var i = 0; i < suggestions.Count; i++)
+                    {
+                        suggestions[i].OrderIndex = i;
+                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                        result.Suggestions.Add(suggestions[i]);
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+            }
         }
 
         _db.AnalysisResults.Add(result);
@@ -677,6 +764,7 @@ public class UnifiedAnalysisService
                 }
                 if (string.IsNullOrWhiteSpace(clean))
                     clean = text;
+                clean = StripTextToCorrectMarkers(clean);
                 var unrelated = IsProofreadResultUnrelated(text, clean);
                 if (unrelated)
                 {
@@ -717,7 +805,7 @@ public class UnifiedAnalysisService
             if (i < chunks.Count - 1 && !string.IsNullOrEmpty(chunks[i].SeparatorAfter))
                 merged.Append(chunks[i].SeparatorAfter);
         }
-        var mergedResultText = merged.ToString();
+        var mergedResultText = StripTextToCorrectMarkers(merged.ToString());
 
         _logger.LogInformation("Proofread merge complete: merged length {Len} chars", mergedResultText.Length);
         _progress.SetStatus(jobId, AnalysisProgressStatus.Succeeded, "Proofread finished");
@@ -725,6 +813,8 @@ public class UnifiedAnalysisService
         var noChangesHint = IsProofreadResultNearlyIdentical(inputText, mergedResultText);
         if (noChangesHint)
             _logger.LogWarning("Proofread (chunked) merged result nearly identical to input (input={InputLen} chars, result={ResultLen} chars).", inputText.Length, mergedResultText.Length);
+
+        await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, AnalysisType.Proofread, ct);
 
         var result = new AnalysisResult
         {
@@ -742,8 +832,17 @@ public class UnifiedAnalysisService
             Language = language,
             ModelName = "chunked",
             ProofreadNoChangesHint = noChangesHint,
-            JobId = jobId
+            JobId = jobId,
+            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
         };
+
+        var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+        for (var i = 0; i < suggestions.Count; i++)
+        {
+            suggestions[i].OrderIndex = i;
+            suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+            result.Suggestions.Add(suggestions[i]);
+        }
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -917,6 +1016,18 @@ public class UnifiedAnalysisService
         return Regex.Replace(stripped, @"[ \t\r\n]+", " ").Trim();
     }
 
+    /// <summary>
+    /// Strip internal proofread wrapper markers such as [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT]
+    /// so they never reach persisted ResultText or diff computation.
+    /// </summary>
+    private static string StripTextToCorrectMarkers(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return text
+            .Replace("[TEXT_TO_CORRECT]", string.Empty, StringComparison.Ordinal)
+            .Replace("[/TEXT_TO_CORRECT]", string.Empty, StringComparison.Ordinal);
+    }
+
     private static string TruncateForAudit(string? prompt, int max = 500) =>
         string.IsNullOrEmpty(prompt) ? "" : prompt.Length <= max ? prompt : prompt[..max] + "…";
 
@@ -925,6 +1036,56 @@ public class UnifiedAnalysisService
     {
         if (string.IsNullOrEmpty(text)) return 0;
         return (int)Math.Ceiling(text.Length / 4.0);
+    }
+
+    /// <summary>
+    /// Strip Unicode bidi control characters and hard line breaks so SourceTextSnapshot
+    /// matches the client-side normalization used for diffing and suggestions
+    /// (LRM, RLM, embeddings, isolates, \r, \n).
+    /// </summary>
+    private static string NormalizeTextForAnalysis(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069\r\n]", "");
+    }
+
+    /// <summary>
+    /// Archive the previous Active analysis for the same (BookId, ChapterId, SceneId, Scope, AnalysisType),
+    /// and mark any pending suggestions as Superseded.
+    /// </summary>
+    private async Task ArchivePreviousActiveAsync(
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        AnalysisType analysisType,
+        CancellationToken ct)
+    {
+        if (!chapterId.HasValue)
+            return;
+
+        var previous = await _db.AnalysisResults
+            .Include(a => a.Suggestions)
+            .Where(a =>
+                a.ChapterId == chapterId.Value &&
+                a.BookId == bookId &&
+                a.SceneId == sceneId &&
+                a.Scope == scope &&
+                a.AnalysisType == analysisType &&
+                a.Status == AnalysisStatus.Active)
+            .ToListAsync(ct);
+
+        if (previous.Count == 0)
+            return;
+
+        foreach (var analysis in previous)
+        {
+            analysis.Status = AnalysisStatus.Archived;
+            foreach (var suggestion in analysis.Suggestions.Where(s => s.Outcome == null))
+            {
+                suggestion.Outcome = SuggestionOutcome.Superseded;
+            }
+        }
     }
 
     /// <summary>True when Proofread result is nearly identical to input (normalize whitespace then compare). Indicates possible truncation or model echo.</summary>

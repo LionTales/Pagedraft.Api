@@ -20,11 +20,15 @@ public class AnalysisResult
     // ── New unified columns ──
     public AnalysisScope Scope { get; set; } = AnalysisScope.Chapter;
     public AnalysisType AnalysisType { get; set; } = AnalysisType.Custom;
+    public AnalysisStatus Status { get; set; } = AnalysisStatus.Active;
     public Guid? SceneId { get; set; }
     public Guid? BookId { get; set; }
 
     /// <summary>Parsed structured JSON (LineEditResult, LinguisticAnalysisResult, etc.).</summary>
     public string? StructuredResult { get; set; }
+
+    /// <summary>Normalized text at analysis time, used as the baseline for server-side suggestion offsets.</summary>
+    public string? SourceTextSnapshot { get; set; }
 
     public string Language { get; set; } = "he";
 
@@ -34,4 +38,11 @@ public class AnalysisResult
     // ── Navigation ──
     public Chapter Chapter { get; set; } = null!;
     public PromptTemplate? Template { get; set; }
+    public ICollection<AnalysisSuggestion> Suggestions { get; set; } = new List<AnalysisSuggestion>();
+}
+
+public enum AnalysisStatus
+{
+    Active,
+    Archived
 }

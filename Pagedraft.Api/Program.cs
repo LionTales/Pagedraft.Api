@@ -43,6 +43,7 @@ builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
+builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
 builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
