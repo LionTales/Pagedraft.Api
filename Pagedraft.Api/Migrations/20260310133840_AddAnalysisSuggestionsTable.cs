@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -23,7 +23,7 @@ namespace Pagedraft.Api.Migrations
                 type: "nvarchar(20)",
                 maxLength: 20,
                 nullable: false,
-                defaultValue: "");
+                defaultValue: "Active");
 
             migrationBuilder.CreateTable(
                 name: "AnalysisSuggestions",

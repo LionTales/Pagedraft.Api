@@ -158,7 +158,7 @@ public class UnifiedAnalysisService
             StructuredResult = structuredJson,
             Language = language,
             ModelName = $"{response.Provider}:{response.Model}",
-            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
+            SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
         if (analysisType == AnalysisType.Proofread)
@@ -265,8 +265,56 @@ public class UnifiedAnalysisService
             StructuredResult = structuredJson,
             Language = language,
             ModelName = $"{response.Provider}:{response.Model}",
-            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
+            SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
+        if (analysisType == AnalysisType.Proofread)
+        {
+            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
+            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
+            if (invalidResult)
+            {
+                _logger.LogWarning("Proofread result (RunWithInputAsync) appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}", inputText.Length, TruncateForAudit(cleanContent, 150));
+                cleanContent = inputText;
+                noChanges = true;
+            }
+
+            result.ProofreadNoChangesHint = noChanges;
+            result.ResultText = cleanContent;
+
+            if (noChanges)
+            {
+                _logger.LogWarning("Proofread result (RunWithInputAsync) is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.", inputText.Length, cleanContent.Length);
+            }
+
+            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+            for (var i = 0; i < suggestions.Count; i++)
+            {
+                suggestions[i].OrderIndex = i;
+                suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                result.Suggestions.Add(suggestions[i]);
+            }
+        }
+        else if (analysisType == AnalysisType.LineEdit && structuredJson is not null)
+        {
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+                if (parsed is not null)
+                {
+                    var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
+                    for (var i = 0; i < suggestions.Count; i++)
+                    {
+                        suggestions[i].OrderIndex = i;
+                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                        result.Suggestions.Add(suggestions[i]);
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Ignore malformed structured result; we still persist raw text.
+            }
+        }
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -350,7 +398,7 @@ public class UnifiedAnalysisService
             StructuredResult = structuredJson,
             Language = language,
             ModelName = "stream",
-            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
+            SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
         if (analysisType == AnalysisType.Proofread)
@@ -833,7 +881,7 @@ public class UnifiedAnalysisService
             ModelName = "chunked",
             ProofreadNoChangesHint = noChangesHint,
             JobId = jobId,
-            SourceTextSnapshot = NormalizeTextForAnalysis(inputText)
+            SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
         var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
@@ -1036,17 +1084,6 @@ public class UnifiedAnalysisService
     {
         if (string.IsNullOrEmpty(text)) return 0;
         return (int)Math.Ceiling(text.Length / 4.0);
-    }
-
-    /// <summary>
-    /// Strip Unicode bidi control characters and hard line breaks so SourceTextSnapshot
-    /// matches the client-side normalization used for diffing and suggestions
-    /// (LRM, RLM, embeddings, isolates, \r, \n).
-    /// </summary>
-    private static string NormalizeTextForAnalysis(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069\r\n]", "");
     }
 
     /// <summary>

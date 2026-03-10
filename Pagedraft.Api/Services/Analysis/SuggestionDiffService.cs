@@ -4,6 +4,7 @@ using System.Linq;
 using DiffPlex;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
+using Pagedraft.Api.Services;
 
 namespace Pagedraft.Api.Services.Analysis;
 
@@ -32,8 +33,8 @@ public class SuggestionDiffService
             return new List<AnalysisSuggestion>();
 
         resultText = StripInternalMarkers(resultText);
-        var normOrig = NormalizeTextForAnalysis(originalText);
-        var normResult = NormalizeTextForAnalysis(resultText);
+        var normOrig = TextNormalization.NormalizeTextForAnalysis(originalText);
+        var normResult = TextNormalization.NormalizeTextForAnalysis(resultText);
 
         var differ = new Differ();
         var diff = differ.CreateCharacterDiffs(normOrig, normResult, ignoreCase: false, ignoreWhitespace: false);
@@ -172,7 +173,7 @@ public class SuggestionDiffService
         var suggestions = new List<AnalysisSuggestion>();
         if (structured?.Suggestions == null || structured.Suggestions.Count == 0)
             return suggestions;
-        var normalizedDocument = NormalizeTextForAnalysis(StripInternalMarkers(originalText));
+        var normalizedDocument = TextNormalization.NormalizeTextForAnalysis(StripInternalMarkers(originalText));
 
         foreach (var s in structured.Suggestions)
         {
@@ -184,7 +185,7 @@ public class SuggestionDiffService
             if (string.IsNullOrWhiteSpace(original) && string.IsNullOrWhiteSpace(suggested))
                 continue;
 
-            var normalizedOriginal = NormalizeTextForAnalysis(original);
+            var normalizedOriginal = TextNormalization.NormalizeTextForAnalysis(original);
             var idx = normalizedDocument.IndexOf(normalizedOriginal, StringComparison.Ordinal);
             if (idx < 0)
             {
@@ -230,16 +231,6 @@ public class SuggestionDiffService
 
     private static bool IsWordChar(char c) =>
         char.IsLetterOrDigit(c);
-
-    /// <summary>
-    /// Strip Unicode bidi control characters and hard line breaks so text used for diffing
-    /// matches the client's normalization (LRM, RLM, embeddings, isolates, \r, \n).
-    /// </summary>
-    private static string NormalizeTextForAnalysis(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069\r\n]", "");
-    }
 
     /// <summary>
     /// Strip internal analysis markers that should never be visible to users or affect offsets,

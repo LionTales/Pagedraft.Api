@@ -386,7 +386,7 @@ public class AnalysisController : ControllerBase
                 s.Reason,
                 s.Category,
                 s.Explanation,
-                s.Outcome!.ToString(),
+                s.Outcome == null ? (string?)null : s.Outcome.ToString(),
                 s.OrderIndex))
             .ToListAsync(ct);
 
