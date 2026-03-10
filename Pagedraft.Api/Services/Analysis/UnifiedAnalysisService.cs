@@ -345,8 +345,8 @@ public class UnifiedAnalysisService
 
     // ─── Proofread chunking (paragraph/sentence aware) ───────────────
 
-    /// <summary>Structured chunk for proofread with merge separator and soft overlap context.</summary>
-    private sealed record ProofreadChunk(string Text, string SeparatorAfter, string? OverlapPrefix, string? OverlapSuffix);
+    /// <summary>Structured chunk for proofread with merge separator and soft overlap context (prefix only).</summary>
+    private sealed record ProofreadChunk(string Text, string SeparatorAfter, string? OverlapPrefix);
 
     /// <summary>
     /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
@@ -354,14 +354,13 @@ public class UnifiedAnalysisService
     /// - Text: the chunk to correct
     /// - SeparatorAfter: separator to append after this chunk when merging
     /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
-    /// - OverlapSuffix: leading sentences from next chunk (reserved for future use)
     /// </summary>
     private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
     {
         if (string.IsNullOrWhiteSpace(fullText))
-            return new List<ProofreadChunk> { new("", "", null, null) };
+            return new List<ProofreadChunk> { new("", "", null) };
         if (targetWordsPerChunk <= 0)
-            return new List<ProofreadChunk> { new(fullText.Trim(), "", null, null) };
+            return new List<ProofreadChunk> { new(fullText.Trim(), "", null) };
 
         fullText = fullText.TrimEnd();
         var segments = new List<(string Text, string Sep)>();
@@ -419,7 +418,7 @@ public class UnifiedAnalysisService
         }
 
         if (segments.Count == 0)
-            return new List<ProofreadChunk> { new("", "", null, null) };
+            return new List<ProofreadChunk> { new("", "", null) };
 
         // Group segments into chunks of ~targetWordsPerChunk (dialogue-aware)
         var baseChunks = new List<(string Text, string SeparatorAfter)>();
@@ -475,7 +474,6 @@ public class UnifiedAnalysisService
         {
             var (text, sep) = baseChunks[i];
             string? overlapPrefix = null;
-            string? overlapSuffix = null;
 
             if (i > 0)
             {
@@ -483,13 +481,7 @@ public class UnifiedAnalysisService
                 overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
             }
 
-            if (i < baseChunks.Count - 1)
-            {
-                var leading = ExtractLeadingSentences(baseChunks[i + 1].Text, 3);
-                overlapSuffix = string.IsNullOrWhiteSpace(leading) ? null : leading;
-            }
-
-            result.Add(new ProofreadChunk(text, sep, overlapPrefix, overlapSuffix));
+            result.Add(new ProofreadChunk(text, sep, overlapPrefix));
         }
 
         return result;
@@ -586,16 +578,6 @@ public class UnifiedAnalysisService
         if (parts.Count == 0) return "";
         var start = Math.Max(0, parts.Count - count);
         return string.Join(" ", parts.Skip(start).Take(count)).Trim();
-    }
-
-    private static string ExtractLeadingSentences(string text, int count)
-    {
-        if (string.IsNullOrWhiteSpace(text) || count <= 0) return "";
-        var parts = Regex.Split(text.Trim(), @"(?<=[.!?।])\s+")
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .ToList();
-        if (parts.Count == 0) return "";
-        return string.Join(" ", parts.Take(count)).Trim();
     }
 
     /// <summary>Run proofread in chunks with limited parallelism, then merge into one AnalysisResult. Updates AnalysisProgressTracker for live progress polling.</summary>
