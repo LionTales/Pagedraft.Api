@@ -748,67 +748,25 @@ public class UnifiedAnalysisService
 
     // ─── Target Resolution ──────────────────────────────────────────
 
-    private async Task<(string InputText, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveTarget(
+    private Task<(string InputText, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveTarget(
         AnalysisScope scope, Guid targetId, CancellationToken ct)
     {
-        return scope switch
-        {
-            AnalysisScope.Chapter => await ResolveChapter(targetId, ct),
-            AnalysisScope.Scene => await ResolveScene(targetId, ct),
-            AnalysisScope.Book => await ResolveBook(targetId, ct),
-            _ => throw new ArgumentOutOfRangeException(nameof(scope))
-        };
+        throw new NotSupportedException("ResolveTarget is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveChapter(Guid chapterId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveChapter(Guid chapterId, CancellationToken ct)
     {
-        var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == chapterId, ct)
-            ?? throw new InvalidOperationException("Chapter not found");
-
-        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
-        if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("No chapter text to analyze. Save the chapter first so the analysis has content.");
-
-        return (text, chapter.BookId, chapterId, null);
+        throw new NotSupportedException("ResolveChapter is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveScene(Guid sceneId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveScene(Guid sceneId, CancellationToken ct)
     {
-        var scene = await _db.Scenes.Include(s => s.Chapter).FirstOrDefaultAsync(s => s.Id == sceneId, ct)
-            ?? throw new InvalidOperationException("Scene not found");
-
-        var sfdt = scene.ContentSfdt ?? "{}";
-        var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
-        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(plainText);
-        if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("Scene has no content to analyze. Edit the scene and save first.");
-
-        return (text, scene.Chapter.BookId, scene.ChapterId, sceneId);
+        throw new NotSupportedException("ResolveScene is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveBook(Guid bookId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveBook(Guid bookId, CancellationToken ct)
     {
-        var chapters = await _db.Chapters
-            .Where(c => c.BookId == bookId)
-            .OrderBy(c => c.Order)
-            .ToListAsync(ct);
-
-        if (chapters.Count == 0)
-            throw new InvalidOperationException("Book has no chapters to analyze.");
-
-        var sb = new StringBuilder();
-        foreach (var ch in chapters)
-        {
-            var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(ch.ContentText ?? "");
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                sb.AppendLine($"## {ch.Title}");
-                sb.AppendLine(text);
-                sb.AppendLine();
-            }
-        }
-
-        return (sb.ToString(), bookId, null, null);
+        throw new NotSupportedException("ResolveBook is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
     // ─── Structured Output Parsing ──────────────────────────────────

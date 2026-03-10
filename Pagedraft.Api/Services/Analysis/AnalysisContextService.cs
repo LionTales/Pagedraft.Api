@@ -128,9 +128,14 @@ public class AnalysisContextService : IAnalysisContextService
             var language = string.IsNullOrWhiteSpace(book.Language) ? "he" : book.Language;
             return await ExtractCharacterRegisterAsync(fullText, language, ct);
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // Any failure should degrade gracefully – proofread still runs without character info.
+            // Preserve cooperative cancellation so the outer analysis can stop immediately.
+            throw;
+        }
+        catch (Exception)
+        {
+            // Any non-cancellation failure should degrade gracefully – proofread still runs without character info.
             return null;
         }
     }
@@ -158,7 +163,12 @@ public class AnalysisContextService : IAnalysisContextService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch
+        catch (OperationCanceledException)
+        {
+            // Let cancellation propagate to the caller.
+            throw;
+        }
+        catch (Exception)
         {
             return null;
         }
