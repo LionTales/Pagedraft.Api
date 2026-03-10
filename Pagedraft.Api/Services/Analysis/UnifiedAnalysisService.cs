@@ -653,7 +653,9 @@ public class UnifiedAnalysisService
 
                 var instruction = customPrompt
                     ?? _promptFactory.BuildProofreadChunkPrompt(language, context.Characters, chunk.OverlapPrefix);
-                var wrappedText = $"[TEXT_TO_CORRECT]{text}[/TEXT_TO_CORRECT]";
+                var wrappedText = customPrompt is null
+                    ? $"[TEXT_TO_CORRECT]{text}[/TEXT_TO_CORRECT]"
+                    : text;
 
                 var request = new AiRequest
                 {
