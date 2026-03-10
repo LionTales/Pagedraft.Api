@@ -161,7 +161,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: false);
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -224,7 +224,7 @@ public class UnifiedAnalysisService
             ModelName = $"{response.Provider}:{response.Model}",
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: true);
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: true, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -311,7 +311,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: true, isRunWithInput: false);
+        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: true, isRunWithInput: false, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -749,7 +749,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false);
+        AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
@@ -1032,43 +1032,47 @@ public class UnifiedAnalysisService
         string? structuredJson,
         string cleanContent,
         bool isStreaming,
-        bool isRunWithInput)
+        bool isRunWithInput,
+        bool applyProofreadHeuristics)
     {
         if (analysisType == AnalysisType.Proofread)
         {
-            var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-            var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
-            if (invalidResult)
+            if (applyProofreadHeuristics)
             {
-                var contextLabel = isStreaming
-                    ? "Proofread (streaming)"
-                    : isRunWithInput
-                        ? "Proofread result (RunWithInputAsync)"
-                        : "Proofread result";
-                _logger.LogWarning(
-                    "{ContextLabel} appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}",
-                    contextLabel,
-                    inputText.Length,
-                    TruncateForAudit(cleanContent, 150));
-                cleanContent = inputText;
-                noChanges = true;
-            }
+                var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
+                var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
+                if (invalidResult)
+                {
+                    var contextLabel = isStreaming
+                        ? "Proofread (streaming)"
+                        : isRunWithInput
+                            ? "Proofread result (RunWithInputAsync)"
+                            : "Proofread result";
+                    _logger.LogWarning(
+                        "{ContextLabel} appears to be unrelated to input (e.g. model wrote new content). Treating as no changes and persisting original text. Input length={InputLen}, result preview={Preview}",
+                        contextLabel,
+                        inputText.Length,
+                        TruncateForAudit(cleanContent, 150));
+                    cleanContent = inputText;
+                    noChanges = true;
+                }
 
-            result.ProofreadNoChangesHint = noChanges;
-            result.ResultText = cleanContent;
+                result.ProofreadNoChangesHint = noChanges;
+                result.ResultText = cleanContent;
 
-            if (noChanges)
-            {
-                var contextLabel = isStreaming
-                    ? "Proofread (streaming)"
-                    : isRunWithInput
-                        ? "Proofread result (RunWithInputAsync)"
-                        : "Proofread result";
-                _logger.LogWarning(
-                    "{ContextLabel} is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.",
-                    contextLabel,
-                    inputText.Length,
-                    cleanContent.Length);
+                if (noChanges)
+                {
+                    var contextLabel = isStreaming
+                        ? "Proofread (streaming)"
+                        : isRunWithInput
+                            ? "Proofread result (RunWithInputAsync)"
+                            : "Proofread result";
+                    _logger.LogWarning(
+                        "{ContextLabel} is nearly identical to input (input={InputLen} chars, result={ResultLen} chars). Model may have hit a length limit or failed—suggest user try a shorter section.",
+                        contextLabel,
+                        inputText.Length,
+                        cleanContent.Length);
+                }
             }
 
             var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);

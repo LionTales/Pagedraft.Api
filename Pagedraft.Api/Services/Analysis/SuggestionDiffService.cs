@@ -175,6 +175,7 @@ public class SuggestionDiffService
             return suggestions;
         var normalizedDocument = TextNormalization.NormalizeTextForAnalysis(StripInternalMarkers(originalText));
 
+        var searchStart = 0;
         foreach (var s in structured.Suggestions)
         {
             var original = s.Original ?? string.Empty;
@@ -186,7 +187,7 @@ public class SuggestionDiffService
                 continue;
 
             var normalizedOriginal = TextNormalization.NormalizeTextForAnalysis(original);
-            var idx = normalizedDocument.IndexOf(normalizedOriginal, StringComparison.Ordinal);
+            var idx = normalizedDocument.IndexOf(normalizedOriginal, searchStart, StringComparison.Ordinal);
             if (idx < 0)
             {
                 suggestions.Add(new AnalysisSuggestion
@@ -201,6 +202,7 @@ public class SuggestionDiffService
 
             var startOffset = idx;
             var endOffset = idx + normalizedOriginal.Length;
+            searchStart = endOffset;
 
             suggestions.Add(new AnalysisSuggestion
             {
