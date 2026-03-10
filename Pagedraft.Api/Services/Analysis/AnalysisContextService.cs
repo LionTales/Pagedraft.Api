@@ -110,7 +110,6 @@ public class AnalysisContextService : IAnalysisContextService
         {
             // 1. Prefer explicit register from BookBible when available
             var bible = await _db.BookBibles
-                .AsNoTracking()
                 .FirstOrDefaultAsync(b => b.BookId == bookId, ct);
 
             if (!string.IsNullOrWhiteSpace(bible?.CharacterRegisterJson))
@@ -122,14 +121,40 @@ public class AnalysisContextService : IAnalysisContextService
                     return fromBible;
             }
 
-            // 2. Fallback: cheap LLM pre-pass on first ~2000 words
+            // 2. Fallback: cheap LLM pre-pass on first ~2000 words,
+            // and persist the extracted register back to BookBible so
+            // subsequent analyses can reuse it without another LLM call.
             var book = await _db.Books
                 .AsNoTracking()
                 .FirstOrDefaultAsync(b => b.Id == bookId, ct);
             if (book == null) return null;
 
             var language = string.IsNullOrWhiteSpace(book.Language) ? "he" : book.Language;
-            return await ExtractCharacterRegisterAsync(fullText, language, ct);
+            var extracted = await ExtractCharacterRegisterAsync(fullText, language, ct);
+            if (extracted is { Characters.Count: > 0 })
+            {
+                var now = DateTimeOffset.UtcNow;
+                if (bible == null)
+                {
+                    bible = new BookBible
+                    {
+                        BookId = bookId,
+                        CreatedAt = now,
+                        UpdatedAt = now,
+                        CharacterRegisterJson = JsonSerializer.Serialize(extracted, JsonOpts)
+                    };
+                    _db.BookBibles.Add(bible);
+                }
+                else
+                {
+                    bible.CharacterRegisterJson = JsonSerializer.Serialize(extracted, JsonOpts);
+                    bible.UpdatedAt = now;
+                }
+
+                await _db.SaveChangesAsync(ct);
+            }
+
+            return extracted;
         }
         catch (OperationCanceledException)
         {
