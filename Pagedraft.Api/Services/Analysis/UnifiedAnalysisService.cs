@@ -614,9 +614,29 @@ public class UnifiedAnalysisService
         AnalysisContext context,
         CancellationToken ct)
     {
-        string? firstChunkInstruction = null;
         var taskType = MapToTaskType(AnalysisType.Proofread);
         var chunks = ChunkForProofread(inputText, chunkTargetWords);
+
+        // Representative instruction for auditing: either the custom prompt (if provided)
+        // or the instruction that will be used for the first chunk when using the
+        // chunk-aware proofread prompt.
+        string? representativeInstruction;
+        if (customPrompt is not null)
+        {
+            representativeInstruction = customPrompt;
+        }
+        else if (chunks.Count > 0)
+        {
+            var firstChunk = chunks[0];
+            representativeInstruction = _promptFactory.BuildProofreadChunkPrompt(
+                language,
+                context.Characters,
+                firstChunk.OverlapPrefix);
+        }
+        else
+        {
+            representativeInstruction = null;
+        }
 
         _logger.LogInformation(
             "Proofread chunked: input {WordCount} words, {ChunkCount} chunks, max parallel {MaxParallel}",
@@ -653,10 +673,6 @@ public class UnifiedAnalysisService
 
                 var instruction = customPrompt
                     ?? _promptFactory.BuildProofreadChunkPrompt(language, context.Characters, chunk.OverlapPrefix);
-                if (firstChunkInstruction == null)
-                {
-                    firstChunkInstruction = instruction;
-                }
                 var wrappedText = customPrompt is null
                     ? $"[TEXT_TO_CORRECT]{text}[/TEXT_TO_CORRECT]"
                     : text;
@@ -737,7 +753,7 @@ public class UnifiedAnalysisService
             AnalysisType = AnalysisType.Proofread,
             Type = nameof(AnalysisType.Proofread),
             PromptUsed = TruncateForAudit(
-                firstChunkInstruction
+                representativeInstruction
                 ?? (customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.Proofread, language, context))),
             ResultText = mergedResultText,
             StructuredResult = null,
