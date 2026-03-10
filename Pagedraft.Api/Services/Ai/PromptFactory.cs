@@ -1,3 +1,5 @@
+using System.Text;
+using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
 
 namespace Pagedraft.Api.Services.Ai;
@@ -93,20 +95,253 @@ public class PromptFactory
         };
     }
 
+    // ─── Context-aware analysis prompt ──────────────────────────────
+
+    /// <summary>
+    /// Returns a context-enriched instruction for the given analysis type.
+    /// When context is null or has no relevant optional fields, falls back to the base prompt.
+    /// Context sections use [SECTION_NAME]...[/SECTION_NAME] delimiters so the LLM can
+    /// distinguish injected context from the analysis instruction itself.
+    /// </summary>
+    public string GetAnalysisPrompt(AnalysisType analysisType, string language, AnalysisContext? context)
+    {
+        var basePrompt = GetAnalysisPrompt(analysisType, language);
+        if (context == null)
+            return basePrompt;
+
+        var preamble = BuildContextPreamble(context, analysisType);
+        if (string.IsNullOrEmpty(preamble))
+            return basePrompt;
+
+        return preamble + basePrompt;
+    }
+
+    // ─── Per-chunk proofread prompt assembly ────────────────────────
+
+    /// <summary>
+    /// Builds a complete per-chunk proofread instruction that prepends character register
+    /// and overlap context (if available) to the base proofread prompt.
+    /// Used by RunProofreadChunkedAsync; the caller wraps InputText with
+    /// [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] markers.
+    /// </summary>
+    public string BuildProofreadChunkPrompt(string language, CharacterRegister? characters, string? overlapPrefix)
+    {
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var basePrompt = isHe ? ProofreadHe : ProofreadEn;
+
+        var sb = new StringBuilder();
+
+        if (characters is { Characters.Count: > 0 })
+            AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(characters));
+
+        if (!string.IsNullOrWhiteSpace(overlapPrefix))
+            AppendSection(sb, "CONTEXT_BEFORE", overlapPrefix.Trim());
+
+        sb.Append(basePrompt);
+        return sb.ToString();
+    }
+
+    // ─── Context preamble builder ───────────────────────────────────
+
+    [Flags]
+    private enum ContextField
+    {
+        None             = 0,
+        StyleProfile     = 1 << 0,
+        Characters       = 1 << 1,
+        ChapterBrief     = 1 << 2,
+        BookBrief        = 1 << 3,
+        PrecedingContext  = 1 << 4,
+        FollowingContext  = 1 << 5,
+    }
+
+    /// <summary>Which optional context fields are relevant for each analysis type.</summary>
+    private static ContextField GetRelevantFields(AnalysisType type) => type switch
+    {
+        AnalysisType.Proofread          => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.Characters,
+        AnalysisType.LineEdit           => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.FollowingContext,
+        AnalysisType.LinguisticAnalysis => ContextField.StyleProfile,
+        AnalysisType.LiteraryAnalysis   => ContextField.StyleProfile | ContextField.Characters | ContextField.ChapterBrief | ContextField.BookBrief,
+        AnalysisType.Summarization      => ContextField.ChapterBrief | ContextField.PrecedingContext,
+        AnalysisType.QA                 => ContextField.BookBrief | ContextField.Characters,
+        AnalysisType.StoryAnalysis      => ContextField.BookBrief,
+        AnalysisType.Synopsis           => ContextField.Characters,
+        // BookOverview, CharacterAnalysis, Custom — no extra context needed
+        _ => ContextField.None,
+    };
+
+    private static string BuildContextPreamble(AnalysisContext ctx, AnalysisType type)
+    {
+        var fields = GetRelevantFields(type);
+        if (fields == ContextField.None)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+
+        if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style));
+
+        if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
+            AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
+
+        if (fields.HasFlag(ContextField.BookBrief) && ctx.BookBrief is { } book)
+            AppendSection(sb, "BOOK_CONTEXT", FormatBookBrief(book));
+
+        if (fields.HasFlag(ContextField.ChapterBrief) && ctx.ChapterBrief is { } chapter)
+            AppendSection(sb, "CHAPTER_CONTEXT", FormatChapterBrief(chapter));
+
+        if (fields.HasFlag(ContextField.PrecedingContext) && !string.IsNullOrWhiteSpace(ctx.PrecedingContext))
+            AppendSection(sb, "PRECEDING_CONTEXT", ctx.PrecedingContext.Trim());
+
+        if (fields.HasFlag(ContextField.FollowingContext) && !string.IsNullOrWhiteSpace(ctx.FollowingContext))
+            AppendSection(sb, "FOLLOWING_CONTEXT", ctx.FollowingContext.Trim());
+
+        return sb.ToString();
+    }
+
+    private static void AppendSection(StringBuilder sb, string name, string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return;
+        sb.Append('[').Append(name).Append("]\n");
+        sb.Append(content.Trim());
+        sb.Append("\n[/").Append(name).Append("]\n\n");
+    }
+
+    private static string FormatStyleProfile(StyleProfileData s)
+    {
+        var sb = new StringBuilder();
+        if (s.DominantTone != null)    sb.AppendLine($"Dominant tone: {s.DominantTone}");
+        if (s.Pov != null)             sb.AppendLine($"POV: {s.Pov}");
+        if (s.TensePattern != null)    sb.AppendLine($"Tense: {s.TensePattern}");
+        if (s.VocabularyLevel != null)  sb.AppendLine($"Vocabulary: {s.VocabularyLevel}");
+        if (s.DialogueStyle != null)   sb.AppendLine($"Dialogue style: {s.DialogueStyle}");
+        if (s.AverageSentenceLength.HasValue) sb.AppendLine($"Avg sentence length: {s.AverageSentenceLength:F1} words");
+        if (s.FormalityScore.HasValue) sb.AppendLine($"Formality: {s.FormalityScore:F2}");
+        if (s.RecurringMotifs.Count > 0) sb.AppendLine($"Motifs: {string.Join(", ", s.RecurringMotifs)}");
+        return sb.ToString();
+    }
+
+    private static string FormatCharacters(CharacterRegister reg)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in reg.Characters)
+        {
+            sb.Append($"- {c.Name}");
+            if (c.Role != null) sb.Append($" ({c.Role})");
+            if (c.Gender != null) sb.Append($" [{c.Gender}]");
+            if (c.Description != null) sb.Append($": {c.Description}");
+            if (c.Aliases.Count > 0) sb.Append($" (aliases: {string.Join(", ", c.Aliases)})");
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatBookBrief(BookBrief b)
+    {
+        var sb = new StringBuilder();
+        if (b.Genre != null) sb.AppendLine($"Genre: {b.Genre}{(b.SubGenre != null ? $" / {b.SubGenre}" : "")}");
+        if (b.TargetAudience != null) sb.AppendLine($"Audience: {b.TargetAudience}");
+        if (b.LiteratureLevel.HasValue) sb.AppendLine($"Literature level: {b.LiteratureLevel}/10");
+        if (b.Themes.Count > 0) sb.AppendLine($"Themes: {string.Join(", ", b.Themes)}");
+        if (b.Synopsis != null) sb.AppendLine($"Synopsis: {b.Synopsis}");
+        return sb.ToString();
+    }
+
+    private static string FormatChapterBrief(ChapterBrief ch)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Chapter {ch.Order}: {ch.Title}");
+        if (ch.Summary != null) sb.AppendLine(ch.Summary);
+        if (ch.PlotEvents.Count > 0) sb.AppendLine($"Plot events: {string.Join("; ", ch.PlotEvents)}");
+        if (ch.CharacterStates.Count > 0)
+        {
+            foreach (var cs in ch.CharacterStates)
+            {
+                sb.Append($"  {cs.Name}");
+                if (cs.State != null) sb.Append($" — {cs.State}");
+                if (cs.EmotionalArc != null) sb.Append($" ({cs.EmotionalArc})");
+                sb.AppendLine();
+            }
+        }
+        if (ch.OpenThreads.Count > 0) sb.AppendLine($"Open threads: {string.Join("; ", ch.OpenThreads)}");
+        if (ch.ToneNotes != null) sb.AppendLine($"Tone: {ch.ToneNotes}");
+        return sb.ToString();
+    }
+
     // ── Proofread ────────────────────────────────────────────────────
 
     private const string ProofreadHe =
-        "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. " +
-        "אם אין שגיאות, החזר את הטקסט כפי שהוא. " +
-        "החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים, הערות או תוספות. " +
-        "אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש. " +
-        "אל תכתוב המשך לסיפור, אל תכתוב פרק חדש, ואל תתחיל טקסט חדש — הפלט חייב להיות אותו טקסט עם תיקונים בלבד. " +
-        "חשוב: הפלט שלך חייב להיות אך ורק הטקסט המתוקן עצמו — שורה ראשונה של התגובה = תחילת הטקסט המתוקן, בלי פתיחות כמו \"הטקסט המתוקן:\" או תוויות.";
+        """
+        תקן שגיאות כתיב, דקדוק ופיסוק בלבד בטקסט הבא.
+
+        אם הטקסט מכיל סימון [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] — תקן רק את הטקסט שבתוך הסימון והחזר אותו בלבד.
+        אם אין סימונים כאלה, תקן את כל הטקסט שקיבלת.
+        אם מופיע [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] — זהו הקשר בלבד לצורך המשכיות. אל תתקן אותו ואל תכלול אותו בפלט.
+        אם מופיע [CHARACTER_REGISTER] — השתמש בו לאימות התאמת מין (נטיית פועל, תואר, כינוי), עקביות כתיב שמות, וזיהוי כינויי גוף.
+
+        אל תשנה סגנון, ניסוח או מבנה פסקאות — רק שגיאות ברורות.
+        אל תתקן ערבוב רישומים מכוון (למשל שפה מדוברת בדיאלוג לעומת לשון ספרותית בתיאור).
+        אם אין שגיאות, החזר את הטקסט כפי שהוא.
+        החזר רק את הטקסט המתוקן — בלי הסברים, תוויות או כותרות כמו "הטקסט המתוקן:".
+        אל תכתוב המשך לסיפור ואל תוסיף תוכן חדש.
+        """;
 
     private const string ProofreadEn =
-        "Receive a text and return **only** the corrected version, with no explanations or additions. " +
-        "Do not change paragraph structure unless there is a clear error. Do not add new content. " +
-        "Do not continue the story, write a new chapter, or start new text — output must be the same text with only corrections.";
+        """
+        Correct only spelling, grammar, and punctuation errors in the following text.
+
+        If the text contains [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] markers — correct only the text inside those markers and return it alone.
+        If no such markers are present, correct the entire text.
+        If [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] is present — it is read-only context for continuity. Do not correct it or include it in your output.
+        If [CHARACTER_REGISTER] is present — use it to verify name spelling consistency, pronoun agreement, and gender-specific language.
+
+        Do not change style, wording, or paragraph structure — only clear errors.
+        If no errors are found, return the text as-is.
+        Return only the corrected text — no explanations, labels, or preambles like "Corrected text:".
+        Do not continue the story or add new content.
+        """;
+
+    // ── Character Extraction (pre-pass) ────────────────────────────
+
+    private const string CharacterExtractionPromptHe =
+        """
+        חלץ את הדמויות בעלות השם מהטקסט הבא. עבור כל דמות ציין שם ומין.
+
+        כללים:
+        - חלץ רק דמויות בעלות שם פרטי (לא כינויים כלליים כמו "האיש", "הילדה" או "הזקן").
+        - הסק מין מנטיית פעלים, תארים ותחביר עברי כשהמין לא מצוין במפורש.
+        - אם לדמות שמות חלופיים או כינויים (למשל "דני"/"דניאל"), קבץ אותם תחת ערך אחד עם שדה aliases.
+        - אם אין דמויות בטקסט, החזר מערך ריק.
+
+        החזר JSON בלבד, ללא הסברים, בפורמט הבא:
+        [{"name":"שם הדמות","gender":"male|female|unknown","aliases":["כינוי1"]}]
+        """;
+
+    private const string CharacterExtractionPromptEn =
+        """
+        Extract named characters from the following text. For each character, provide name and gender.
+
+        Rules:
+        - Extract only named characters (not generic descriptions like "the man", "the girl", or "the old one").
+        - Infer gender from context (verb agreement, pronouns, descriptions) when not explicitly stated.
+        - If a character has aliases or alternate names (e.g., "Danny"/"Daniel"), group them under one entry with an aliases field.
+        - If no characters are found, return an empty array.
+
+        Return JSON only, no explanations, in this format:
+        [{"name":"character name","gender":"male|female|unknown","aliases":["alias1"]}]
+        """;
+
+    /// <summary>
+    /// Returns the character extraction prompt for the LLM pre-pass.
+    /// Used by AnalysisContextService to extract characters + genders from ~2000 words
+    /// when no BookBible.CharacterRegisterJson is available.
+    /// </summary>
+    public string GetCharacterExtractionPrompt(string language)
+    {
+        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+            ? CharacterExtractionPromptHe
+            : CharacterExtractionPromptEn;
+    }
 
     // ── LineEdit ─────────────────────────────────────────────────────
 

@@ -27,6 +27,7 @@ public class UnifiedAnalysisService
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<UnifiedAnalysisService> _logger;
     private readonly AnalysisProgressTracker _progress;
+    private readonly IAnalysisContextService _contextService;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -41,7 +42,8 @@ public class UnifiedAnalysisService
         SfdtConversionService sfdtConversion,
         IOptions<AiOptions> aiOptions,
         ILogger<UnifiedAnalysisService> logger,
-        AnalysisProgressTracker progress)
+        AnalysisProgressTracker progress,
+        IAnalysisContextService contextService)
     {
         _db = db;
         _router = router;
@@ -50,6 +52,7 @@ public class UnifiedAnalysisService
         _aiOptions = aiOptions;
         _logger = logger;
         _progress = progress;
+        _contextService = contextService;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -61,7 +64,7 @@ public class UnifiedAnalysisService
     /// When provided and the run uses chunked proofread, this jobId will be used for progress tracking and persisted on AnalysisResult.
     /// When null, a new jobId is generated internally for chunked proofread.
     /// </param>
-    public async Task<AnalysisResult> RunAsync(
+        public async Task<AnalysisResult> RunAsync(
         AnalysisScope scope,
         AnalysisType analysisType,
         Guid targetId,
@@ -70,7 +73,11 @@ public class UnifiedAnalysisService
         Guid? jobId = null,
         CancellationToken ct = default)
     {
-        var (inputText, bookId, chapterId, sceneId) = await ResolveTarget(scope, targetId, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var inputText = context.TargetText;
+        var bookId = context.BookId;
+        var chapterId = context.ChapterId;
+        var sceneId = context.SceneId;
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
@@ -83,14 +90,15 @@ public class UnifiedAnalysisService
                 var effectiveJobId = jobId ?? Guid.NewGuid();
                 return await RunProofreadChunkedAsync(
                     inputText, bookId, chapterId, sceneId, scope, targetId,
-                    customPrompt, language, chunkTargetWords, maxParallel, effectiveJobId, ct);
+                    customPrompt, language, chunkTargetWords, maxParallel, effectiveJobId, context, ct);
             }
             if (inputText.Length > MaxProofreadInputLength)
                 throw new InvalidOperationException($"Proofread text is too long ({inputText.Length} characters). Please select a shorter section (e.g. one scene or a few paragraphs). Maximum is {MaxProofreadInputLength:N0} characters.");
         }
 
         var taskType = MapToTaskType(analysisType);
-        var instruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(analysisType, language);
+        var instruction = customPrompt
+            ?? _promptFactory.GetAnalysisPrompt(analysisType, language, context);
 
         var request = new AiRequest
         {
@@ -228,12 +236,17 @@ public class UnifiedAnalysisService
         string language,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        var (inputText, bookId, chapterId, sceneId) = await ResolveTarget(scope, targetId, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var inputText = context.TargetText;
+        var bookId = context.BookId;
+        var chapterId = context.ChapterId;
+        var sceneId = context.SceneId;
         if (analysisType == AnalysisType.Proofread && inputText.Length > MaxProofreadInputLength)
             throw new InvalidOperationException($"Proofread text is too long ({inputText.Length} characters). Please select a shorter section (e.g. one scene or a few paragraphs). Maximum is {MaxProofreadInputLength:N0} characters.");
 
         var taskType = MapToTaskType(analysisType);
-        var instruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(analysisType, language);
+        var instruction = customPrompt
+            ?? _promptFactory.GetAnalysisPrompt(analysisType, language, context);
 
         var request = new AiRequest
         {
@@ -332,13 +345,22 @@ public class UnifiedAnalysisService
 
     // ─── Proofread chunking (paragraph/sentence aware) ───────────────
 
-    /// <summary>Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk. Returns (chunkText, separatorAfter) for merge.</summary>
-    private static List<(string Text, string SeparatorAfter)> ChunkForProofread(string fullText, int targetWordsPerChunk)
+    /// <summary>Structured chunk for proofread with merge separator and soft overlap context (prefix only).</summary>
+    private sealed record ProofreadChunk(string Text, string SeparatorAfter, string? OverlapPrefix);
+
+    /// <summary>
+    /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
+    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
+    /// - Text: the chunk to correct
+    /// - SeparatorAfter: separator to append after this chunk when merging
+    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// </summary>
+    private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
     {
         if (string.IsNullOrWhiteSpace(fullText))
-            return new List<(string, string)> { ("", "") };
+            return new List<ProofreadChunk> { new("", "", null) };
         if (targetWordsPerChunk <= 0)
-            return new List<(string, string)> { (fullText.Trim(), "") };
+            return new List<ProofreadChunk> { new(fullText.Trim(), "", null) };
 
         fullText = fullText.TrimEnd();
         var segments = new List<(string Text, string Sep)>();
@@ -396,32 +418,73 @@ public class UnifiedAnalysisService
         }
 
         if (segments.Count == 0)
-            return new List<(string, string)> { ("", "") };
+            return new List<ProofreadChunk> { new("", "", null) };
 
-        // Group segments into chunks of ~targetWordsPerChunk
-        var chunks = new List<(string Text, string SeparatorAfter)>();
+        // Group segments into chunks of ~targetWordsPerChunk (dialogue-aware)
+        var baseChunks = new List<(string Text, string SeparatorAfter)>();
         var current = new StringBuilder();
         var currentWords = 0;
         var lastSep = "";
+        var inDialogueBlock = false;
 
         foreach (var (text, sep) in segments)
         {
             var w = WordCount(text);
-            if (currentWords + w > targetWordsPerChunk && currentWords > 0)
+            var belongsToDialogue = BelongsToDialogueBlock(text);
+
+            if (currentWords == 0)
             {
-                chunks.Add((current.ToString().TrimEnd(), lastSep));
-                current.Clear();
-                currentWords = 0;
+                inDialogueBlock = belongsToDialogue;
             }
+            else if (belongsToDialogue)
+            {
+                inDialogueBlock = true;
+            }
+            else if (inDialogueBlock && !belongsToDialogue)
+            {
+                // End of dialogue block – subsequent non-dialogue segments start a new block
+                inDialogueBlock = false;
+            }
+
+            var limit = targetWordsPerChunk;
+            var dialogueLimit = (int)Math.Round(targetWordsPerChunk * DialogueOverflowMultiplier);
+
+            if (currentWords > 0)
+            {
+                var threshold = inDialogueBlock ? dialogueLimit : limit;
+                if (currentWords + w > threshold)
+                {
+                    baseChunks.Add((current.ToString().TrimEnd(), lastSep));
+                    current.Clear();
+                    currentWords = 0;
+                }
+            }
+
             current.Append(text).Append(sep);
             currentWords += w;
             lastSep = sep;
         }
 
         if (current.Length > 0)
-            chunks.Add((current.ToString().TrimEnd(), lastSep));
+            baseChunks.Add((current.ToString().TrimEnd(), lastSep));
 
-        return chunks;
+        // Post-process: compute soft overlaps from neighboring chunks
+        var result = new List<ProofreadChunk>(baseChunks.Count);
+        for (var i = 0; i < baseChunks.Count; i++)
+        {
+            var (text, sep) = baseChunks[i];
+            string? overlapPrefix = null;
+
+            if (i > 0)
+            {
+                var trailing = ExtractTrailingSentences(baseChunks[i - 1].Text, 3);
+                overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
+            }
+
+            result.Add(new ProofreadChunk(text, sep, overlapPrefix));
+        }
+
+        return result;
     }
 
     private static int WordCount(string text)
@@ -447,6 +510,76 @@ public class UnifiedAnalysisService
         return result;
     }
 
+    // ─── Dialogue-aware chunking rules ─────────────────────────────
+
+    /// <summary>When inside a dialogue block and a chunk would exceed the target, allow up to 30% overflow to keep the block intact.</summary>
+    internal const double DialogueOverflowMultiplier = 1.3;
+
+    /// <summary>Max word count for a line to qualify as a short attribution/narration between dialogue turns.</summary>
+    private const int MaxAttributionWords = 20;
+
+    /// <summary>
+    /// Detects opening dialogue markers: standard double quote, Hebrew gershayim (״),
+    /// left curly quote (\u201C), em dash (—), and en dash (–).
+    /// </summary>
+    private static readonly Regex DialogueStartPattern = new(
+        "^\\s*[\"\u201C\u05F4\u2014\u2013]",
+        RegexOptions.Compiled);
+
+    /// <summary>Hebrew speech-verb attribution after a quoted clause (e.g. "...," אמרה שרה).</summary>
+    private static readonly Regex HebrewAttributionPattern = new(
+        "(אמר|אמרה|שאל|שאלה|ענה|ענתה|לחש|לחשה|צעק|צעקה|מלמל|מלמלה|קרא|קראה|הוסיף|הוסיפה|סיפר|סיפרה)\\s",
+        RegexOptions.Compiled);
+
+    /// <summary>English speech-verb attribution after a quoted clause (e.g. "...," said Sarah).</summary>
+    private static readonly Regex EnglishAttributionPattern = new(
+        @"[,]\s*(said|asked|replied|answered|whispered|shouted|murmured|exclaimed|called|added|continued)\s",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns true if the segment begins with a dialogue marker
+    /// (opening quote, Hebrew gershayim, em dash, en dash, left curly quote).
+    /// </summary>
+    internal static bool IsDialogueStart(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return DialogueStartPattern.IsMatch(text);
+    }
+
+    /// <summary>
+    /// Returns true if the segment is a short attribution/narration line that belongs
+    /// to the surrounding dialogue block (e.g. "אמרה שרה וחייכה." or "said Sarah quietly.").
+    /// Capped at <see cref="MaxAttributionWords"/> words so longer paragraphs aren't mistakenly absorbed.
+    /// </summary>
+    internal static bool IsDialogueAttribution(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        if (WordCount(text) > MaxAttributionWords) return false;
+        return HebrewAttributionPattern.IsMatch(text) || EnglishAttributionPattern.IsMatch(text);
+    }
+
+    /// <summary>
+    /// Returns true if the segment is part of an ongoing dialogue block — either it
+    /// opens with a dialogue marker or it is a short attribution line.
+    /// Used by the dialogue-aware chunking loop to decide whether extending the current
+    /// chunk (up to <see cref="DialogueOverflowMultiplier"/>) is preferable to splitting.
+    /// </summary>
+    internal static bool BelongsToDialogueBlock(string text)
+    {
+        return IsDialogueStart(text) || IsDialogueAttribution(text);
+    }
+
+    private static string ExtractTrailingSentences(string text, int count)
+    {
+        if (string.IsNullOrWhiteSpace(text) || count <= 0) return "";
+        var parts = Regex.Split(text.Trim(), @"(?<=[.!?।])\s+")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToList();
+        if (parts.Count == 0) return "";
+        var start = Math.Max(0, parts.Count - count);
+        return string.Join(" ", parts.Skip(start).Take(count)).Trim();
+    }
+
     /// <summary>Run proofread in chunks with limited parallelism, then merge into one AnalysisResult. Updates AnalysisProgressTracker for live progress polling.</summary>
     private async Task<AnalysisResult> RunProofreadChunkedAsync(
         string inputText,
@@ -460,11 +593,32 @@ public class UnifiedAnalysisService
         int chunkTargetWords,
         int maxParallel,
         Guid jobId,
+        AnalysisContext context,
         CancellationToken ct)
     {
-        var instruction = customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.Proofread, language);
         var taskType = MapToTaskType(AnalysisType.Proofread);
         var chunks = ChunkForProofread(inputText, chunkTargetWords);
+
+        // Representative instruction for auditing: either the custom prompt (if provided)
+        // or the instruction that will be used for the first chunk when using the
+        // chunk-aware proofread prompt.
+        string? representativeInstruction;
+        if (customPrompt is not null)
+        {
+            representativeInstruction = customPrompt;
+        }
+        else if (chunks.Count > 0)
+        {
+            var firstChunk = chunks[0];
+            representativeInstruction = _promptFactory.BuildProofreadChunkPrompt(
+                language,
+                context.Characters,
+                firstChunk.OverlapPrefix);
+        }
+        else
+        {
+            representativeInstruction = null;
+        }
 
         _logger.LogInformation(
             "Proofread chunked: input {WordCount} words, {ChunkCount} chunks, max parallel {MaxParallel}",
@@ -485,7 +639,8 @@ public class UnifiedAnalysisService
 
         async Task ProcessChunk(int index)
         {
-            var (text, separatorAfter) = chunks[index];
+            var chunk = chunks[index];
+            var text = chunk.Text;
             if (string.IsNullOrWhiteSpace(text))
             {
                 corrected[index] = text ?? "";
@@ -497,9 +652,16 @@ public class UnifiedAnalysisService
                 var chunkNumber = index + 1;
                 _logger.LogDebug("Proofread chunk {Index}/{Total} starting ({Words} words)", chunkNumber, chunks.Count, WordCount(text));
                 _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+
+                var instruction = customPrompt
+                    ?? _promptFactory.BuildProofreadChunkPrompt(language, context.Characters, chunk.OverlapPrefix);
+                var wrappedText = customPrompt is null
+                    ? $"[TEXT_TO_CORRECT]{text}[/TEXT_TO_CORRECT]"
+                    : text;
+
                 var request = new AiRequest
                 {
-                    InputText = text,
+                    InputText = wrappedText,
                     Instruction = instruction,
                     TaskType = taskType,
                     Language = language,
@@ -572,7 +734,9 @@ public class UnifiedAnalysisService
             Scope = scope,
             AnalysisType = AnalysisType.Proofread,
             Type = nameof(AnalysisType.Proofread),
-            PromptUsed = TruncateForAudit(instruction),
+            PromptUsed = TruncateForAudit(
+                representativeInstruction
+                ?? (customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.Proofread, language, context))),
             ResultText = mergedResultText,
             StructuredResult = null,
             Language = language,
@@ -590,67 +754,25 @@ public class UnifiedAnalysisService
 
     // ─── Target Resolution ──────────────────────────────────────────
 
-    private async Task<(string InputText, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveTarget(
+    private Task<(string InputText, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveTarget(
         AnalysisScope scope, Guid targetId, CancellationToken ct)
     {
-        return scope switch
-        {
-            AnalysisScope.Chapter => await ResolveChapter(targetId, ct),
-            AnalysisScope.Scene => await ResolveScene(targetId, ct),
-            AnalysisScope.Book => await ResolveBook(targetId, ct),
-            _ => throw new ArgumentOutOfRangeException(nameof(scope))
-        };
+        throw new NotSupportedException("ResolveTarget is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveChapter(Guid chapterId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveChapter(Guid chapterId, CancellationToken ct)
     {
-        var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == chapterId, ct)
-            ?? throw new InvalidOperationException("Chapter not found");
-
-        var text = StripSyncfusionWatermark(chapter.ContentText ?? "");
-        if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("No chapter text to analyze. Save the chapter first so the analysis has content.");
-
-        return (text, chapter.BookId, chapterId, null);
+        throw new NotSupportedException("ResolveChapter is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveScene(Guid sceneId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveScene(Guid sceneId, CancellationToken ct)
     {
-        var scene = await _db.Scenes.Include(s => s.Chapter).FirstOrDefaultAsync(s => s.Id == sceneId, ct)
-            ?? throw new InvalidOperationException("Scene not found");
-
-        var sfdt = scene.ContentSfdt ?? "{}";
-        var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
-        var text = StripSyncfusionWatermark(plainText);
-        if (string.IsNullOrWhiteSpace(text))
-            throw new InvalidOperationException("Scene has no content to analyze. Edit the scene and save first.");
-
-        return (text, scene.Chapter.BookId, scene.ChapterId, sceneId);
+        throw new NotSupportedException("ResolveScene is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
-    private async Task<(string, Guid?, Guid?, Guid?)> ResolveBook(Guid bookId, CancellationToken ct)
+    private Task<(string, Guid?, Guid?, Guid?)> ResolveBook(Guid bookId, CancellationToken ct)
     {
-        var chapters = await _db.Chapters
-            .Where(c => c.BookId == bookId)
-            .OrderBy(c => c.Order)
-            .ToListAsync(ct);
-
-        if (chapters.Count == 0)
-            throw new InvalidOperationException("Book has no chapters to analyze.");
-
-        var sb = new StringBuilder();
-        foreach (var ch in chapters)
-        {
-            var text = StripSyncfusionWatermark(ch.ContentText ?? "");
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                sb.AppendLine($"## {ch.Title}");
-                sb.AppendLine(text);
-                sb.AppendLine();
-            }
-        }
-
-        return (sb.ToString(), bookId, null, null);
+        throw new NotSupportedException("ResolveBook is obsolete. Use IAnalysisContextService.BuildContextAsync instead.");
     }
 
     // ─── Structured Output Parsing ──────────────────────────────────
@@ -753,7 +875,7 @@ public class UnifiedAnalysisService
     {
         if (string.IsNullOrEmpty(text)) return text;
         text = StripThinkBlock(text);
-        text = StripSyncfusionWatermark(text);
+        text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(text);
         text = StripCjk(text);
         return text;
     }
@@ -786,27 +908,6 @@ public class UnifiedAnalysisService
         if (closeIdx < 0) return text.Trim();
         var after = text[(closeIdx + close.Length)..].Trim();
         return after.Length > 0 ? after : null;
-    }
-
-    private static string StripSyncfusionWatermark(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        const StringComparison ci = StringComparison.OrdinalIgnoreCase;
-        var result = text;
-        int searchStart = 0;
-        while (true)
-        {
-            var startIdx = result.IndexOf("Created with a trial version of Syncfusion", searchStart, ci);
-            if (startIdx < 0) break;
-            const string keyPhrase = "to obtain the valid key.";
-            var keyEnd = result.IndexOf(keyPhrase, startIdx, ci);
-            int endIdx = keyEnd >= 0 ? keyEnd + keyPhrase.Length : result.Length;
-            result = result.Remove(startIdx, endIdx - startIdx);
-            searchStart = startIdx;
-        }
-        result = Regex.Replace(result, @"[\r\n]+", "\n");
-        result = Regex.Replace(result, @"[ \t]+", " ").Trim();
-        return result;
     }
 
     private static string StripCjk(string text)
