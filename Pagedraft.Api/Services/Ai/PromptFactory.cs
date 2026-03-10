@@ -116,6 +116,31 @@ public class PromptFactory
         return preamble + basePrompt;
     }
 
+    // ─── Per-chunk proofread prompt assembly ────────────────────────
+
+    /// <summary>
+    /// Builds a complete per-chunk proofread instruction that prepends character register
+    /// and overlap context (if available) to the base proofread prompt.
+    /// Used by RunProofreadChunkedAsync; the caller wraps InputText with
+    /// [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] markers.
+    /// </summary>
+    public string BuildProofreadChunkPrompt(string language, CharacterRegister? characters, string? overlapPrefix)
+    {
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var basePrompt = isHe ? ProofreadHe : ProofreadEn;
+
+        var sb = new StringBuilder();
+
+        if (characters is { Characters.Count: > 0 })
+            AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(characters));
+
+        if (!string.IsNullOrWhiteSpace(overlapPrefix))
+            AppendSection(sb, "CONTEXT_BEFORE", overlapPrefix.Trim());
+
+        sb.Append(basePrompt);
+        return sb.ToString();
+    }
+
     // ─── Context preamble builder ───────────────────────────────────
 
     [Flags]
@@ -133,7 +158,7 @@ public class PromptFactory
     /// <summary>Which optional context fields are relevant for each analysis type.</summary>
     private static ContextField GetRelevantFields(AnalysisType type) => type switch
     {
-        AnalysisType.Proofread          => ContextField.StyleProfile | ContextField.PrecedingContext,
+        AnalysisType.Proofread          => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.Characters,
         AnalysisType.LineEdit           => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.FollowingContext,
         AnalysisType.LinguisticAnalysis => ContextField.StyleProfile,
         AnalysisType.LiteraryAnalysis   => ContextField.StyleProfile | ContextField.Characters | ContextField.ChapterBrief | ContextField.BookBrief,
@@ -246,17 +271,77 @@ public class PromptFactory
     // ── Proofread ────────────────────────────────────────────────────
 
     private const string ProofreadHe =
-        "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. " +
-        "אם אין שגיאות, החזר את הטקסט כפי שהוא. " +
-        "החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים, הערות או תוספות. " +
-        "אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש. " +
-        "אל תכתוב המשך לסיפור, אל תכתוב פרק חדש, ואל תתחיל טקסט חדש — הפלט חייב להיות אותו טקסט עם תיקונים בלבד. " +
-        "חשוב: הפלט שלך חייב להיות אך ורק הטקסט המתוקן עצמו — שורה ראשונה של התגובה = תחילת הטקסט המתוקן, בלי פתיחות כמו \"הטקסט המתוקן:\" או תוויות.";
+        """
+        תקן שגיאות כתיב, דקדוק ופיסוק בלבד בטקסט הבא.
+
+        אם הטקסט מכיל סימון [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] — תקן רק את הטקסט שבתוך הסימון והחזר אותו בלבד.
+        אם אין סימונים כאלה, תקן את כל הטקסט שקיבלת.
+        אם מופיע [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] — זהו הקשר בלבד לצורך המשכיות. אל תתקן אותו ואל תכלול אותו בפלט.
+        אם מופיע [CHARACTER_REGISTER] — השתמש בו לאימות התאמת מין (נטיית פועל, תואר, כינוי), עקביות כתיב שמות, וזיהוי כינויי גוף.
+
+        אל תשנה סגנון, ניסוח או מבנה פסקאות — רק שגיאות ברורות.
+        אל תתקן ערבוב רישומים מכוון (למשל שפה מדוברת בדיאלוג לעומת לשון ספרותית בתיאור).
+        אם אין שגיאות, החזר את הטקסט כפי שהוא.
+        החזר רק את הטקסט המתוקן — בלי הסברים, תוויות או כותרות כמו "הטקסט המתוקן:".
+        אל תכתוב המשך לסיפור ואל תוסיף תוכן חדש.
+        """;
 
     private const string ProofreadEn =
-        "Receive a text and return **only** the corrected version, with no explanations or additions. " +
-        "Do not change paragraph structure unless there is a clear error. Do not add new content. " +
-        "Do not continue the story, write a new chapter, or start new text — output must be the same text with only corrections.";
+        """
+        Correct only spelling, grammar, and punctuation errors in the following text.
+
+        If the text contains [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT] markers — correct only the text inside those markers and return it alone.
+        If no such markers are present, correct the entire text.
+        If [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] is present — it is read-only context for continuity. Do not correct it or include it in your output.
+        If [CHARACTER_REGISTER] is present — use it to verify name spelling consistency, pronoun agreement, and gender-specific language.
+
+        Do not change style, wording, or paragraph structure — only clear errors.
+        If no errors are found, return the text as-is.
+        Return only the corrected text — no explanations, labels, or preambles like "Corrected text:".
+        Do not continue the story or add new content.
+        """;
+
+    // ── Character Extraction (pre-pass) ────────────────────────────
+
+    private const string CharacterExtractionPromptHe =
+        """
+        חלץ את הדמויות בעלות השם מהטקסט הבא. עבור כל דמות ציין שם ומין.
+
+        כללים:
+        - חלץ רק דמויות בעלות שם פרטי (לא כינויים כלליים כמו "האיש", "הילדה" או "הזקן").
+        - הסק מין מנטיית פעלים, תארים ותחביר עברי כשהמין לא מצוין במפורש.
+        - אם לדמות שמות חלופיים או כינויים (למשל "דני"/"דניאל"), קבץ אותם תחת ערך אחד עם שדה aliases.
+        - אם אין דמויות בטקסט, החזר מערך ריק.
+
+        החזר JSON בלבד, ללא הסברים, בפורמט הבא:
+        [{"name":"שם הדמות","gender":"male|female|unknown","aliases":["כינוי1"]}]
+        """;
+
+    private const string CharacterExtractionPromptEn =
+        """
+        Extract named characters from the following text. For each character, provide name and gender.
+
+        Rules:
+        - Extract only named characters (not generic descriptions like "the man", "the girl", or "the old one").
+        - Infer gender from context (verb agreement, pronouns, descriptions) when not explicitly stated.
+        - If a character has aliases or alternate names (e.g., "Danny"/"Daniel"), group them under one entry with an aliases field.
+        - If no characters are found, return an empty array.
+
+        Return JSON only, no explanations, in this format:
+        [{"name":"character name","gender":"male|female|unknown","aliases":["alias1"]}]
+        """;
+
+    /// <summary>
+    /// Returns the character extraction prompt for the LLM pre-pass.
+    /// Used by AnalysisContextService to extract characters + genders from ~2000 words
+    /// when no BookBible.CharacterRegisterJson is available.
+    /// </summary>
+    public string GetCharacterExtractionPrompt(string language)
+    {
+        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+            ? CharacterExtractionPromptHe
+            : CharacterExtractionPromptEn;
+    }
 
     // ── LineEdit ─────────────────────────────────────────────────────
 
