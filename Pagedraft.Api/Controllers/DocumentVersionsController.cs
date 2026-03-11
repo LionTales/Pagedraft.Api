@@ -79,9 +79,30 @@ public class DocumentVersionsController : ControllerBase
         _db.DocumentVersions.Add(version);
         await _db.SaveChangesAsync(ct);
 
+        string? analysisStatus = null;
+        if (version.AnalysisResultId.HasValue)
+        {
+            var status = await _db.AnalysisResults.AsNoTracking()
+                .Where(a => a.Id == version.AnalysisResultId.Value)
+                .Select(a => a.Status)
+                .FirstOrDefaultAsync(ct);
+            if (status != default)
+            {
+                analysisStatus = status.ToString();
+            }
+        }
+
         return Ok(new DocumentVersionDto(
-            version.Id, version.BookId, version.ChapterId, version.SceneId,
-            version.CreatedAt, version.Label, version.AnalysisResultId, version.OriginalText, version.SuggestedText));
+            version.Id,
+            version.BookId,
+            version.ChapterId,
+            version.SceneId,
+            version.CreatedAt,
+            version.Label,
+            version.AnalysisResultId,
+            version.OriginalText,
+            version.SuggestedText,
+            analysisStatus));
     }
 
     [HttpGet("versions/{id:guid}")]

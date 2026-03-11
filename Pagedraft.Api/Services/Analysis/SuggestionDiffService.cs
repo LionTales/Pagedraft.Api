@@ -35,7 +35,6 @@ public class SuggestionDiffService
         if (string.IsNullOrWhiteSpace(originalText) || string.IsNullOrWhiteSpace(resultText))
             return new List<AnalysisSuggestion>();
 
-        resultText = StripInternalMarkers(resultText);
         var normOrig = TextNormalization.NormalizeTextForAnalysis(originalText);
         var normResult = TextNormalization.NormalizeTextForAnalysis(resultText);
 
@@ -314,7 +313,7 @@ public class SuggestionDiffService
         var suggestions = new List<AnalysisSuggestion>();
         if (structured?.Suggestions == null || structured.Suggestions.Count == 0)
             return suggestions;
-        var normalizedDocument = TextNormalization.NormalizeTextForAnalysis(StripInternalMarkers(originalText));
+        var normalizedDocument = TextNormalization.NormalizeTextForAnalysis(originalText);
 
         var searchStart = 0;
         foreach (var s in structured.Suggestions)
@@ -375,15 +374,4 @@ public class SuggestionDiffService
     private static bool IsWordChar(char c) =>
         char.IsLetterOrDigit(c);
 
-    /// <summary>
-    /// Strip internal analysis markers that should never be visible to users or affect offsets,
-    /// such as [TEXT_TO_CORRECT]...[/TEXT_TO_CORRECT].
-    /// </summary>
-    private static string StripInternalMarkers(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        return text
-            .Replace("[TEXT_TO_CORRECT]", string.Empty, StringComparison.Ordinal)
-            .Replace("[/TEXT_TO_CORRECT]", string.Empty, StringComparison.Ordinal);
-    }
 }
