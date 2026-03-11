@@ -358,7 +358,7 @@ public class SuggestionDiffService
             {
                 StartOffset = startOffset,
                 EndOffset = endOffset,
-                OriginalText = normalizedOriginal,
+                OriginalText = original,
                 SuggestedText = suggested,
                 Reason = reason,
                 Category = category
