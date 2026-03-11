@@ -164,13 +164,13 @@ public class SuggestionDiffService
                 // don't all collapse to the exact same result position.
                 if (block.DeleteCountA <= 0)
                 {
-                    return block.InsertStartB + delta;
+                    return block.InsertStartB;
                 }
 
                 var clamped = Math.Max(block.DeleteStartA, Math.Min(origPos, deleteEnd));
                 var rel = (double)(clamped - block.DeleteStartA) / block.DeleteCountA;
                 var mappedWithin = (int)Math.Round(rel * block.InsertCountB);
-                return block.InsertStartB + mappedWithin + delta;
+                return block.InsertStartB + mappedWithin;
             }
             else
             {
