@@ -82,14 +82,10 @@ public class DocumentVersionsController : ControllerBase
         string? analysisStatus = null;
         if (version.AnalysisResultId.HasValue)
         {
-            var status = await _db.AnalysisResults.AsNoTracking()
+            analysisStatus = await _db.AnalysisResults.AsNoTracking()
                 .Where(a => a.Id == version.AnalysisResultId.Value)
-                .Select(a => a.Status)
+                .Select(a => a.Status.ToString())
                 .FirstOrDefaultAsync(ct);
-            if (status != default)
-            {
-                analysisStatus = status.ToString();
-            }
         }
 
         return Ok(new DocumentVersionDto(
