@@ -297,11 +297,10 @@ public class SuggestionDiffService
             }
             wordCountInSeg++;
 
-            // If we've reached maxWordsPerSegment, close this segment just before the next word.
+            // If we've reached maxWordsPerSegment, close this segment at the end of the last word.
             if (wordCountInSeg >= maxWordsPerSegment)
             {
-                var segEnd = i;
-                while (segEnd < length && !IsWordChar(text[segEnd])) segEnd++;
+                var segEnd = wordEnd;
                 yield return (segStart, segEnd);
                 wordCountInSeg = 0;
             }
