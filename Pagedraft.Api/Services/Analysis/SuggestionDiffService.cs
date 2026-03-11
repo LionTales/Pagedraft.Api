@@ -158,9 +158,19 @@ public class SuggestionDiffService
             }
             else if (block.DeleteStartA < origPos)
             {
-                // origPos is inside a deleted range (shouldn't happen for word boundaries).
-                // Graceful fallback: map to the end of the corresponding insertion.
-                return block.InsertStartB + block.InsertCountB;
+                // origPos is inside a deleted range. This can happen when we later split
+                // merged ranges by words. Approximate the mapping by interpolating within
+                // the inserted span, so multiple split points inside the same deleted range
+                // don't all collapse to the exact same result position.
+                if (block.DeleteCountA <= 0)
+                {
+                    return block.InsertStartB + delta;
+                }
+
+                var clamped = Math.Max(block.DeleteStartA, Math.Min(origPos, deleteEnd));
+                var rel = (double)(clamped - block.DeleteStartA) / block.DeleteCountA;
+                var mappedWithin = (int)Math.Round(rel * block.InsertCountB);
+                return block.InsertStartB + mappedWithin + delta;
             }
             else
             {
