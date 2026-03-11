@@ -15,6 +15,9 @@ namespace Pagedraft.Api.Services.Analysis;
 public class SuggestionDiffService
 {
     private const int MaxSuggestionCountForProofread = 2_000;
+    private const int MergeGapThreshold = 1;
+    // Target one-word-level proofread suggestions; larger rewrites belong in Line Edit.
+    private const int MaxWordsPerSuggestion = 1;
 
     /// <summary>
     /// Compute proofread suggestions by diffing original document text with the proofread result text.
@@ -82,21 +85,19 @@ public class SuggestionDiffService
         {
             var current = wordRanges[i];
             var last = merged[^1];
-            if (current.Start <= last.End)
+            if (current.Start <= last.End + MergeGapThreshold)
                 merged[^1] = (last.Start, Math.Max(last.End, current.End));
             else
                 merged.Add(current);
         }
 
-        // Step 3: build a cumulative delta array from the diff blocks so we can map
-        // any original position to its result position.
-        // For an original position P that is NOT inside any deleted range:
-        //   resultPos = P + cumDelta
-        // where cumDelta = sum of (InsertCountB - DeleteCountA) for every block
-        // whose deleted range ends at or before P.
+        // Step 3: split any oversized merged range back into individual diff-block-aligned sub-ranges.
+        merged = SplitOversizedRanges(merged, diff.DiffBlocks, normOrig);
+
+        // Step 4: build cumulative delta via diff blocks to map original positions to result positions.
         var blocks = diff.DiffBlocks;
 
-        // Step 4: map each merged original word range to the result and build suggestions.
+        // Step 5: map each merged original word range to the result and build suggestions.
         var suggestions = new List<AnalysisSuggestion>();
         foreach (var (wStart, wEnd) in merged)
         {
@@ -112,6 +113,12 @@ public class SuggestionDiffService
 
             if (string.Equals(origWord, sugWord, StringComparison.Ordinal))
                 continue;
+
+            // Layer 3: reject pathological suggestions where large original maps to empty/tiny replacement
+            var origLen = wEnd - wStart;
+            var sugLen = rEnd - rStart;
+            if (origLen > 40 && sugLen <= 8) continue;
+            if (origLen > 25 && sugLen == 0) continue;
 
             suggestions.Add(new AnalysisSuggestion
             {
@@ -162,6 +169,140 @@ public class SuggestionDiffService
             }
         }
         return origPos + delta;
+    }
+
+    /// <summary>
+    /// Split any merged range that spans more than <see cref="MaxWordsPerSuggestion"/> words back
+    /// into individual diff-block-aligned sub-ranges. This prevents a cluster of nearby
+    /// character-level edits from fusing into one giant suggestion.
+    /// </summary>
+    private static List<(int Start, int End)> SplitOversizedRanges(
+        List<(int Start, int End)> merged,
+        IList<DiffPlex.Model.DiffBlock> diffBlocks,
+        string normOrig)
+    {
+        var result = new List<(int Start, int End)>(merged.Count);
+        foreach (var (mStart, mEnd) in merged)
+        {
+            if (CountWords(normOrig, mStart, mEnd) <= MaxWordsPerSuggestion)
+            {
+                result.Add((mStart, mEnd));
+                continue;
+            }
+
+            // Re-expand each diff block within this merged range into its own word-boundary range
+            var subRanges = new List<(int Start, int End)>();
+            foreach (var block in diffBlocks)
+            {
+                if (block.DeleteCountA == 0 && block.InsertCountB == 0)
+                    continue;
+                var s = block.DeleteStartA;
+                var e = s + block.DeleteCountA;
+                if (e <= mStart || s >= mEnd) continue;
+
+                while (s > 0 && IsWordChar(normOrig[s - 1])) s--;
+                while (e < normOrig.Length && IsWordChar(normOrig[e])) e++;
+                if (s == e)
+                {
+                    while (s > 0 && IsWordChar(normOrig[s - 1])) s--;
+                    while (e < normOrig.Length && IsWordChar(normOrig[e])) e++;
+                }
+                if (s < e)
+                    subRanges.Add((s, e));
+            }
+
+            if (subRanges.Count == 0)
+            {
+                result.Add((mStart, mEnd));
+                continue;
+            }
+
+            // Merge only truly overlapping sub-ranges (no gap tolerance)
+            subRanges.Sort((a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : a.End.CompareTo(b.End));
+            var subMerged = new List<(int Start, int End)> { subRanges[0] };
+            for (var i = 1; i < subRanges.Count; i++)
+            {
+                var cur = subRanges[i];
+                var prev = subMerged[^1];
+                if (cur.Start < prev.End) // strict overlap only
+                    subMerged[^1] = (prev.Start, Math.Max(prev.End, cur.End));
+                else
+                    subMerged.Add(cur);
+            }
+
+            // Finally, enforce MaxWordsPerSuggestion by splitting any remaining
+            // multi-word ranges into per-word segments.
+            foreach (var (s, e) in subMerged)
+            {
+                if (CountWords(normOrig, s, e) <= MaxWordsPerSuggestion)
+                {
+                    result.Add((s, e));
+                }
+                else
+                {
+                    result.AddRange(SplitRangeByWords(normOrig, s, e, MaxWordsPerSuggestion));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static int CountWords(string text, int start, int end)
+    {
+        var count = 0;
+        var inWord = false;
+        for (var i = start; i < end && i < text.Length; i++)
+        {
+            if (IsWordChar(text[i]))
+            {
+                if (!inWord) { count++; inWord = true; }
+            }
+            else
+            {
+                inWord = false;
+            }
+        }
+        return count;
+    }
+
+    private static IEnumerable<(int Start, int End)> SplitRangeByWords(string text, int start, int end, int maxWordsPerSegment)
+    {
+        var i = start;
+        var length = Math.Min(end, text.Length);
+        var segStart = start;
+        var wordCountInSeg = 0;
+
+        while (i < length)
+        {
+            // Find next word
+            while (i < length && !IsWordChar(text[i])) i++;
+            if (i >= length) break;
+
+            var wordStart = i;
+            while (i < length && IsWordChar(text[i])) i++;
+            var wordEnd = i;
+
+            if (wordCountInSeg == 0)
+            {
+                segStart = wordStart;
+            }
+            wordCountInSeg++;
+
+            // If we've reached maxWordsPerSegment, close this segment just before the next word.
+            if (wordCountInSeg >= maxWordsPerSegment)
+            {
+                var segEnd = i;
+                while (segEnd < length && !IsWordChar(text[segEnd])) segEnd++;
+                yield return (segStart, segEnd);
+                wordCountInSeg = 0;
+            }
+        }
+
+        // Remainder segment, if any words accumulated and not yet yielded
+        if (wordCountInSeg > 0)
+        {
+            yield return (segStart, length);
+        }
     }
 
     /// <summary>
