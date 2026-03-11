@@ -152,7 +152,7 @@ public class SuggestionDiffService
         {
             var deleteEnd = block.DeleteStartA + block.DeleteCountA;
 
-            if (deleteEnd <= origPos)
+            if (deleteEnd < origPos)
             {
                 delta += block.InsertCountB - block.DeleteCountA;
             }
@@ -339,13 +339,8 @@ public class SuggestionDiffService
             var idx = normalizedDocument.IndexOf(normalizedOriginal, searchStart, StringComparison.Ordinal);
             if (idx < 0)
             {
-                suggestions.Add(new AnalysisSuggestion
-                {
-                    OriginalText = original,
-                    SuggestedText = suggested,
-                    Reason = reason,
-                    Category = category
-                });
+                // Unable to map this suggestion back into the normalized document text; skip it
+                // so we don't persist a suggestion with invalid or misleading offsets.
                 continue;
             }
 
