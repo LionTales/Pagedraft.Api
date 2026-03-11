@@ -181,7 +181,7 @@ public class AnalysisController : ControllerBase
         var query = _db.AnalysisResults
             .AsNoTracking()
             .Include(a => a.Suggestions)
-            .Where(a => a.ChapterId == chapterId);
+            .Where(a => a.ChapterId == chapterId && a.Status == AnalysisStatus.Active);
         if (sceneId.HasValue)
             query = query.Where(a => a.SceneId == sceneId);
 
