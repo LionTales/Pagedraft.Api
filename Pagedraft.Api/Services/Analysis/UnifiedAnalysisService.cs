@@ -1105,4 +1105,63 @@ public class UnifiedAnalysisService
             }
         }
     }
+
+    /// <summary>
+    /// Explain why a specific suggestion was made. Uses LLM with a focused prompt and caches
+    /// the explanation on the suggestion row. Centralized here so controllers do not depend
+    /// directly on IAiRouter / PromptFactory.
+    /// </summary>
+    public async Task<string?> ExplainSuggestionAsync(
+        Guid bookId,
+        Guid chapterId,
+        Guid suggestionId,
+        CancellationToken ct = default)
+    {
+        var suggestion = await _db.AnalysisSuggestions
+            .Include(s => s.AnalysisResult)
+            .FirstOrDefaultAsync(s => s.Id == suggestionId, ct);
+
+        if (suggestion == null ||
+            suggestion.AnalysisResult.ChapterId != chapterId ||
+            suggestion.AnalysisResult.BookId != bookId)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(suggestion.Explanation))
+        {
+            return suggestion.Explanation;
+        }
+
+        var language = string.IsNullOrWhiteSpace(suggestion.AnalysisResult.Language)
+            ? "he"
+            : suggestion.AnalysisResult.Language;
+
+        var prompt = _promptFactory.GetExplainSuggestionPrompt(
+            suggestion.OriginalText,
+            suggestion.SuggestedText,
+            suggestion.Reason,
+            language);
+
+        var request = new AiRequest
+        {
+            InputText = suggestion.OriginalText,
+            Instruction = prompt,
+            TaskType = AiTaskType.GenericChat,
+            Language = language,
+            SourceId = suggestion.Id.ToString()
+        };
+
+        var response = await _router.CompleteAsync(request, ct);
+        var explanation = (response.Content ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(explanation))
+        {
+            explanation = "No explanation could be generated for this suggestion.";
+        }
+
+        suggestion.Explanation = explanation;
+        await _db.SaveChangesAsync(ct);
+
+        return explanation;
+    }
 }

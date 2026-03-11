@@ -22,8 +22,6 @@ public class AnalysisController : ControllerBase
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AnalysisController> _logger;
     private readonly IHostApplicationLifetime _appLifetime;
-    private readonly IAiRouter _router;
-    private readonly PromptFactory _promptFactory;
 
     public AnalysisController(
         AppDbContext db,
@@ -31,9 +29,7 @@ public class AnalysisController : ControllerBase
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
         ILogger<AnalysisController> logger,
-        IHostApplicationLifetime appLifetime,
-        IAiRouter router,
-        PromptFactory promptFactory)
+        IHostApplicationLifetime appLifetime)
     {
         _db = db;
         _unifiedAnalysis = unifiedAnalysis;
@@ -41,8 +37,6 @@ public class AnalysisController : ControllerBase
         _scopeFactory = scopeFactory;
         _logger = logger;
         _appLifetime = appLifetime;
-        _router = router;
-        _promptFactory = promptFactory;
     }
 
     [HttpPost("analyze")]
@@ -429,41 +423,9 @@ public class AnalysisController : ControllerBase
         Guid suggestionId,
         CancellationToken ct = default)
     {
-        var suggestion = await _db.AnalysisSuggestions
-            .Include(s => s.AnalysisResult)
-            .FirstOrDefaultAsync(s => s.Id == suggestionId, ct);
-        if (suggestion == null || suggestion.AnalysisResult.ChapterId != chapterId || suggestion.AnalysisResult.BookId != bookId)
+        var explanation = await _unifiedAnalysis.ExplainSuggestionAsync(bookId, chapterId, suggestionId, ct);
+        if (explanation is null)
             return NotFound();
-
-        if (!string.IsNullOrWhiteSpace(suggestion.Explanation))
-            return Ok(new ExplainSuggestionResponse(suggestion.Explanation));
-
-        var language = string.IsNullOrWhiteSpace(suggestion.AnalysisResult.Language)
-            ? "he"
-            : suggestion.AnalysisResult.Language;
-
-        var prompt = _promptFactory.GetExplainSuggestionPrompt(
-            suggestion.OriginalText,
-            suggestion.SuggestedText,
-            suggestion.Reason,
-            language);
-
-        var request = new AiRequest
-        {
-            InputText = suggestion.OriginalText,
-            Instruction = prompt,
-            TaskType = AiTaskType.GenericChat,
-            Language = language,
-            SourceId = suggestion.Id.ToString()
-        };
-
-        var response = await _router.CompleteAsync(request, ct);
-        var explanation = (response.Content ?? string.Empty).Trim();
-        if (string.IsNullOrEmpty(explanation))
-            explanation = "No explanation could be generated for this suggestion.";
-
-        suggestion.Explanation = explanation;
-        await _db.SaveChangesAsync(ct);
 
         return Ok(new ExplainSuggestionResponse(explanation));
     }
