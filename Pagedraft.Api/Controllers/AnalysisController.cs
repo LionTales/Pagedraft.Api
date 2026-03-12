@@ -6,6 +6,7 @@ using Microsoft.Extensions.Hosting;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
+using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
 
@@ -79,16 +80,42 @@ public class AnalysisController : ControllerBase
         }
     }
 
-    internal static AnalysisResultDto ToDto(AnalysisResult a, List<SuggestionOutcomeDto>? suggestionOutcomes = null) =>
-        new(a.Id, a.ChapterId, a.JobId, a.Type, a.ResultText, a.ModelName, a.CreatedAt,
+    internal static AnalysisResultDto ToDto(AnalysisResult a)
+    {
+        var suggestions = a.Suggestions
+            .OrderBy(s => s.OrderIndex)
+            .Select(s => new AnalysisSuggestionDto(
+                s.Id,
+                s.AnalysisResultId,
+                s.OriginalText,
+                s.SuggestedText,
+                s.StartOffset,
+                s.EndOffset,
+                s.Reason,
+                s.Category,
+                s.Explanation,
+                s.Outcome?.ToString(),
+                s.OrderIndex))
+            .ToList();
+
+        return new AnalysisResultDto(
+            a.Id,
+            a.ChapterId,
+            a.JobId,
+            a.Type,
+            a.ResultText,
+            a.ModelName,
+            a.CreatedAt,
             StructuredResult: a.StructuredResult,
             Scope: a.Scope.ToString(),
             AnalysisType: a.AnalysisType.ToString(),
             SceneId: a.SceneId,
             BookId: a.BookId,
             Language: a.Language,
+            Status: a.Status.ToString(),
             ProofreadNoChangesHint: a.ProofreadNoChangesHint,
-            SuggestionOutcomes: suggestionOutcomes);
+            Suggestions: suggestions);
+    }
 
     private async Task<(AnalysisType analysisType, string? customPrompt, string language)> ResolveAnalysisParamsAsync(Guid chapterId, RunAnalysisRequest req, Chapter? chapter, CancellationToken ct)
     {
@@ -151,7 +178,10 @@ public class AnalysisController : ControllerBase
     [HttpGet("analyses")]
     public async Task<ActionResult<List<AnalysisResultDto>>> GetAnalyses(Guid bookId, Guid chapterId, [FromQuery] Guid? sceneId = null, [FromQuery] string? analysisType = null, CancellationToken ct = default)
     {
-        var query = _db.AnalysisResults.AsNoTracking().Where(a => a.ChapterId == chapterId);
+        var query = _db.AnalysisResults
+            .AsNoTracking()
+            .Include(a => a.Suggestions)
+            .Where(a => a.ChapterId == chapterId && a.Status == AnalysisStatus.Active);
         if (sceneId.HasValue)
             query = query.Where(a => a.SceneId == sceneId);
 
@@ -159,30 +189,7 @@ public class AnalysisController : ControllerBase
             query = query.Where(a => a.AnalysisType == type);
 
         var items = (await query.ToListAsync(ct)).OrderByDescending(a => a.CreatedAt).ToList();
-        var ids = items.Select(a => a.Id).ToList();
-
-        Dictionary<Guid, List<SuggestionOutcomeDto>> grouped;
-        if (ids.Count == 0)
-        {
-            grouped = new Dictionary<Guid, List<SuggestionOutcomeDto>>();
-        }
-        else
-        {
-            var outcomesByAnalysis = await _db.SuggestionOutcomeRecords.AsNoTracking()
-                .Where(o => ids.Contains(o.AnalysisResultId))
-                .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
-                .ToListAsync(ct);
-
-            grouped = outcomesByAnalysis
-                .GroupBy(o => o.AnalysisResultId)
-                .ToDictionary(g => g.Key, g => g.ToList());
-        }
-
-        var dtos = items.Select(a =>
-        {
-            var outcomes = grouped.TryGetValue(a.Id, out var list) ? list : null;
-            return ToDto(a, outcomes);
-        }).ToList();
+        var dtos = items.Select(a => ToDto(a)).ToList();
 
         return Ok(dtos);
     }
@@ -190,116 +197,14 @@ public class AnalysisController : ControllerBase
     [HttpGet("analyses/{id:guid}")]
     public async Task<ActionResult<AnalysisResultDto>> GetAnalysisById(Guid bookId, Guid chapterId, Guid id, CancellationToken ct)
     {
-        var a = await _db.AnalysisResults.FirstOrDefaultAsync(x => x.ChapterId == chapterId && x.Id == id, ct);
+        var a = await _db.AnalysisResults
+            .Include(x => x.Suggestions)
+            .FirstOrDefaultAsync(x => x.ChapterId == chapterId && x.Id == id, ct);
         if (a == null) return NotFound();
 
-        // Load suggestion outcomes for this analysis so the DTO matches other endpoints.
-        var outcomes = await _db.SuggestionOutcomeRecords.AsNoTracking()
-            .Where(o => o.AnalysisResultId == a.Id)
-            .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
-            .ToListAsync(ct);
-
-        return Ok(ToDto(a, outcomes.Count > 0 ? outcomes : null));
+        return Ok(ToDto(a));
     }
 
-    /// <summary>Save or update the outcome (Accepted/Dismissed) for one suggestion of an analysis run.</summary>
-    [HttpPost("analyses/{analysisId:guid}/suggestion-outcomes")]
-    public async Task<ActionResult> SaveSuggestionOutcome(
-        Guid bookId,
-        Guid chapterId,
-        Guid analysisId,
-        [FromBody] CreateSuggestionOutcomeRequest request,
-        CancellationToken ct = default)
-    {
-        var analysis = await _db.AnalysisResults.FindAsync(new object[] { analysisId }, ct);
-        if (analysis == null || analysis.ChapterId != chapterId)
-            return NotFound();
-
-        if (string.IsNullOrEmpty(request?.OriginalText) || string.IsNullOrEmpty(request?.SuggestedText))
-            return BadRequest("OriginalText and SuggestedText are required.");
-
-        var originalText = request!.OriginalText!;
-        var suggestedText = request.SuggestedText!;
-        var outcomeText = (request.Outcome ?? string.Empty).Trim();
-        SuggestionOutcome outcome;
-        if (outcomeText.Equals("Accepted", StringComparison.OrdinalIgnoreCase))
-        {
-            outcome = SuggestionOutcome.Accepted;
-        }
-        else if (outcomeText.Equals("Dismissed", StringComparison.OrdinalIgnoreCase))
-        {
-            outcome = SuggestionOutcome.Dismissed;
-        }
-        else if (outcomeText.Equals("Reverted", StringComparison.OrdinalIgnoreCase))
-        {
-            outcome = SuggestionOutcome.Reverted;
-        }
-        else
-        {
-            return BadRequest("Invalid Outcome. Must be Accepted, Dismissed, or Reverted.");
-        }
-
-        var existing = await _db.SuggestionOutcomeRecords
-            .FirstOrDefaultAsync(
-                x => x.AnalysisResultId == analysisId && x.OriginalText == originalText && x.SuggestedText == suggestedText,
-                ct);
-
-        if (existing != null)
-        {
-            existing.Outcome = outcome;
-        }
-        else
-        {
-            _db.SuggestionOutcomeRecords.Add(new SuggestionOutcomeRecord
-            {
-                AnalysisResultId = analysisId,
-                OriginalText = originalText,
-                SuggestedText = suggestedText,
-                Outcome = outcome,
-                CreatedAt = DateTimeOffset.UtcNow
-            });
-        }
-
-        try
-        {
-            await _db.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException)
-        {
-            // Handle rare race where another request inserted the same (AnalysisResultId, OriginalText, SuggestedText)
-            // between our read and write. Reload and update instead of creating a duplicate.
-            _db.ChangeTracker.Clear();
-            var concurrent = await _db.SuggestionOutcomeRecords
-                .FirstOrDefaultAsync(
-                    x => x.AnalysisResultId == analysisId && x.OriginalText == originalText && x.SuggestedText == suggestedText,
-                    ct);
-            if (concurrent == null) throw;
-            concurrent.Outcome = outcome;
-            await _db.SaveChangesAsync(ct);
-        }
-        return Ok();
-    }
-
-    /// <summary>Get all suggestion outcomes for analyses in this chapter (and optionally scene). Used to restore Accepted/Dismissed state in the History tab.</summary>
-    [HttpGet("suggestion-outcomes")]
-    public async Task<ActionResult<List<SuggestionOutcomeDto>>> GetSuggestionOutcomes(
-        Guid bookId,
-        Guid chapterId,
-        [FromQuery] Guid? sceneId,
-        CancellationToken ct = default)
-    {
-        var query = _db.SuggestionOutcomeRecords.AsNoTracking()
-            .Where(o => o.AnalysisResult.ChapterId == chapterId);
-
-        if (sceneId.HasValue)
-            query = query.Where(o => o.AnalysisResult.SceneId == sceneId);
-
-        var list = await query
-            .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
-            .ToListAsync(ct);
-
-        return Ok(list);
-    }
 
     [HttpGet("analysis-progress/{jobId:guid}")]
     public ActionResult<AnalysisProgressDto> GetAnalysisProgress(Guid bookId, Guid chapterId, Guid jobId)
@@ -440,17 +345,88 @@ public class AnalysisController : ControllerBase
         CancellationToken ct)
     {
         var analysis = await _db.AnalysisResults
+            .Include(a => a.Suggestions)
             .FirstOrDefaultAsync(a => a.ChapterId == chapterId && a.BookId == bookId && a.JobId == jobId, ct);
 
         if (analysis == null)
             return NotFound();
 
-        // Load suggestion outcomes for this analysis so the DTO matches the list endpoint behavior.
-        var outcomes = await _db.SuggestionOutcomeRecords.AsNoTracking()
-            .Where(o => o.AnalysisResultId == analysis.Id)
-            .Select(o => new SuggestionOutcomeDto(o.AnalysisResultId, o.OriginalText, o.SuggestedText, o.Outcome.ToString()))
+        return Ok(ToDto(analysis));
+    }
+
+    /// <summary>Get all persisted suggestions for a given analysis result.</summary>
+    [HttpGet("analyses/{analysisId:guid}/suggestions")]
+    public async Task<ActionResult<List<AnalysisSuggestionDto>>> GetSuggestionsForAnalysis(
+        Guid bookId,
+        Guid chapterId,
+        Guid analysisId,
+        CancellationToken ct = default)
+    {
+        var analysis = await _db.AnalysisResults
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == analysisId && a.ChapterId == chapterId && a.BookId == bookId, ct);
+        if (analysis == null) return NotFound();
+
+        var items = await _db.AnalysisSuggestions.AsNoTracking()
+            .Where(s => s.AnalysisResultId == analysisId)
+            .OrderBy(s => s.OrderIndex)
+            .Select(s => new AnalysisSuggestionDto(
+                s.Id,
+                s.AnalysisResultId,
+                s.OriginalText,
+                s.SuggestedText,
+                s.StartOffset,
+                s.EndOffset,
+                s.Reason,
+                s.Category,
+                s.Explanation,
+                s.Outcome == null ? (string?)null : s.Outcome.ToString(),
+                s.OrderIndex))
             .ToListAsync(ct);
 
-        return Ok(ToDto(analysis, outcomes.Count > 0 ? outcomes : null));
+        return Ok(items);
+    }
+
+    /// <summary>Update the outcome for a single suggestion (Accepted, Dismissed, Reverted, Superseded).</summary>
+    [HttpPatch("suggestions/{suggestionId:guid}/outcome")]
+    public async Task<ActionResult> UpdateSuggestionOutcome(
+        Guid bookId,
+        Guid chapterId,
+        Guid suggestionId,
+        [FromBody] UpdateSuggestionOutcomeRequest request,
+        CancellationToken ct = default)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.Outcome))
+            return BadRequest("Outcome is required.");
+
+        var suggestion = await _db.AnalysisSuggestions
+            .Include(s => s.AnalysisResult)
+            .FirstOrDefaultAsync(s => s.Id == suggestionId, ct);
+        if (suggestion == null || suggestion.AnalysisResult.ChapterId != chapterId || suggestion.AnalysisResult.BookId != bookId)
+            return NotFound();
+
+        if (!Enum.TryParse<SuggestionOutcome>(request.Outcome, ignoreCase: true, out var outcome))
+            return BadRequest("Invalid outcome. Must be Accepted, Dismissed, Reverted, or Superseded.");
+
+        suggestion.Outcome = outcome;
+        await _db.SaveChangesAsync(ct);
+        return Ok();
+    }
+
+    /// <summary>
+    /// Explain why a specific suggestion was made. Uses LLM with a focused prompt and caches the explanation on the suggestion row.
+    /// </summary>
+    [HttpPost("suggestions/{suggestionId:guid}/explain")]
+    public async Task<ActionResult<ExplainSuggestionResponse>> ExplainSuggestion(
+        Guid bookId,
+        Guid chapterId,
+        Guid suggestionId,
+        CancellationToken ct = default)
+    {
+        var explanation = await _unifiedAnalysis.ExplainSuggestionAsync(bookId, chapterId, suggestionId, ct);
+        if (explanation is null)
+            return NotFound();
+
+        return Ok(new ExplainSuggestionResponse(explanation));
     }
 }

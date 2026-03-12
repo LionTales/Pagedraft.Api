@@ -97,20 +97,13 @@ public class SfdtConversionService
         {
             using var docIoDocument = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(sfdtJson);
             var text = docIoDocument.GetText().Trim();
-            text = NormalizeTextForAnalysis(text);
+            text = TextNormalization.NormalizeTextForStorage(text);
             return (text, CountWords(text));
         }
         catch
         {
             return ("", 0);
         }
-    }
-
-    /// <summary>Strip Unicode bidi control characters so plain text matches client normalization (LRM, RLM, embeddings, isolates).</summary>
-    private static string NormalizeTextForAnalysis(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        return System.Text.RegularExpressions.Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "");
     }
 
     /// <summary>

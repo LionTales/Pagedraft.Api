@@ -33,7 +33,22 @@ public class DocumentVersionsController : ControllerBase
             query = query.Where(v => v.SceneId == null);
 
         var list = await query
-            .Select(v => new DocumentVersionDto(v.Id, v.BookId, v.ChapterId, v.SceneId, v.CreatedAt, v.Label, v.AnalysisResultId, v.OriginalText, v.SuggestedText))
+            .GroupJoin(
+                _db.AnalysisResults.AsNoTracking(),
+                v => v.AnalysisResultId,
+                a => a.Id,
+                (v, analyses) => new { Version = v, Analysis = analyses.FirstOrDefault() })
+            .Select(x => new DocumentVersionDto(
+                x.Version.Id,
+                x.Version.BookId,
+                x.Version.ChapterId,
+                x.Version.SceneId,
+                x.Version.CreatedAt,
+                x.Version.Label,
+                x.Version.AnalysisResultId,
+                x.Version.OriginalText,
+                x.Version.SuggestedText,
+                x.Analysis != null ? x.Analysis.Status.ToString() : null))
             .ToListAsync(ct);
 
         return Ok(list.OrderByDescending(v => v.CreatedAt).ToList());
@@ -64,9 +79,26 @@ public class DocumentVersionsController : ControllerBase
         _db.DocumentVersions.Add(version);
         await _db.SaveChangesAsync(ct);
 
+        string? analysisStatus = null;
+        if (version.AnalysisResultId.HasValue)
+        {
+            analysisStatus = await _db.AnalysisResults.AsNoTracking()
+                .Where(a => a.Id == version.AnalysisResultId.Value)
+                .Select(a => a.Status.ToString())
+                .FirstOrDefaultAsync(ct);
+        }
+
         return Ok(new DocumentVersionDto(
-            version.Id, version.BookId, version.ChapterId, version.SceneId,
-            version.CreatedAt, version.Label, version.AnalysisResultId, version.OriginalText, version.SuggestedText));
+            version.Id,
+            version.BookId,
+            version.ChapterId,
+            version.SceneId,
+            version.CreatedAt,
+            version.Label,
+            version.AnalysisResultId,
+            version.OriginalText,
+            version.SuggestedText,
+            analysisStatus));
     }
 
     [HttpGet("versions/{id:guid}")]
@@ -77,10 +109,26 @@ public class DocumentVersionsController : ControllerBase
         CancellationToken ct = default)
     {
         var v = await _db.DocumentVersions.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == id && x.BookId == bookId && x.ChapterId == chapterId, ct);
+            .Where(x => x.Id == id && x.BookId == bookId && x.ChapterId == chapterId)
+            .GroupJoin(
+                _db.AnalysisResults.AsNoTracking(),
+                dv => dv.AnalysisResultId,
+                a => a.Id,
+                (dv, analyses) => new { Version = dv, Analysis = analyses.FirstOrDefault() })
+            .FirstOrDefaultAsync(ct);
         if (v == null) return NotFound();
 
         return Ok(new DocumentVersionDetailDto(
-            v.Id, v.BookId, v.ChapterId, v.SceneId, v.CreatedAt, v.Label, v.ContentSfdt, v.AnalysisResultId, v.OriginalText, v.SuggestedText));
+            v.Version.Id,
+            v.Version.BookId,
+            v.Version.ChapterId,
+            v.Version.SceneId,
+            v.Version.CreatedAt,
+            v.Version.Label,
+            v.Version.ContentSfdt,
+            v.Version.AnalysisResultId,
+            v.Version.OriginalText,
+            v.Version.SuggestedText,
+            v.Analysis != null ? v.Analysis.Status.ToString() : null));
     }
 }

@@ -24,5 +24,6 @@ public enum SuggestionOutcome
 {
     Accepted = 0,
     Dismissed = 1,
-    Reverted = 2
+    Reverted = 2,
+    Superseded = 3
 }
