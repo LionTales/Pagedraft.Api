@@ -42,6 +42,8 @@ public class TextNormalizationAndContextTests
         var storage = TextNormalization.NormalizeTextForStorage(input);
 
         Assert.Contains("\r\n", storage);
+        Assert.DoesNotContain("\u200E", storage);
+        Assert.DoesNotContain("\u200F", storage);
     }
 
     [Fact]

@@ -85,21 +85,19 @@ public class SuggestionDiffServiceTests
     public void ComputeProofreadSuggestions_BidiAndCrLfAreIgnoredForOffsets()
     {
         var originalRaw = "שלום\u200F עולם\r\nשורה שנייה";
-        var resultRaw = "שלום עולם\r\nשורה שנייה.";
+        var resultRaw = "שלום\u200F טוב\r\nשורה שנייה.";
 
         var originalNorm = TextNormalization.NormalizeTextForAnalysis(originalRaw);
         TextNormalization.NormalizeTextForAnalysis(resultRaw);
 
-        // When suggestions exist, verify that they operate in normalized space without
-        // throwing due to CRLF / bidi controls. When there are no suggestions, the
-        // important invariant is that normalization itself succeeded.
         var suggestions = _sut.ComputeProofreadSuggestions(originalRaw, resultRaw);
 
-        if (suggestions.Count > 0)
+        Assert.NotEmpty(suggestions);
+
+        foreach (var s in suggestions)
         {
-            var first = suggestions[0];
-            Assert.InRange(first.StartOffset, 0, originalNorm.Length);
-            Assert.InRange(first.EndOffset, first.StartOffset, originalNorm.Length);
+            Assert.InRange(s.StartOffset, 0, originalNorm.Length);
+            Assert.InRange(s.EndOffset, s.StartOffset, originalNorm.Length);
         }
     }
 
