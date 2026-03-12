@@ -8,6 +8,16 @@ namespace Pagedraft.Api.Services;
 /// </summary>
 public static class TextNormalization
 {
+    private static bool IsBidiControl(char ch)
+    {
+        var code = (int)ch;
+        // LRM, RLM, embeddings/overrides, isolates
+        return code == 0x200E
+               || code == 0x200F
+               || (code >= 0x202A && code <= 0x202E)
+               || (code >= 0x2066 && code <= 0x2069);
+    }
+
     /// <summary>
     /// Strip Unicode bidi control characters and hard line breaks so text used for
     /// analysis and diffing matches the client normalization (LRM, RLM, embeddings,
@@ -16,7 +26,15 @@ public static class TextNormalization
     public static string NormalizeTextForAnalysis(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
-        return Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069\r\n]", "");
+        // Avoid regex quirks with invisible characters by walking the string explicitly.
+        var buffer = new System.Text.StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            if (IsBidiControl(ch)) continue;
+            if (ch == '\r' || ch == '\n') continue;
+            buffer.Append(ch);
+        }
+        return buffer.ToString();
     }
 
     /// <summary>
@@ -27,7 +45,13 @@ public static class TextNormalization
     public static string NormalizeTextForStorage(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
-        return Regex.Replace(text, @"[\u200E\u200F\u202A-\u202E\u2066-\u2069]", "");
+        var buffer = new System.Text.StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            if (IsBidiControl(ch)) continue;
+            buffer.Append(ch);
+        }
+        return buffer.ToString();
     }
 }
 
