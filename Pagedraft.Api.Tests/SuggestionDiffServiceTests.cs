@@ -88,7 +88,7 @@ public class SuggestionDiffServiceTests
         var resultRaw = "שלום עולם\r\nשורה שנייה.";
 
         var originalNorm = TextNormalization.NormalizeTextForAnalysis(originalRaw);
-        var resultNorm = TextNormalization.NormalizeTextForAnalysis(resultRaw);
+        TextNormalization.NormalizeTextForAnalysis(resultRaw);
 
         // When suggestions exist, verify that they operate in normalized space without
         // throwing due to CRLF / bidi controls. When there are no suggestions, the
