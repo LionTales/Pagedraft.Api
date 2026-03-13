@@ -282,7 +282,8 @@ public class UnifiedAnalysisService
             Instruction = instruction,
             TaskType = taskType,
             Language = language,
-            SourceId = targetId.ToString()
+            SourceId = targetId.ToString(),
+            JsonMode = analysisType == AnalysisType.LineEdit
         };
 
         var sb = new StringBuilder();
@@ -385,18 +386,16 @@ public class UnifiedAnalysisService
         string? OverlapSuffix);
 
     /// <summary>
-    /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
-    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
-    /// - Text: the chunk to correct
-    /// - SeparatorAfter: separator to append after this chunk when merging
-    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// Shared core: split text by paragraphs then sentences, group into ~targetWords per chunk
+    /// with dialogue-aware grouping. Returns raw (Text, SeparatorAfter) chunks; callers add
+    /// overlap prefix/suffix as needed (Proofread: prefix only; LineEdit: prefix + suffix).
     /// </summary>
-    private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
+    private static List<(string Text, string SeparatorAfter)> BuildChunkSegmentsCore(string fullText, int targetWordsPerChunk)
     {
         if (string.IsNullOrWhiteSpace(fullText))
-            return new List<ProofreadChunk> { new("", "", null) };
+            return new List<(string Text, string SeparatorAfter)> { ("", "") };
         if (targetWordsPerChunk <= 0)
-            return new List<ProofreadChunk> { new(fullText.Trim(), "", null) };
+            return new List<(string Text, string SeparatorAfter)> { (fullText.Trim(), "") };
 
         fullText = fullText.TrimEnd();
         var segments = new List<(string Text, string Sep)>();
@@ -454,7 +453,7 @@ public class UnifiedAnalysisService
         }
 
         if (segments.Count == 0)
-            return new List<ProofreadChunk> { new("", "", null) };
+            return new List<(string Text, string SeparatorAfter)> { ("", "") };
 
         // Group segments into chunks of ~targetWordsPerChunk (dialogue-aware)
         var baseChunks = new List<(string Text, string SeparatorAfter)>();
@@ -478,7 +477,6 @@ public class UnifiedAnalysisService
             }
             else if (inDialogueBlock && !belongsToDialogue)
             {
-                // End of dialogue block – subsequent non-dialogue segments start a new block
                 inDialogueBlock = false;
             }
 
@@ -504,22 +502,34 @@ public class UnifiedAnalysisService
         if (current.Length > 0)
             baseChunks.Add((current.ToString().TrimEnd(), lastSep));
 
-        // Post-process: compute soft overlaps from neighboring chunks
+        return baseChunks;
+    }
+
+    /// <summary>
+    /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
+    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
+    /// - Text: the chunk to correct
+    /// - SeparatorAfter: separator to append after this chunk when merging
+    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// </summary>
+    private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
+    {
+        var baseChunks = BuildChunkSegmentsCore(fullText, targetWordsPerChunk);
+        if (baseChunks.Count == 0)
+            return new List<ProofreadChunk> { new("", "", null) };
+
         var result = new List<ProofreadChunk>(baseChunks.Count);
         for (var i = 0; i < baseChunks.Count; i++)
         {
             var (text, sep) = baseChunks[i];
             string? overlapPrefix = null;
-
             if (i > 0)
             {
                 var trailing = ExtractTrailingSentences(baseChunks[i - 1].Text, 3);
                 overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
             }
-
             result.Add(new ProofreadChunk(text, sep, overlapPrefix));
         }
-
         return result;
     }
 
@@ -533,140 +543,28 @@ public class UnifiedAnalysisService
     /// </summary>
     private static List<LineEditChunk> ChunkForLineEdit(string fullText, int targetWordsPerChunk)
     {
-        if (string.IsNullOrWhiteSpace(fullText))
-            return new List<LineEditChunk> { new("", "", null, null) };
-        if (targetWordsPerChunk <= 0)
-            return new List<LineEditChunk> { new(fullText.Trim(), "", null, null) };
-
-        fullText = fullText.TrimEnd();
-        var segments = new List<(string Text, string Sep)>();
-
-        // Split by paragraph boundaries, keeping separators
-        var paraParts = Regex.Split(fullText, @"(\n\n+)");
-        for (var i = 0; i < paraParts.Length; i++)
-        {
-            var part = paraParts[i];
-            if (string.IsNullOrEmpty(part)) continue;
-            if (Regex.IsMatch(part, @"^\s*$")) continue;
-
-            if (Regex.IsMatch(part, @"^\n\n+$"))
-            {
-                if (segments.Count > 0)
-                {
-                    var (t, s) = segments[^1];
-                    segments[^1] = (t, part);
-                }
-                continue;
-            }
-
-            var paragraphSep = (i + 1 < paraParts.Length && Regex.IsMatch(paraParts[i + 1], @"^\n\n+$")) ? paraParts[i + 1] : "";
-
-            if (WordCount(part) <= targetWordsPerChunk)
-            {
-                segments.Add((part.Trim(), paragraphSep));
-            }
-            else
-            {
-                // Split on sentence boundaries (Latin + Hebrew / Devanagari)
-                var sentenceParts = Regex.Split(part, @"(?<=[.!?।])\s+");
-                var hadAnySentence = false;
-                for (var j = 0; j < sentenceParts.Length; j++)
-                {
-                    var sent = sentenceParts[j].Trim();
-                    if (string.IsNullOrEmpty(sent)) continue;
-                    hadAnySentence = true;
-                    var sentSep = (j < sentenceParts.Length - 1) ? " " : paragraphSep;
-                    if (WordCount(sent) <= targetWordsPerChunk)
-                        segments.Add((sent, sentSep));
-                    else
-                    {
-                        // One long sentence or no sentence boundaries: split by word count
-                        foreach (var (subText, subSep) in SplitByWordCount(sent, targetWordsPerChunk, sentSep, " "))
-                            segments.Add((subText, subSep));
-                    }
-                }
-                if (!hadAnySentence)
-                {
-                    foreach (var (subText, subSep) in SplitByWordCount(part.Trim(), targetWordsPerChunk, paragraphSep, " "))
-                        segments.Add((subText, subSep));
-                }
-            }
-        }
-
-        if (segments.Count == 0)
+        var baseChunks = BuildChunkSegmentsCore(fullText, targetWordsPerChunk);
+        if (baseChunks.Count == 0)
             return new List<LineEditChunk> { new("", "", null, null) };
 
-        // Group segments into chunks of ~targetWordsPerChunk (dialogue-aware)
-        var baseChunks = new List<(string Text, string SeparatorAfter)>();
-        var current = new StringBuilder();
-        var currentWords = 0;
-        var lastSep = "";
-        var inDialogueBlock = false;
-
-        foreach (var (text, sep) in segments)
-        {
-            var w = WordCount(text);
-            var belongsToDialogue = BelongsToDialogueBlock(text);
-
-            if (currentWords == 0)
-            {
-                inDialogueBlock = belongsToDialogue;
-            }
-            else if (belongsToDialogue)
-            {
-                inDialogueBlock = true;
-            }
-            else if (inDialogueBlock && !belongsToDialogue)
-            {
-                // End of dialogue block – subsequent non-dialogue segments start a new block
-                inDialogueBlock = false;
-            }
-
-            var limit = targetWordsPerChunk;
-            var dialogueLimit = (int)Math.Round(targetWordsPerChunk * DialogueOverflowMultiplier);
-
-            if (currentWords > 0)
-            {
-                var threshold = inDialogueBlock ? dialogueLimit : limit;
-                if (currentWords + w > threshold)
-                {
-                    baseChunks.Add((current.ToString().TrimEnd(), lastSep));
-                    current.Clear();
-                    currentWords = 0;
-                }
-            }
-
-            current.Append(text).Append(sep);
-            currentWords += w;
-            lastSep = sep;
-        }
-
-        if (current.Length > 0)
-            baseChunks.Add((current.ToString().TrimEnd(), lastSep));
-
-        // Post-process: compute soft overlaps from neighboring chunks
         var result = new List<LineEditChunk>(baseChunks.Count);
         for (var i = 0; i < baseChunks.Count; i++)
         {
             var (text, sep) = baseChunks[i];
             string? overlapPrefix = null;
             string? overlapSuffix = null;
-
             if (i > 0)
             {
                 var trailing = ExtractTrailingSentences(baseChunks[i - 1].Text, 3);
                 overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
             }
-
             if (i < baseChunks.Count - 1)
             {
                 var leading = ExtractLeadingSentences(baseChunks[i + 1].Text, 2);
                 overlapSuffix = string.IsNullOrWhiteSpace(leading) ? null : leading;
             }
-
             result.Add(new LineEditChunk(text, sep, overlapPrefix, overlapSuffix));
         }
-
         return result;
     }
 

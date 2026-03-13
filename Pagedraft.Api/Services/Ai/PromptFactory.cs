@@ -177,7 +177,7 @@ public class PromptFactory
         var sb = new StringBuilder();
 
         if (context.StyleProfile is { } style)
-            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style));
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: true));
 
         var precedingText = isFirstChunk ? context.PrecedingContext : localOverlapBefore;
         if (!string.IsNullOrWhiteSpace(precedingText))
@@ -236,7 +236,7 @@ public class PromptFactory
         var sb = new StringBuilder();
 
         if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
-            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style));
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: type == AnalysisType.LineEdit || type == AnalysisType.Proofread));
 
         if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
@@ -264,33 +264,50 @@ public class PromptFactory
         sb.Append("\n[/").Append(name).Append("]\n\n");
     }
 
-    private static string FormatStyleProfile(StyleProfileData s)
+    /// <param name="forSuggestions">When true, includes imperative instructions for LineEdit/Proofread (flag as consistency, avoid suggesting, etc.). When false, descriptive only for analysis types (Linguistic/Literary).</param>
+    private static string FormatStyleProfile(StyleProfileData s, bool forSuggestions = true)
     {
         var sb = new StringBuilder();
 
         if (s.DominantTone != null)
-            sb.AppendLine($"The author's dominant tone is {s.DominantTone}. Flag passages where a different tone creeps in as 'consistency'.");
+            sb.AppendLine(forSuggestions
+                ? $"The author's dominant tone is {s.DominantTone}. Flag passages where a different tone creeps in as 'consistency'."
+                : $"The author's dominant tone is {s.DominantTone}.");
 
         if (s.Pov != null)
-            sb.AppendLine($"The narrative uses {s.Pov} POV. Flag unintentional POV shifts as 'consistency' issues.");
+            sb.AppendLine(forSuggestions
+                ? $"The narrative uses {s.Pov} POV. Flag unintentional POV shifts as 'consistency' issues."
+                : $"The narrative uses {s.Pov} POV.");
 
         if (s.TensePattern != null)
-            sb.AppendLine($"The narrative tense is {s.TensePattern}. Flag unintentional tense shifts as 'consistency'.");
+            sb.AppendLine(forSuggestions
+                ? $"The narrative tense is {s.TensePattern}. Flag unintentional tense shifts as 'consistency'."
+                : $"The narrative tense is {s.TensePattern}.");
 
         if (s.VocabularyLevel != null)
-            sb.AppendLine($"Vocabulary level is {s.VocabularyLevel}. Avoid suggesting words outside this register.");
+            sb.AppendLine(forSuggestions
+                ? $"Vocabulary level is {s.VocabularyLevel}. Avoid suggesting words outside this register."
+                : $"Vocabulary level is {s.VocabularyLevel}.");
 
         if (s.DialogueStyle != null)
-            sb.AppendLine($"Dialogue style is {s.DialogueStyle}. Preserve it in any dialogue suggestions.");
+            sb.AppendLine(forSuggestions
+                ? $"Dialogue style is {s.DialogueStyle}. Preserve it in any dialogue suggestions."
+                : $"Dialogue style is {s.DialogueStyle}.");
 
         if (s.RecurringMotifs is { Count: > 0 })
-            sb.AppendLine($"Recurring motifs: {string.Join(", ", s.RecurringMotifs)}. Do not suggest removing these.");
+            sb.AppendLine(forSuggestions
+                ? $"Recurring motifs: {string.Join(", ", s.RecurringMotifs)}. Do not suggest removing these."
+                : $"Recurring motifs: {string.Join(", ", s.RecurringMotifs)}.");
 
         if (s.AverageSentenceLength.HasValue)
-            sb.AppendLine($"Average sentence length is ~{s.AverageSentenceLength:F0} words. Keep suggestions near this rhythm.");
+            sb.AppendLine(forSuggestions
+                ? $"Average sentence length is ~{s.AverageSentenceLength:F0} words. Keep suggestions near this rhythm."
+                : $"Average sentence length is ~{s.AverageSentenceLength:F0} words.");
 
         if (s.FormalityScore.HasValue)
-            sb.AppendLine($"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal). Match this level in suggestions.");
+            sb.AppendLine(forSuggestions
+                ? $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal). Match this level in suggestions."
+                : $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal).");
 
         return sb.ToString();
     }
