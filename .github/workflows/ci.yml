@@ -22,10 +22,10 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore Pagedraft.Api.Tests/Pagedraft.Api.Tests.csproj
 
       - name: Build
-        run: dotnet build --no-restore -c Release
+        run: dotnet build Pagedraft.Api.Tests/Pagedraft.Api.Tests.csproj --no-restore -c Release
 
       - name: Test
-        run: dotnet test --no-build -c Release --verbosity normal
+        run: dotnet test Pagedraft.Api.Tests/Pagedraft.Api.Tests.csproj --no-build -c Release --verbosity normal
