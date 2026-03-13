@@ -10,4 +10,6 @@ public record ResolvedAiRequest
     public required AiModelSelection Selection { get; init; }
     /// <summary>Task type (e.g. Proofread) so providers can apply task-specific limits (e.g. higher NumPredict).</summary>
     public AiTaskType TaskType { get; init; }
+    /// <summary>When true, providers should enforce structured JSON output (e.g. Ollama format:"json").</summary>
+    public bool JsonMode { get; init; }
 }

@@ -24,6 +24,7 @@ public class AnalysisContextService : IAnalysisContextService
     };
 
     private const int CharacterPrepassMaxWords = 2000;
+    private const int ContextEnvelopeMaxWords = 300;
 
     private readonly AppDbContext _db;
     private readonly SfdtConversionService _sfdtConversion;
@@ -56,6 +57,14 @@ public class AnalysisContextService : IAnalysisContextService
             _ => throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported analysis scope")
         };
 
+        string? precedingContext = null;
+        string? followingContext = null;
+        if (analysisType is AnalysisType.LineEdit)
+        {
+            (precedingContext, followingContext) =
+                await ResolveContextEnvelopeAsync(scope, bookId, chapterId, sceneId, ct);
+        }
+
         CharacterRegister? characters = null;
         if (bookId.HasValue && analysisType is AnalysisType.Proofread
             or AnalysisType.LiteraryAnalysis
@@ -65,15 +74,23 @@ public class AnalysisContextService : IAnalysisContextService
             characters = await LoadCharacterRegisterAsync(bookId.Value, text, ct);
         }
 
+        StyleProfileData? styleProfile = null;
+        if (bookId.HasValue && analysisType is AnalysisType.LineEdit
+            or AnalysisType.LinguisticAnalysis
+            or AnalysisType.LiteraryAnalysis)
+        {
+            styleProfile = await LoadStyleProfileAsync(bookId.Value, ct);
+        }
+
         return new AnalysisContext
         {
             TargetText = text,
 
             // Optional context fields – populated in later plans
-            PrecedingContext = null,
-            FollowingContext = null,
+            PrecedingContext = precedingContext,
+            FollowingContext = followingContext,
             Characters = characters,
-            StyleProfile = null,
+            StyleProfile = styleProfile,
             ChapterBrief = null,
             BookBrief = null,
 
@@ -168,6 +185,33 @@ public class AnalysisContextService : IAnalysisContextService
         }
     }
 
+    private async Task<StyleProfileData?> LoadStyleProfileAsync(
+        Guid bookId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var bible = await _db.BookBibles
+                .AsNoTracking()
+                .FirstOrDefaultAsync(b => b.BookId == bookId, ct);
+
+            var json = bible?.StyleProfileJson;
+            if (string.IsNullOrWhiteSpace(json))
+                return null;
+
+            return JsonSerializer.Deserialize<StyleProfileData>(json, JsonOpts);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Any non-cancellation failure should degrade gracefully – analyses still run without style info.
+            return null;
+        }
+    }
+
     private async Task<CharacterRegister?> ExtractCharacterRegisterAsync(
         string fullText,
         string language,
@@ -226,6 +270,34 @@ public class AnalysisContextService : IAnalysisContextService
         }
     }
 
+    private async Task<(string? Preceding, string? Following)> ResolveContextEnvelopeAsync(
+        AnalysisScope scope,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        CancellationToken ct)
+    {
+        try
+        {
+            return scope switch
+            {
+                AnalysisScope.Scene   => await ResolveSceneEnvelopeAsync(chapterId, sceneId, ct),
+                AnalysisScope.Chapter => await ResolveChapterEnvelopeAsync(chapterId, ct),
+                AnalysisScope.Book    => (null, null),
+                _                     => (null, null)
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Any failure to load envelope context should degrade gracefully.
+            return (null, null);
+        }
+    }
+
     private static string TruncateToWords(string text, int maxWords)
     {
         if (string.IsNullOrWhiteSpace(text) || maxWords <= 0) return "";
@@ -259,6 +331,164 @@ public class AnalysisContextService : IAnalysisContextService
         if (end <= start) return null;
 
         return text.Substring(start, end - start + 1).Trim();
+    }
+
+    private async Task<(string? Preceding, string? Following)> ResolveSceneEnvelopeAsync(
+        Guid? chapterId,
+        Guid? sceneId,
+        CancellationToken ct)
+    {
+        if (!sceneId.HasValue)
+            return (null, null);
+
+        // Load the target scene with its chapter so we can resolve siblings.
+        var scene = await _db.Scenes
+            .Include(s => s.Chapter)
+            .FirstOrDefaultAsync(s => s.Id == sceneId.Value, ct);
+        if (scene == null)
+            return (null, null);
+
+        var effectiveChapterId = chapterId ?? scene.ChapterId;
+
+        var siblings = await _db.Scenes
+            .Where(s => s.ChapterId == effectiveChapterId)
+            .OrderBy(s => s.Order)
+            .ToListAsync(ct);
+
+        if (siblings.Count == 0)
+            return (null, null);
+
+        var index = siblings.FindIndex(s => s.Id == scene.Id);
+        if (index < 0)
+            return (null, null);
+
+        var previousScene = index > 0 ? siblings[index - 1] : null;
+        var nextScene = index < siblings.Count - 1 ? siblings[index + 1] : null;
+
+        string? preceding = null;
+        string? following = null;
+
+        if (previousScene != null)
+        {
+            preceding = await ExtractSceneTailAsync(previousScene, ct);
+        }
+        else
+        {
+            // First scene in chapter – use chapter opening paragraph as preceding context.
+            var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == effectiveChapterId, ct);
+            if (chapter != null)
+            {
+                var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+                var paragraphs = SplitIntoParagraphs(text);
+                preceding = paragraphs.FirstOrDefault();
+            }
+        }
+
+        if (nextScene != null)
+        {
+            following = await ExtractSceneHeadAsync(nextScene, ct);
+        }
+        else
+        {
+            // Last scene in chapter – use chapter closing paragraph as following context.
+            var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == effectiveChapterId, ct);
+            if (chapter != null)
+            {
+                var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+                var paragraphs = SplitIntoParagraphs(text);
+                following = paragraphs.LastOrDefault();
+            }
+        }
+
+        return (string.IsNullOrWhiteSpace(preceding) ? null : preceding,
+            string.IsNullOrWhiteSpace(following) ? null : following);
+    }
+
+    private async Task<(string? Preceding, string? Following)> ResolveChapterEnvelopeAsync(
+        Guid? chapterId,
+        CancellationToken ct)
+    {
+        if (!chapterId.HasValue)
+            return (null, null);
+
+        var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.Id == chapterId.Value, ct);
+        if (chapter == null)
+            return (null, null);
+
+        var previousChapter = await _db.Chapters
+            .Where(c => c.BookId == chapter.BookId && c.Order < chapter.Order)
+            .OrderByDescending(c => c.Order)
+            .FirstOrDefaultAsync(ct);
+
+        var nextChapter = await _db.Chapters
+            .Where(c => c.BookId == chapter.BookId && c.Order > chapter.Order)
+            .OrderBy(c => c.Order)
+            .FirstOrDefaultAsync(ct);
+
+        string? preceding = null;
+        string? following = null;
+
+        if (previousChapter != null)
+        {
+            var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(previousChapter.ContentText ?? "");
+            var paragraphs = SplitIntoParagraphs(text);
+            preceding = paragraphs.LastOrDefault();
+        }
+
+        if (nextChapter != null)
+        {
+            var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(nextChapter.ContentText ?? "");
+            var paragraphs = SplitIntoParagraphs(text);
+            following = paragraphs.FirstOrDefault();
+        }
+
+        return (string.IsNullOrWhiteSpace(preceding) ? null : preceding,
+            string.IsNullOrWhiteSpace(following) ? null : following);
+    }
+
+    private async Task<string?> ExtractSceneHeadAsync(Scene scene, CancellationToken ct)
+    {
+        var sfdt = scene.ContentSfdt ?? "{}";
+        var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(plainText);
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        return TruncateToWords(text, ContextEnvelopeMaxWords);
+    }
+
+    private async Task<string?> ExtractSceneTailAsync(Scene scene, CancellationToken ct)
+    {
+        var sfdt = scene.ContentSfdt ?? "{}";
+        var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(plainText);
+        if (string.IsNullOrWhiteSpace(text))
+            return null;
+
+        return TakeLastWords(text, ContextEnvelopeMaxWords);
+    }
+
+    private static IReadOnlyList<string> SplitIntoParagraphs(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return Array.Empty<string>();
+
+        var normalized = text.Replace("\r\n", "\n");
+        var rawParagraphs = Regex.Split(normalized, @"\n\s*\n+");
+        return rawParagraphs
+            .Select(p => p.Trim())
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToArray();
+    }
+
+    private static string TakeLastWords(string text, int maxWords)
+    {
+        if (string.IsNullOrWhiteSpace(text) || maxWords <= 0) return "";
+        var words = Regex.Split(text.Trim(), @"\s+");
+        if (words.Length <= maxWords) return text.Trim();
+        var start = Math.Max(0, words.Length - maxWords);
+        var span = words.AsSpan(start);
+        return string.Join(" ", span.ToArray());
     }
 
     private async Task<(string Text, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveSceneAsync(

@@ -43,14 +43,19 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
 
         var tuning = GetTuning("Ollama", request.TaskType);
         var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
-        var payload = new { model, prompt, stream = false, think = false, options, stop = StopSequences };
+
+        object payload = request.JsonMode
+            ? new { model, prompt, stream = false, think = false, options, stop = StopSequences, format = "json" }
+            : new { model, prompt, stream = false, think = false, options, stop = StopSequences };
 
         var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
             response.Dispose();
             model = defaultModel;
-            payload = new { model, prompt, stream = false, think = false, options, stop = StopSequences };
+            payload = request.JsonMode
+                ? new { model, prompt, stream = false, think = false, options, stop = StopSequences, format = "json" } as object
+                : new { model, prompt, stream = false, think = false, options, stop = StopSequences };
             response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         }
 
@@ -142,10 +147,12 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
 
     private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType = AiTaskType.GenericChat)
     {
-        // Proofread needs a higher output limit so the full corrected text isn't truncated (e.g. long Hebrew chapter).
-        if (taskType == AiTaskType.Proofread && _options.ProviderSettings != null &&
-            _options.ProviderSettings.TryGetValue(providerName + "_Proofread", out var proofreadTuning))
-            return proofreadTuning;
+        if (_options.ProviderSettings != null)
+        {
+            var taskSpecificKey = providerName + "_" + taskType;
+            if (_options.ProviderSettings.TryGetValue(taskSpecificKey, out var taskTuning))
+                return taskTuning;
+        }
         if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
             return t;
         return new ProviderTuningOptions { Temperature = 0.2, NumPredict = 2048 };

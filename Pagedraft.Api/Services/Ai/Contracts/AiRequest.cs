@@ -10,4 +10,6 @@ public record AiRequest
     public string? UserId { get; init; }
     public string? SourceId { get; init; }
     public Dictionary<string, string>? Metadata { get; init; }
+    /// <summary>When true, providers that support it will enforce structured JSON output (e.g. Ollama format:"json").</summary>
+    public bool JsonMode { get; init; }
 }

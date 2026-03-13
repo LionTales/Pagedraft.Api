@@ -16,6 +16,11 @@ public class AiOptions
     public int ProofreadChunkTargetWords { get; set; } = 500;
     /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
     public int MaxParallelProofreadChunks { get; set; } = 2;
+
+    /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel.</summary>
+    public int LineEditChunkTargetWords { get; set; } = 1500;
+    /// <summary>Max concurrent LLM requests when running LineEdit in chunks.</summary>
+    public int MaxParallelLineEditChunks { get; set; } = 2;
 }
 
 public class OllamaProviderOptions
