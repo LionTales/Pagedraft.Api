@@ -96,13 +96,18 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
 
         var tuning = GetTuning("Ollama", request.TaskType);
         var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
-        var payload = new { model, prompt, stream = true, think = false, options, stop = StopSequences };
+
+        object payload = request.JsonMode
+            ? new { model, prompt, stream = true, think = false, options, stop = StopSequences, format = "json" }
+            : new { model, prompt, stream = true, think = false, options, stop = StopSequences };
 
         using var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
             model = defaultModel;
-            payload = new { model, prompt, stream = true, think = false, options, stop = StopSequences };
+            payload = request.JsonMode
+                ? new { model, prompt, stream = true, think = false, options, stop = StopSequences, format = "json" }
+                : new { model, prompt, stream = true, think = false, options, stop = StopSequences };
             using var retryResponse = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
             if (!retryResponse.IsSuccessStatusCode)
             {

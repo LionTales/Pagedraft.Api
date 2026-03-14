@@ -30,7 +30,7 @@ public class AiRouter : IAiRouter
         var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
             ? pipelineInstruction
-            : ShouldUseUnifiedInstructionVerbatim(request, pipelineInstruction)
+            : ShouldUseUnifiedInstructionVerbatim(request)
                 ? request.Instruction
                 : request.Instruction + "\n\n" + pipelineInstruction;
 
@@ -62,7 +62,7 @@ public class AiRouter : IAiRouter
         var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
             ? pipelineInstruction
-            : ShouldUseUnifiedInstructionVerbatim(request, pipelineInstruction)
+            : ShouldUseUnifiedInstructionVerbatim(request)
                 ? request.Instruction
                 : request.Instruction + "\n\n" + pipelineInstruction;
 
@@ -120,7 +120,7 @@ public class AiRouter : IAiRouter
     /// LineEdit has its own dedicated AiTaskType; also kept: heuristic detection for
     /// any prompt containing the sentence-level line edit marker text.
     /// </summary>
-    private static bool ShouldUseUnifiedInstructionVerbatim(AiRequest request, string pipelineInstruction)
+    private static bool ShouldUseUnifiedInstructionVerbatim(AiRequest request)
     {
         if (request == null || string.IsNullOrWhiteSpace(request.Instruction))
             return false;
