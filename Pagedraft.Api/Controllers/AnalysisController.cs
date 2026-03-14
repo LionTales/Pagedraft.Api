@@ -227,6 +227,7 @@ public class AnalysisController : ControllerBase
             snapshot.Status.ToString(),
             snapshot.CurrentChunkIndex,
             snapshot.TotalChunks,
+            snapshot.CompletedChunks,
             snapshot.Message,
             snapshot.EstimatedCompletionPercent);
 

@@ -84,7 +84,7 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
-            var chunkTargetWords = opts.ProofreadChunkTargetWords > 0 ? opts.ProofreadChunkTargetWords : 500;
+            var chunkTargetWords = opts.EffectiveProofreadChunkTargetWords;
             var maxParallel = Math.Max(1, opts.MaxParallelProofreadChunks);
             var wordCount = WordCount(inputText);
 
@@ -102,7 +102,7 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.LineEdit)
         {
             var opts = _aiOptions.Value;
-            var chunkTargetWords = opts.LineEditChunkTargetWords > 0 ? opts.LineEditChunkTargetWords : 1500;
+            var chunkTargetWords = opts.EffectiveLineEditChunkTargetWords;
             var maxParallel = Math.Max(1, opts.MaxParallelLineEditChunks);
             var wordCount = WordCount(inputText);
 

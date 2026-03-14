@@ -5,6 +5,12 @@ public class AiOptions
 {
     public const string SectionName = "Ai";
 
+    // Chunk-target defaults: both 500 by design. Matches production config and client/server contract (api/config/analysis-chunk-thresholds).
+    /// <summary>Default used when ProofreadChunkTargetWords is not set or &lt;= 0. Kept in sync with effective resolution used by server and config API.</summary>
+    public const int DefaultProofreadChunkTargetWords = 500;
+    /// <summary>Default used when LineEditChunkTargetWords is not set or &lt;= 0. Kept in sync with effective resolution used by server and config API.</summary>
+    public const int DefaultLineEditChunkTargetWords = 500;
+
     public string DefaultProvider { get; set; } = "Ollama";
     public string DefaultModel { get; set; } = "qwen2.5:14b";
 
@@ -13,12 +19,17 @@ public class AiOptions
     public Dictionary<string, FeatureModelOptions>? FeatureModels { get; set; }
 
     /// <summary>Proofread chunking: when text exceeds ChunkTargetWords, split and run in parallel.</summary>
-    public int ProofreadChunkTargetWords { get; set; } = 500;
+    public int ProofreadChunkTargetWords { get; set; } = DefaultProofreadChunkTargetWords;
     /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
     public int MaxParallelProofreadChunks { get; set; } = 2;
 
-    /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel.</summary>
-    public int LineEditChunkTargetWords { get; set; } = 1500;
+    /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel. Default 500.</summary>
+    public int LineEditChunkTargetWords { get; set; } = DefaultLineEditChunkTargetWords;
+
+    /// <summary>Effective proofread chunk target: configured value if &gt; 0, otherwise <see cref="DefaultProofreadChunkTargetWords"/>.</summary>
+    public int EffectiveProofreadChunkTargetWords => ProofreadChunkTargetWords > 0 ? ProofreadChunkTargetWords : DefaultProofreadChunkTargetWords;
+    /// <summary>Effective line-edit chunk target: configured value if &gt; 0, otherwise <see cref="DefaultLineEditChunkTargetWords"/>.</summary>
+    public int EffectiveLineEditChunkTargetWords => LineEditChunkTargetWords > 0 ? LineEditChunkTargetWords : DefaultLineEditChunkTargetWords;
     /// <summary>Max concurrent LLM requests when running LineEdit in chunks.</summary>
     public int MaxParallelLineEditChunks { get; set; } = 2;
 }
