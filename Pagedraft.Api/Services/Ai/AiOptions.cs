@@ -5,6 +5,7 @@ public class AiOptions
 {
     public const string SectionName = "Ai";
 
+    // Chunk-target defaults: both 500 by design. Matches production config and client/server contract (api/config/analysis-chunk-thresholds).
     /// <summary>Default used when ProofreadChunkTargetWords is not set or &lt;= 0. Kept in sync with effective resolution used by server and config API.</summary>
     public const int DefaultProofreadChunkTargetWords = 500;
     /// <summary>Default used when LineEditChunkTargetWords is not set or &lt;= 0. Kept in sync with effective resolution used by server and config API.</summary>
