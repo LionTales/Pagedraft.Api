@@ -236,7 +236,7 @@ public class PromptFactory
         var sb = new StringBuilder();
 
         if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
-            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: type == AnalysisType.LineEdit || type == AnalysisType.Proofread));
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: type == AnalysisType.LineEdit));
 
         if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
@@ -264,7 +264,7 @@ public class PromptFactory
         sb.Append("\n[/").Append(name).Append("]\n\n");
     }
 
-    /// <param name="forSuggestions">When true, includes imperative instructions for LineEdit/Proofread (flag as consistency, avoid suggesting, etc.). When false, descriptive only for analysis types (Linguistic/Literary).</param>
+    /// <param name="forSuggestions">When true, includes imperative instructions for LineEdit (flag as consistency, avoid suggesting, etc.). When false, descriptive only for Proofread and analysis types (Linguistic/Literary).</param>
     private static string FormatStyleProfile(StyleProfileData s, bool forSuggestions = true)
     {
         var sb = new StringBuilder();

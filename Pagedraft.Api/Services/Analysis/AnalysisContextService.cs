@@ -381,7 +381,8 @@ public class AnalysisContextService : IAnalysisContextService
             {
                 var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
                 var paragraphs = SplitIntoParagraphs(text);
-                preceding = paragraphs.FirstOrDefault();
+                var firstPara = paragraphs.FirstOrDefault();
+                preceding = string.IsNullOrWhiteSpace(firstPara) ? null : TruncateToWords(firstPara, ContextEnvelopeMaxWords);
             }
         }
 
@@ -397,7 +398,8 @@ public class AnalysisContextService : IAnalysisContextService
             {
                 var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
                 var paragraphs = SplitIntoParagraphs(text);
-                following = paragraphs.LastOrDefault();
+                var lastPara = paragraphs.LastOrDefault();
+                following = string.IsNullOrWhiteSpace(lastPara) ? null : TakeLastWords(lastPara, ContextEnvelopeMaxWords);
             }
         }
 
@@ -433,14 +435,16 @@ public class AnalysisContextService : IAnalysisContextService
         {
             var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(previousChapter.ContentText ?? "");
             var paragraphs = SplitIntoParagraphs(text);
-            preceding = paragraphs.LastOrDefault();
+            var lastPara = paragraphs.LastOrDefault();
+            preceding = string.IsNullOrWhiteSpace(lastPara) ? null : TakeLastWords(lastPara, ContextEnvelopeMaxWords);
         }
 
         if (nextChapter != null)
         {
             var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(nextChapter.ContentText ?? "");
             var paragraphs = SplitIntoParagraphs(text);
-            following = paragraphs.FirstOrDefault();
+            var firstPara = paragraphs.FirstOrDefault();
+            following = string.IsNullOrWhiteSpace(firstPara) ? null : TruncateToWords(firstPara, ContextEnvelopeMaxWords);
         }
 
         return (string.IsNullOrWhiteSpace(preceding) ? null : preceding,
