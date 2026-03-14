@@ -12,6 +12,7 @@ public record AnalysisProgressDto(
     string Status,
     int CurrentChunk,
     int TotalChunks,
+    int CompletedChunks,
     string Message,
     int EstimatedCompletionPercent);
 
