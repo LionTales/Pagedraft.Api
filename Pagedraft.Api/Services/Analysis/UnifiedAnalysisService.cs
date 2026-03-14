@@ -400,15 +400,15 @@ public class UnifiedAnalysisService
         fullText = fullText.TrimEnd();
         var segments = new List<(string Text, string Sep)>();
 
-        // Split by paragraph boundaries, keeping separators
-        var paraParts = Regex.Split(fullText, @"(\n\n+)");
+        // Split by paragraph boundaries (single or double \n), keeping separators
+        var paraParts = Regex.Split(fullText, @"(\n+)");
         for (var i = 0; i < paraParts.Length; i++)
         {
             var part = paraParts[i];
             if (string.IsNullOrEmpty(part)) continue;
             if (Regex.IsMatch(part, @"^\s*$")) continue;
 
-            if (Regex.IsMatch(part, @"^\n\n+$"))
+            if (Regex.IsMatch(part, @"^\n+$"))
             {
                 if (segments.Count > 0)
                 {
@@ -418,7 +418,7 @@ public class UnifiedAnalysisService
                 continue;
             }
 
-            var paragraphSep = (i + 1 < paraParts.Length && Regex.IsMatch(paraParts[i + 1], @"^\n\n+$")) ? paraParts[i + 1] : "";
+            var paragraphSep = (i + 1 < paraParts.Length && Regex.IsMatch(paraParts[i + 1], @"^\n+$")) ? paraParts[i + 1] : "";
 
             if (WordCount(part) <= targetWordsPerChunk)
             {
