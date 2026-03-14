@@ -21,9 +21,7 @@ public class ConfigController : ControllerBase
     public ActionResult<AnalysisChunkThresholdsDto> GetAnalysisChunkThresholds()
     {
         var opts = _aiOptions.Value;
-        var proofread = opts.ProofreadChunkTargetWords > 0 ? opts.ProofreadChunkTargetWords : 500;
-        var lineEdit = opts.LineEditChunkTargetWords > 0 ? opts.LineEditChunkTargetWords : 1500;
-        return Ok(new AnalysisChunkThresholdsDto(proofread, lineEdit));
+        return Ok(new AnalysisChunkThresholdsDto(opts.EffectiveProofreadChunkTargetWords, opts.EffectiveLineEditChunkTargetWords));
     }
 }
 
