@@ -77,7 +77,8 @@ public class AnalysisContextService : IAnalysisContextService
         StyleProfileData? styleProfile = null;
         if (bookId.HasValue && analysisType is AnalysisType.LineEdit
             or AnalysisType.LinguisticAnalysis
-            or AnalysisType.LiteraryAnalysis)
+            or AnalysisType.LiteraryAnalysis
+            or AnalysisType.Proofread)
         {
             styleProfile = await LoadStyleProfileAsync(bookId.Value, ct);
         }
@@ -370,7 +371,7 @@ public class AnalysisContextService : IAnalysisContextService
 
         if (previousScene != null)
         {
-            preceding = await ExtractSceneTailAsync(previousScene, ct);
+            preceding = ExtractSceneTail(previousScene);
         }
         else
         {
@@ -386,7 +387,7 @@ public class AnalysisContextService : IAnalysisContextService
 
         if (nextScene != null)
         {
-            following = await ExtractSceneHeadAsync(nextScene, ct);
+            following = ExtractSceneHead(nextScene);
         }
         else
         {
@@ -446,7 +447,7 @@ public class AnalysisContextService : IAnalysisContextService
             string.IsNullOrWhiteSpace(following) ? null : following);
     }
 
-    private async Task<string?> ExtractSceneHeadAsync(Scene scene, CancellationToken ct)
+    private string? ExtractSceneHead(Scene scene)
     {
         var sfdt = scene.ContentSfdt ?? "{}";
         var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
@@ -457,7 +458,7 @@ public class AnalysisContextService : IAnalysisContextService
         return TruncateToWords(text, ContextEnvelopeMaxWords);
     }
 
-    private async Task<string?> ExtractSceneTailAsync(Scene scene, CancellationToken ct)
+    private string? ExtractSceneTail(Scene scene)
     {
         var sfdt = scene.ContentSfdt ?? "{}";
         var (plainText, _) = _sfdtConversion.GetTextFromSfdt(sfdt);
