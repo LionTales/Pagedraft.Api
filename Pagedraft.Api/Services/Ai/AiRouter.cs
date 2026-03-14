@@ -27,10 +27,12 @@ public class AiRouter : IAiRouter
         if (!_providers.TryGetValue(selection.Provider, out var provider))
             throw new InvalidOperationException($"Unknown AI provider: {selection.Provider}. Configured: {string.Join(", ", _providers.Keys)}");
 
-        var (systemMessage, instruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
-            ? instruction
-            : request.Instruction + "\n\n" + instruction;
+            ? pipelineInstruction
+            : ShouldUseUnifiedInstructionVerbatim(request)
+                ? request.Instruction
+                : request.Instruction + "\n\n" + pipelineInstruction;
 
         var resolved = new ResolvedAiRequest
         {
@@ -39,7 +41,8 @@ public class AiRouter : IAiRouter
             InputText = request.InputText,
             Language = request.Language,
             Selection = selection,
-            TaskType = request.TaskType
+            TaskType = request.TaskType,
+            JsonMode = request.JsonMode
         };
 
         return await provider.CompleteAsync(resolved, cancellationToken).ConfigureAwait(false);
@@ -56,10 +59,12 @@ public class AiRouter : IAiRouter
         if (provider is not IStreamingAiAnalysisProvider streaming)
             throw new NotSupportedException($"Provider {selection.Provider} does not support streaming.");
 
-        var (systemMessage, instruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
-            ? instruction
-            : request.Instruction + "\n\n" + instruction;
+            ? pipelineInstruction
+            : ShouldUseUnifiedInstructionVerbatim(request)
+                ? request.Instruction
+                : request.Instruction + "\n\n" + pipelineInstruction;
 
         var resolved = new ResolvedAiRequest
         {
@@ -68,7 +73,8 @@ public class AiRouter : IAiRouter
             InputText = request.InputText,
             Language = request.Language,
             Selection = selection,
-            TaskType = request.TaskType
+            TaskType = request.TaskType,
+            JsonMode = request.JsonMode
         };
 
         await foreach (var token in streaming.StreamCompleteAsync(resolved, cancellationToken).WithCancellation(cancellationToken))
@@ -82,9 +88,10 @@ public class AiRouter : IAiRouter
         var taskKey = request.TaskType.ToString();
         var language = request.Language?.Trim() ?? "";
 
-        // For Proofread (and LineEdit, which maps to Proofread), prefer a language-specific model so English uses an English-capable model (e.g. Qwen) instead of DictaLM.
         var isEnglish = language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
-        if (opt.FeatureModels != null && request.TaskType == AiTaskType.Proofread && isEnglish)
+        if (opt.FeatureModels != null &&
+            (request.TaskType == AiTaskType.Proofread || request.TaskType == AiTaskType.LineEdit) &&
+            isEnglish)
         {
             var langKey = taskKey + "_en";
             if (opt.FeatureModels.TryGetValue(langKey, out var featureEn) &&
@@ -105,5 +112,28 @@ public class AiRouter : IAiRouter
             Provider = opt.DefaultProvider ?? "Ollama",
             Model = opt.DefaultModel ?? "qwen2.5:14b"
         };
+    }
+
+    /// <summary>
+    /// For unified analysis flows (e.g. LineEdit), avoid appending the legacy pipeline
+    /// instruction when the caller already provided a complete, task-specific instruction.
+    /// LineEdit has its own dedicated AiTaskType; also kept: heuristic detection for
+    /// any prompt containing the sentence-level line edit marker text.
+    /// </summary>
+    private static bool ShouldUseUnifiedInstructionVerbatim(AiRequest request)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.Instruction))
+            return false;
+
+        if (request.TaskType == AiTaskType.LineEdit)
+            return true;
+
+        var instruction = request.Instruction;
+        if (instruction.IndexOf("Perform a sentence-level line edit", StringComparison.OrdinalIgnoreCase) >= 0)
+            return true;
+        if (instruction.Contains("בצע עריכה ברמת המשפט", StringComparison.Ordinal))
+            return true;
+
+        return false;
     }
 }

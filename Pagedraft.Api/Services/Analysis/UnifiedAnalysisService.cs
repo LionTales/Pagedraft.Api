@@ -63,11 +63,11 @@ public class UnifiedAnalysisService
 
     /// <summary>Run an analysis and persist the result.</summary>
     /// <param name="jobId">
-    /// Optional analysis job identifier for long-running operations (currently chunked Proofread).
-    /// When provided and the run uses chunked proofread, this jobId will be used for progress tracking and persisted on AnalysisResult.
-    /// When null, a new jobId is generated internally for chunked proofread.
+    /// Optional analysis job identifier for long-running operations (currently chunked Proofread/LineEdit).
+    /// When provided and the run uses chunked proofread/LineEdit, this jobId will be used for progress tracking and persisted on AnalysisResult.
+    /// When null, a new jobId is generated internally for chunked proofread/LineEdit.
     /// </param>
-        public async Task<AnalysisResult> RunAsync(
+    public async Task<AnalysisResult> RunAsync(
         AnalysisScope scope,
         AnalysisType analysisType,
         Guid targetId,
@@ -99,6 +99,22 @@ public class UnifiedAnalysisService
                 throw new InvalidOperationException($"Proofread text is too long ({inputText.Length} characters). Please select a shorter section (e.g. one scene or a few paragraphs). Maximum is {MaxProofreadInputLength:N0} characters.");
         }
 
+        if (analysisType == AnalysisType.LineEdit)
+        {
+            var opts = _aiOptions.Value;
+            var chunkTargetWords = opts.LineEditChunkTargetWords > 0 ? opts.LineEditChunkTargetWords : 1500;
+            var maxParallel = Math.Max(1, opts.MaxParallelLineEditChunks);
+            var wordCount = WordCount(inputText);
+
+            if (wordCount > chunkTargetWords)
+            {
+                var effectiveJobId = jobId ?? Guid.NewGuid();
+                return await RunLineEditChunkedAsync(
+                    inputText, bookId, chapterId, sceneId, scope, targetId,
+                    customPrompt, language, chunkTargetWords, maxParallel, effectiveJobId, context, ct);
+            }
+        }
+
         var taskType = MapToTaskType(analysisType);
         var instruction = customPrompt
             ?? _promptFactory.GetAnalysisPrompt(analysisType, language, context);
@@ -109,7 +125,8 @@ public class UnifiedAnalysisService
             Instruction = instruction,
             TaskType = taskType,
             Language = language,
-            SourceId = targetId.ToString()
+            SourceId = targetId.ToString(),
+            JsonMode = analysisType == AnalysisType.LineEdit
         };
 
         _logger.LogInformation("Running {Scope}/{Type} analysis on {TargetId}", scope, analysisType, targetId);
@@ -144,6 +161,8 @@ public class UnifiedAnalysisService
         {
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
+
+        cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
         {
@@ -193,7 +212,8 @@ public class UnifiedAnalysisService
             Instruction = instruction,
             TaskType = taskType,
             Language = language,
-            SourceId = bookId?.ToString() ?? chapterId?.ToString() ?? sceneId?.ToString() ?? ""
+            SourceId = bookId?.ToString() ?? chapterId?.ToString() ?? sceneId?.ToString() ?? "",
+            JsonMode = analysisType == AnalysisType.LineEdit
         };
 
         _logger.LogInformation("Running {Scope}/{Type} with provided input", scope, analysisType);
@@ -208,6 +228,8 @@ public class UnifiedAnalysisService
         {
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
+
+        cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
         {
@@ -260,7 +282,8 @@ public class UnifiedAnalysisService
             Instruction = instruction,
             TaskType = taskType,
             Language = language,
-            SourceId = targetId.ToString()
+            SourceId = targetId.ToString(),
+            JsonMode = analysisType == AnalysisType.LineEdit
         };
 
         var sb = new StringBuilder();
@@ -294,6 +317,8 @@ public class UnifiedAnalysisService
         {
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
+
+        cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
         {
@@ -336,7 +361,8 @@ public class UnifiedAnalysisService
             InputText = inputText,
             Instruction = prompt,
             TaskType = taskType,
-            Language = language
+            Language = language,
+            JsonMode = analysisType == AnalysisType.LineEdit
         };
 
         var response = await _router.CompleteAsync(request, ct);
@@ -349,18 +375,27 @@ public class UnifiedAnalysisService
     private sealed record ProofreadChunk(string Text, string SeparatorAfter, string? OverlapPrefix);
 
     /// <summary>
-    /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
-    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
-    /// - Text: the chunk to correct
-    /// - SeparatorAfter: separator to append after this chunk when merging
-    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// Structured chunk for LineEdit with merge separator and soft overlap context
+    /// (both prefix from previous chunk and suffix from next chunk).
+    /// This will be used by the LineEdit chunking pipeline.
     /// </summary>
-    private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
+    private sealed record LineEditChunk(
+        string Text,
+        string SeparatorAfter,
+        string? OverlapPrefix,
+        string? OverlapSuffix);
+
+    /// <summary>
+    /// Shared core: split text by paragraphs then sentences, group into ~targetWords per chunk
+    /// with dialogue-aware grouping. Returns raw (Text, SeparatorAfter) chunks; callers add
+    /// overlap prefix/suffix as needed (Proofread: prefix only; LineEdit: prefix + suffix).
+    /// </summary>
+    private static List<(string Text, string SeparatorAfter)> BuildChunkSegmentsCore(string fullText, int targetWordsPerChunk)
     {
         if (string.IsNullOrWhiteSpace(fullText))
-            return new List<ProofreadChunk> { new("", "", null) };
+            return new List<(string Text, string SeparatorAfter)> { ("", "") };
         if (targetWordsPerChunk <= 0)
-            return new List<ProofreadChunk> { new(fullText.Trim(), "", null) };
+            return new List<(string Text, string SeparatorAfter)> { (fullText.Trim(), "") };
 
         fullText = fullText.TrimEnd();
         var segments = new List<(string Text, string Sep)>();
@@ -418,7 +453,7 @@ public class UnifiedAnalysisService
         }
 
         if (segments.Count == 0)
-            return new List<ProofreadChunk> { new("", "", null) };
+            return new List<(string Text, string SeparatorAfter)> { ("", "") };
 
         // Group segments into chunks of ~targetWordsPerChunk (dialogue-aware)
         var baseChunks = new List<(string Text, string SeparatorAfter)>();
@@ -442,7 +477,6 @@ public class UnifiedAnalysisService
             }
             else if (inDialogueBlock && !belongsToDialogue)
             {
-                // End of dialogue block – subsequent non-dialogue segments start a new block
                 inDialogueBlock = false;
             }
 
@@ -468,22 +502,69 @@ public class UnifiedAnalysisService
         if (current.Length > 0)
             baseChunks.Add((current.ToString().TrimEnd(), lastSep));
 
-        // Post-process: compute soft overlaps from neighboring chunks
+        return baseChunks;
+    }
+
+    /// <summary>
+    /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
+    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
+    /// - Text: the chunk to correct
+    /// - SeparatorAfter: separator to append after this chunk when merging
+    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// </summary>
+    private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
+    {
+        var baseChunks = BuildChunkSegmentsCore(fullText, targetWordsPerChunk);
+        if (baseChunks.Count == 0)
+            return new List<ProofreadChunk> { new("", "", null) };
+
         var result = new List<ProofreadChunk>(baseChunks.Count);
         for (var i = 0; i < baseChunks.Count; i++)
         {
             var (text, sep) = baseChunks[i];
             string? overlapPrefix = null;
-
             if (i > 0)
             {
                 var trailing = ExtractTrailingSentences(baseChunks[i - 1].Text, 3);
                 overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
             }
-
             result.Add(new ProofreadChunk(text, sep, overlapPrefix));
         }
+        return result;
+    }
 
+    /// <summary>
+    /// Chunk text for LineEdit: split by paragraphs then sentences, ~targetWords per chunk,
+    /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
+    /// - Text: the chunk to edit
+    /// - SeparatorAfter: separator to append after this chunk when merging
+    /// - OverlapPrefix: trailing sentences from previous chunk (read-only [PRECEDING_CONTEXT])
+    /// - OverlapSuffix: leading sentences from next chunk (read-only [FOLLOWING_CONTEXT])
+    /// </summary>
+    private static List<LineEditChunk> ChunkForLineEdit(string fullText, int targetWordsPerChunk)
+    {
+        var baseChunks = BuildChunkSegmentsCore(fullText, targetWordsPerChunk);
+        if (baseChunks.Count == 0)
+            return new List<LineEditChunk> { new("", "", null, null) };
+
+        var result = new List<LineEditChunk>(baseChunks.Count);
+        for (var i = 0; i < baseChunks.Count; i++)
+        {
+            var (text, sep) = baseChunks[i];
+            string? overlapPrefix = null;
+            string? overlapSuffix = null;
+            if (i > 0)
+            {
+                var trailing = ExtractTrailingSentences(baseChunks[i - 1].Text, 3);
+                overlapPrefix = string.IsNullOrWhiteSpace(trailing) ? null : trailing;
+            }
+            if (i < baseChunks.Count - 1)
+            {
+                var leading = ExtractLeadingSentences(baseChunks[i + 1].Text, 2);
+                overlapSuffix = string.IsNullOrWhiteSpace(leading) ? null : leading;
+            }
+            result.Add(new LineEditChunk(text, sep, overlapPrefix, overlapSuffix));
+        }
         return result;
     }
 
@@ -578,6 +659,286 @@ public class UnifiedAnalysisService
         if (parts.Count == 0) return "";
         var start = Math.Max(0, parts.Count - count);
         return string.Join(" ", parts.Skip(start).Take(count)).Trim();
+    }
+
+    private static string ExtractLeadingSentences(string text, int count)
+    {
+        if (string.IsNullOrWhiteSpace(text) || count <= 0) return "";
+        var parts = Regex.Split(text.Trim(), @"(?<=[.!?।])\s+")
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .ToList();
+        if (parts.Count == 0) return "";
+        return string.Join(" ", parts.Take(count)).Trim();
+    }
+
+    // ─── LineEdit chunk merging ──────────────────────────────────────
+
+    /// <summary>
+    /// Merge per-chunk LineEdit results into a single <see cref="LineEditResult"/>.
+    /// Concatenates suggestions in chunk order, deduplicates overlap-region duplicates
+    /// by normalized <see cref="LineEditSuggestion.Original"/> text, and joins
+    /// non-empty <see cref="LineEditResult.OverallFeedback"/> strings.
+    /// </summary>
+    internal static LineEditResult MergeLineEditResults(List<LineEditResult> chunkResults)
+    {
+        if (chunkResults is null || chunkResults.Count == 0)
+            return new LineEditResult();
+
+        var merged = new List<LineEditSuggestion>();
+        var seenOriginals = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var chunk in chunkResults)
+        {
+            if (chunk?.Suggestions is null || chunk.Suggestions.Count == 0)
+                continue;
+
+            foreach (var suggestion in chunk.Suggestions)
+            {
+                if (suggestion is null) continue;
+
+                // Filter no-op suggestions where original == suggested (model padding)
+                if (IsNoOpSuggestion(suggestion))
+                    continue;
+
+                var normalizedOriginal = TextNormalization.NormalizeTextForAnalysis(
+                    suggestion.Original ?? string.Empty);
+
+                if (string.IsNullOrWhiteSpace(normalizedOriginal))
+                {
+                    merged.Add(suggestion);
+                    continue;
+                }
+
+                if (seenOriginals.Add(normalizedOriginal))
+                    merged.Add(suggestion);
+            }
+        }
+
+        var feedbackParts = chunkResults
+            .Where(c => c is not null && !string.IsNullOrWhiteSpace(c.OverallFeedback))
+            .Select(c => c.OverallFeedback.Trim())
+            .ToList();
+
+        var combinedFeedback = feedbackParts.Count switch
+        {
+            0 => string.Empty,
+            1 => feedbackParts[0],
+            _ => string.Join("\n\n---\n\n", feedbackParts)
+        };
+
+        return new LineEditResult
+        {
+            Suggestions = merged,
+            OverallFeedback = combinedFeedback
+        };
+    }
+
+    /// <summary>
+    /// Returns true when a suggestion is a no-op: original and suggested are identical
+    /// after trimming and Unicode normalization. These are padding entries the model
+    /// emits with reasons like "אין שינוי דרוש" that carry no value.
+    /// </summary>
+    internal static bool IsNoOpSuggestion(LineEditSuggestion suggestion)
+    {
+        var original = (suggestion.Original ?? string.Empty).Trim();
+        var suggested = (suggestion.Suggested ?? string.Empty).Trim();
+
+        if (original == suggested)
+            return true;
+
+        var normalizedOriginal = TextNormalization.NormalizeTextForAnalysis(original);
+        var normalizedSuggested = TextNormalization.NormalizeTextForAnalysis(suggested);
+
+        return !string.IsNullOrEmpty(normalizedOriginal) &&
+               normalizedOriginal == normalizedSuggested;
+    }
+
+    /// <summary>
+    /// Run LineEdit in chunks with limited parallelism, then merge into one AnalysisResult.
+    /// Updates AnalysisProgressTracker for live progress polling.
+    /// </summary>
+    private async Task<AnalysisResult> RunLineEditChunkedAsync(
+        string inputText,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        Guid targetId,
+        string? customPrompt,
+        string language,
+        int chunkTargetWords,
+        int maxParallel,
+        Guid jobId,
+        AnalysisContext context,
+        CancellationToken ct)
+    {
+        var taskType = MapToTaskType(AnalysisType.LineEdit);
+        var chunks = ChunkForLineEdit(inputText, chunkTargetWords);
+
+        string? representativeInstruction;
+        if (customPrompt is not null)
+        {
+            representativeInstruction = customPrompt;
+        }
+        else if (chunks.Count > 0)
+        {
+            var firstChunk = chunks[0];
+            representativeInstruction = _promptFactory.BuildLineEditChunkPrompt(
+                language,
+                context,
+                firstChunk.OverlapPrefix,
+                firstChunk.OverlapSuffix,
+                isFirstChunk: true,
+                isLastChunk: chunks.Count == 1);
+        }
+        else
+        {
+            representativeInstruction = null;
+        }
+
+        _logger.LogInformation(
+            "LineEdit chunked: input {WordCount} words, {ChunkCount} chunks, max parallel {MaxParallel}",
+            WordCount(inputText), chunks.Count, maxParallel);
+
+        _progress.StartJob(
+            jobId,
+            scope,
+            AnalysisType.LineEdit,
+            bookId,
+            chapterId,
+            sceneId,
+            $"Queued {chunks.Count} LineEdit chunks");
+        _progress.SetTotalChunks(jobId, chunks.Count, $"Queued {chunks.Count} LineEdit chunks");
+
+        var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
+        var chunkResults = new LineEditResult[chunks.Count];
+
+        async Task ProcessChunk(int index)
+        {
+            var chunk = chunks[index];
+            var text = chunk.Text;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                chunkResults[index] = new LineEditResult();
+                return;
+            }
+
+            await semaphore.WaitAsync(ct);
+            try
+            {
+                var chunkNumber = index + 1;
+                _logger.LogDebug("LineEdit chunk {Index}/{Total} starting ({Words} words)", chunkNumber, chunks.Count, WordCount(text));
+                _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+
+                var instruction = customPrompt
+                    ?? _promptFactory.BuildLineEditChunkPrompt(
+                        language,
+                        context,
+                        chunk.OverlapPrefix,
+                        chunk.OverlapSuffix,
+                        isFirstChunk: index == 0,
+                        isLastChunk: index == chunks.Count - 1);
+
+                var wrappedText = $"[TEXT_TO_EDIT]{text}[/TEXT_TO_EDIT]";
+
+                var request = new AiRequest
+                {
+                    InputText = wrappedText,
+                    Instruction = instruction,
+                    TaskType = taskType,
+                    Language = language,
+                    SourceId = targetId.ToString(),
+                    JsonMode = true
+                };
+
+                var response = await _router.CompleteAsync(request, ct);
+                var raw = response.Content ?? string.Empty;
+                _logger.LogDebug(
+                    "LineEdit chunk {Index}/{Total} raw response: length={Len}, preview={Preview}",
+                    chunkNumber, chunks.Count, raw.Length, TruncateForAudit(raw, 200));
+                var clean = SanitizeResponse(raw);
+
+                var structuredJson = TryParseStructured(AnalysisType.LineEdit, clean);
+
+                if (structuredJson is null)
+                {
+                    _logger.LogWarning(
+                        "LineEdit chunk {Index}/{Total} produced no structured JSON. rawLen={RawLen}, cleanLen={CleanLen}, cleanPreview={Preview}",
+                        chunkNumber, chunks.Count, raw.Length, clean.Length, TruncateForAudit(clean, 200));
+                    chunkResults[index] = new LineEditResult();
+                }
+                else
+                {
+                    try
+                    {
+                        var parsed = JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+                        chunkResults[index] = parsed ?? new LineEditResult();
+                    }
+                    catch (JsonException)
+                    {
+                        chunkResults[index] = new LineEditResult();
+                    }
+                }
+
+                _logger.LogDebug("LineEdit chunk {Index}/{Total} finished", chunkNumber, chunks.Count);
+                _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var chunkNumber = index + 1;
+                _logger.LogWarning(ex, "LineEdit chunk {Index} failed; treating as empty result", chunkNumber);
+                chunkResults[index] = new LineEditResult();
+                _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }
+
+        var tasks = Enumerable.Range(0, chunks.Count).Select(ProcessChunk).ToArray();
+        await Task.WhenAll(tasks);
+
+        var merged = MergeLineEditResults(chunkResults.ToList());
+        var mergedJson = JsonSerializer.Serialize(merged, JsonOpts);
+
+        _logger.LogInformation("LineEdit merge complete: {SuggestionCount} suggestions", merged.Suggestions.Count);
+        _progress.SetStatus(jobId, AnalysisProgressStatus.Succeeded, "LineEdit finished");
+
+        await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, AnalysisType.LineEdit, ct);
+
+        var cleanContent = MaybeReplaceLineEditResultText(AnalysisType.LineEdit, mergedJson, merged.OverallFeedback ?? string.Empty);
+
+        var result = new AnalysisResult
+        {
+            ChapterId = chapterId ?? Guid.Empty,
+            BookId = bookId,
+            SceneId = sceneId,
+            Scope = scope,
+            AnalysisType = AnalysisType.LineEdit,
+            Type = nameof(AnalysisType.LineEdit),
+            PromptUsed = TruncateForAudit(
+                representativeInstruction
+                ?? (customPrompt ?? _promptFactory.GetAnalysisPrompt(AnalysisType.LineEdit, language, context))),
+            ResultText = cleanContent,
+            StructuredResult = mergedJson,
+            Language = language,
+            ModelName = "chunked",
+            JobId = jobId,
+            SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
+        };
+
+        AttachSuggestions(result, inputText, AnalysisType.LineEdit, mergedJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
+
+        _db.AnalysisResults.Add(result);
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("Analysis {Id} persisted (LineEdit chunked, {Scope})", result.Id, scope);
+        return result;
     }
 
     /// <summary>Run proofread in chunks with limited parallelism, then merge into one AnalysisResult. Updates AnalysisProgressTracker for live progress polling.</summary>
@@ -783,11 +1144,49 @@ public class UnifiedAnalysisService
 
     // ─── Structured Output Parsing ──────────────────────────────────
 
-    private static string? TryParseStructured(AnalysisType type, string content)
+    private string? TryParseStructured(AnalysisType type, string content)
     {
+        if (type == AnalysisType.LineEdit)
+        {
+            var result = TryExtractAndReserializeWithLogging<LineEditResult>(content, AnalysisType.LineEdit);
+            if (result != null) return result;
+
+            // Aggressive retry: strip all markdown fences/formatting, bidi, then try direct deserialize
+            result = TryLineEditAggressiveParse(content);
+            if (result != null)
+            {
+                _logger.LogInformation("LineEdit aggressive parse fallback succeeded after primary parse failed.");
+                return result;
+            }
+
+            // Final fallback: salvage truncated JSON by keeping only fully-closed suggestion objects
+            result = SalvageTruncatedLineEditJson(content);
+            if (result != null)
+                _logger.LogInformation("LineEdit truncation salvage succeeded: recovered partial suggestions from truncated JSON.");
+            if (result != null)
+                return result;
+
+            // XML-like fallback: when the model returns a structured but non-JSON response
+            // (e.g. <edit><instruction>...</instruction></edit>), salvage it into a minimal
+            // LineEditResult with only OverallFeedback populated so the user still sees
+            // high-level feedback instead of an empty result.
+            var xmlFallback = TryLineEditXmlFallback(content);
+            if (xmlFallback != null)
+            {
+                _logger.LogInformation(
+                    "LineEdit XML fallback produced OverallFeedback from non-JSON structured output.");
+                return xmlFallback;
+            }
+
+            _logger.LogWarning(
+                "LineEdit structured parse: all extraction methods failed (primary, aggressive, salvage, XML). Content length={Len}, preview={Preview}",
+                content.Length,
+                TruncateForAudit(content, 200));
+            return null;
+        }
+
         return type switch
         {
-            AnalysisType.LineEdit => TryExtractAndReserialize<LineEditResult>(content),
             AnalysisType.LinguisticAnalysis => TryExtractAndReserialize<LinguisticAnalysisResult>(content),
             AnalysisType.LiteraryAnalysis => TryExtractAndReserialize<LiteraryAnalysisResult>(content),
             AnalysisType.BookOverview => TryExtractAndReserialize<BookOverviewResult>(content),
@@ -796,6 +1195,136 @@ public class UnifiedAnalysisService
             AnalysisType.QA => TryExtractAndReserialize<QAResult>(content),
             _ => null
         };
+    }
+
+    /// <summary>
+    /// Aggressive fallback for LineEdit: strip all markdown fences, bidi controls, and
+    /// surrounding text, then attempt case-insensitive deserialization directly.
+    /// </summary>
+    private string? TryLineEditAggressiveParse(string content)
+    {
+        try
+        {
+            // Strip markdown fence markers only (marker + optional language tag),
+            // not the rest of the line — safe regardless of newline presence.
+            var stripped = Regex.Replace(content, @"```[a-zA-Z]*[ \t]*\n?", "");
+            stripped = StripBomAndBidiWrapper(stripped);
+
+            stripped = Regex.Replace(stripped, @"^[#*>`~\-]+\s?", "", RegexOptions.Multiline);
+
+            // Remove bidi controls that may be interspersed in JSON structure
+            stripped = StripBidiControls(stripped);
+
+            var json = ExtractJsonByBraceMatching(stripped);
+            if (json == null) return null;
+
+            var parsed = JsonSerializer.Deserialize<LineEditResult>(json, JsonOpts);
+            if (parsed == null) return null;
+
+            return JsonSerializer.Serialize(parsed, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Last-resort salvage for truncated LineEdit JSON. Locates the "suggestions" array,
+    /// walks the content tracking bracket/brace depth, finds the last fully-closed suggestion
+    /// object, then reconstructs valid JSON keeping only complete suggestions.
+    /// Mirrors the frontend trySalvageTruncatedLineEditJson logic.
+    /// </summary>
+    internal static string? SalvageTruncatedLineEditJson(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return null;
+
+        // Strip markdown fence markers safely (marker + optional language tag only)
+        var stripped = Regex.Replace(content, @"```[a-zA-Z]*[ \t]*\n?", "");
+        stripped = StripBomAndBidiWrapper(stripped);
+        stripped = StripBidiControls(stripped);
+
+        var keyIndex = stripped.IndexOf("\"suggestions\"", StringComparison.Ordinal);
+        if (keyIndex < 0) return null;
+
+        var arrayStart = stripped.IndexOf('[', keyIndex);
+        if (arrayStart < 0) return null;
+
+        bool inString = false;
+        bool escape = false;
+        int depthCurly = 0;
+        int depthSquare = 0;
+        int lastObjectEnd = -1;
+
+        for (int i = arrayStart; i < stripped.Length; i++)
+        {
+            char c = stripped[i];
+            if (escape) { escape = false; continue; }
+            if (c == '\\' && inString) { escape = true; continue; }
+            if (c == '"') { inString = !inString; continue; }
+            if (inString) continue;
+
+            if (c == '[') depthSquare++;
+            else if (c == ']') depthSquare--;
+            else if (c == '{') depthCurly++;
+            else if (c == '}')
+            {
+                depthCurly--;
+                if (depthSquare == 1 && depthCurly == 0)
+                    lastObjectEnd = i;
+            }
+        }
+
+        if (lastObjectEnd < 0) return null;
+
+        // Reconstruct: everything up to and including '[', then the closed objects, then close array + root
+        var head = stripped[..(arrayStart + 1)];
+        var body = stripped[(arrayStart + 1)..(lastObjectEnd + 1)];
+        var salvaged = $"{head}{body}]}}";
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<LineEditResult>(salvaged, JsonOpts);
+            if (parsed?.Suggestions == null || parsed.Suggestions.Count == 0)
+                return null;
+            return JsonSerializer.Serialize(parsed, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fallback for clearly non-JSON but still structured LineEdit responses, such as
+    /// XML-like wrappers (&lt;edit&gt;&lt;instruction&gt;...&lt;/instruction&gt;&lt;/edit&gt;).
+    /// Strips tags and whitespace and returns a minimal LineEditResult JSON with
+    /// OverallFeedback populated and an empty suggestions array.
+    /// Returns null when the content does not look like a tagged/markup payload.
+    /// </summary>
+    internal static string? TryLineEditXmlFallback(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return null;
+
+        var trimmed = content.Trim();
+        // Heuristic: require at least one opening and one closing angle bracket so we don't
+        // treat plain Hebrew/English prose as XML/HTML.
+        if (!trimmed.Contains('<') || !trimmed.Contains('>'))
+            return null;
+
+        // Best-effort strip of XML/HTML-ish tags.
+        var withoutTags = Regex.Replace(trimmed, "<[^>]+>", " ");
+        var normalized = Regex.Replace(withoutTags, @"\s+", " ").Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return null;
+
+        var fallback = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>(),
+            OverallFeedback = normalized
+        };
+
+        return JsonSerializer.Serialize(fallback, JsonOpts);
     }
 
     private static string? TryExtractAndReserialize<T>(string content) where T : class
@@ -817,44 +1346,175 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
+    /// LineEdit-specific wrapper that adds diagnostics around JSON extraction and deserialization.
+    /// Other analysis types continue to use the generic TryExtractAndReserialize without logging.
+    /// </summary>
+    private string? TryExtractAndReserializeWithLogging<T>(string content, AnalysisType analysisType) where T : class
+    {
+        string? preview = null;
+        try
+        {
+            var json = ExtractJson(content);
+            if (json == null)
+            {
+                if (analysisType == AnalysisType.LineEdit)
+                {
+                    preview = TruncateForAudit(content, 200);
+                    // Debug: fallback parsers (aggressive, salvage) will retry
+                    _logger.LogDebug(
+                        "LineEdit primary parse: no JSON block extracted. Content preview={Preview}",
+                        preview);
+                }
+                return null;
+            }
+
+            preview = TruncateForAudit(json, 200);
+
+            var parsed = JsonSerializer.Deserialize<T>(json, JsonOpts);
+            if (parsed == null)
+            {
+                if (analysisType == AnalysisType.LineEdit)
+                {
+                    _logger.LogDebug(
+                        "LineEdit primary parse: deserialized object was null. Json preview={Preview}",
+                        preview);
+                }
+                return null;
+            }
+
+            return JsonSerializer.Serialize(parsed, JsonOpts);
+        }
+        catch (JsonException ex)
+        {
+            if (analysisType == AnalysisType.LineEdit)
+            {
+                _logger.LogDebug(
+                    ex,
+                    "LineEdit primary parse: JsonException. Json/Content preview={Preview}",
+                    preview ?? TruncateForAudit(content, 200));
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Extract the first top-level JSON object or array from LLM output,
     /// which may contain markdown fences or surrounding text.
     /// </summary>
-    private static string? ExtractJson(string content)
+    internal static string? ExtractJson(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
 
-        var fenceMatch = Regex.Match(content, @"```(?:json)?\s*\n?([\s\S]*?)```", RegexOptions.IgnoreCase);
+        content = StripBomAndBidiWrapper(content);
+
+        // Match fenced blocks with any language tag (json, text, etc.); the tag is
+        // excluded from the capture so we get only the inner content.
+        var fenceMatch = Regex.Match(content, @"```\w*[ \t]*\n?([\s\S]*?)```", RegexOptions.IgnoreCase);
         if (fenceMatch.Success)
         {
-            var inner = fenceMatch.Groups[1].Value.Trim();
+            var inner = StripBomAndBidiWrapper(fenceMatch.Groups[1].Value.Trim());
+            inner = StripBidiControls(inner);
             if (inner.Length > 0 && (inner[0] == '{' || inner[0] == '['))
                 return inner;
         }
 
-        var start = content.IndexOfAny(new[] { '{', '[' });
-        if (start < 0) return null;
+        var extracted = ExtractJsonByBraceMatching(content);
+        if (extracted != null) return extracted;
 
-        char open = content[start];
-        char close = open == '{' ? '}' : ']';
-        int depth = 0;
-        bool inString = false;
-        bool escape = false;
+        // Second pass: strip markdown formatting (bold, headers) and retry
+        var stripped = Regex.Replace(content, @"[*#`~]+", " ");
+        return ExtractJsonByBraceMatching(stripped);
+    }
 
-        for (int i = start; i < content.Length; i++)
+    /// <summary>
+    /// Strip BOM, leading/trailing whitespace, and Unicode bidi/RTL control characters
+    /// that appear outside JSON boundaries (common with Hebrew LLM output).
+    /// </summary>
+    private static string StripBomAndBidiWrapper(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        // Strip BOM (U+FEFF)
+        text = text.TrimStart('\uFEFF');
+
+        // Strip leading/trailing bidi control characters that may surround the JSON:
+        // RLM U+200F, LRM U+200E, RLE U+202B, LRE U+202A, PDF U+202C,
+        // RLO U+202E, LRO U+202D, LRI U+2066, RLI U+2067, FSI U+2068, PDI U+2069
+        ReadOnlySpan<char> bidiControls = stackalloc char[]
         {
-            char c = content[i];
-            if (escape) { escape = false; continue; }
-            if (c == '\\' && inString) { escape = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
-            if (c == open) depth++;
-            else if (c == close) depth--;
-            if (depth == 0)
-                return content.Substring(start, i - start + 1);
+            '\u200E', '\u200F',
+            '\u202A', '\u202B', '\u202C', '\u202D', '\u202E',
+            '\u2066', '\u2067', '\u2068', '\u2069'
+        };
+
+        var span = text.AsSpan().Trim();
+        while (span.Length > 0 && bidiControls.Contains(span[0]))
+            span = span[1..];
+        while (span.Length > 0 && bidiControls.Contains(span[^1]))
+            span = span[..^1];
+
+        return span.ToString().Trim();
+    }
+
+    private static string? ExtractJsonByBraceMatching(string content)
+    {
+        int searchFrom = 0;
+        while (searchFrom < content.Length)
+        {
+            var start = content.IndexOfAny(new[] { '{', '[' }, searchFrom);
+            if (start < 0) return null;
+
+            // For objects, the first non-whitespace/non-bidi char after '{' must be '"' or '}'
+            // so we reject Hebrew prose in braces like {רוברט הסיט...}
+            if (content[start] == '{')
+            {
+                var peek = start + 1;
+                while (peek < content.Length && (char.IsWhiteSpace(content[peek]) || IsBidiOrZeroWidth(content[peek])))
+                    peek++;
+                if (peek >= content.Length || (content[peek] != '"' && content[peek] != '}'))
+                {
+                    searchFrom = start + 1;
+                    continue;
+                }
+            }
+
+            char open = content[start];
+            char close = open == '{' ? '}' : ']';
+            int depth = 0;
+            bool inString = false;
+            bool escape = false;
+
+            for (int i = start; i < content.Length; i++)
+            {
+                char c = content[i];
+                if (escape) { escape = false; continue; }
+                if (c == '\\' && inString) { escape = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+                if (c == open) depth++;
+                else if (c == close) depth--;
+                if (depth == 0)
+                    return content.Substring(start, i - start + 1);
+            }
+
+            // Unbalanced from this position; try next occurrence
+            searchFrom = start + 1;
         }
 
         return null;
+    }
+
+    private static bool IsBidiOrZeroWidth(char c) =>
+        c is '\u200E' or '\u200F'
+            or (>= '\u202A' and <= '\u202E')
+            or (>= '\u2066' and <= '\u2069')
+            or '\uFEFF' or '\u200B' or '\u200C' or '\u200D';
+
+    /// <summary>Strip all Unicode bidi/RTL control characters from text.</summary>
+    private static string StripBidiControls(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return Regex.Replace(text, @"[\u200E\u200F\u200B-\u200D\u202A-\u202E\u2066-\u2069\uFEFF]", "");
     }
 
     // ─── Mapping helpers ────────────────────────────────────────────
@@ -862,7 +1522,7 @@ public class UnifiedAnalysisService
     private static AiTaskType MapToTaskType(AnalysisType analysisType) => analysisType switch
     {
         AnalysisType.Proofread => AiTaskType.Proofread,
-        AnalysisType.LineEdit => AiTaskType.Proofread,
+        AnalysisType.LineEdit => AiTaskType.LineEdit,
         AnalysisType.LinguisticAnalysis => AiTaskType.LinguisticAnalysis,
         AnalysisType.LiteraryAnalysis => AiTaskType.LinguisticAnalysis,
         AnalysisType.Summarization => AiTaskType.Summarization,
@@ -875,6 +1535,28 @@ public class UnifiedAnalysisService
         _ => AiTaskType.GenericChat
     };
 
+    /// <summary>
+    /// For LineEdit, replace resultText with overallFeedback from the structured parse
+    /// so the generic text display shows a human-readable summary instead of raw JSON.
+    /// Only applies when the structured parse succeeded.
+    /// </summary>
+    private static string MaybeReplaceLineEditResultText(AnalysisType analysisType, string? structuredJson, string cleanContent)
+    {
+        if (analysisType != AnalysisType.LineEdit || structuredJson is null) return cleanContent;
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
+            if (parsed != null && !string.IsNullOrWhiteSpace(parsed.OverallFeedback))
+                return parsed.OverallFeedback;
+        }
+        catch (JsonException)
+        {
+            // Structured JSON was already validated; ignore any unlikely failure here
+        }
+        return cleanContent;
+    }
+
     // ─── Sanitization ───────────────────────────────────────────────
 
     private static string SanitizeResponse(string text)
@@ -882,6 +1564,7 @@ public class UnifiedAnalysisService
         if (string.IsNullOrEmpty(text)) return text;
         text = StripThinkBlock(text);
         text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(text);
+        text = Regex.Replace(text, @"[\u0000-\u0008\u000B\u000C\u000E-\u001F]", " ");
         text = StripCjk(text);
         return text;
     }
@@ -920,7 +1603,10 @@ public class UnifiedAnalysisService
     {
         if (string.IsNullOrEmpty(text)) return text;
         var stripped = Regex.Replace(text, @"[\u4e00-\u9fff\u3000-\u303f]+", " ");
-        return Regex.Replace(stripped, @"[ \t\r\n]+", " ").Trim();
+        // Collapse horizontal whitespace only; preserve line breaks so downstream
+        // markdown-fence regexes (```json ... ```) still work correctly.
+        stripped = Regex.Replace(stripped, @"[^\S\n]+", " ");
+        return Regex.Replace(stripped, @"\n{3,}", "\n\n").Trim();
     }
 
     /// <summary>
@@ -1090,7 +1776,21 @@ public class UnifiedAnalysisService
                 var parsed = System.Text.Json.JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
                 if (parsed is not null)
                 {
+                    // Strip no-op suggestions before diff computation (safety net)
+                    var preFilterCount = parsed.Suggestions.Count;
+                    parsed.Suggestions.RemoveAll(s => IsNoOpSuggestion(s));
+                    if (preFilterCount > parsed.Suggestions.Count)
+                        _logger.LogInformation("LineEdit AttachSuggestions: filtered {Count} no-op suggestions", preFilterCount - parsed.Suggestions.Count);
+
                     var suggestions = _suggestionDiff.ComputeLineEditSuggestions(parsed, inputText);
+                    if (suggestions.Count == 0)
+                    {
+                        _logger.LogWarning(
+                            "LineEdit AttachSuggestions produced zero suggestions after successful structured parse. Input length={InputLength}, structuredResult preview={Preview}",
+                            inputText?.Length ?? 0,
+                            TruncateForAudit(structuredJson, 200));
+                    }
+
                     for (var i = 0; i < suggestions.Count; i++)
                     {
                         suggestions[i].OrderIndex = i;
@@ -1098,9 +1798,19 @@ public class UnifiedAnalysisService
                         result.Suggestions.Add(suggestions[i]);
                     }
                 }
+                else
+                {
+                    _logger.LogWarning(
+                        "LineEdit AttachSuggestions: structured JSON deserialized to null LineEditResult. structuredResult preview={Preview}",
+                        TruncateForAudit(structuredJson, 200));
+                }
             }
-            catch (System.Text.Json.JsonException)
+            catch (System.Text.Json.JsonException ex)
             {
+                _logger.LogWarning(
+                    ex,
+                    "LineEdit AttachSuggestions: failed to deserialize structuredResult into LineEditResult. structuredResult preview={Preview}",
+                    TruncateForAudit(structuredJson, 200));
                 // Ignore malformed structured result; we still persist raw text.
             }
         }

@@ -4,6 +4,7 @@ namespace Pagedraft.Api.Services.Ai.Contracts;
 public enum AiTaskType
 {
     Proofread,
+    LineEdit,
     LinguisticAnalysis,
     Summarization,
     Translation,

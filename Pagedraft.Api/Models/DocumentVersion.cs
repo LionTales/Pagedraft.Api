@@ -19,4 +19,10 @@ public class DocumentVersion
     public string? OriginalText { get; set; }
     /// <summary>When set with AnalysisResultId, exact suggested text (so revert can record Reverted outcome).</summary>
     public string? SuggestedText { get; set; }
+    /// <summary>
+    /// Optional link to the specific AnalysisSuggestion row that produced this version.
+    /// When present, Versions/History operations should prefer this stable identifier
+    /// over text-based matching of OriginalText/SuggestedText.
+    /// </summary>
+    public Guid? SuggestionId { get; set; }
 }

@@ -189,7 +189,7 @@ public class AppDbContext : DbContext
             e.Property(x => x.OriginalText).IsRequired();
             e.Property(x => x.SuggestedText).IsRequired();
             e.Property(x => x.Outcome).HasConversion<string>().HasMaxLength(20);
-            e.Property(x => x.Reason).HasMaxLength(400);
+            e.Property(x => x.Reason).HasMaxLength(2000);
             e.Property(x => x.Category).HasMaxLength(100);
             e.HasOne(x => x.AnalysisResult)
                 .WithMany(r => r.Suggestions)

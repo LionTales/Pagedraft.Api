@@ -23,7 +23,7 @@ public class LineEditSuggestion
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
 
-    /// <summary>Category: "clarity", "flow", "word-choice", "structure", "redundancy", "style"</summary>
+    /// <summary>Category: "clarity", "flow", "word-choice", "structure", "redundancy", "style", "consistency" (conflicts with established style/voice/register), "continuity" (breaks narrative flow with surrounding context, referencing something not yet introduced, contradicting adjacent scenes, etc.)</summary>
     [JsonPropertyName("category")]
     public string Category { get; set; } = "style";
 }

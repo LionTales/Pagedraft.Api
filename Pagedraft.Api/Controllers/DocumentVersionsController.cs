@@ -46,6 +46,7 @@ public class DocumentVersionsController : ControllerBase
                 x.Version.CreatedAt,
                 x.Version.Label,
                 x.Version.AnalysisResultId,
+                x.Version.SuggestionId,
                 x.Version.OriginalText,
                 x.Version.SuggestedText,
                 x.Analysis != null ? x.Analysis.Status.ToString() : null))
@@ -73,6 +74,7 @@ public class DocumentVersionsController : ControllerBase
             ContentSfdt = request.ContentSfdt,
             Label = request.Label?.Trim().Length > 0 ? request.Label!.Trim() : null,
             AnalysisResultId = request.AnalysisId,
+            SuggestionId = request.SuggestionId,
             OriginalText = request.OriginalText?.Trim().Length > 0 ? request.OriginalText!.Trim() : null,
             SuggestedText = request.SuggestedText?.Trim().Length > 0 ? request.SuggestedText!.Trim() : null
         };
@@ -96,6 +98,7 @@ public class DocumentVersionsController : ControllerBase
             version.CreatedAt,
             version.Label,
             version.AnalysisResultId,
+            version.SuggestionId,
             version.OriginalText,
             version.SuggestedText,
             analysisStatus));
@@ -127,6 +130,7 @@ public class DocumentVersionsController : ControllerBase
             v.Version.Label,
             v.Version.ContentSfdt,
             v.Version.AnalysisResultId,
+            v.Version.SuggestionId,
             v.Version.OriginalText,
             v.Version.SuggestedText,
             v.Analysis != null ? v.Analysis.Status.ToString() : null));

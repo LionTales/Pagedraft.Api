@@ -253,10 +253,10 @@ public class AnalysisController : ControllerBase
         var scope = sceneId.HasValue ? AnalysisScope.Scene : AnalysisScope.Chapter;
         var targetId = sceneId ?? chapterId;
 
-        // For now the async job path is focused on long-running Proofread (chunked).
-        if (analysisType != AnalysisType.Proofread)
+        // Async job path is focused on long-running, chunked analyses (currently Proofread and LineEdit).
+        if (analysisType != AnalysisType.Proofread && analysisType != AnalysisType.LineEdit)
         {
-            return BadRequest(new { error = "Async analysis jobs are currently supported only for Proofread type." });
+            return BadRequest(new { error = "Async analysis jobs are currently supported only for Proofread and LineEdit types." });
         }
 
         // If the application is already stopping, don't enqueue new jobs that can never run.
@@ -276,7 +276,9 @@ public class AnalysisController : ControllerBase
             bookId,
             chapterId,
             sceneId,
-            "Queued proofread job…");
+            analysisType == AnalysisType.LineEdit
+                ? "Queued LineEdit job…"
+                : "Queued proofread job…");
 
         // Fire-and-forget background task that runs the actual analysis using a new DI scope.
         // Tie the inner work to the host's shutdown token, but always start the task so we can

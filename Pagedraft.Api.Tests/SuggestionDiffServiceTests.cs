@@ -166,5 +166,38 @@ public class SuggestionDiffServiceTests
         var starts = suggestions.Select(s => s.StartOffset).ToArray();
         Assert.True(starts[0] < starts[1] && starts[1] < starts[2]);
     }
+
+    [Fact]
+    public void ComputeLineEditSuggestions_PreservesCategory_ForConsistencyAndContinuity()
+    {
+        const string doc = "First sentence. Second sentence. Third sentence.";
+
+        var structured = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new()
+                {
+                    Original = "Second sentence.",
+                    Suggested = "Second sentence, improved.",
+                    Reason = "consistency",
+                    Category = "consistency"
+                },
+                new()
+                {
+                    Original = "Third sentence.",
+                    Suggested = "Third sentence, adjusted.",
+                    Reason = "continuity",
+                    Category = "continuity"
+                }
+            }
+        };
+
+        var suggestions = _sut.ComputeLineEditSuggestions(structured, doc);
+
+        Assert.Equal(2, suggestions.Count);
+        Assert.Contains(suggestions, s => s.Category == "consistency");
+        Assert.Contains(suggestions, s => s.Category == "continuity");
+    }
 }
 

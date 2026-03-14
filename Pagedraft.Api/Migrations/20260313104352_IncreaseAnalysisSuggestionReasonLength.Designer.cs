@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pagedraft.Api.Data;
 
@@ -11,9 +12,11 @@ using Pagedraft.Api.Data;
 namespace Pagedraft.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260313104352_IncreaseAnalysisSuggestionReasonLength")]
+    partial class IncreaseAnalysisSuggestionReasonLength
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -393,9 +396,6 @@ namespace Pagedraft.Api.Migrations
 
                     b.Property<string>("SuggestedText")
                         .HasColumnType("nvarchar(max)");
-
-                    b.Property<Guid?>("SuggestionId")
-                        .HasColumnType("uniqueidentifier");
 
                     b.HasKey("Id");
 

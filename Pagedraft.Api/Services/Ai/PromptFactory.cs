@@ -27,6 +27,12 @@ public class PromptFactory
     private const string EnglishBookSystem =
         "You are a literary expert who analyzes complete books. You can identify genres, characters, plot structure, and provide deep insights about literary works. Respond in a professional, concise style.";
 
+    private const string HebrewLineEditSystem =
+        "אתה עורך ספרותי מומחה. תפקידך לזהות הזדמנויות לשיפור סגנון, בהירות וזרימה בטקסט ספרותי, תוך שמירה על קול המחבר. השב בעברית בפורמט JSON בלבד.";
+
+    private const string EnglishLineEditSystem =
+        "You are an expert literary editor. Your role is to identify opportunities for improving style, clarity, and flow in literary text while preserving the author's voice. Always respond in JSON format only.";
+
     // ─── Pipeline prompts (legacy AiTaskType) ───────────────────────
 
     /// <summary>Returns (systemMessage, instruction) for the correction pipeline.</summary>
@@ -40,6 +46,13 @@ public class PromptFactory
             var instruction = isHebrew
                 ? "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. אם אין שגיאות, החזר את הטקסט כפי שהוא. החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים או תוספות. אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש."
                 : "Receive a text and return **only** the corrected version, with no explanations or additions. Do not change paragraph structure unless there is a clear error. Do not add new content.";
+            return (system, instruction);
+        }
+
+        if (taskType == AiTaskType.LineEdit)
+        {
+            var system = isHebrew ? HebrewLineEditSystem : EnglishLineEditSystem;
+            var instruction = isHebrew ? LineEditHe : LineEditEn;
             return (system, instruction);
         }
 
@@ -141,6 +154,50 @@ public class PromptFactory
         return sb.ToString();
     }
 
+    // ─── Per-chunk LineEdit prompt assembly ─────────────────────────
+
+    /// <summary>
+    /// Builds a complete per-chunk LineEdit instruction that injects style profile and
+    /// context (global or local overlap) before the base LineEdit prompt, with a
+    /// reinforcement that edits must target only [TEXT_TO_EDIT] content.
+    /// Used by RunLineEditChunkedAsync; the caller wraps chunk text with
+    /// [TEXT_TO_EDIT]...[/TEXT_TO_EDIT] markers in the InputText.
+    /// </summary>
+    public string BuildLineEditChunkPrompt(
+        string language,
+        AnalysisContext context,
+        string? localOverlapBefore,
+        string? localOverlapAfter,
+        bool isFirstChunk,
+        bool isLastChunk)
+    {
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var basePrompt = isHe ? LineEditHe : LineEditEn;
+
+        var sb = new StringBuilder();
+
+        if (context.StyleProfile is { } style)
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: true));
+
+        var precedingText = isFirstChunk ? context.PrecedingContext : localOverlapBefore;
+        if (!string.IsNullOrWhiteSpace(precedingText))
+            AppendSection(sb, "PRECEDING_CONTEXT", precedingText.Trim());
+
+        var followingText = isLastChunk ? context.FollowingContext : localOverlapAfter;
+        if (!string.IsNullOrWhiteSpace(followingText))
+            AppendSection(sb, "FOLLOWING_CONTEXT", followingText.Trim());
+
+        sb.Append(basePrompt);
+
+        sb.AppendLine();
+        sb.AppendLine();
+        sb.Append(isHe
+            ? "הטקסט לעריכה מסומן ב-[TEXT_TO_EDIT]...[/TEXT_TO_EDIT]. הצע שינויים רק לטקסט שבתוך הסימון. החזר אך ורק JSON — ללא גדרות markdown, ללא טקסט נוסף."
+            : "The text to edit is in [TEXT_TO_EDIT]...[/TEXT_TO_EDIT]. Only suggest edits for text inside those markers. Return ONLY JSON — no markdown fences, no extra text.");
+
+        return sb.ToString();
+    }
+
     // ─── Context preamble builder ───────────────────────────────────
 
     [Flags]
@@ -179,7 +236,7 @@ public class PromptFactory
         var sb = new StringBuilder();
 
         if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
-            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style));
+            AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: type == AnalysisType.LineEdit));
 
         if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
@@ -207,17 +264,51 @@ public class PromptFactory
         sb.Append("\n[/").Append(name).Append("]\n\n");
     }
 
-    private static string FormatStyleProfile(StyleProfileData s)
+    /// <param name="forSuggestions">When true, includes imperative instructions for LineEdit (flag as consistency, avoid suggesting, etc.). When false, descriptive only for Proofread and analysis types (Linguistic/Literary).</param>
+    private static string FormatStyleProfile(StyleProfileData s, bool forSuggestions = true)
     {
         var sb = new StringBuilder();
-        if (s.DominantTone != null)    sb.AppendLine($"Dominant tone: {s.DominantTone}");
-        if (s.Pov != null)             sb.AppendLine($"POV: {s.Pov}");
-        if (s.TensePattern != null)    sb.AppendLine($"Tense: {s.TensePattern}");
-        if (s.VocabularyLevel != null)  sb.AppendLine($"Vocabulary: {s.VocabularyLevel}");
-        if (s.DialogueStyle != null)   sb.AppendLine($"Dialogue style: {s.DialogueStyle}");
-        if (s.AverageSentenceLength.HasValue) sb.AppendLine($"Avg sentence length: {s.AverageSentenceLength:F1} words");
-        if (s.FormalityScore.HasValue) sb.AppendLine($"Formality: {s.FormalityScore:F2}");
-        if (s.RecurringMotifs.Count > 0) sb.AppendLine($"Motifs: {string.Join(", ", s.RecurringMotifs)}");
+
+        if (s.DominantTone != null)
+            sb.AppendLine(forSuggestions
+                ? $"The author's dominant tone is {s.DominantTone}. Flag passages where a different tone creeps in as 'consistency'."
+                : $"The author's dominant tone is {s.DominantTone}.");
+
+        if (s.Pov != null)
+            sb.AppendLine(forSuggestions
+                ? $"The narrative uses {s.Pov} POV. Flag unintentional POV shifts as 'consistency' issues."
+                : $"The narrative uses {s.Pov} POV.");
+
+        if (s.TensePattern != null)
+            sb.AppendLine(forSuggestions
+                ? $"The narrative tense is {s.TensePattern}. Flag unintentional tense shifts as 'consistency'."
+                : $"The narrative tense is {s.TensePattern}.");
+
+        if (s.VocabularyLevel != null)
+            sb.AppendLine(forSuggestions
+                ? $"Vocabulary level is {s.VocabularyLevel}. Avoid suggesting words outside this register."
+                : $"Vocabulary level is {s.VocabularyLevel}.");
+
+        if (s.DialogueStyle != null)
+            sb.AppendLine(forSuggestions
+                ? $"Dialogue style is {s.DialogueStyle}. Preserve it in any dialogue suggestions."
+                : $"Dialogue style is {s.DialogueStyle}.");
+
+        if (s.RecurringMotifs is { Count: > 0 })
+            sb.AppendLine(forSuggestions
+                ? $"Recurring motifs: {string.Join(", ", s.RecurringMotifs)}. Do not suggest removing these."
+                : $"Recurring motifs: {string.Join(", ", s.RecurringMotifs)}.");
+
+        if (s.AverageSentenceLength.HasValue)
+            sb.AppendLine(forSuggestions
+                ? $"Average sentence length is ~{s.AverageSentenceLength:F0} words. Keep suggestions near this rhythm."
+                : $"Average sentence length is ~{s.AverageSentenceLength:F0} words.");
+
+        if (s.FormalityScore.HasValue)
+            sb.AppendLine(forSuggestions
+                ? $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal). Match this level in suggestions."
+                : $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal).");
+
         return sb.ToString();
     }
 
@@ -392,54 +483,54 @@ public class PromptFactory
 
     private const string LineEditHe =
         """
-        אתה עורך ספרותי מקצועי. בצע עריכה ברמת המשפט של הטקסט הבא.
-        
-        עבור כל משפט או ביטוי שדורש שיפור, ספק:
-        - את הנוסח המקורי
-        - את הנוסח המוצע
-        - סיבת השינוי
-        - קטגוריה: "clarity" (בהירות), "flow" (זרימה), "word-choice" (בחירת מילים), "structure" (מבנה), "redundancy" (יתירות), "style" (סגנון)
-        
-        החזר את התוצאה בפורמט JSON:
+        בצע עריכה ברמת המשפט של הטקסט הבא. הצע שינויים רק כשיש שיפור ממשי.
+
+        כללים:
+        - אסור להחזיר הצעה שבה original ו-suggested זהים. אם המשפט תקין — דלג עליו.
+        - original ו-suggested: רק הקטע המינימלי סביב השינוי — המילים שהשתנו + 2–4 מילות הקשר מכל צד. לא את המשפט המלא.
+        - reason: משפט אחד תמציתי. ללא היסוסים כמו "אם נחשב..." או "אך הוא תקין".
+        - אל תשנה תוכן עלילתי, רק סגנון וניסוח. שמור על הקול הייחודי של המחבר.
+        - אם סופק STYLE_PROFILE — שמור על מאפייניו. סמן סטיות לא מכוונות כ-"consistency".
+        - אם סופקו PRECEDING_CONTEXT / FOLLOWING_CONTEXT — הם לקריאה בלבד. אל תציע עריכות להקשר.
+
+        קטגוריות:
+        "clarity" — מעורפל/דו-משמעי | "flow" — מעבר תקוע/קצב לא אחיד | "word-choice" — מילה לא מדויקת | "structure" — סדר מסורבל/משפט ארוך מדי | "redundancy" — חזרה מיותרת | "style" — שיפור אסתטי | "consistency" — סטייה מדפוסי המחבר | "continuity" — סתירה להקשר הנרטיבי
+
+        פורמט JSON:
         {
           "suggestions": [
-            {
-              "original": "המשפט המקורי",
-              "suggested": "המשפט המוצע",
-              "reason": "סיבת השינוי",
-              "category": "clarity"
-            }
+            {"original": "שלא הכיר שנהרס", "suggested": "שלא הכיר, שנהרס", "reason": "פסיק להפרדה בין פסוקיות", "category": "clarity"}
           ],
-          "overallFeedback": "סיכום כללי של הטקסט — חוזקות, נקודות לשיפור, ורושם כולל."
+          "overallFeedback": "סיכום קצר של חוזקות ונקודות לשיפור."
         }
-        
-        אל תשנה את תוכן העלילה, רק את הסגנון והניסוח. שמור על הקול הייחודי של המחבר.
+
+        אם אין הצעות, החזר: {"suggestions":[],"overallFeedback":""}
         """;
 
     private const string LineEditEn =
         """
-        You are a professional literary editor. Perform a sentence-level line edit of the following text.
-        
-        For each sentence or phrase that needs improvement, provide:
-        - The original text
-        - The suggested revision
-        - The reason for the change
-        - A category: "clarity", "flow", "word-choice", "structure", "redundancy", or "style"
-        
-        Return the result in JSON format:
+        Perform a sentence-level line edit of the following text. Only suggest changes where there is a real improvement.
+
+        Rules:
+        - NEVER return a suggestion where original and suggested are identical. If nothing needs changing, omit the suggestion entirely.
+        - original and suggested: only the MINIMAL span around the change — the changed words plus 2–4 words of context on each side. NOT the full sentence.
+        - reason: one concise sentence. No hedging like "could be improved but is also fine".
+        - Do not change plot content, only style and phrasing. Preserve the author's voice.
+        - If STYLE_PROFILE is provided — preserve its characteristics. Flag unintentional deviations as "consistency".
+        - If PRECEDING_CONTEXT / FOLLOWING_CONTEXT are provided — they are read-only. Do not suggest edits for context text.
+
+        Categories:
+        "clarity" — vague/ambiguous | "flow" — jarring transition/uneven rhythm | "word-choice" — imprecise word | "structure" — awkward order/overly long | "redundancy" — unnecessary repetition | "style" — aesthetic improvement | "consistency" — deviates from author's patterns | "continuity" — contradicts narrative context
+
+        Return JSON only:
         {
           "suggestions": [
-            {
-              "original": "the original sentence",
-              "suggested": "the improved sentence",
-              "reason": "why this change improves the text",
-              "category": "clarity"
-            }
+            {"original": "the uneven rhythm between", "suggested": "the jarring rhythm between", "reason": "stronger word for the intended disruption", "category": "word-choice"}
           ],
-          "overallFeedback": "Overall assessment of the text — strengths, areas for improvement, and general impression."
+          "overallFeedback": "Brief summary of strengths and areas for improvement."
         }
-        
-        Do not change plot content, only style and phrasing. Preserve the author's unique voice.
+
+        If no suggestions: {"suggestions":[],"overallFeedback":""}
         """;
 
     // ── Linguistic Analysis ─────────────────────────────────────────
