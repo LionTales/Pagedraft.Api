@@ -95,7 +95,9 @@ public class AnalysisController : ControllerBase
                 s.Category,
                 s.Explanation,
                 s.Outcome?.ToString(),
-                s.OrderIndex))
+                s.OrderIndex,
+                s.ContextBefore,
+                s.ContextAfter))
             .ToList();
 
         return new AnalysisResultDto(
@@ -384,7 +386,9 @@ public class AnalysisController : ControllerBase
                 s.Category,
                 s.Explanation,
                 s.Outcome == null ? (string?)null : s.Outcome.ToString(),
-                s.OrderIndex))
+                s.OrderIndex,
+                s.ContextBefore,
+                s.ContextAfter))
             .ToListAsync(ct);
 
         return Ok(items);

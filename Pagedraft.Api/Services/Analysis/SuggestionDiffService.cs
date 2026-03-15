@@ -113,11 +113,16 @@ public class SuggestionDiffService
             if (string.Equals(origWord, sugWord, StringComparison.Ordinal))
                 continue;
 
-            // Layer 3: reject pathological suggestions where large original maps to empty/tiny replacement
             var origLen = wEnd - wStart;
             var sugLen = rEnd - rStart;
+
+            // Reject pathological suggestions where large original maps to empty/tiny replacement
             if (origLen > 40 && sugLen <= 8) continue;
             if (origLen > 25 && sugLen == 0) continue;
+
+            // Reject suggestions where result mapping is disproportionately large
+            // (typically from diff misalignment caused by AI hallucination / repetition loops)
+            if (sugLen > origLen * 5 + 30) continue;
 
             suggestions.Add(new AnalysisSuggestion
             {
@@ -125,7 +130,9 @@ public class SuggestionDiffService
                 EndOffset = wEnd,
                 OriginalText = origWord,
                 SuggestedText = sugWord,
-                Reason = "Proofread"
+                Reason = "Proofread",
+                ContextBefore = normOrig[Math.Max(0, wStart - 50)..wStart],
+                ContextAfter = normOrig[wEnd..Math.Min(normOrig.Length, wEnd + 50)]
             });
         }
 
@@ -355,7 +362,9 @@ public class SuggestionDiffService
                 OriginalText = original,
                 SuggestedText = suggested,
                 Reason = reason,
-                Category = category
+                Category = category,
+                ContextBefore = normalizedDocument[Math.Max(0, startOffset - 50)..startOffset],
+                ContextAfter = normalizedDocument[endOffset..Math.Min(normalizedDocument.Length, endOffset + 50)]
             });
         }
 
