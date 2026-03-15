@@ -199,5 +199,98 @@ public class SuggestionDiffServiceTests
         Assert.Contains(suggestions, s => s.Category == "consistency");
         Assert.Contains(suggestions, s => s.Category == "continuity");
     }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_SuggestionAtStartOfText_ContextBeforeIsEmpty()
+    {
+        const string original = "First word here and more text.";
+        const string result = "Second word here and more text.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal("", suggestion.ContextBefore);
+        Assert.NotNull(suggestion.ContextAfter);
+        Assert.True(suggestion.ContextAfter!.Length > 0);
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_SuggestionAtEndOfText_ContextAfterIsEmpty()
+    {
+        // No character after the changed word so ContextAfter is empty
+        const string original = "Some text here and final";
+        const string result = "Some text here and last";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.NotNull(suggestion.ContextBefore);
+        Assert.True(suggestion.ContextBefore!.Length > 0);
+        Assert.Equal("", suggestion.ContextAfter);
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_MidDocumentSuggestion_BothContextsPopulatedMax50Chars()
+    {
+        // Long enough prefix/suffix so 50 chars exist on both sides of the changed word
+        var prefix = new string('x', 60);
+        var suffix = new string('y', 60);
+        var original = prefix + " wrong " + suffix;
+        var result = prefix + " right " + suffix;
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.NotNull(suggestion.ContextBefore);
+        Assert.NotNull(suggestion.ContextAfter);
+        Assert.True(suggestion.ContextBefore!.Length > 0);
+        Assert.True(suggestion.ContextAfter!.Length > 0);
+        Assert.True(suggestion.ContextBefore.Length <= 50, "ContextBefore should be at most 50 characters");
+        Assert.True(suggestion.ContextAfter.Length <= 50, "ContextAfter should be at most 50 characters");
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_HallucinatedRepetition_RejectsDisproportionateSuggestions()
+    {
+        const string original = "אחד שניים שלושה ארבע חמש שש שבע שמונה תשע עשר";
+        var repeated = string.Concat(Enumerable.Repeat("שלושה ארבע חמש שש שבע שמונה תשע עשר ", 20));
+        var result = "אחד שניים " + repeated;
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        foreach (var s in suggestions)
+        {
+            Assert.True(
+                s.SuggestedText.Length <= s.OriginalText.Length * 5 + 30,
+                $"Suggestion for '{s.OriginalText}' has disproportionate suggestedText length {s.SuggestedText.Length}");
+        }
+    }
+
+    [Fact]
+    public void ComputeLineEditSuggestions_MidDocument_CapturesContextBeforeAndAfter()
+    {
+        var prefix = new string('a', 55);
+        var suffix = new string('b', 55);
+        const string middle = "replace me";
+        var doc = prefix + " " + middle + " " + suffix;
+
+        var structured = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = middle, Suggested = "replaced", Reason = "style", Category = "style" }
+            }
+        };
+
+        var suggestions = _sut.ComputeLineEditSuggestions(structured, doc);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.NotNull(suggestion.ContextBefore);
+        Assert.NotNull(suggestion.ContextAfter);
+        Assert.True(suggestion.ContextBefore!.Length > 0);
+        Assert.True(suggestion.ContextAfter!.Length > 0);
+        Assert.True(suggestion.ContextBefore.Length <= 50, "ContextBefore should be at most 50 characters");
+        Assert.True(suggestion.ContextAfter.Length <= 50, "ContextAfter should be at most 50 characters");
+    }
 }
 

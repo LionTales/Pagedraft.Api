@@ -16,6 +16,8 @@ public class AnalysisSuggestion
     public SuggestionOutcome? Outcome { get; set; }
     public int OrderIndex { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public string? ContextBefore { get; set; }
+    public string? ContextAfter { get; set; }
 
     public AnalysisResult AnalysisResult { get; set; } = null!;
 }

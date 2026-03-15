@@ -43,7 +43,9 @@ public record AnalysisSuggestionDto(
     string? Category,
     string? Explanation,
     string? Outcome,
-    int OrderIndex);
+    int OrderIndex,
+    string? ContextBefore = null,
+    string? ContextAfter = null);
 
 /// <summary>Request body for PATCH suggestions/{id}/outcome.</summary>
 public record UpdateSuggestionOutcomeRequest(string Outcome);

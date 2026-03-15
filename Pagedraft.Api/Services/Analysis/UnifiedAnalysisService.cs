@@ -1043,11 +1043,24 @@ public class UnifiedAnalysisService
                 if (unrelated)
                 {
                     _logger.LogWarning(
-                        "Proofread chunk {Index} result may be unrelated (input prefix='{InputPrefix}', result prefix='{ResultPrefix}'). Keeping model output so suggestions are not lost.",
+                        "Proofread chunk {Index} result may be unrelated (input prefix='{InputPrefix}', result prefix='{ResultPrefix}'). Falling back to original text.",
                         index + 1,
                         TruncateForAudit(text, 150),
                         TruncateForAudit(clean, 150));
+                    clean = text;
                 }
+
+                if (clean.Length > text.Length * 1.3 + 200)
+                {
+                    _logger.LogWarning(
+                        "Proofread chunk {Index} result is {Ratio:P0} longer than input (input={InputLen}, result={ResultLen}). Likely AI repetition loop; falling back to original text.",
+                        index + 1,
+                        (double)clean.Length / text.Length - 1,
+                        text.Length,
+                        clean.Length);
+                    clean = text;
+                }
+
                 corrected[index] = clean;
                 _logger.LogDebug("Proofread chunk {Index}/{Total} finished (result length {Len})", chunkNumber, chunks.Count, clean.Length);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
