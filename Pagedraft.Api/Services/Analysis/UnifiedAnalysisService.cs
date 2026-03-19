@@ -68,7 +68,9 @@ public class UnifiedAnalysisService
         string inputText,
         string llmResultText,
         AnalysisResult result,
-        string? structuredJson)
+        string? structuredJson,
+        bool? proofreadUnrelatedOverride = null,
+        double? proofreadWordSimilarityOverride = null)
     {
         var outcome = "Succeeded";
         string? note = null;
@@ -76,7 +78,33 @@ public class UnifiedAnalysisService
 
         if (analysisType == AnalysisType.Proofread)
         {
-            var unrelated = IsProofreadResultUnrelated(inputText, llmResultText, out var similarity);
+            bool unrelated;
+            double similarity;
+
+            if (proofreadUnrelatedOverride.HasValue)
+            {
+                unrelated = proofreadUnrelatedOverride.Value;
+
+                if (proofreadWordSimilarityOverride.HasValue)
+                {
+                    similarity = proofreadWordSimilarityOverride.Value;
+                }
+                else if (unrelated)
+                {
+                    // Caller usually provides similarity together with the unrelated flag.
+                    // Fall back to computing it only when we still need it for logging.
+                    unrelated = IsProofreadResultUnrelated(inputText, llmResultText, out similarity);
+                }
+                else
+                {
+                    similarity = 0.0;
+                }
+            }
+            else
+            {
+                unrelated = IsProofreadResultUnrelated(inputText, llmResultText, out similarity);
+            }
+
             if (unrelated)
             {
                 outcome = "FallbackUnrelated";
@@ -123,7 +151,7 @@ public class UnifiedAnalysisService
         };
     }
 
-    private async Task PersistSingleChunkRunLogAsync(
+    private Task PersistSingleChunkRunLogAsync(
         Guid jobId,
         AnalysisResult result,
         Guid? bookId,
@@ -164,10 +192,10 @@ public class UnifiedAnalysisService
         };
 
         _db.AnalysisRunLogs.Add(runLog);
-        await _db.SaveChangesAsync(ct);
+        return Task.CompletedTask;
     }
 
-    private async Task PersistChunkedRunLogAsync(
+    private Task PersistChunkedRunLogAsync(
         Guid jobId,
         AnalysisResult result,
         Guid? bookId,
@@ -214,7 +242,7 @@ public class UnifiedAnalysisService
         };
 
         _db.AnalysisRunLogs.Add(runLog);
-        await _db.SaveChangesAsync(ct);
+        return Task.CompletedTask;
     }
 
     /// <summary>Run an analysis and persist the result.</summary>
@@ -339,17 +367,41 @@ public class UnifiedAnalysisService
         };
 
         var llmOutputText = cleanContent;
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: true);
+        bool? proofreadUnrelated = null;
+        double? proofreadWordSimilarity = null;
+        if (analysisType == AnalysisType.Proofread)
+        {
+            proofreadUnrelated = IsProofreadResultUnrelated(inputText, llmOutputText, out var similarity);
+            proofreadWordSimilarity = similarity;
+        }
+
+        AttachSuggestions(
+            result,
+            inputText,
+            analysisType,
+            structuredJson,
+            cleanContent,
+            isStreaming: false,
+            isRunWithInput: false,
+            applyProofreadHeuristics: true,
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
         _db.AnalysisResults.Add(result);
-        await _db.SaveChangesAsync(ct);
 
         // Persist an AnalysisRunLog for normal (non-chunked) proofread/line-edit too.
         // Chunked runs already persist per-chunk outcomes in RunProofreadChunkedAsync / RunLineEditChunkedAsync.
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = jobId ?? Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
+                analysisType,
+                inputText,
+                llmOutputText,
+                result,
+                structuredJson,
+                proofreadUnrelatedOverride: proofreadUnrelated,
+                proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
@@ -374,6 +426,8 @@ public class UnifiedAnalysisService
                 chunkOutcome: chunkOutcome,
                 ct: ct);
         }
+
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
@@ -439,15 +493,39 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
         var llmOutputText = cleanContent;
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: true, applyProofreadHeuristics: true);
+        bool? proofreadUnrelated = null;
+        double? proofreadWordSimilarity = null;
+        if (analysisType == AnalysisType.Proofread)
+        {
+            proofreadUnrelated = IsProofreadResultUnrelated(inputText, llmOutputText, out var similarity);
+            proofreadWordSimilarity = similarity;
+        }
+
+        AttachSuggestions(
+            result,
+            inputText,
+            analysisType,
+            structuredJson,
+            cleanContent,
+            isStreaming: false,
+            isRunWithInput: true,
+            applyProofreadHeuristics: true,
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
         _db.AnalysisResults.Add(result);
-        await _db.SaveChangesAsync(ct);
 
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
+                analysisType,
+                inputText,
+                llmOutputText,
+                result,
+                structuredJson,
+                proofreadUnrelatedOverride: proofreadUnrelated,
+                proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
@@ -472,6 +550,8 @@ public class UnifiedAnalysisService
                 chunkOutcome: chunkOutcome,
                 ct: ct);
         }
+
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
@@ -561,15 +641,39 @@ public class UnifiedAnalysisService
         };
 
         var llmOutputText = cleanContent;
-        AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: true, isRunWithInput: false, applyProofreadHeuristics: true);
+        bool? proofreadUnrelated = null;
+        double? proofreadWordSimilarity = null;
+        if (analysisType == AnalysisType.Proofread)
+        {
+            proofreadUnrelated = IsProofreadResultUnrelated(inputText, llmOutputText, out var similarity);
+            proofreadWordSimilarity = similarity;
+        }
+
+        AttachSuggestions(
+            result,
+            inputText,
+            analysisType,
+            structuredJson,
+            cleanContent,
+            isStreaming: true,
+            isRunWithInput: false,
+            applyProofreadHeuristics: true,
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
         _db.AnalysisResults.Add(result);
-        await _db.SaveChangesAsync(ct);
 
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
+                analysisType,
+                inputText,
+                llmOutputText,
+                result,
+                structuredJson,
+                proofreadUnrelatedOverride: proofreadUnrelated,
+                proofreadWordSimilarityOverride: proofreadWordSimilarity);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
@@ -594,6 +698,8 @@ public class UnifiedAnalysisService
                 chunkOutcome: chunkOutcome,
                 ct: ct);
         }
+
+        await _db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -1221,7 +1327,6 @@ public class UnifiedAnalysisService
         AttachSuggestions(result, inputText, AnalysisType.LineEdit, mergedJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
         _db.AnalysisResults.Add(result);
-        await _db.SaveChangesAsync(ct);
 
         await PersistChunkedRunLogAsync(
             jobId: jobId,
@@ -1239,6 +1344,8 @@ public class UnifiedAnalysisService
             durationMs: overallSw.ElapsedMilliseconds,
             noChangesHint: false,
             ct: ct);
+
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted (LineEdit chunked, {Scope})", result.Id, scope);
         return result;
@@ -1476,7 +1583,6 @@ public class UnifiedAnalysisService
         AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
         _db.AnalysisResults.Add(result);
-        await _db.SaveChangesAsync(ct);
 
         await PersistChunkedRunLogAsync(
             jobId: jobId,
@@ -1494,6 +1600,8 @@ public class UnifiedAnalysisService
             durationMs: overallSw.ElapsedMilliseconds,
             noChangesHint: result.ProofreadNoChangesHint,
             ct: ct);
+
+        await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted (Proofread chunked, {Scope})", result.Id, scope);
         return result;
@@ -2134,14 +2242,19 @@ public class UnifiedAnalysisService
         string cleanContent,
         bool isStreaming,
         bool isRunWithInput,
-        bool applyProofreadHeuristics)
+        bool applyProofreadHeuristics,
+        bool? proofreadUnrelatedOverride = null,
+        double? proofreadWordSimilarityOverride = null)
     {
         if (analysisType == AnalysisType.Proofread)
         {
             if (applyProofreadHeuristics)
             {
                 var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-                var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent, out _);
+                // Similarity is computed once by the caller for normal (non-chunked) proofread runs.
+                // AttachSuggestions only needs the boolean to decide whether to fall back to the original text.
+                var invalidResult = proofreadUnrelatedOverride ??
+                                     IsProofreadResultUnrelated(inputText, cleanContent, out _);
                 if (invalidResult)
                 {
                     var contextLabel = isStreaming
