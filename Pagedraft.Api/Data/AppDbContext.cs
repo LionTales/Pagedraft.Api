@@ -213,7 +213,9 @@ public class AppDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.AnalysisResultId)
                 .IsRequired(false)
-                .OnDelete(DeleteBehavior.Restrict);
+                // When a chapter is deleted, AnalysisResults are cascaded (Cascade from Chapter->AnalysisResult).
+                // The run-log FK must therefore be SET NULL so deletion of analyzed rows doesn't get blocked.
+                .OnDelete(DeleteBehavior.SetNull);
 
             e.HasOne(x => x.PromptTemplate)
                 .WithMany()
