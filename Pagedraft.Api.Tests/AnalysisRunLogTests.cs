@@ -103,6 +103,88 @@ public class AnalysisRunLogTests
     }
 
     [Fact]
+    public async Task RunAsync_Proofread_NearlyIdentical_Output_RecordedAsFallbackNoChanges_AndOutputCharCountReflectsLLMOutput()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var inputText = "שלום עולם. זהו טקסט לבדיקה.";
+        var llmOutput = inputText; // force ProofreadNoChangesHint=true
+
+        var routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AiResponse
+            {
+                Content = llmOutput,
+                Provider = "test-provider",
+                Model = "test-model"
+            });
+
+        var contextMock = new Mock<IAnalysisContextService>();
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        contextMock
+            .Setup(c => c.BuildContextAsync(
+                It.IsAny<AnalysisScope>(),
+                chapterId,
+                AnalysisType.Proofread,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AnalysisContext
+            {
+                TargetText = inputText,
+                Scope = AnalysisScope.Chapter,
+                AnalysisType = AnalysisType.Proofread,
+                BookId = bookId,
+                ChapterId = chapterId,
+                SceneId = null
+            });
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var result = await svc.RunAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            chapterId,
+            customPrompt: null,
+            language: "he",
+            jobId: null,
+            ct: CancellationToken.None);
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        Assert.True(runLog.NoChangesHint);
+        Assert.Equal(1, runLog.TotalChunks);
+        Assert.Equal(0, runLog.SucceededChunks);
+        Assert.Equal(1, runLog.FallbackChunks);
+        Assert.Equal("Proofread", runLog.AnalysisType);
+        Assert.Equal(llmOutput.Length, runLog.OutputCharCount);
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        var outcome = Assert.Single(outcomes!);
+        Assert.Equal(0, outcome.ChunkIndex);
+        Assert.Equal("FallbackNoChanges", outcome.Outcome);
+        Assert.Null(outcome.Note);
+        Assert.Null(outcome.WordSimilarity);
+    }
+
+    [Fact]
     public async Task RunAsync_Proofread_Chunked_EmptyResponse_PersistsSingleOutcomePerChunk()
     {
         var options = new DbContextOptionsBuilder<AppDbContext>()
@@ -509,6 +591,107 @@ public class AnalysisRunLogTests
 
         Assert.Equal(1, outcomes!.Count);
         Assert.Equal("Succeeded", outcomes[0].Outcome);
+    }
+
+    [Fact]
+    public async Task RunProofreadChunkedAsync_RepetitionLoopChunk_RecordedAsFallbackRepetition()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((AiRequest req, CancellationToken ct) =>
+            {
+                const string start = "[TEXT_TO_CORRECT]";
+                const string end = "[/TEXT_TO_CORRECT]";
+
+                var input = req.InputText ?? "";
+                var startIdx = input.IndexOf(start, StringComparison.Ordinal);
+                if (startIdx >= 0)
+                {
+                    startIdx += start.Length;
+                    var endIdx = input.IndexOf(end, startIdx, StringComparison.Ordinal);
+                    if (endIdx > startIdx)
+                        input = input.Substring(startIdx, endIdx - startIdx);
+                }
+
+                // Make the output significantly longer than the input chunk.
+                var repeated = $"{input} {input} {input}";
+
+                return new AiResponse
+                {
+                    Content = repeated,
+                    Provider = "test-provider",
+                    Model = "test-model"
+                };
+            });
+
+        var contextMock = new Mock<IAnalysisContextService>();
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var method = typeof(UnifiedAnalysisService).GetMethod(
+            "RunProofreadChunkedAsync",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+
+        Assert.NotNull(method);
+
+        var inputText = string.Join(" ", Enumerable.Repeat("שלום", 200));
+        var analysisContext = new AnalysisContext
+        {
+            TargetText = inputText,
+            Scope = AnalysisScope.Chapter,
+            AnalysisType = AnalysisType.Proofread,
+            BookId = null,
+            ChapterId = null,
+            SceneId = null,
+            Characters = null
+        };
+
+        var jobId = Guid.NewGuid();
+        var result = (AnalysisResult)await (Task<AnalysisResult>)method.Invoke(
+            svc,
+            new object?[]
+            {
+                inputText,
+                null, // bookId
+                null, // chapterId
+                null, // sceneId
+                AnalysisScope.Chapter,
+                Guid.NewGuid(), // targetId
+                null, // customPrompt
+                "he", // language
+                1000, // chunkTargetWords (should produce a single chunk)
+                1, // maxParallel
+                jobId,
+                analysisContext,
+                CancellationToken.None
+            })!;
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        var outcome = Assert.Single(outcomes!);
+        Assert.Equal("FallbackRepetition", outcome.Outcome);
+        Assert.True(outcome.OutputCharCount > outcome.InputCharCount);
     }
 
     [Fact]

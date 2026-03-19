@@ -85,7 +85,9 @@ public class UnifiedAnalysisService
             }
             else if (result.ProofreadNoChangesHint)
             {
-                outcome = "FallbackRepetition";
+                // "ProofreadNoChangesHint" means the output is nearly identical (echo/truncation),
+                // which is distinct from the chunked repetition-loop heuristic.
+                outcome = string.IsNullOrWhiteSpace(llmResultText) ? "FallbackEmpty" : "FallbackNoChanges";
             }
         }
         else
