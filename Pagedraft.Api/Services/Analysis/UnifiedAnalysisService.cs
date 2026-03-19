@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
@@ -810,8 +812,10 @@ public class UnifiedAnalysisService
             $"Queued {chunks.Count} LineEdit chunks");
         _progress.SetTotalChunks(jobId, chunks.Count, $"Queued {chunks.Count} LineEdit chunks");
 
+        var overallSw = Stopwatch.StartNew();
         var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
         var chunkResults = new LineEditResult[chunks.Count];
+        var chunkOutcomes = new ConcurrentBag<AnalysisChunkOutcome>();
 
         async Task ProcessChunk(int index)
         {
@@ -824,6 +828,7 @@ public class UnifiedAnalysisService
             }
 
             await semaphore.WaitAsync(ct);
+            var chunkSw = Stopwatch.StartNew();
             try
             {
                 var chunkNumber = index + 1;
@@ -860,12 +865,14 @@ public class UnifiedAnalysisService
 
                 var structuredJson = TryParseStructured(AnalysisType.LineEdit, clean);
 
+                string outcome;
                 if (structuredJson is null)
                 {
                     _logger.LogWarning(
                         "LineEdit chunk {Index}/{Total} produced no structured JSON. rawLen={RawLen}, cleanLen={CleanLen}, cleanPreview={Preview}",
                         chunkNumber, chunks.Count, raw.Length, clean.Length, TruncateForAudit(clean, 200));
                     chunkResults[index] = new LineEditResult();
+                    outcome = string.IsNullOrWhiteSpace(clean) ? "FallbackEmpty" : "FallbackError";
                 }
                 else
                 {
@@ -873,12 +880,24 @@ public class UnifiedAnalysisService
                     {
                         var parsed = JsonSerializer.Deserialize<LineEditResult>(structuredJson, JsonOpts);
                         chunkResults[index] = parsed ?? new LineEditResult();
+                        outcome = "Succeeded";
                     }
                     catch (JsonException)
                     {
                         chunkResults[index] = new LineEditResult();
+                        outcome = "FallbackError";
                     }
                 }
+
+                chunkOutcomes.Add(new AnalysisChunkOutcome
+                {
+                    ChunkIndex = index,
+                    InputCharCount = text.Length,
+                    InputWordCount = WordCount(text),
+                    OutputCharCount = clean.Length,
+                    DurationMs = chunkSw.ElapsedMilliseconds,
+                    Outcome = outcome
+                });
 
                 _logger.LogDebug("LineEdit chunk {Index}/{Total} finished", chunkNumber, chunks.Count);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
@@ -891,6 +910,16 @@ public class UnifiedAnalysisService
             {
                 var chunkNumber = index + 1;
                 _logger.LogWarning(ex, "LineEdit chunk {Index} failed; treating as empty result", chunkNumber);
+                chunkOutcomes.Add(new AnalysisChunkOutcome
+                {
+                    ChunkIndex = index,
+                    InputCharCount = text.Length,
+                    InputWordCount = WordCount(text),
+                    OutputCharCount = 0,
+                    DurationMs = chunkSw.ElapsedMilliseconds,
+                    Outcome = "FallbackError",
+                    Note = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message
+                });
                 chunkResults[index] = new LineEditResult();
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
@@ -902,6 +931,7 @@ public class UnifiedAnalysisService
 
         var tasks = Enumerable.Range(0, chunks.Count).Select(ProcessChunk).ToArray();
         await Task.WhenAll(tasks);
+        overallSw.Stop();
 
         var merged = MergeLineEditResults(chunkResults.ToList());
         var mergedJson = JsonSerializer.Serialize(merged, JsonOpts);
@@ -935,6 +965,34 @@ public class UnifiedAnalysisService
         AttachSuggestions(result, inputText, AnalysisType.LineEdit, mergedJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
         _db.AnalysisResults.Add(result);
+        await _db.SaveChangesAsync(ct);
+
+        var runLog = new AnalysisRunLog
+        {
+            JobId = jobId,
+            AnalysisResultId = result.Id,
+            PromptTemplateId = result.TemplateId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            SceneId = sceneId,
+            Scope = scope.ToString(),
+            AnalysisType = "LineEdit",
+            ModelName = result.ModelName,
+            Language = language,
+            TotalChunks = chunks.Count,
+            SucceededChunks = chunkOutcomes.Count(c => c.Outcome == "Succeeded"),
+            FallbackChunks = chunkOutcomes.Count(c => c.Outcome != "Succeeded"),
+            InputWordCount = WordCount(inputText),
+            InputCharCount = inputText.Length,
+            OutputCharCount = cleanContent.Length,
+            SuggestionCount = result.Suggestions.Count,
+            TotalDurationMs = overallSw.ElapsedMilliseconds,
+            NoChangesHint = false,
+            ChunkDetailsJson = JsonSerializer.Serialize(
+                chunkOutcomes.OrderBy(c => c.ChunkIndex).ToList(), JsonOpts),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        _db.AnalysisRunLogs.Add(runLog);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted (LineEdit chunked, {Scope})", result.Id, scope);
@@ -995,8 +1053,10 @@ public class UnifiedAnalysisService
             $"Queued {chunks.Count} proofread chunks");
         _progress.SetTotalChunks(jobId, chunks.Count, $"Queued {chunks.Count} proofread chunks");
 
+        var overallSw = Stopwatch.StartNew();
         var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
         var corrected = new string[chunks.Count];
+        var chunkOutcomes = new ConcurrentBag<AnalysisChunkOutcome>();
 
         async Task ProcessChunk(int index)
         {
@@ -1008,6 +1068,7 @@ public class UnifiedAnalysisService
                 return;
             }
             await semaphore.WaitAsync(ct);
+            var chunkSw = Stopwatch.StartNew();
             try
             {
                 var chunkNumber = index + 1;
@@ -1037,9 +1098,31 @@ public class UnifiedAnalysisService
                     clean = !string.IsNullOrWhiteSpace(afterThink) ? afterThink : raw.Trim();
                 }
                 if (string.IsNullOrWhiteSpace(clean))
+                {
+                    chunkOutcomes.Add(new AnalysisChunkOutcome
+                    {
+                        ChunkIndex = index,
+                        InputCharCount = text.Length,
+                        InputWordCount = WordCount(text),
+                        OutputCharCount = 0,
+                        DurationMs = chunkSw.ElapsedMilliseconds,
+                        Outcome = "FallbackEmpty"
+                    });
                     clean = text;
+                }
                 clean = StripTextToCorrectMarkers(clean);
-                var unrelated = IsProofreadResultUnrelated(text, clean);
+                var chunkOutcome = new AnalysisChunkOutcome
+                {
+                    ChunkIndex = index,
+                    InputCharCount = text.Length,
+                    InputWordCount = WordCount(text),
+                    OutputCharCount = clean.Length,
+                    DurationMs = chunkSw.ElapsedMilliseconds,
+                    Outcome = "Succeeded"
+                };
+
+                var unrelated = IsProofreadResultUnrelated(text, clean, out var similarity);
+                chunkOutcome.WordSimilarity = similarity;
                 if (unrelated)
                 {
                     _logger.LogWarning(
@@ -1047,10 +1130,11 @@ public class UnifiedAnalysisService
                         index + 1,
                         TruncateForAudit(text, 150),
                         TruncateForAudit(clean, 150));
+                    chunkOutcome.Outcome = "FallbackUnrelated";
+                    chunkOutcome.Note = $"similarity={similarity:F2}";
                     clean = text;
                 }
-
-                if (clean.Length > text.Length * 1.3 + 200)
+                else if (clean.Length > text.Length * 1.3 + 200)
                 {
                     _logger.LogWarning(
                         "Proofread chunk {Index} result is {Ratio:P0} longer than input (input={InputLen}, result={ResultLen}). Likely AI repetition loop; falling back to original text.",
@@ -1058,9 +1142,12 @@ public class UnifiedAnalysisService
                         (double)clean.Length / text.Length - 1,
                         text.Length,
                         clean.Length);
+                    chunkOutcome.Outcome = "FallbackRepetition";
+                    chunkOutcome.Note = $"{(double)clean.Length / text.Length - 1:P0} longer than input";
                     clean = text;
                 }
 
+                chunkOutcomes.Add(chunkOutcome);
                 corrected[index] = clean;
                 _logger.LogDebug("Proofread chunk {Index}/{Total} finished (result length {Len})", chunkNumber, chunks.Count, clean.Length);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
@@ -1073,6 +1160,16 @@ public class UnifiedAnalysisService
             {
                 var chunkNumber = index + 1;
                 _logger.LogWarning(ex, "Proofread chunk {Index} failed; using original text", chunkNumber);
+                chunkOutcomes.Add(new AnalysisChunkOutcome
+                {
+                    ChunkIndex = index,
+                    InputCharCount = text.Length,
+                    InputWordCount = WordCount(text),
+                    OutputCharCount = 0,
+                    DurationMs = chunkSw.ElapsedMilliseconds,
+                    Outcome = "FallbackError",
+                    Note = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message
+                });
                 corrected[index] = text;
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
@@ -1084,6 +1181,7 @@ public class UnifiedAnalysisService
 
         var tasks = Enumerable.Range(0, chunks.Count).Select(ProcessChunk).ToArray();
         await Task.WhenAll(tasks);
+        overallSw.Stop();
 
         var merged = new StringBuilder();
         for (var i = 0; i < chunks.Count; i++)
@@ -1126,6 +1224,34 @@ public class UnifiedAnalysisService
         AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
         _db.AnalysisResults.Add(result);
+        await _db.SaveChangesAsync(ct);
+
+        var runLog = new AnalysisRunLog
+        {
+            JobId = jobId,
+            AnalysisResultId = result.Id,
+            PromptTemplateId = result.TemplateId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            SceneId = sceneId,
+            Scope = scope.ToString(),
+            AnalysisType = "Proofread",
+            ModelName = result.ModelName,
+            Language = language,
+            TotalChunks = chunks.Count,
+            SucceededChunks = chunkOutcomes.Count(c => c.Outcome == "Succeeded"),
+            FallbackChunks = chunkOutcomes.Count(c => c.Outcome != "Succeeded"),
+            InputWordCount = WordCount(inputText),
+            InputCharCount = inputText.Length,
+            OutputCharCount = mergedResultText.Length,
+            SuggestionCount = result.Suggestions.Count,
+            TotalDurationMs = overallSw.ElapsedMilliseconds,
+            NoChangesHint = result.ProofreadNoChangesHint,
+            ChunkDetailsJson = JsonSerializer.Serialize(
+                chunkOutcomes.OrderBy(c => c.ChunkIndex).ToList(), JsonOpts),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+        _db.AnalysisRunLogs.Add(runLog);
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation("Analysis {Id} persisted (Proofread chunked, {Scope})", result.Id, scope);
@@ -1709,8 +1835,9 @@ public class UnifiedAnalysisService
     /// Any result whose prefix has low word-overlap similarity with the input is treated
     /// as unrelated, even if it does not contain explicit continuation marker phrases.
     /// </summary>
-    private static bool IsProofreadResultUnrelated(string input, string result)
+    private static bool IsProofreadResultUnrelated(string input, string result, out double wordSimilarity)
     {
+        wordSimilarity = 0.0;
         if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(result)) return false;
 
         var inputClean = SceneAutoSplitRules.StripLeadingBreakMarkers(input);
@@ -1723,8 +1850,8 @@ public class UnifiedAnalysisService
         var inputPrefix = inputStart.Length <= 120 ? inputStart : inputStart[..120];
         var resultPrefix = resultStart.Length <= 200 ? resultStart : resultStart[..200];
 
-        var similarity = WordOverlapSimilarity(inputPrefix, resultPrefix);
-        if (similarity >= 0.7)
+        wordSimilarity = WordOverlapSimilarity(inputPrefix, resultPrefix);
+        if (wordSimilarity >= 0.7)
             return false;
 
         var continuationMarkers = new[] { "הנה המשך לסיפור", "הנה המשך", "פרק 12", "**פרק 12", "Chapter 12" };
@@ -1734,9 +1861,6 @@ public class UnifiedAnalysisService
                 return true;
         }
 
-        // When similarity is below the threshold and no explicit continuation marker
-        // is present, treat the result as unrelated to avoid replacing user text with
-        // newly generated content.
         return true;
     }
 
@@ -1776,7 +1900,7 @@ public class UnifiedAnalysisService
             if (applyProofreadHeuristics)
             {
                 var noChanges = IsProofreadResultNearlyIdentical(inputText, cleanContent);
-                var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent);
+                var invalidResult = IsProofreadResultUnrelated(inputText, cleanContent, out _);
                 if (invalidResult)
                 {
                     var contextLabel = isStreaming

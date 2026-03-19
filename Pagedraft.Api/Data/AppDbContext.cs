@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
     public DbSet<AnalysisSuggestion> AnalysisSuggestions => Set<AnalysisSuggestion>();
     public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
+    public DbSet<AnalysisRunLog> AnalysisRunLogs => Set<AnalysisRunLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -197,6 +198,33 @@ public class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => x.AnalysisResultId);
         });
+
+        modelBuilder.Entity<AnalysisRunLog>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.ToTable("AnalysisRunLogs");
+            e.Property(x => x.Scope).HasMaxLength(20);
+            e.Property(x => x.AnalysisType).HasMaxLength(30);
+            e.Property(x => x.ModelName).HasMaxLength(200);
+            e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.ChunkDetailsJson).HasColumnType("nvarchar(max)");
+
+            e.HasOne(x => x.AnalysisResult)
+                .WithMany()
+                .HasForeignKey(x => x.AnalysisResultId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(x => x.PromptTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.PromptTemplateId)
+                .IsRequired(false)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasIndex(x => x.JobId);
+            e.HasIndex(x => x.AnalysisResultId);
+            e.HasIndex(x => x.PromptTemplateId);
+        });
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
@@ -247,6 +275,10 @@ public class AppDbContext : DbContext
             else if (entry.Entity is SuggestionOutcomeRecord so)
             {
                 if (entry.State == EntityState.Added) so.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is AnalysisRunLog rl)
+            {
+                if (entry.State == EntityState.Added) rl.CreatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);
