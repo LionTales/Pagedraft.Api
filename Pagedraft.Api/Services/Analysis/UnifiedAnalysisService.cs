@@ -428,8 +428,7 @@ public class UnifiedAnalysisService
             isStreaming: false,
             isRunWithInput: false,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated,
-            proofreadWordSimilarityOverride: proofreadWordSimilarity);
+            proofreadUnrelatedOverride: proofreadUnrelated);
 
         _db.AnalysisResults.Add(result);
 
@@ -538,8 +537,7 @@ public class UnifiedAnalysisService
             isStreaming: false,
             isRunWithInput: true,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated,
-            proofreadWordSimilarityOverride: proofreadWordSimilarity);
+            proofreadUnrelatedOverride: proofreadUnrelated);
 
         _db.AnalysisResults.Add(result);
 
@@ -682,8 +680,7 @@ public class UnifiedAnalysisService
             isStreaming: true,
             isRunWithInput: false,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated,
-            proofreadWordSimilarityOverride: proofreadWordSimilarity);
+            proofreadUnrelatedOverride: proofreadUnrelated);
 
         _db.AnalysisResults.Add(result);
 
@@ -2249,8 +2246,7 @@ public class UnifiedAnalysisService
         bool isStreaming,
         bool isRunWithInput,
         bool applyProofreadHeuristics,
-        bool? proofreadUnrelatedOverride = null,
-        double? proofreadWordSimilarityOverride = null)
+        bool? proofreadUnrelatedOverride = null)
     {
         if (analysisType == AnalysisType.Proofread)
         {
