@@ -1701,27 +1701,53 @@ public class UnifiedAnalysisService
         return (double)match / minLen >= 0.98;
     }
 
-    /// <summary>True when the proofread result looks like new/continuation content rather than a correction of the input (e.g. model wrote "Chapter 12" or "הנה המשך לסיפור").</summary>
+    /// <summary>
+    /// True when the proofread result looks like new/continuation content rather than
+    /// a correction of the input (e.g. model wrote "Chapter 12" or "הנה המשך לסיפור").
+    /// Uses word-overlap similarity after stripping scene/chapter break markers so that
+    /// legitimate proofreading corrections (punctuation, spelling) are not falsely rejected.
+    /// </summary>
     private static bool IsProofreadResultUnrelated(string input, string result)
     {
         if (string.IsNullOrEmpty(input) || string.IsNullOrEmpty(result)) return false;
-        var inputStart = Regex.Replace(input.TrimStart(), @"\s+", " ").Trim();
-        var resultStart = Regex.Replace(result.TrimStart(), @"\s+", " ").Trim();
+
+        var inputClean = SceneAutoSplitRules.StripLeadingBreakMarkers(input);
+        var resultClean = SceneAutoSplitRules.StripLeadingBreakMarkers(result);
+
+        var inputStart = Regex.Replace(inputClean.TrimStart(), @"\s+", " ").Trim();
+        var resultStart = Regex.Replace(resultClean.TrimStart(), @"\s+", " ").Trim();
         if (inputStart.Length < 30 || resultStart.Length < 30) return false;
-        // Result should start with something very similar to the input (allowing small corrections). Take first ~150 chars of each.
-        var inputPrefix = inputStart.Length <= 150 ? inputStart : inputStart.Substring(0, 150);
-        var resultPrefix = resultStart.Length <= 200 ? resultStart : resultStart.Substring(0, 200);
-        // If the first 50 chars of input don't appear in the first 100 chars of result, it's likely unrelated.
-        var inputFirst50 = inputPrefix.Length >= 50 ? inputPrefix.Substring(0, 50) : inputPrefix;
-        if (!resultPrefix.Contains(inputFirst50, StringComparison.Ordinal))
-        {
-            // Also treat known "continuation" phrases as invalid proofread output.
-            var continuationMarkers = new[] { "הנה המשך לסיפור", "הנה המשך", "פרק 12", "**פרק 12", "Chapter 12" };
-            foreach (var marker in continuationMarkers)
-                if (resultStart.Contains(marker, StringComparison.OrdinalIgnoreCase)) return true;
-            return true;
-        }
-        return false;
+
+        var continuationMarkers = new[] { "הנה המשך לסיפור", "הנה המשך", "פרק 12", "**פרק 12", "Chapter 12" };
+        foreach (var marker in continuationMarkers)
+            if (resultStart.Contains(marker, StringComparison.OrdinalIgnoreCase)) return true;
+
+        var inputPrefix = inputStart.Length <= 120 ? inputStart : inputStart[..120];
+        var resultPrefix = resultStart.Length <= 200 ? resultStart : resultStart[..200];
+
+        var similarity = WordOverlapSimilarity(inputPrefix, resultPrefix);
+        return similarity < 0.7;
+    }
+
+    private static readonly char[] WordSplitSeparators =
+        [' ', '\t', ',', '.', ';', ':', '!', '?', '"', '\'', '(', ')', '[', ']', '{', '}', '-', '\u2013', '\u2014', '\n', '\r'];
+
+    /// <summary>
+    /// Fraction of words from <paramref name="a"/> that also appear in <paramref name="b"/>.
+    /// Single-char words are ignored to avoid noise from punctuation remnants.
+    /// </summary>
+    private static double WordOverlapSimilarity(string a, string b)
+    {
+        var wordsA = a.Split(WordSplitSeparators, StringSplitOptions.RemoveEmptyEntries)
+            .Where(w => w.Length > 1).ToArray();
+        if (wordsA.Length == 0) return 1.0;
+
+        var wordsB = new HashSet<string>(
+            b.Split(WordSplitSeparators, StringSplitOptions.RemoveEmptyEntries)
+                .Where(w => w.Length > 1));
+
+        int matches = wordsA.Count(w => wordsB.Contains(w));
+        return (double)matches / wordsA.Length;
     }
 
     private void AttachSuggestions(
