@@ -1732,7 +1732,7 @@ public class UnifiedAnalysisService
                 return true;
         }
 
-        return true;
+        return false;
     }
 
     private static readonly char[] WordSplitSeparators =
