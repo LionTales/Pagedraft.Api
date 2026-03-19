@@ -116,4 +116,63 @@ public static class SceneAutoSplitRules
     }
 
     private record SceneBreakPattern(string Name, string Regex, bool IsMultiline);
+
+    // ── Reusable break-marker patterns (used by proofread validation) ──
+
+    /// <summary>
+    /// Matches a single line that is a scene or chapter break marker
+    /// (asterisks, dashes, tildes, hashes, Hebrew multiplication signs, symbol dividers).
+    /// </summary>
+    public static readonly Regex SceneBreakLineRegex = new(
+        @"^\s*(?:" +
+            @"\*{3,5}|" +                       // *** to *****
+            @"\*\s+\*\s+\*|" +                  // * * *
+            @"[-_]{3,}|" +                       // --- or ___
+            @"#\s*#\s*#|" +                      // ###
+            @"~{3,}|" +                          // ~~~
+            @"×\s*×\s*×|" +                      // ×××
+            @"[◆◇●○★☆■□♦♣♠♥♢♤♡]{1,5}" +        // symbol dividers
+        @")\s*$",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// Matches a single line that looks like a chapter heading
+    /// (numbered chapters in English/Hebrew, standalone numbers).
+    /// </summary>
+    public static readonly Regex ChapterHeadingLineRegex = new(
+        @"^\s*(?:" +
+            @"Chapter\s+\d+|" +                  // Chapter 1
+            @"פרק\s+[\u0590-\u05FF0-9]+|" +     // פרק א / פרק 1
+            @"\d+\.\s*[A-Za-z\u0590-\u05FF]+" +  // 1. Title
+        @")\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Strips leading lines that are scene/chapter break markers or blank,
+    /// returning the text starting from the first real content line.
+    /// </summary>
+    public static string StripLeadingBreakMarkers(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        var span = text.AsSpan();
+        while (span.Length > 0)
+        {
+            var newlineIdx = span.IndexOf('\n');
+            var line = newlineIdx >= 0 ? span[..newlineIdx] : span;
+            var trimmed = line.Trim();
+
+            var lineString = trimmed.ToString();
+
+            if (trimmed.IsEmpty ||
+                SceneBreakLineRegex.IsMatch(lineString) ||
+                ChapterHeadingLineRegex.IsMatch(lineString))
+            {
+                span = newlineIdx >= 0 ? span[(newlineIdx + 1)..] : ReadOnlySpan<char>.Empty;
+                continue;
+            }
+            break;
+        }
+        return span.ToString();
+    }
 }
