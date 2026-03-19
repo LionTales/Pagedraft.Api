@@ -125,7 +125,7 @@ public static class SceneAutoSplitRules
     /// </summary>
     public static readonly Regex SceneBreakLineRegex = new(
         @"^\s*(?:" +
-            @"\*{1,5}|" +                       // * to *****
+            @"\*{3,5}|" +                       // *** to *****
             @"\*\s+\*\s+\*|" +                  // * * *
             @"[-_]{3,}|" +                       // --- or ___
             @"#\s*#\s*#|" +                      // ###
@@ -162,7 +162,11 @@ public static class SceneAutoSplitRules
             var line = newlineIdx >= 0 ? span[..newlineIdx] : span;
             var trimmed = line.Trim();
 
-            if (trimmed.IsEmpty || SceneBreakLineRegex.IsMatch(trimmed.ToString()))
+            var lineString = trimmed.ToString();
+
+            if (trimmed.IsEmpty ||
+                SceneBreakLineRegex.IsMatch(lineString) ||
+                ChapterHeadingLineRegex.IsMatch(lineString))
             {
                 span = newlineIdx >= 0 ? span[(newlineIdx + 1)..] : ReadOnlySpan<char>.Empty;
                 continue;

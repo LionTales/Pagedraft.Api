@@ -1718,15 +1718,21 @@ public class UnifiedAnalysisService
         var resultStart = Regex.Replace(resultClean.TrimStart(), @"\s+", " ").Trim();
         if (inputStart.Length < 30 || resultStart.Length < 30) return false;
 
-        var continuationMarkers = new[] { "הנה המשך לסיפור", "הנה המשך", "פרק 12", "**פרק 12", "Chapter 12" };
-        foreach (var marker in continuationMarkers)
-            if (resultStart.Contains(marker, StringComparison.OrdinalIgnoreCase)) return true;
-
         var inputPrefix = inputStart.Length <= 120 ? inputStart : inputStart[..120];
         var resultPrefix = resultStart.Length <= 200 ? resultStart : resultStart[..200];
 
         var similarity = WordOverlapSimilarity(inputPrefix, resultPrefix);
-        return similarity < 0.7;
+        if (similarity >= 0.7)
+            return false;
+
+        var continuationMarkers = new[] { "הנה המשך לסיפור", "הנה המשך", "פרק 12", "**פרק 12", "Chapter 12" };
+        foreach (var marker in continuationMarkers)
+        {
+            if (resultStart.Contains(marker, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return true;
     }
 
     private static readonly char[] WordSplitSeparators =
