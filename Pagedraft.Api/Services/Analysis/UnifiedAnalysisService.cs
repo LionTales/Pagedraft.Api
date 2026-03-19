@@ -1706,6 +1706,8 @@ public class UnifiedAnalysisService
     /// a correction of the input (e.g. model wrote "Chapter 12" or "הנה המשך לסיפור").
     /// Uses word-overlap similarity after stripping scene/chapter break markers so that
     /// legitimate proofreading corrections (punctuation, spelling) are not falsely rejected.
+    /// Any result whose prefix has low word-overlap similarity with the input is treated
+    /// as unrelated, even if it does not contain explicit continuation marker phrases.
     /// </summary>
     private static bool IsProofreadResultUnrelated(string input, string result)
     {
@@ -1732,7 +1734,10 @@ public class UnifiedAnalysisService
                 return true;
         }
 
-        return false;
+        // When similarity is below the threshold and no explicit continuation marker
+        // is present, treat the result as unrelated to avoid replacing user text with
+        // newly generated content.
+        return true;
     }
 
     private static readonly char[] WordSplitSeparators =
