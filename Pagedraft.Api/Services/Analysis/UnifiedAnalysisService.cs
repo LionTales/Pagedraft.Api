@@ -151,7 +151,7 @@ public class UnifiedAnalysisService
         };
     }
 
-    private Task PersistSingleChunkRunLogAsync(
+    private void PersistSingleChunkRunLog(
         Guid jobId,
         AnalysisResult result,
         Guid? bookId,
@@ -162,8 +162,7 @@ public class UnifiedAnalysisService
         string language,
         long durationMs,
         string outcome,
-        AnalysisChunkOutcome chunkOutcome,
-        CancellationToken ct)
+        AnalysisChunkOutcome chunkOutcome)
     {
         var runLog = new AnalysisRunLog
         {
@@ -192,10 +191,9 @@ public class UnifiedAnalysisService
         };
 
         _db.AnalysisRunLogs.Add(runLog);
-        return Task.CompletedTask;
     }
 
-    private Task PersistChunkedRunLogAsync(
+    private void PersistChunkedRunLog(
         Guid jobId,
         AnalysisResult result,
         Guid? bookId,
@@ -209,8 +207,7 @@ public class UnifiedAnalysisService
         string inputText,
         string outputText,
         long durationMs,
-        bool noChangesHint,
-        CancellationToken ct)
+        bool noChangesHint)
     {
         var outcomesList = chunkOutcomes
             .OrderBy(c => c.ChunkIndex)
@@ -242,7 +239,54 @@ public class UnifiedAnalysisService
         };
 
         _db.AnalysisRunLogs.Add(runLog);
-        return Task.CompletedTask;
+    }
+
+    private void PersistSingleRunLog(
+        Guid jobId,
+        AnalysisResult result,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        AnalysisType analysisType,
+        string language,
+        string inputText,
+        string llmOutputText,
+        string? structuredJson,
+        long durationMs,
+        bool? proofreadUnrelated,
+        double? proofreadWordSimilarity)
+    {
+        var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
+            analysisType,
+            inputText,
+            llmOutputText,
+            result,
+            structuredJson,
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            proofreadWordSimilarityOverride: proofreadWordSimilarity);
+
+        var chunkOutcome = CreateChunkOutcome(
+            chunkIndex: 0,
+            inputText: inputText,
+            outputText: llmOutputText,
+            durationMs: durationMs,
+            outcome: outcome,
+            wordSimilarity: wordSimilarity,
+            note: note);
+
+        PersistSingleChunkRunLog(
+            jobId: jobId,
+            result: result,
+            bookId: bookId,
+            chapterId: chapterId,
+            sceneId: sceneId,
+            scope: scope,
+            analysisType: analysisType,
+            language: language,
+            durationMs: durationMs,
+            outcome: outcome,
+            chunkOutcome: chunkOutcome);
     }
 
     /// <summary>Run an analysis and persist the result.</summary>
@@ -394,25 +438,7 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = jobId ?? Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
-                analysisType,
-                inputText,
-                llmOutputText,
-                result,
-                structuredJson,
-                proofreadUnrelatedOverride: proofreadUnrelated,
-                proofreadWordSimilarityOverride: proofreadWordSimilarity);
-
-            var chunkOutcome = CreateChunkOutcome(
-                chunkIndex: 0,
-                inputText: inputText,
-                outputText: llmOutputText,
-                durationMs: llmSw.ElapsedMilliseconds,
-                outcome: outcome,
-                wordSimilarity: wordSimilarity,
-                note: note);
-
-            await PersistSingleChunkRunLogAsync(
+            PersistSingleRunLog(
                 jobId: effectiveJobId,
                 result: result,
                 bookId: bookId,
@@ -421,10 +447,12 @@ public class UnifiedAnalysisService
                 scope: scope,
                 analysisType: analysisType,
                 language: language,
+                inputText: inputText,
+                llmOutputText: llmOutputText,
+                structuredJson: structuredJson,
                 durationMs: llmSw.ElapsedMilliseconds,
-                outcome: outcome,
-                chunkOutcome: chunkOutcome,
-                ct: ct);
+                proofreadUnrelated: proofreadUnrelated,
+                proofreadWordSimilarity: proofreadWordSimilarity);
         }
 
         await _db.SaveChangesAsync(ct);
@@ -518,25 +546,7 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
-                analysisType,
-                inputText,
-                llmOutputText,
-                result,
-                structuredJson,
-                proofreadUnrelatedOverride: proofreadUnrelated,
-                proofreadWordSimilarityOverride: proofreadWordSimilarity);
-
-            var chunkOutcome = CreateChunkOutcome(
-                chunkIndex: 0,
-                inputText: inputText,
-                outputText: llmOutputText,
-                durationMs: llmSw.ElapsedMilliseconds,
-                outcome: outcome,
-                wordSimilarity: wordSimilarity,
-                note: note);
-
-            await PersistSingleChunkRunLogAsync(
+            PersistSingleRunLog(
                 jobId: effectiveJobId,
                 result: result,
                 bookId: bookId,
@@ -545,10 +555,12 @@ public class UnifiedAnalysisService
                 scope: scope,
                 analysisType: analysisType,
                 language: language,
+                inputText: inputText,
+                llmOutputText: llmOutputText,
+                structuredJson: structuredJson,
                 durationMs: llmSw.ElapsedMilliseconds,
-                outcome: outcome,
-                chunkOutcome: chunkOutcome,
-                ct: ct);
+                proofreadUnrelated: proofreadUnrelated,
+                proofreadWordSimilarity: proofreadWordSimilarity);
         }
 
         await _db.SaveChangesAsync(ct);
@@ -666,25 +678,7 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(
-                analysisType,
-                inputText,
-                llmOutputText,
-                result,
-                structuredJson,
-                proofreadUnrelatedOverride: proofreadUnrelated,
-                proofreadWordSimilarityOverride: proofreadWordSimilarity);
-
-            var chunkOutcome = CreateChunkOutcome(
-                chunkIndex: 0,
-                inputText: inputText,
-                outputText: llmOutputText,
-                durationMs: streamSw.ElapsedMilliseconds,
-                outcome: outcome,
-                wordSimilarity: wordSimilarity,
-                note: note);
-
-            await PersistSingleChunkRunLogAsync(
+            PersistSingleRunLog(
                 jobId: effectiveJobId,
                 result: result,
                 bookId: bookId,
@@ -693,10 +687,12 @@ public class UnifiedAnalysisService
                 scope: scope,
                 analysisType: analysisType,
                 language: language,
+                inputText: inputText,
+                llmOutputText: llmOutputText,
+                structuredJson: structuredJson,
                 durationMs: streamSw.ElapsedMilliseconds,
-                outcome: outcome,
-                chunkOutcome: chunkOutcome,
-                ct: ct);
+                proofreadUnrelated: proofreadUnrelated,
+                proofreadWordSimilarity: proofreadWordSimilarity);
         }
 
         await _db.SaveChangesAsync(ct);
@@ -1328,7 +1324,7 @@ public class UnifiedAnalysisService
 
         _db.AnalysisResults.Add(result);
 
-        await PersistChunkedRunLogAsync(
+        PersistChunkedRunLog(
             jobId: jobId,
             result: result,
             bookId: bookId,
@@ -1342,8 +1338,7 @@ public class UnifiedAnalysisService
             inputText: inputText,
             outputText: cleanContent,
             durationMs: overallSw.ElapsedMilliseconds,
-            noChangesHint: false,
-            ct: ct);
+            noChangesHint: false);
 
         await _db.SaveChangesAsync(ct);
 
@@ -1584,7 +1579,7 @@ public class UnifiedAnalysisService
 
         _db.AnalysisResults.Add(result);
 
-        await PersistChunkedRunLogAsync(
+        PersistChunkedRunLog(
             jobId: jobId,
             result: result,
             bookId: bookId,
@@ -1598,8 +1593,7 @@ public class UnifiedAnalysisService
             inputText: inputText,
             outputText: mergedResultText,
             durationMs: overallSw.ElapsedMilliseconds,
-            noChangesHint: result.ProofreadNoChangesHint,
-            ct: ct);
+            noChangesHint: result.ProofreadNoChangesHint);
 
         await _db.SaveChangesAsync(ct);
 
