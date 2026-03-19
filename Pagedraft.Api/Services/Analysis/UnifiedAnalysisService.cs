@@ -66,6 +66,7 @@ public class UnifiedAnalysisService
     private static (string Outcome, string? Note, double? WordSimilarity) ResolveSingleRunOutcome(
         AnalysisType analysisType,
         string inputText,
+        string llmResultText,
         AnalysisResult result,
         string? structuredJson)
     {
@@ -75,7 +76,7 @@ public class UnifiedAnalysisService
 
         if (analysisType == AnalysisType.Proofread)
         {
-            var unrelated = IsProofreadResultUnrelated(inputText, result.ResultText, out var similarity);
+            var unrelated = IsProofreadResultUnrelated(inputText, llmResultText, out var similarity);
             if (unrelated)
             {
                 outcome = "FallbackUnrelated";
@@ -92,7 +93,7 @@ public class UnifiedAnalysisService
             // For normal LineEdit, StructuredResult existence is our best proxy
             // for whether the model produced valid JSON (chunked uses the same heuristic).
             if (structuredJson is null)
-                outcome = string.IsNullOrWhiteSpace(result.ResultText) ? "FallbackEmpty" : "FallbackError";
+                outcome = string.IsNullOrWhiteSpace(llmResultText) ? "FallbackEmpty" : "FallbackError";
         }
 
         return (outcome, note, wordSimilarity);
@@ -335,6 +336,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
+        var llmOutputText = cleanContent;
         AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
@@ -345,12 +347,12 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = jobId ?? Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
                 inputText: inputText,
-                outputText: result.ResultText,
+                outputText: llmOutputText,
                 durationMs: llmSw.ElapsedMilliseconds,
                 outcome: outcome,
                 wordSimilarity: wordSimilarity,
@@ -434,6 +436,7 @@ public class UnifiedAnalysisService
             ModelName = $"{response.Provider}:{response.Model}",
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
+        var llmOutputText = cleanContent;
         AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: false, isRunWithInput: true, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
@@ -442,12 +445,12 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
                 inputText: inputText,
-                outputText: result.ResultText,
+                outputText: llmOutputText,
                 durationMs: llmSw.ElapsedMilliseconds,
                 outcome: outcome,
                 wordSimilarity: wordSimilarity,
@@ -555,6 +558,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
+        var llmOutputText = cleanContent;
         AttachSuggestions(result, inputText, analysisType, structuredJson, cleanContent, isStreaming: true, isRunWithInput: false, applyProofreadHeuristics: true);
 
         _db.AnalysisResults.Add(result);
@@ -563,12 +567,12 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
         {
             var effectiveJobId = Guid.NewGuid();
-            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, llmOutputText, result, structuredJson);
 
             var chunkOutcome = CreateChunkOutcome(
                 chunkIndex: 0,
                 inputText: inputText,
-                outputText: result.ResultText,
+                outputText: llmOutputText,
                 durationMs: streamSw.ElapsedMilliseconds,
                 outcome: outcome,
                 wordSimilarity: wordSimilarity,
@@ -1070,6 +1074,16 @@ public class UnifiedAnalysisService
             if (string.IsNullOrWhiteSpace(text))
             {
                 chunkResults[index] = new LineEditResult();
+                chunkOutcomes.Add(CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: text ?? "",
+                    outputText: text ?? "",
+                    durationMs: 0,
+                    outcome: "Succeeded"));
+
+                var chunkNumber = index + 1;
+                _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+                _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
                 return;
             }
 
@@ -1293,7 +1307,18 @@ public class UnifiedAnalysisService
             var text = chunk.Text;
             if (string.IsNullOrWhiteSpace(text))
             {
-                corrected[index] = text ?? "";
+                var emptyOrWhitespace = text ?? "";
+                corrected[index] = emptyOrWhitespace;
+                chunkOutcomes.Add(CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: emptyOrWhitespace,
+                    outputText: emptyOrWhitespace,
+                    durationMs: 0,
+                    outcome: "Succeeded"));
+
+                var chunkNumber = index + 1;
+                _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+                _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
                 return;
             }
             await semaphore.WaitAsync(ct);

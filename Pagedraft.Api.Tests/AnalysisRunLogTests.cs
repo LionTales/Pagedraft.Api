@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -280,6 +281,311 @@ public class AnalysisRunLogTests
         Assert.Equal("Succeeded", outcome.Outcome);
 
         Assert.Equal(result.Suggestions.Count, runLog.SuggestionCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_Proofread_Unrelated_Output_RecordedAsFallbackUnrelated_AndOutputCharCountReflectsLLMOutput()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var inputText =
+            "זהו טקסט לבדיקה שמטרתו למצוא שגיאות ולהציע תיקונים באיכות גבוהה ומקיפה לאותיות ודקדוק " +
+            "במהלך הקריאה כדי לוודא שהמודל אכן מתקן.";
+
+        // Include "Chapter 12" so IsProofreadResultUnrelated can detect continuation marker.
+        var llmOutput =
+            "Chapter 12: The story continues with completely different content and new characters, far away from the original text.";
+
+        var routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AiResponse
+            {
+                Content = llmOutput,
+                Provider = "test-provider",
+                Model = "test-model"
+            });
+
+        var contextMock = new Mock<IAnalysisContextService>();
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        contextMock
+            .Setup(c => c.BuildContextAsync(
+                It.IsAny<AnalysisScope>(),
+                chapterId,
+                AnalysisType.Proofread,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AnalysisContext
+            {
+                TargetText = inputText,
+                Scope = AnalysisScope.Chapter,
+                AnalysisType = AnalysisType.Proofread,
+                BookId = bookId,
+                ChapterId = chapterId,
+                SceneId = null
+            });
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var result = await svc.RunAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            chapterId,
+            customPrompt: null,
+            language: "he",
+            jobId: null,
+            ct: CancellationToken.None);
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        Assert.True(runLog.NoChangesHint); // AttachSuggestions treated it as "no changes"
+        Assert.Equal(1, runLog.TotalChunks);
+        Assert.Equal(0, runLog.SucceededChunks);
+        Assert.Equal(1, runLog.FallbackChunks);
+        Assert.Equal(llmOutput.Length, runLog.OutputCharCount); // should reflect real LLM output length
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        var outcome = Assert.Single(outcomes!);
+        Assert.Equal("FallbackUnrelated", outcome.Outcome);
+        Assert.NotNull(outcome.Note);
+        Assert.StartsWith("similarity=", outcome.Note);
+        Assert.NotNull(outcome.WordSimilarity);
+    }
+
+    [Fact]
+    public async Task RunWithInputAsync_Proofread_Unrelated_Output_RecordedAsFallbackUnrelated_AndOutputCharCountReflectsLLMOutput()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var inputText =
+            "זהו טקסט לבדיקה שמטרתו למצוא שגיאות ולהציע תיקונים באיכות גבוהה ומקיפה לאותיות ודקדוק " +
+            "במהלך הקריאה כדי לוודא שהמודל אכן מתקן.";
+
+        var llmOutput =
+            "Chapter 12: The story continues with completely different content and new characters, far away from the original text.";
+
+        var routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AiResponse
+            {
+                Content = llmOutput,
+                Provider = "test-provider",
+                Model = "test-model"
+            });
+
+        var contextMock = new Mock<IAnalysisContextService>();
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var result = await svc.RunWithInputAsync(
+            AnalysisScope.Book,
+            AnalysisType.Proofread,
+            bookId: Guid.NewGuid(),
+            chapterId: null,
+            sceneId: null,
+            inputText,
+            language: "he",
+            ct: CancellationToken.None);
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        Assert.True(runLog.NoChangesHint);
+        Assert.Equal(1, runLog.TotalChunks);
+        Assert.Equal(0, runLog.SucceededChunks);
+        Assert.Equal(1, runLog.FallbackChunks);
+        Assert.Equal(llmOutput.Length, runLog.OutputCharCount);
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        var outcome = Assert.Single(outcomes!);
+        Assert.Equal("FallbackUnrelated", outcome.Outcome);
+    }
+
+    [Fact]
+    public async Task RunProofreadChunkedAsync_WhitespaceOnlyChunk_PersistsOutcomePerChunk()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var routerMock = new Mock<IAiRouter>(MockBehavior.Loose);
+        var contextMock = new Mock<IAnalysisContextService>();
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var method = typeof(UnifiedAnalysisService).GetMethod(
+            "RunProofreadChunkedAsync",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+
+        Assert.NotNull(method);
+
+        var inputText = "   ";
+        var analysisContext = new AnalysisContext
+        {
+            TargetText = inputText,
+            Scope = AnalysisScope.Chapter,
+            AnalysisType = AnalysisType.Proofread,
+            BookId = null,
+            ChapterId = null,
+            SceneId = null,
+            Characters = null
+        };
+
+        var jobId = Guid.NewGuid();
+        var result = (AnalysisResult)await (Task<AnalysisResult>)method.Invoke(
+            svc,
+            new object?[]
+            {
+                inputText,
+                null, // bookId
+                null, // chapterId
+                null, // sceneId
+                AnalysisScope.Chapter,
+                Guid.NewGuid(), // targetId
+                null, // customPrompt
+                "he", // language
+                5, // chunkTargetWords
+                1, // maxParallel
+                jobId,
+                analysisContext,
+                CancellationToken.None
+            })!;
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        Assert.Equal(1, runLog.TotalChunks);
+        Assert.Equal(1, runLog.SucceededChunks);
+        Assert.Equal(0, runLog.FallbackChunks);
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.Equal(1, outcomes!.Count);
+        Assert.Equal("Succeeded", outcomes[0].Outcome);
+    }
+
+    [Fact]
+    public async Task RunLineEditChunkedAsync_WhitespaceOnlyChunk_PersistsOutcomePerChunk()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new AppDbContext(options);
+
+        var routerMock = new Mock<IAiRouter>(MockBehavior.Loose);
+        var contextMock = new Mock<IAnalysisContextService>();
+
+        var svc = new UnifiedAnalysisService(
+            db,
+            routerMock.Object,
+            new PromptFactory(),
+            new SfdtConversionService(),
+            Options.Create(new AiOptions()),
+            NullLogger<UnifiedAnalysisService>.Instance,
+            new AnalysisProgressTracker(),
+            contextMock.Object,
+            new SuggestionDiffService());
+
+        var method = typeof(UnifiedAnalysisService).GetMethod(
+            "RunLineEditChunkedAsync",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+
+        Assert.NotNull(method);
+
+        var inputText = "   ";
+        var analysisContext = new AnalysisContext
+        {
+            TargetText = inputText,
+            Scope = AnalysisScope.Chapter,
+            AnalysisType = AnalysisType.LineEdit,
+            BookId = null,
+            ChapterId = null,
+            SceneId = null,
+            Characters = null,
+            StyleProfile = null
+        };
+
+        var jobId = Guid.NewGuid();
+        var result = (AnalysisResult)await (Task<AnalysisResult>)method.Invoke(
+            svc,
+            new object?[]
+            {
+                inputText,
+                null, // bookId
+                null, // chapterId
+                null, // sceneId
+                AnalysisScope.Chapter,
+                Guid.NewGuid(), // targetId
+                null, // customPrompt
+                "he", // language
+                5, // chunkTargetWords
+                1, // maxParallel
+                jobId,
+                analysisContext,
+                CancellationToken.None
+            })!;
+
+        var runLog = await db.AnalysisRunLogs
+            .SingleAsync(r => r.AnalysisResultId == result.Id);
+
+        Assert.Equal(1, runLog.TotalChunks);
+        Assert.Equal(1, runLog.SucceededChunks);
+        Assert.Equal(0, runLog.FallbackChunks);
+
+        var outcomes = JsonSerializer.Deserialize<List<AnalysisChunkOutcome>>(
+            runLog.ChunkDetailsJson!,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        Assert.Equal(1, outcomes!.Count);
+        Assert.Equal("Succeeded", outcomes[0].Outcome);
     }
 }
 
