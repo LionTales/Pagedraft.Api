@@ -93,7 +93,7 @@ public class UnifiedAnalysisService
                 {
                     // Caller usually provides similarity together with the unrelated flag.
                     // Fall back to computing it only when we still need it for logging.
-                    unrelated = IsProofreadResultUnrelated(inputText, llmResultText, out similarity);
+                    _ = IsProofreadResultUnrelated(inputText, llmResultText, out similarity);
                 }
                 else
                 {
