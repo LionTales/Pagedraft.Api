@@ -565,6 +565,84 @@ public class TextNormalizationAndContextTests
         Assert.Equal("first-person", context.StyleProfile.Pov);
     }
 
+    // ─── IsProofreadResultUnrelated tests ───
+
+    private static readonly MethodInfo IsUnrelatedMethod =
+        typeof(UnifiedAnalysisService).GetMethod(
+            "IsProofreadResultUnrelated",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static bool InvokeIsUnrelated(string input, string result, out double wordSimilarity)
+    {
+        var args = new object[] { input, result, 0.0 };
+        var ret = (bool)IsUnrelatedMethod.Invoke(null, args)!;
+        wordSimilarity = (double)args[2];
+        return ret;
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_SimilarText_ReturnsFalseWithHighSimilarity()
+    {
+        var input = "הילדה הלכה לבית הספר בבוקר המוקדם ולמדה שיעורים רבים במשך היום";
+        var result = "הילדה הלכה לבית הספר בבוקר המוקדם, ולמדה שיעורים רבים במשך היום.";
+
+        var unrelated = InvokeIsUnrelated(input, result, out var similarity);
+
+        Assert.False(unrelated);
+        Assert.True(similarity >= 0.7, $"Expected similarity >= 0.7, got {similarity}");
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_CompletelyDifferentText_ReturnsTrueWithLowSimilarity()
+    {
+        var input = "הילדה הלכה לבית הספר בבוקר המוקדם ולמדה שיעורים רבים במשך היום";
+        var result = "השמש זרחה על פני הים הכחול והגלים התנפצו על החוף בעוצמה רבה";
+
+        var unrelated = InvokeIsUnrelated(input, result, out var similarity);
+
+        Assert.True(unrelated);
+        Assert.True(similarity < 0.7, $"Expected similarity < 0.7, got {similarity}");
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_ContinuationMarker_ReturnsTrueWithSimilaritySet()
+    {
+        var input = "הילדה הלכה לבית הספר בבוקר המוקדם ולמדה שיעורים רבים במשך היום";
+        var result = "הנה המשך לסיפור על הילדה שהלכה לבית הספר, היא פגשה חברה ישנה";
+
+        var unrelated = InvokeIsUnrelated(input, result, out var similarity);
+
+        Assert.True(unrelated);
+        Assert.True(similarity > 0.0, "Similarity should be computed before marker check");
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_EmptyInput_ReturnsFalseWithZeroSimilarity()
+    {
+        var unrelated = InvokeIsUnrelated("", "some result text that is long enough to pass the checks", out var similarity);
+
+        Assert.False(unrelated);
+        Assert.Equal(0.0, similarity);
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_EmptyResult_ReturnsFalseWithZeroSimilarity()
+    {
+        var unrelated = InvokeIsUnrelated("some input text that is long enough", "", out var similarity);
+
+        Assert.False(unrelated);
+        Assert.Equal(0.0, similarity);
+    }
+
+    [Fact]
+    public void IsProofreadResultUnrelated_ShortText_ReturnsFalseEarly()
+    {
+        var unrelated = InvokeIsUnrelated("short", "different short text", out var similarity);
+
+        Assert.False(unrelated);
+        Assert.Equal(0.0, similarity);
+    }
+
     private static ServiceProvider BuildServiceProvider(bool useRealRouter = false, bool simulateSlowRouter = false)
     {
         var services = new ServiceCollection();
