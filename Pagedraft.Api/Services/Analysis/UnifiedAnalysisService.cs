@@ -63,6 +63,157 @@ public class UnifiedAnalysisService
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
     private const int MaxProofreadInputLength = 10_000;
 
+    private static (string Outcome, string? Note, double? WordSimilarity) ResolveSingleRunOutcome(
+        AnalysisType analysisType,
+        string inputText,
+        AnalysisResult result,
+        string? structuredJson)
+    {
+        var outcome = "Succeeded";
+        string? note = null;
+        double? wordSimilarity = null;
+
+        if (analysisType == AnalysisType.Proofread)
+        {
+            var unrelated = IsProofreadResultUnrelated(inputText, result.ResultText, out var similarity);
+            if (unrelated)
+            {
+                outcome = "FallbackUnrelated";
+                wordSimilarity = similarity;
+                note = $"similarity={similarity:F2}";
+            }
+            else if (result.ProofreadNoChangesHint)
+            {
+                outcome = "FallbackRepetition";
+            }
+        }
+        else
+        {
+            // For normal LineEdit, StructuredResult existence is our best proxy
+            // for whether the model produced valid JSON (chunked uses the same heuristic).
+            if (structuredJson is null)
+                outcome = string.IsNullOrWhiteSpace(result.ResultText) ? "FallbackEmpty" : "FallbackError";
+        }
+
+        return (outcome, note, wordSimilarity);
+    }
+
+    private static AnalysisChunkOutcome CreateChunkOutcome(
+        int chunkIndex,
+        string inputText,
+        string outputText,
+        long durationMs,
+        string outcome,
+        double? wordSimilarity = null,
+        string? note = null)
+    {
+        return new AnalysisChunkOutcome
+        {
+            ChunkIndex = chunkIndex,
+            InputCharCount = inputText.Length,
+            InputWordCount = WordCount(inputText),
+            OutputCharCount = outputText.Length,
+            DurationMs = durationMs,
+            Outcome = outcome,
+            WordSimilarity = wordSimilarity,
+            Note = note
+        };
+    }
+
+    private async Task PersistSingleChunkRunLogAsync(
+        Guid jobId,
+        AnalysisResult result,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        AnalysisType analysisType,
+        string language,
+        long durationMs,
+        string outcome,
+        AnalysisChunkOutcome chunkOutcome,
+        CancellationToken ct)
+    {
+        var runLog = new AnalysisRunLog
+        {
+            JobId = jobId,
+            AnalysisResultId = result.Id,
+            PromptTemplateId = result.TemplateId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            SceneId = sceneId,
+            Scope = scope.ToString(),
+            AnalysisType = analysisType.ToString(),
+            ModelName = result.ModelName,
+            Language = language,
+            TotalChunks = 1,
+            SucceededChunks = outcome == "Succeeded" ? 1 : 0,
+            FallbackChunks = outcome == "Succeeded" ? 0 : 1,
+            InputWordCount = chunkOutcome.InputWordCount,
+            InputCharCount = chunkOutcome.InputCharCount,
+            OutputCharCount = chunkOutcome.OutputCharCount,
+            SuggestionCount = result.Suggestions.Count,
+            TotalDurationMs = durationMs,
+            NoChangesHint = analysisType == AnalysisType.Proofread && result.ProofreadNoChangesHint,
+            ChunkDetailsJson = JsonSerializer.Serialize(
+                new List<AnalysisChunkOutcome> { chunkOutcome }, JsonOpts),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        _db.AnalysisRunLogs.Add(runLog);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    private async Task PersistChunkedRunLogAsync(
+        Guid jobId,
+        AnalysisResult result,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        string analysisTypeString,
+        string language,
+        int totalChunks,
+        IEnumerable<AnalysisChunkOutcome> chunkOutcomes,
+        string inputText,
+        string outputText,
+        long durationMs,
+        bool noChangesHint,
+        CancellationToken ct)
+    {
+        var outcomesList = chunkOutcomes
+            .OrderBy(c => c.ChunkIndex)
+            .ToList();
+
+        var runLog = new AnalysisRunLog
+        {
+            JobId = jobId,
+            AnalysisResultId = result.Id,
+            PromptTemplateId = result.TemplateId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            SceneId = sceneId,
+            Scope = scope.ToString(),
+            AnalysisType = analysisTypeString,
+            ModelName = result.ModelName,
+            Language = language,
+            TotalChunks = totalChunks,
+            SucceededChunks = outcomesList.Count(c => c.Outcome == "Succeeded"),
+            FallbackChunks = outcomesList.Count(c => c.Outcome != "Succeeded"),
+            InputWordCount = WordCount(inputText),
+            InputCharCount = inputText.Length,
+            OutputCharCount = outputText.Length,
+            SuggestionCount = result.Suggestions.Count,
+            TotalDurationMs = durationMs,
+            NoChangesHint = noChangesHint,
+            ChunkDetailsJson = JsonSerializer.Serialize(outcomesList, JsonOpts),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        _db.AnalysisRunLogs.Add(runLog);
+        await _db.SaveChangesAsync(ct);
+    }
+
     /// <summary>Run an analysis and persist the result.</summary>
     /// <param name="jobId">
     /// Optional analysis job identifier for long-running operations (currently chunked Proofread/LineEdit).
@@ -135,7 +286,9 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread)
             _logger.LogInformation("Proofread input length: {Length} characters (~{EstTokens} tokens). Long text may hit model limits.", inputText.Length, EstimateTokenCount(inputText));
 
+        var llmSw = Stopwatch.StartNew();
         var response = await _router.CompleteAsync(request, ct);
+        llmSw.Stop();
 
         if (analysisType == AnalysisType.Proofread && _logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
             _logger.LogDebug("Proofread raw response length={Len} startsWith={Preview}", response.Content?.Length ?? 0, response.Content?.Length > 0 ? response.Content.Substring(0, Math.Min(120, response.Content.Length)) : "");
@@ -187,6 +340,37 @@ public class UnifiedAnalysisService
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
 
+        // Persist an AnalysisRunLog for normal (non-chunked) proofread/line-edit too.
+        // Chunked runs already persist per-chunk outcomes in RunProofreadChunkedAsync / RunLineEditChunkedAsync.
+        if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
+        {
+            var effectiveJobId = jobId ?? Guid.NewGuid();
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+
+            var chunkOutcome = CreateChunkOutcome(
+                chunkIndex: 0,
+                inputText: inputText,
+                outputText: result.ResultText,
+                durationMs: llmSw.ElapsedMilliseconds,
+                outcome: outcome,
+                wordSimilarity: wordSimilarity,
+                note: note);
+
+            await PersistSingleChunkRunLogAsync(
+                jobId: effectiveJobId,
+                result: result,
+                bookId: bookId,
+                chapterId: chapterId,
+                sceneId: sceneId,
+                scope: scope,
+                analysisType: analysisType,
+                language: language,
+                durationMs: llmSw.ElapsedMilliseconds,
+                outcome: outcome,
+                chunkOutcome: chunkOutcome,
+                ct: ct);
+        }
+
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
     }
@@ -219,7 +403,9 @@ public class UnifiedAnalysisService
         };
 
         _logger.LogInformation("Running {Scope}/{Type} with provided input", scope, analysisType);
+        var llmSw = Stopwatch.StartNew();
         var response = await _router.CompleteAsync(request, ct);
+        llmSw.Stop();
 
         var cleanContent = SanitizeResponse(response.Content);
         var structuredJson = TryParseStructured(analysisType, cleanContent);
@@ -252,6 +438,35 @@ public class UnifiedAnalysisService
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
+
+        if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
+        {
+            var effectiveJobId = Guid.NewGuid();
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+
+            var chunkOutcome = CreateChunkOutcome(
+                chunkIndex: 0,
+                inputText: inputText,
+                outputText: result.ResultText,
+                durationMs: llmSw.ElapsedMilliseconds,
+                outcome: outcome,
+                wordSimilarity: wordSimilarity,
+                note: note);
+
+            await PersistSingleChunkRunLogAsync(
+                jobId: effectiveJobId,
+                result: result,
+                bookId: bookId,
+                chapterId: chapterId,
+                sceneId: sceneId,
+                scope: scope,
+                analysisType: analysisType,
+                language: language,
+                durationMs: llmSw.ElapsedMilliseconds,
+                outcome: outcome,
+                chunkOutcome: chunkOutcome,
+                ct: ct);
+        }
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
@@ -289,12 +504,14 @@ public class UnifiedAnalysisService
         };
 
         var sb = new StringBuilder();
+        var streamSw = Stopwatch.StartNew();
         await foreach (var token in _router.StreamCompleteAsync(request, ct))
         {
             if (ct.IsCancellationRequested) yield break;
             sb.Append(token);
             yield return token;
         }
+        streamSw.Stop();
 
         var cleanContent = SanitizeResponse(sb.ToString());
 
@@ -342,6 +559,35 @@ public class UnifiedAnalysisService
 
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
+
+        if (analysisType == AnalysisType.Proofread || analysisType == AnalysisType.LineEdit)
+        {
+            var effectiveJobId = Guid.NewGuid();
+            var (outcome, note, wordSimilarity) = ResolveSingleRunOutcome(analysisType, inputText, result, structuredJson);
+
+            var chunkOutcome = CreateChunkOutcome(
+                chunkIndex: 0,
+                inputText: inputText,
+                outputText: result.ResultText,
+                durationMs: streamSw.ElapsedMilliseconds,
+                outcome: outcome,
+                wordSimilarity: wordSimilarity,
+                note: note);
+
+            await PersistSingleChunkRunLogAsync(
+                jobId: effectiveJobId,
+                result: result,
+                bookId: bookId,
+                chapterId: chapterId,
+                sceneId: sceneId,
+                scope: scope,
+                analysisType: analysisType,
+                language: language,
+                durationMs: streamSw.ElapsedMilliseconds,
+                outcome: outcome,
+                chunkOutcome: chunkOutcome,
+                ct: ct);
+        }
     }
 
     /// <summary>
@@ -889,15 +1135,12 @@ public class UnifiedAnalysisService
                     }
                 }
 
-                chunkOutcomes.Add(new AnalysisChunkOutcome
-                {
-                    ChunkIndex = index,
-                    InputCharCount = text.Length,
-                    InputWordCount = WordCount(text),
-                    OutputCharCount = clean.Length,
-                    DurationMs = chunkSw.ElapsedMilliseconds,
-                    Outcome = outcome
-                });
+                chunkOutcomes.Add(CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: text,
+                    outputText: clean,
+                    durationMs: chunkSw.ElapsedMilliseconds,
+                    outcome: outcome));
 
                 _logger.LogDebug("LineEdit chunk {Index}/{Total} finished", chunkNumber, chunks.Count);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
@@ -910,16 +1153,13 @@ public class UnifiedAnalysisService
             {
                 var chunkNumber = index + 1;
                 _logger.LogWarning(ex, "LineEdit chunk {Index} failed; treating as empty result", chunkNumber);
-                chunkOutcomes.Add(new AnalysisChunkOutcome
-                {
-                    ChunkIndex = index,
-                    InputCharCount = text.Length,
-                    InputWordCount = WordCount(text),
-                    OutputCharCount = 0,
-                    DurationMs = chunkSw.ElapsedMilliseconds,
-                    Outcome = "FallbackError",
-                    Note = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message
-                });
+                chunkOutcomes.Add(CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: text,
+                    outputText: "",
+                    durationMs: chunkSw.ElapsedMilliseconds,
+                    outcome: "FallbackError",
+                    note: ex.Message.Length > 200 ? ex.Message[..200] : ex.Message));
                 chunkResults[index] = new LineEditResult();
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
@@ -967,33 +1207,22 @@ public class UnifiedAnalysisService
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
 
-        var runLog = new AnalysisRunLog
-        {
-            JobId = jobId,
-            AnalysisResultId = result.Id,
-            PromptTemplateId = result.TemplateId,
-            BookId = bookId,
-            ChapterId = chapterId,
-            SceneId = sceneId,
-            Scope = scope.ToString(),
-            AnalysisType = "LineEdit",
-            ModelName = result.ModelName,
-            Language = language,
-            TotalChunks = chunks.Count,
-            SucceededChunks = chunkOutcomes.Count(c => c.Outcome == "Succeeded"),
-            FallbackChunks = chunkOutcomes.Count(c => c.Outcome != "Succeeded"),
-            InputWordCount = WordCount(inputText),
-            InputCharCount = inputText.Length,
-            OutputCharCount = cleanContent.Length,
-            SuggestionCount = result.Suggestions.Count,
-            TotalDurationMs = overallSw.ElapsedMilliseconds,
-            NoChangesHint = false,
-            ChunkDetailsJson = JsonSerializer.Serialize(
-                chunkOutcomes.OrderBy(c => c.ChunkIndex).ToList(), JsonOpts),
-            CreatedAt = DateTimeOffset.UtcNow
-        };
-        _db.AnalysisRunLogs.Add(runLog);
-        await _db.SaveChangesAsync(ct);
+        await PersistChunkedRunLogAsync(
+            jobId: jobId,
+            result: result,
+            bookId: bookId,
+            chapterId: chapterId,
+            sceneId: sceneId,
+            scope: scope,
+            analysisTypeString: AnalysisType.LineEdit.ToString(),
+            language: language,
+            totalChunks: chunks.Count,
+            chunkOutcomes: chunkOutcomes,
+            inputText: inputText,
+            outputText: cleanContent,
+            durationMs: overallSw.ElapsedMilliseconds,
+            noChangesHint: false,
+            ct: ct);
 
         _logger.LogInformation("Analysis {Id} persisted (LineEdit chunked, {Scope})", result.Id, scope);
         return result;
@@ -1097,54 +1326,53 @@ public class UnifiedAnalysisService
                     var afterThink = ExtractTextAfterThinkBlock(raw);
                     clean = !string.IsNullOrWhiteSpace(afterThink) ? afterThink : raw.Trim();
                 }
+                var chunkOutcomeOutcome = "Succeeded";
+                var chunkOutcomeOutputText = clean;
                 if (string.IsNullOrWhiteSpace(clean))
                 {
-                    chunkOutcomes.Add(new AnalysisChunkOutcome
-                    {
-                        ChunkIndex = index,
-                        InputCharCount = text.Length,
-                        InputWordCount = WordCount(text),
-                        OutputCharCount = 0,
-                        DurationMs = chunkSw.ElapsedMilliseconds,
-                        Outcome = "FallbackEmpty"
-                    });
+                    chunkOutcomeOutcome = "FallbackEmpty";
+                    // Preserve prior semantics: the fallback outcome stores empty output,
+                    // while merging still uses the original chunk text.
+                    chunkOutcomeOutputText = "";
                     clean = text;
                 }
                 clean = StripTextToCorrectMarkers(clean);
-                var chunkOutcome = new AnalysisChunkOutcome
-                {
-                    ChunkIndex = index,
-                    InputCharCount = text.Length,
-                    InputWordCount = WordCount(text),
-                    OutputCharCount = clean.Length,
-                    DurationMs = chunkSw.ElapsedMilliseconds,
-                    Outcome = "Succeeded"
-                };
+                var chunkOutcome = CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: text,
+                    outputText: chunkOutcomeOutputText,
+                    durationMs: chunkSw.ElapsedMilliseconds,
+                    outcome: chunkOutcomeOutcome);
 
-                var unrelated = IsProofreadResultUnrelated(text, clean, out var similarity);
-                chunkOutcome.WordSimilarity = similarity;
-                if (unrelated)
+                // Only run unrelated/repetition heuristics when we actually have a "Succeeded" output.
+                // For FallbackEmpty we keep the original chunk for merging and avoid mutating the fallback outcome.
+                if (chunkOutcomeOutcome == "Succeeded")
                 {
-                    _logger.LogWarning(
-                        "Proofread chunk {Index} result may be unrelated (input prefix='{InputPrefix}', result prefix='{ResultPrefix}'). Falling back to original text.",
-                        index + 1,
-                        TruncateForAudit(text, 150),
-                        TruncateForAudit(clean, 150));
-                    chunkOutcome.Outcome = "FallbackUnrelated";
-                    chunkOutcome.Note = $"similarity={similarity:F2}";
-                    clean = text;
-                }
-                else if (clean.Length > text.Length * 1.3 + 200)
-                {
-                    _logger.LogWarning(
-                        "Proofread chunk {Index} result is {Ratio:P0} longer than input (input={InputLen}, result={ResultLen}). Likely AI repetition loop; falling back to original text.",
-                        index + 1,
-                        (double)clean.Length / text.Length - 1,
-                        text.Length,
-                        clean.Length);
-                    chunkOutcome.Outcome = "FallbackRepetition";
-                    chunkOutcome.Note = $"{(double)clean.Length / text.Length - 1:P0} longer than input";
-                    clean = text;
+                    var unrelated = IsProofreadResultUnrelated(text, clean, out var similarity);
+                    chunkOutcome.WordSimilarity = similarity;
+                    if (unrelated)
+                    {
+                        _logger.LogWarning(
+                            "Proofread chunk {Index} result may be unrelated (input prefix='{InputPrefix}', result prefix='{ResultPrefix}'). Falling back to original text.",
+                            index + 1,
+                            TruncateForAudit(text, 150),
+                            TruncateForAudit(clean, 150));
+                        chunkOutcome.Outcome = "FallbackUnrelated";
+                        chunkOutcome.Note = $"similarity={similarity:F2}";
+                        clean = text;
+                    }
+                    else if (clean.Length > text.Length * 1.3 + 200)
+                    {
+                        _logger.LogWarning(
+                            "Proofread chunk {Index} result is {Ratio:P0} longer than input (input={InputLen}, result={ResultLen}). Likely AI repetition loop; falling back to original text.",
+                            index + 1,
+                            (double)clean.Length / text.Length - 1,
+                            text.Length,
+                            clean.Length);
+                        chunkOutcome.Outcome = "FallbackRepetition";
+                        chunkOutcome.Note = $"{(double)clean.Length / text.Length - 1:P0} longer than input";
+                        clean = text;
+                    }
                 }
 
                 chunkOutcomes.Add(chunkOutcome);
@@ -1160,16 +1388,13 @@ public class UnifiedAnalysisService
             {
                 var chunkNumber = index + 1;
                 _logger.LogWarning(ex, "Proofread chunk {Index} failed; using original text", chunkNumber);
-                chunkOutcomes.Add(new AnalysisChunkOutcome
-                {
-                    ChunkIndex = index,
-                    InputCharCount = text.Length,
-                    InputWordCount = WordCount(text),
-                    OutputCharCount = 0,
-                    DurationMs = chunkSw.ElapsedMilliseconds,
-                    Outcome = "FallbackError",
-                    Note = ex.Message.Length > 200 ? ex.Message[..200] : ex.Message
-                });
+                chunkOutcomes.Add(CreateChunkOutcome(
+                    chunkIndex: index,
+                    inputText: text,
+                    outputText: "",
+                    durationMs: chunkSw.ElapsedMilliseconds,
+                    outcome: "FallbackError",
+                    note: ex.Message.Length > 200 ? ex.Message[..200] : ex.Message));
                 corrected[index] = text;
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
@@ -1226,33 +1451,22 @@ public class UnifiedAnalysisService
         _db.AnalysisResults.Add(result);
         await _db.SaveChangesAsync(ct);
 
-        var runLog = new AnalysisRunLog
-        {
-            JobId = jobId,
-            AnalysisResultId = result.Id,
-            PromptTemplateId = result.TemplateId,
-            BookId = bookId,
-            ChapterId = chapterId,
-            SceneId = sceneId,
-            Scope = scope.ToString(),
-            AnalysisType = "Proofread",
-            ModelName = result.ModelName,
-            Language = language,
-            TotalChunks = chunks.Count,
-            SucceededChunks = chunkOutcomes.Count(c => c.Outcome == "Succeeded"),
-            FallbackChunks = chunkOutcomes.Count(c => c.Outcome != "Succeeded"),
-            InputWordCount = WordCount(inputText),
-            InputCharCount = inputText.Length,
-            OutputCharCount = mergedResultText.Length,
-            SuggestionCount = result.Suggestions.Count,
-            TotalDurationMs = overallSw.ElapsedMilliseconds,
-            NoChangesHint = result.ProofreadNoChangesHint,
-            ChunkDetailsJson = JsonSerializer.Serialize(
-                chunkOutcomes.OrderBy(c => c.ChunkIndex).ToList(), JsonOpts),
-            CreatedAt = DateTimeOffset.UtcNow
-        };
-        _db.AnalysisRunLogs.Add(runLog);
-        await _db.SaveChangesAsync(ct);
+        await PersistChunkedRunLogAsync(
+            jobId: jobId,
+            result: result,
+            bookId: bookId,
+            chapterId: chapterId,
+            sceneId: sceneId,
+            scope: scope,
+            analysisTypeString: AnalysisType.Proofread.ToString(),
+            language: language,
+            totalChunks: chunks.Count,
+            chunkOutcomes: chunkOutcomes,
+            inputText: inputText,
+            outputText: mergedResultText,
+            durationMs: overallSw.ElapsedMilliseconds,
+            noChangesHint: result.ProofreadNoChangesHint,
+            ct: ct);
 
         _logger.LogInformation("Analysis {Id} persisted (Proofread chunked, {Scope})", result.Id, scope);
         return result;
