@@ -392,6 +392,7 @@ public class UnifiedAnalysisService
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
 
+        var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
@@ -410,7 +411,6 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        var llmOutputText = cleanContent;
         bool? proofreadUnrelated = null;
         double? proofreadWordSimilarity = null;
         if (analysisType == AnalysisType.Proofread)
@@ -503,6 +503,7 @@ public class UnifiedAnalysisService
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
 
+        var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
@@ -520,7 +521,6 @@ public class UnifiedAnalysisService
             ModelName = $"{response.Provider}:{response.Model}",
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
-        var llmOutputText = cleanContent;
         bool? proofreadUnrelated = null;
         double? proofreadWordSimilarity = null;
         if (analysisType == AnalysisType.Proofread)
@@ -601,14 +601,26 @@ public class UnifiedAnalysisService
         };
 
         var sb = new StringBuilder();
-        var streamSw = Stopwatch.StartNew();
-        await foreach (var token in _router.StreamCompleteAsync(request, ct))
+        var streamSw = new Stopwatch();
+        await using (var streamEnumerator = _router.StreamCompleteAsync(request, ct).GetAsyncEnumerator(ct))
         {
-            if (ct.IsCancellationRequested) yield break;
-            sb.Append(token);
-            yield return token;
+            while (true)
+            {
+                streamSw.Start();
+                var hasNext = await streamEnumerator.MoveNextAsync();
+                streamSw.Stop();
+
+                if (!hasNext)
+                    break;
+
+                if (ct.IsCancellationRequested)
+                    yield break;
+
+                var token = streamEnumerator.Current;
+                sb.Append(token);
+                yield return token;
+            }
         }
-        streamSw.Stop();
 
         var cleanContent = SanitizeResponse(sb.ToString());
 
@@ -634,6 +646,7 @@ public class UnifiedAnalysisService
             cleanContent = StripTextToCorrectMarkers(cleanContent);
         }
 
+        var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         var result = new AnalysisResult
@@ -652,7 +665,6 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        var llmOutputText = cleanContent;
         bool? proofreadUnrelated = null;
         double? proofreadWordSimilarity = null;
         if (analysisType == AnalysisType.Proofread)
