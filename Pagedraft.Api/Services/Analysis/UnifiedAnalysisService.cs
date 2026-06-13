@@ -2050,7 +2050,13 @@ public class UnifiedAnalysisService
 
     // ─── Sanitization ───────────────────────────────────────────────
 
-    private static string SanitizeResponse(string text)
+    /// <summary>
+    /// Cleans a raw model response: strips think-blocks, the Syncfusion watermark, control
+    /// characters, and CJK noise. Pure string-in/string-out (no instance state). Exposed as
+    /// <c>internal</c> so the proofread quality eval measures the SAME corrected text production
+    /// feeds to the diff, instead of a divergent test-only reimplementation.
+    /// </summary>
+    internal static string SanitizeResponse(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
         text = StripThinkBlock(text);

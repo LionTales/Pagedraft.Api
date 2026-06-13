@@ -28,16 +28,8 @@ public class AnthropicProvider : IAiAnalysisProvider
 
         var model = request.Selection.Model;
         var tuning = GetTuning("Anthropic");
-        var userContent = request.Instruction + "\n\n" + request.InputText;
 
-        var payload = new
-        {
-            model,
-            max_tokens = tuning.MaxTokens,
-            system = request.SystemMessage,
-            messages = new[] { new { role = "user", content = userContent } },
-            temperature = tuning.Temperature
-        };
+        var payload = BuildPayload(model, request, tuning);
 
         var client = _httpFactory.CreateClient();
         client.DefaultRequestHeaders.Add("x-api-key", apiKey);
@@ -69,6 +61,43 @@ public class AnthropicProvider : IAiAnalysisProvider
             Extra = null
         };
     }
+
+    /// <summary>
+    /// Builds the Anthropic /v1/messages request body. Extracted from <see cref="CompleteAsync"/> so the
+    /// per-model-family sampling-param logic can be unit-tested without a network call. Behavior MUST stay
+    /// identical to inline construction: same property names, same temperature-omit conditional.
+    /// </summary>
+    internal static Dictionary<string, object?> BuildPayload(string model, ResolvedAiRequest request, ProviderTuningOptions tuning)
+    {
+        var userContent = request.Instruction + "\n\n" + request.InputText;
+
+        // Some Anthropic models (Opus 4.7/4.8, Fable 5, Mythos 5) reject the `temperature` sampling
+        // parameter (HTTP 400). Build the payload so `temperature` is simply absent for those models;
+        // Sonnet 4.6 / Haiku 4.5 / older Claude still accept it. We intentionally do NOT add a
+        // `thinking` field: adaptive thinking is off by default on Opus 4.7/4.8 when unset, and
+        // Fable 5 has thinking always-on automatically.
+        var payload = new Dictionary<string, object?>
+        {
+            ["model"] = model,
+            ["max_tokens"] = tuning.MaxTokens,
+            ["system"] = request.SystemMessage,
+            ["messages"] = new[] { new { role = "user", content = userContent } }
+        };
+        if (AnthropicSupportsTemperature(model))
+            payload["temperature"] = tuning.Temperature;
+        return payload;
+    }
+
+    /// <summary>
+    /// Whether the given Anthropic model accepts a custom `temperature`. Opus 4.7/4.8, Fable 5 and
+    /// Mythos 5 reject it (HTTP 400); Sonnet 4.6, Haiku 4.5 and older Claude still accept it.
+    /// MAINTENANCE: when a NEW Claude family that drops/changes `temperature` (or any sampling param)
+    /// ships, add its model-id prefix here AND extend ProviderPayloadTests, or it will silently send an
+    /// unsupported param and 400. See OpenAiProvider for the equivalent gpt-5 list.
+    /// </summary>
+    private static bool AnthropicSupportsTemperature(string model)
+        => !(model.StartsWith("claude-opus-4-7") || model.StartsWith("claude-opus-4-8")
+            || model.StartsWith("claude-fable") || model.StartsWith("claude-mythos"));
 
     private ProviderTuningOptions GetTuning(string providerName)
     {

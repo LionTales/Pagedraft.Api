@@ -206,6 +206,18 @@ public class SuggestionDiffService
                 continue;
             }
 
+            // A range can read as multiple ORIGINAL words only because a space between them was
+            // DELETED (e.g. "ל הראות" → "להראות"): the correction joins two words into one. Splitting
+            // such a range into per-word sub-ranges destroys the edit — each half then maps to an
+            // unchanged word and the join is lost. If every diff block touching this range deletes (or
+            // inserts) only whitespace, the multi-word count is an artifact of the join; keep the range
+            // whole so the join surfaces as one suggestion.
+            if (IsWhitespaceOnlyEdit(diffBlocks, normOrig, mStart, mEnd))
+            {
+                result.Add((mStart, mEnd));
+                continue;
+            }
+
             // Re-expand each diff block within this merged range into its own word-boundary range
             var subRanges = new List<(int Start, int End)>();
             foreach (var block in diffBlocks)
@@ -261,6 +273,35 @@ public class SuggestionDiffService
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// True when every diff block intersecting the original range [start, end) deletes only
+    /// whitespace characters (and at least one such block exists). This identifies a word-join
+    /// correction (a space was removed between words) that must not be split into per-word ranges.
+    /// Pure insertions (DeleteCountA == 0) are ignored here: a join is driven by the whitespace the
+    /// original loses, and an insertion alone never inflates the original word count.
+    /// </summary>
+    private static bool IsWhitespaceOnlyEdit(
+        IList<DiffPlex.Model.DiffBlock> diffBlocks, string normOrig, int start, int end)
+    {
+        var sawDeletion = false;
+        foreach (var block in diffBlocks)
+        {
+            if (block.DeleteCountA == 0)
+                continue;
+            var s = block.DeleteStartA;
+            var e = s + block.DeleteCountA;
+            if (e <= start || s >= end) continue; // block does not touch this range
+
+            for (var i = s; i < e && i < normOrig.Length; i++)
+            {
+                if (!char.IsWhiteSpace(normOrig[i]))
+                    return false; // a non-whitespace deletion → not a pure word-join
+            }
+            sawDeletion = true;
+        }
+        return sawDeletion;
     }
 
     private static int CountWords(string text, int start, int end)
@@ -376,13 +417,33 @@ public class SuggestionDiffService
         if (string.Equals(s.OriginalText, s.SuggestedText, StringComparison.Ordinal))
             return false;
 
-        var o = (s.OriginalText ?? string.Empty).Trim();
-        var g = (s.SuggestedText ?? string.Empty).Trim();
+        var orig = s.OriginalText ?? string.Empty;
+        var sug = s.SuggestedText ?? string.Empty;
+        var o = orig.Trim();
+        var g = sug.Trim();
         if (string.Equals(o, g, StringComparison.Ordinal))
-            return false;
+        {
+            // Trimming makes them equal, so the ONLY change is leading/trailing whitespace on the
+            // span. That is usually a span-boundary artifact (drop it) — UNLESS removing that
+            // whitespace genuinely changes adjacency, i.e. it sat between this token and a
+            // neighbouring non-whitespace character (e.g. a stray space before a period:
+            // "מסמיקה ." → "מסמיקה."). In that case it is a real punctuation/spacing correction.
+            var droppedTrailing = orig.Length > sug.Length && EndsWithWhitespace(orig) && !EndsWithWhitespace(sug);
+            var droppedLeading = orig.Length > sug.Length && StartsWithWhitespace(orig) && !StartsWithWhitespace(sug);
+
+            var contextAfter = s.ContextAfter ?? string.Empty;
+            var contextBefore = s.ContextBefore ?? string.Empty;
+            var realTrailingFix = droppedTrailing && contextAfter.Length > 0 && !char.IsWhiteSpace(contextAfter[0]);
+            var realLeadingFix = droppedLeading && contextBefore.Length > 0 && !char.IsWhiteSpace(contextBefore[^1]);
+
+            return realTrailingFix || realLeadingFix;
+        }
 
         return true;
     }
+
+    private static bool EndsWithWhitespace(string s) => s.Length > 0 && char.IsWhiteSpace(s[^1]);
+    private static bool StartsWithWhitespace(string s) => s.Length > 0 && char.IsWhiteSpace(s[0]);
 
     private static bool IsWordChar(char c) =>
         char.IsLetterOrDigit(c);
