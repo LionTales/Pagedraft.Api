@@ -1,0 +1,659 @@
+[
+  {
+    "id": "norm-1",
+    "input": "  טקסט   עם   רווחים   כפולים  ",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "  טקסט   עם   רווחים   כפולים  ",
+        "suggested": "טקסט עם רווחים כפולים",
+        "category": "whitespace"
+      }
+    ]
+  },
+  {
+    "id": "norm-2",
+    "input": "שורה אחת.\n\n\n\nשורה שנייה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "\n\n\n\n",
+        "suggested": "\n\n",
+        "category": "whitespace"
+      }
+    ]
+  },
+  {
+    "id": "norm-3",
+    "input": "משפט עם \"מרכאות אנגליות\".",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "\"מרכאות אנגליות\"",
+        "suggested": "״מרכאות אנגליות״",
+        "category": "punctuation"
+      }
+    ]
+  },
+  {
+    "id": "norm-4",
+    "input": "גם 'גרש' בודד.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "'גרש'",
+        "suggested": "׳גרש׳",
+        "category": "punctuation"
+      }
+    ]
+  },
+  {
+    "id": "norm-5",
+    "input": "טקסט נקי ללא שינוי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "norm-6",
+    "input": "Zero​width‌chars",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "Zero​width‌chars",
+        "suggested": "Zerowidthchars",
+        "category": "whitespace"
+      }
+    ]
+  },
+  {
+    "id": "detect-1",
+    "input": "זה משפט תקין בעברית.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "detect-2",
+    "input": "משפט עם אולי שגיאה דקדוקית או כתיב.",
+    "language": "he-IL",
+    "expectedCorrections": [],
+    "_note": "Input is ambiguous — 'שגיאה דקדוקית' is written correctly as a phrase describing a potential error, so no mechanical correction can be derived. Developer should confirm with a native speaker whether any grammar/spelling fix is expected here."
+  },
+  {
+    "id": "rewrite-1",
+    "input": "שלום עולם.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "full-1",
+    "input": "  שלום.   \"מרכאות\" וטקסט.  ",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "  שלום.   \"מרכאות\" וטקסט.  ",
+        "suggested": "שלום. ״מרכאות״ וטקסט.",
+        "category": "whitespace"
+      }
+    ]
+  },
+
+  {
+    "id": "clean-ms-01",
+    "input": "לפחות זה מה שחשבתי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-02",
+    "input": "זה העלה בה חיוך.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-03",
+    "input": "אצל מכשפי הצפון זה הקקאו.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-04",
+    "input": "קוסמים צריכים שרביט כדי לעשות קסמים.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-05",
+    "input": "אצל מכשפים שרביט זה מותרות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-06",
+    "input": "באותו רגע שמתי לב שהמורה מסתכלת עלינו במבט מוזר.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-07",
+    "input": "אפילו לא חיכיתי שהמורה תסיים לדבר.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-08",
+    "input": "אנחנו מתכננים לצאת היום לסושי ולסרט.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-09",
+    "input": "שירה ואור הן האחראיות לרשימת המוזמנים.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-10",
+    "input": "נעמדנו במסדרון כדי לסיים את השיחה לפני שנתפצל לכיתות השונות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-11",
+    "input": "אור הייתה היחידה שהתקבלה לחמש יחידות לימוד מתמטיקה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-12",
+    "input": "היא ואור ניגשו מייד לעבודה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-13",
+    "input": "פתאום התחלתי להרגיש קצת לא בנוח עם התוכנית שלנו.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-14",
+    "input": "שמעתי את מתן צוחק בדרך לכיתה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-15",
+    "input": "חיוך מוזר עלה על פניה של טל.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-16",
+    "input": "המורה שלנו יצאה מהכיתה והשיחה הסתיימה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-17",
+    "input": "חיכיתי אבל היא לא המשיכה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-18",
+    "input": "דרך המראה ראיתי שהיא מסמיקה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-19",
+    "input": "היא שאלה בקול חלש כל כך שכמעט לא הצלחתי לשמוע.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-20",
+    "input": "ראיתי על טל שגם היא נעלבה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-21",
+    "input": "סגרתי את הסמרטפון.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-22",
+    "input": "חייכתי אליה חיוך מעודד ופלשתי למדף החולצות שלה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-23",
+    "input": "בסופו של דבר היינו מאורגנות רבע שעה אחרי השעה שנקבעה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-24",
+    "input": "היא עצמה לא התאפרה כלל.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-25",
+    "input": "הסרט היה אמור להתחיל עוד כרבע שעה ולא היה שום סימן לאילון.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-26",
+    "input": "שירה התחילה להראות סימני לחץ.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-27",
+    "input": "איכשהו התגבשה החלטה אילמת לתת לשירה לבחור.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-28",
+    "input": "באופן אירוני לחלוטין היא בחרה קומדיה על מכשף צעיר.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-29",
+    "input": "ראיתי את רוני מבליעה חיוך.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-30",
+    "input": "התחלתי להבין מדוע ביקשה רוני שאביא את נדב.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-31",
+    "input": "הידיים שלהם לא נפרדו לרגע.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-32",
+    "input": "פרק שלם עסק בהחלפה של כלי נשק תוך כדי לחימה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-33",
+    "input": "האורות באולם הקולנוע נדלקו וקטעו את המחשבות שלי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-34",
+    "input": "רוני קמה לבדה והתקדמה לכיוון היציאה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-35",
+    "input": "היא לא נראתה מרוצה מזה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-36",
+    "input": "היא פשוט עשתה משהו שעוצר את אנרגיית הכישוף שלי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-37",
+    "input": "אבל היא הסתפקה במכה קטנה עם התיק שלה וצחקה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-38",
+    "input": "הסרט כבר המשיך.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-39",
+    "input": "היינו בחוץ יותר מרבע שעה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-40",
+    "input": "כשהסרט נגמר לא אכלנו אפילו חצי מכמות הפופקורן.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-41",
+    "input": "החלטתי לנסות את זה בהזדמנות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-42",
+    "input": "משהו אמר לי שאני הולך להתחרט על זה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-43",
+    "input": "הקול של המורה בקע מאחוריי והבהיל אותי לגמרי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-44",
+    "input": "לא הייתה לי ברירה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-45",
+    "input": "רוני הסתכלה עלינו לשנייה ותהיתי אם גם שירה שמה לב לכך.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-46",
+    "input": "העיניים שלה כבר לא נראו אדומות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-47",
+    "input": "היא לא הראתה סימנים של חשד.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-48",
+    "input": "המורה הסתכלה עלינו במבט שגרם לנו לסתום את הפה למשך כל שאר השיעור.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-49",
+    "input": "אור פירשה זאת כהסכמה ושלפה את הסמרטפון כדי לשלוח הודעות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-50",
+    "input": "טל נראתה קצת מודאגת.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-51",
+    "input": "רוני לא הגיבה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-52",
+    "input": "נכנסתי למשרד הקטן יחסית של המזכירה שלה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-53",
+    "input": "קול נשי עדין וסמכותי ענה לי מעבר לדלת.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-54",
+    "input": "שערה הבלונדיני היה חלק ועיניה החומות ננעצו בי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-55",
+    "input": "הנדתי ראשי לשלילה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-56",
+    "input": "ובמילים אלו השיחה הסתיימה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-57",
+    "input": "דודה שלי אפילו לא טרחה להרים מבט כשנכנסתי.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-58",
+    "input": "נשמתי עמוק והתאמצתי לא לענות לה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-59",
+    "input": "לא רציתי לחבל בסיכויים שלי לצאת בערב.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-60",
+    "input": "הסתכלתי על הספר מולי וניסיתי לגייס מוטיבציה להמשיך ולחקור.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-61",
+    "input": "שוב התארגנתי אצל טל.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-62",
+    "input": "הוא נראה מתוח.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-63",
+    "input": "הייתי חייבת להודות בפני עצמי שהוא נראה מעולה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-64",
+    "input": "לא אהבתי את הרעיון.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+  {
+    "id": "clean-ms-65",
+    "input": "ניגשנו לשלם בקופה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true
+  },
+
+  {
+    "id": "inj-ms-01",
+    "input": "זה העלה בה בה חיוך.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "בה בה",
+        "suggested": "בה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "זה העלה בה חיוך.",
+    "_note": "Injected a doubled word: 'בה' repeated. Source clean sentence: 'זה העלה בה חיוך.'"
+  },
+  {
+    "id": "inj-ms-02",
+    "input": "אצל מכשפי הצפון זההקקאו.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "זההקקאו",
+        "suggested": "זה הקקאו",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "אצל מכשפי הצפון זה הקקאו.",
+    "_note": "Injected a missing space between 'זה' and 'הקקאו'. Source: 'אצל מכשפי הצפון זה הקקאו.'"
+  },
+  {
+    "id": "inj-ms-03",
+    "input": "אפילו לא חכיתי שהמורה תסיים לדבר.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "חכיתי",
+        "suggested": "חיכיתי",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "אפילו לא חיכיתי שהמורה תסיים לדבר.",
+    "_note": "Injected ktiv-haser error: dropped the vowel-yod from 'חיכיתי' -> 'חכיתי' (defective spelling). Source: 'אפילו לא חיכיתי שהמורה תסיים לדבר.'"
+  },
+  {
+    "id": "inj-ms-04",
+    "input": "הסרט כבר המשיכ.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "המשיכ",
+        "suggested": "המשיך",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "הסרט כבר המשיך.",
+    "_note": "Injected wrong final-letter form: medial kaf 'כ' instead of final kaf 'ך' at word end ('המשיכ' -> 'המשיך'). Source: 'הסרט כבר המשיך.'"
+  },
+  {
+    "id": "inj-ms-05",
+    "input": "היינו בחוצ יותר מרבע שעה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "בחוצ",
+        "suggested": "בחוץ",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "היינו בחוץ יותר מרבע שעה.",
+    "_note": "Injected wrong final-letter form: medial tsadi 'צ' instead of final tsadi 'ץ' ('בחוצ' -> 'בחוץ'). Source: 'היינו בחוץ יותר מרבע שעה.'"
+  },
+  {
+    "id": "inj-ms-06",
+    "input": "נכנסתי למשרד הקטנ יחסית של המזכירה שלה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "הקטנ",
+        "suggested": "הקטן",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "נכנסתי למשרד הקטן יחסית של המזכירה שלה.",
+    "_note": "Injected wrong final-letter form: medial nun 'נ' instead of final nun 'ן' ('הקטנ' -> 'הקטן'). Source: 'נכנסתי למשרד הקטן יחסית של המזכירה שלה.'"
+  },
+  {
+    "id": "inj-ms-07",
+    "input": "רוני לא הגיבה הגיבה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "הגיבה הגיבה",
+        "suggested": "הגיבה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "רוני לא הגיבה.",
+    "_note": "Injected a doubled word: 'הגיבה' repeated. Source: 'רוני לא הגיבה.'"
+  },
+  {
+    "id": "inj-ms-08",
+    "input": "היא ואור נגשו מייד לעבודה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "נגשו",
+        "suggested": "ניגשו",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "היא ואור ניגשו מייד לעבודה.",
+    "_note": "Injected ktiv-haser error: dropped the yod from 'ניגשו' -> 'נגשו' (defective spelling). Source: 'היא ואור ניגשו מייד לעבודה.'"
+  },
+  {
+    "id": "inj-ms-09",
+    "input": "דרך המראה ראיתי שהיא מסמיקה .",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "מסמיקה .",
+        "suggested": "מסמיקה.",
+        "category": "punctuation"
+      }
+    ],
+    "expectedCorrectedText": "דרך המראה ראיתי שהיא מסמיקה.",
+    "_note": "Injected a stray space before the sentence-final period. Source: 'דרך המראה ראיתי שהיא מסמיקה.'"
+  },
+  {
+    "id": "inj-ms-10",
+    "input": "שירה התחילה ל הראות סימני לחץ.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "ל הראות",
+        "suggested": "להראות",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "שירה התחילה להראות סימני לחץ.",
+    "_note": "Injected an extra space splitting the infinitive 'להראות' -> 'ל הראות'. Source: 'שירה התחילה להראות סימני לחץ.'"
+  },
+  {
+    "id": "inj-ms-11",
+    "input": "ניגשנו לשלמ בקופה.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "לשלמ",
+        "suggested": "לשלם",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "ניגשנו לשלם בקופה.",
+    "_note": "Injected wrong final-letter form: medial mem 'מ' instead of final mem 'ם' ('לשלמ' -> 'לשלם'). Source: 'ניגשנו לשלם בקופה.'"
+  },
+  {
+    "id": "inj-ms-12",
+    "input": "הוא נראה מתוח מתוח.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "מתוח מתוח",
+        "suggested": "מתוח",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "הוא נראה מתוח.",
+    "_note": "Injected a doubled word: 'מתוח' repeated. Source: 'הוא נראה מתוח.'"
+  }
+]
