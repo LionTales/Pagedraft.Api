@@ -28,19 +28,8 @@ public class OpenAiProvider : IAiAnalysisProvider
 
         var model = request.Selection.Model;
         var tuning = GetTuning("OpenAI");
-        var userContent = request.Instruction + "\n\n" + request.InputText;
 
-        var payload = new
-        {
-            model,
-            messages = new[]
-            {
-                new { role = "system", content = request.SystemMessage },
-                new { role = "user", content = userContent }
-            },
-            temperature = tuning.Temperature,
-            max_tokens = tuning.MaxTokens
-        };
+        var payload = BuildPayload(model, request, tuning);
 
         var client = _httpFactory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
@@ -67,6 +56,43 @@ public class OpenAiProvider : IAiAnalysisProvider
             ApproxCostUsd = EstimateCost(model, inputTokens, outputTokens),
             Extra = null
         };
+    }
+
+    /// <summary>
+    /// Builds the OpenAI /v1/chat/completions request body. Extracted from <see cref="CompleteAsync"/> so the
+    /// per-model-family param logic can be unit-tested without a network call. Behavior MUST stay identical to
+    /// inline construction: same property names (`max_completion_tokens` vs `max_tokens`), same temperature-omit
+    /// conditional.
+    /// MAINTENANCE: when a NEW model family that requires `max_completion_tokens` / drops `temperature` (like
+    /// gpt-5 does) ships, extend the prefix check below AND extend ProviderPayloadTests, or it will silently
+    /// send an unsupported param and 400. See AnthropicProvider for the equivalent omit-list.
+    /// </summary>
+    internal static Dictionary<string, object?> BuildPayload(string model, ResolvedAiRequest request, ProviderTuningOptions tuning)
+    {
+        var userContent = request.Instruction + "\n\n" + request.InputText;
+
+        // The GPT-5 family rejects `max_tokens` (must use `max_completion_tokens`) and rejects a
+        // non-default `temperature` (only the default is allowed). Older models (gpt-4o, etc.) use
+        // `max_tokens` + `temperature` exactly as before.
+        var payload = new Dictionary<string, object?>
+        {
+            ["model"] = model,
+            ["messages"] = new[]
+            {
+                new { role = "system", content = request.SystemMessage },
+                new { role = "user", content = userContent }
+            }
+        };
+        if (model.StartsWith("gpt-5"))
+        {
+            payload["max_completion_tokens"] = tuning.MaxTokens;
+        }
+        else
+        {
+            payload["temperature"] = tuning.Temperature;
+            payload["max_tokens"] = tuning.MaxTokens;
+        }
+        return payload;
     }
 
     private static decimal? EstimateCost(string model, int? input, int? output)
