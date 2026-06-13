@@ -13,6 +13,38 @@ public class SuggestionDiffServiceTests
     private readonly SuggestionDiffService _sut = new();
 
     [Fact]
+    public void ComputeProofreadSuggestions_StraySpaceBeforePeriod_ProducesWhitespaceCorrection()
+    {
+        // Regression: removing a stray space before sentence-final punctuation is a real correction.
+        // The trim-equality "meaningful" filter used to drop it because the only change was trailing
+        // whitespace on the word span.
+        const string original = "דרך המראה ראיתי שהיא מסמיקה .";
+        const string result = "דרך המראה ראיתי שהיא מסמיקה.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var s = Assert.Single(suggestions);
+        Assert.EndsWith(" ", s.OriginalText);
+        Assert.Equal(s.OriginalText.TrimEnd(), s.SuggestedText);
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_WordJoin_KeptAsOneSuggestion()
+    {
+        // Regression: a space deleted between two words ("ל הראות" → "להראות") joins them into one.
+        // The oversized-range splitter used to break the merged range into two single words, each of
+        // which mapped to an unchanged word, losing the join entirely.
+        const string original = "שירה התחילה ל הראות סימני לחץ.";
+        const string result = "שירה התחילה להראות סימני לחץ.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var s = Assert.Single(suggestions);
+        Assert.Equal("ל הראות", s.OriginalText);
+        Assert.Equal("להראות", s.SuggestedText);
+    }
+
+    [Fact]
     public void ComputeProofreadSuggestions_NoChanges_ReturnsEmpty()
     {
         var text = "שלום עולם, זהו טקסט לבדיקה.";
