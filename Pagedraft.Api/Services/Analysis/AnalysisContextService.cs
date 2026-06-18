@@ -285,7 +285,12 @@ public class AnalysisContextService : IAnalysisContextService
         if (string.IsNullOrWhiteSpace(raw))
             return null;
 
-        var json = ExtractJsonObject(raw);
+        // Reuse the SAME extractor the user-facing LinguisticAnalysis path uses
+        // (UnifiedAnalysisService.ExtractJson): BOM/bidi stripping, balanced-brace matching,
+        // any-tag fences, and a markdown-strip retry. A local first-'{'-to-last-'}' parser
+        // would reject Hebrew/fenced/prose-wrapped JSON that the main path accepts, leaving the
+        // ChapterStyleProfile baseline unbuilt and scene deviations without [CHAPTER_STYLE_BASELINE].
+        var json = UnifiedAnalysisService.ExtractJson(raw);
         if (string.IsNullOrWhiteSpace(json))
             return null;
 
@@ -306,24 +311,6 @@ public class AnalysisContextService : IAnalysisContextService
             .AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == bookId, ct);
         return string.IsNullOrWhiteSpace(book?.Language) ? "he" : book.Language;
-    }
-
-    private static string? ExtractJsonObject(string content)
-    {
-        if (string.IsNullOrWhiteSpace(content)) return null;
-        var text = content.Trim();
-
-        // Handle fenced JSON blocks ```json ... ```
-        var fenceMatch = Regex.Match(text, @"```(?:json)?\s*\n?([\s\S]*?)```", RegexOptions.IgnoreCase);
-        if (fenceMatch.Success)
-            text = fenceMatch.Groups[1].Value.Trim();
-
-        var start = text.IndexOf('{');
-        if (start < 0) return null;
-        var end = text.LastIndexOf('}');
-        if (end <= start) return null;
-
-        return text.Substring(start, end - start + 1).Trim();
     }
 
     // ─── Target resolution (mirrors UnifiedAnalysisService.ResolveTarget) ─────

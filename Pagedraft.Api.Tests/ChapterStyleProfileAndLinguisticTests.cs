@@ -154,6 +154,71 @@ public class ChapterStyleProfileAndLinguisticTests
             "IAiRouter should be called once on a cache miss");
     }
 
+    // ─── 1b. Cache MISS → build with Hebrew prose-wrapped JSON: baseline still builds ─────────
+    // Regression for the divergent-extractor bug: ComputeChapterLinguisticMetricsAsync used to
+    // parse with a local first-'{'-to-last-'}' helper, while the user-facing LinguisticAnalysis
+    // path uses UnifiedAnalysisService.ExtractJson (bidi stripping + balanced-brace matching +
+    // Hebrew-prose-brace rejection). An LLM reply with Hebrew prose containing braces BEFORE the
+    // real JSON would parse on the main path but fail the baseline build, so the profile was never
+    // built and scene deviations lacked [CHAPTER_STYLE_BASELINE]. With the shared extractor the
+    // leading {Hebrew prose} braces are skipped and the real object is extracted, so the build
+    // succeeds. The old helper would have spliced first-'{'..last-'}' into invalid JSON → null.
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_HebrewProseWrappedJson_StillBuildsProfile()
+    {
+        // Hebrew preamble containing its OWN braces, then the real metrics object. The old
+        // first-'{'-to-last-'}' parser would extract "{הערה...}\n\n{...real...}" → JsonException.
+        const string llmResponse = """
+            לפניכם ניתוח לשוני של הפרק {הערה ראשונית: הטקסט תקין}.
+
+            {
+              "syntaxMetrics": { "sentenceCount": 8, "averageSentenceLength": 15.0 },
+              "morphologyMetrics": { "wordCount": 120, "uniqueWords": 90, "averageWordLength": 4.5, "lexicalDensity": 0.75 },
+              "styleMetrics": { "formality": "literary", "readability": 0.8, "voiceBalance": "active" },
+              "grammaticalityScore": 0.95,
+              "summary": "ניתוח תקין.",
+              "deviations": [],
+              "consistencyIssues": []
+            }
+            """;
+
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: llmResponse);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Prose-Wrapped Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "זהו פרק עם תוכן מספיק לניתוח לשוני."
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // Profile was built and persisted despite the prose-wrapped, brace-laden Hebrew preamble.
+        Assert.NotNull(result);
+        Assert.Equal(chapterId, result!.ChapterId);
+        Assert.False(string.IsNullOrWhiteSpace(result.MetricsJson), "MetricsJson should be set");
+
+        // The persisted metrics are the REAL object (not the Hebrew preamble): the grammaticality
+        // score round-trips, proving the correct '{' was selected.
+        var parsed = JsonSerializer.Deserialize<LinguisticAnalysisResult>(result.MetricsJson, DeserializeOpts);
+        Assert.NotNull(parsed);
+        Assert.Equal(0.95, parsed!.GrammaticalityScore, precision: 5);
+
+        var count = await db.ChapterStyleProfiles.CountAsync();
+        Assert.Equal(1, count);
+    }
+
     // ─── 2. Graceful degradation: missing chapter → null, no throw, no row ──────────────────
 
     [Fact]
