@@ -42,7 +42,7 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         client.BaseAddress = new Uri(baseUrl);
 
         var tuning = GetTuning("Ollama", request.TaskType);
-        var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
+        var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict, repeat_penalty = tuning.RepeatPenalty, num_ctx = tuning.NumCtx };
 
         object payload = request.JsonMode
             ? new { model, prompt, stream = false, think = false, options, stop = StopSequences, format = "json" }
@@ -95,7 +95,7 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         client.BaseAddress = new Uri(baseUrl);
 
         var tuning = GetTuning("Ollama", request.TaskType);
-        var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict };
+        var options = new { temperature = tuning.Temperature, num_predict = tuning.NumPredict, repeat_penalty = tuning.RepeatPenalty, num_ctx = tuning.NumCtx };
 
         object payload = request.JsonMode
             ? new { model, prompt, stream = true, think = false, options, stop = StopSequences, format = "json" }

@@ -51,6 +51,7 @@ public class AnalysisRunLogTests
                 It.IsAny<AnalysisScope>(),
                 chapterId,
                 AnalysisType.Proofread,
+                It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AnalysisContext
             {
@@ -132,6 +133,7 @@ public class AnalysisRunLogTests
                 It.IsAny<AnalysisScope>(),
                 chapterId,
                 AnalysisType.Proofread,
+                It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AnalysisContext
             {
@@ -215,6 +217,7 @@ public class AnalysisRunLogTests
                 It.IsAny<AnalysisScope>(),
                 chapterId,
                 AnalysisType.Proofread,
+                It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AnalysisContext
             {
@@ -309,6 +312,7 @@ public class AnalysisRunLogTests
                 It.IsAny<AnalysisScope>(),
                 chapterId,
                 AnalysisType.LineEdit,
+                It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AnalysisContext
             {
@@ -400,6 +404,7 @@ public class AnalysisRunLogTests
                 It.IsAny<AnalysisScope>(),
                 chapterId,
                 AnalysisType.Proofread,
+                It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AnalysisContext
             {

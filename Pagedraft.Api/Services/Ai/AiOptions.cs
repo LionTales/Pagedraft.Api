@@ -64,6 +64,14 @@ public class ProviderTuningOptions
     public double Temperature { get; set; } = 0.2;
     public int MaxTokens { get; set; } = 2048;
     public int NumPredict { get; set; } = 2048; // Ollama
+    /// <summary>Ollama repeat_penalty. 1.1 is Ollama's default (no-op); raise for tasks prone to
+    /// repetition loops (e.g. structured linguistic output on smaller local models).</summary>
+    public double RepeatPenalty { get; set; } = 1.1; // Ollama
+    /// <summary>Ollama context window (num_ctx) in tokens. Ollama silently TRUNCATES any prompt
+    /// longer than this, which yields broken/empty output (e.g. a lone "{"). 4096 is Ollama's
+    /// usual default; raise for tasks that send a whole chapter/book unchunked (e.g.
+    /// LinguisticAnalysis) so input + generated output both fit.</summary>
+    public int NumCtx { get; set; } = 4096; // Ollama
 }
 
 /// <summary>Per-feature (task type) provider/model override.</summary>

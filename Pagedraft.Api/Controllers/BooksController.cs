@@ -114,6 +114,11 @@ public class BooksController : ControllerBase
         if (chunkSummaries.Count > 0)
             _db.ChunkSummaries.RemoveRange(chunkSummaries);
 
+        // Explicitly remove cached ChapterStyleProfiles to satisfy the Restrict FK on BookId.
+        var styleProfiles = await _db.ChapterStyleProfiles.Where(p => p.BookId == bookId).ToListAsync(ct);
+        if (styleProfiles.Count > 0)
+            _db.ChapterStyleProfiles.RemoveRange(styleProfiles);
+
         // Clean up document history snapshots for this book to avoid orphaned versions.
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);
         if (documentVersions.Count > 0)
