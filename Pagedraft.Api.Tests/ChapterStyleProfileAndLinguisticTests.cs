@@ -812,6 +812,58 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Equal(1, count);
     }
 
+    // ─── 6a. Stale profile + failed rebuild: return null, never the outdated cached row ────────────
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_StaleProfile_RebuildFails_ReturnsNullNotStaleRow()
+    {
+        // The chapter has (new) content so a rebuild is attempted, but the LLM yields nothing. The
+        // stale cached row must NOT be returned — that would inject an outdated [CHAPTER_STYLE_BASELINE]
+        // and produce spurious deviations.
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: "");
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Stale Rebuild-Fail Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "פרק עם תוכן חדש לאחר עריכה." // has content → rebuild is attempted
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":99}}" // outdated baseline
+        });
+        await db.SaveChangesAsync();
+
+        // Force the profile STALE: built before the chapter's last edit.
+        var profileEntry = db.Entry(db.ChapterStyleProfiles.Local.Single(p => p.Id == profileId));
+        profileEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        profileEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // No stale baseline returned, and the rebuild was actually attempted.
+        Assert.Null(result);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Once,
+            "A stale profile must trigger a rebuild attempt");
+    }
+
     // ─── 6b. Empty chapter content: do NOT return a stale baseline from the previous full chapter ──
 
     [Fact]

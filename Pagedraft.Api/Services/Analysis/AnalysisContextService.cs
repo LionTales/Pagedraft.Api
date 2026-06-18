@@ -202,7 +202,11 @@ public class AnalysisContextService : IAnalysisContextService
             // 4. Cache miss OR stale: (re)compute chapter-level metrics from the CURRENT text.
             var metrics = await ComputeChapterLinguisticMetricsAsync(chapterText, lang, ct);
             if (metrics == null)
-                return existing; // computation failed -> keep the old profile rather than nothing
+                // Rebuild failed. We only reach here on a cache miss (existing == null) or a STALE
+                // profile (step 3 already returned a fresh one), so `existing` is never current. Return
+                // null rather than the stale row: injecting an outdated [CHAPTER_STYLE_BASELINE] would
+                // produce spurious deviations. Mirrors the empty-content stale handling above.
+                return null;
 
             // 5. Serialize metrics honouring StructuredResults' [JsonPropertyName] conventions so
             // the FE/parse layer reads the same shape it expects from LinguisticAnalysisResult.
