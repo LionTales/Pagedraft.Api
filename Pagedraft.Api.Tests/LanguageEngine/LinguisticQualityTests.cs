@@ -480,15 +480,18 @@ public class LinguisticQualityTests
     // ─── Structured JSON parse (mirrors UnifiedAnalysisService.TryExtractAndReserialize shape) ───
 
     /// <summary>
-    /// Parse the model's content into a LinguisticAnalysisResult. Models often wrap JSON in markdown
-    /// fences or surrounding prose, so we brace-match the first balanced object, then deserialize
-    /// case-insensitively (the same leniency UnifiedAnalysisService.TryExtractAndReserialize applies).
-    /// Returns null on any failure — the caller treats that as zero issues.
+    /// Parse the model's content into a LinguisticAnalysisResult. Uses the SAME extractor that
+    /// production and the chapter-baseline builder use (<see cref="UnifiedAnalysisService.ExtractJson"/>:
+    /// markdown fences, BOM/bidi stripping, prose-in-braces rejection, and a markdown-strip retry), so
+    /// bake-off parsing matches real parsing and cannot mis-rank models. A local first-'{' brace matcher
+    /// would reject Hebrew prose-wrapped JSON that production accepts. Returns null on any failure — the
+    /// caller treats that as zero issues.
     /// </summary>
     private static LinguisticAnalysisResult? ParseLinguistic(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
-        var json = ExtractJsonByBraceMatching(content) ?? content;
+        var json = UnifiedAnalysisService.ExtractJson(content);
+        if (string.IsNullOrWhiteSpace(json)) return null;
         try
         {
             return JsonSerializer.Deserialize<LinguisticAnalysisResult>(json, JsonOptions);
@@ -499,33 +502,32 @@ public class LinguisticQualityTests
         }
     }
 
-    /// <summary>Return the first balanced {...} object in the text, or null if none is found.</summary>
-    private static string? ExtractJsonByBraceMatching(string text)
+    // ─── Bug-fix guard: bake-off parsing uses the SAME extractor as production ───
+    // Always-on (no live model needed). Locks the harness to UnifiedAnalysisService.ExtractJson so
+    // scores reflect real parsing.
+
+    [Fact]
+    public void ParseLinguistic_HebrewProseWrappedJson_ExtractsRealObjectNotPreambleBrace()
     {
-        var start = text.IndexOf('{');
-        if (start < 0) return null;
-        var depth = 0;
-        var inString = false;
-        var escaped = false;
-        for (var i = start; i < text.Length; i++)
-        {
-            var ch = text[i];
-            if (inString)
+        // A Hebrew preamble that itself contains balanced braces, then the REAL metrics object.
+        // A first-'{' brace matcher would lock onto {הערה...} and fail; the production extractor
+        // rejects prose-in-braces and finds the real object, so bake-off parsing matches production.
+        const string proseWrapped = """
+            לפניכם ניתוח לשוני {הערה ראשונית: הטקסט תקין}.
+
             {
-                if (escaped) escaped = false;
-                else if (ch == '\\') escaped = true;
-                else if (ch == '"') inString = false;
-                continue;
+              "grammaticalityScore": 0.95,
+              "summary": "ניתוח תקין.",
+              "deviations": [],
+              "consistencyIssues": []
             }
-            if (ch == '"') { inString = true; continue; }
-            if (ch == '{') depth++;
-            else if (ch == '}')
-            {
-                depth--;
-                if (depth == 0) return text.Substring(start, i - start + 1);
-            }
-        }
-        return null;
+            """;
+
+        var parsed = ParseLinguistic(proseWrapped);
+
+        // The REAL object is parsed (grammaticalityScore round-trips), not the prose {הערה...} brace.
+        Assert.NotNull(parsed);
+        Assert.Equal(0.95, parsed!.GrammaticalityScore, precision: 5);
     }
 
     // ─── Gold loading ───

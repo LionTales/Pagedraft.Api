@@ -115,17 +115,19 @@ public class AiRouter : IAiRouter
     }
 
     /// <summary>
-    /// For unified analysis flows (e.g. LineEdit), avoid appending the legacy pipeline
-    /// instruction when the caller already provided a complete, task-specific instruction.
-    /// LineEdit has its own dedicated AiTaskType; also kept: heuristic detection for
-    /// any prompt containing the sentence-level line edit marker text.
+    /// For unified analysis flows (LineEdit, LinguisticAnalysis), avoid appending the legacy pipeline
+    /// instruction when the caller already provided a complete, task-specific instruction. Both have
+    /// dedicated AiTaskTypes and run with structured JSON output (format=json), so the legacy
+    /// heading/numbered-list pipeline prompt must NOT be appended (it would contradict the JSON schema
+    /// and hurt quality/parsing). Also kept: heuristic detection for any prompt containing the
+    /// sentence-level line edit marker text.
     /// </summary>
     private static bool ShouldUseUnifiedInstructionVerbatim(AiRequest request)
     {
         if (request == null || string.IsNullOrWhiteSpace(request.Instruction))
             return false;
 
-        if (request.TaskType == AiTaskType.LineEdit)
+        if (request.TaskType is AiTaskType.LineEdit or AiTaskType.LinguisticAnalysis)
             return true;
 
         var instruction = request.Instruction;
