@@ -71,7 +71,8 @@ builder.Services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(
         ["Ollama"] = new OllamaProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
         ["OpenAI"] = new OpenAiProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
         ["Azure"] = new AzureOpenAiProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
-        ["Anthropic"] = new AnthropicProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>())
+        ["Anthropic"] = new AnthropicProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
+        ["OpenRouter"] = new OpenAiCompatibleProvider("OpenRouter", sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>())
     };
     return dict;
 });
