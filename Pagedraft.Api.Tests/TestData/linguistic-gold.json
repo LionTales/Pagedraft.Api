@@ -1,0 +1,115 @@
+[
+  {
+    "_README": "HEBREW VALIDATION REQUIRED — All Hebrew-language entries in this file are AI-authored drafts that MUST be reviewed and approved by a native Hebrew speaker before the bake-off results are considered trustworthy. The following entry ids contain Hebrew text that needs validation: clean-he-01, clean-he-02, clean-he-03, planted-register-he, planted-tense-he, planted-pov-he. English entries (clean-en-01, planted-register-en, planted-tense-en, planted-pov-en) are self-validated by the author. See each entry's 'notes' field for details on what to check."
+  },
+
+  {
+    "id": "clean-en-01",
+    "language": "en",
+    "input": "The morning light filtered through the curtains, casting pale stripes across the wooden floor.\n\nSarah stood at the window, watching the street below. A cat crossed the empty road, paused, then disappeared behind a hedge.",
+    "expectClean": true,
+    "expectedConsistencyTypes": [],
+    "maxConsistencyIssues": 0,
+    "notes": "English clean passage. Third-person past tense throughout. Consistent literary register. Validated by author."
+  },
+
+  {
+    "id": "clean-he-01",
+    "language": "he-IL",
+    "input": "הגשם ירד בשקט על הרחוב הריק. מרים עמדה ליד החלון ונשמה עמוק.\n\nהיא חשבה על הבוקר שעבר, על הפגישה שלא הסתיימה כמו שתכננה. הרגשות היו מסובכים, אבל היא ידעה שתמצא דרך.",
+    "expectClean": true,
+    "expectedConsistencyTypes": [],
+    "maxConsistencyIssues": 0,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Third-person past tense, consistent literary register throughout. No register, tense, or POV shifts intended."
+  },
+
+  {
+    "id": "clean-he-02",
+    "language": "he-IL",
+    "input": "דני ישב בחדר הקטן ושמע את הרעש מבחוץ. הוא הניח את הספר על השולחן.\n\nהאורות ברחוב כבו אחד אחד. דני הביט בחלון ולא אמר כלום. היה זה ערב שקט כמו כל ערב אחר.",
+    "expectClean": true,
+    "expectedConsistencyTypes": [],
+    "maxConsistencyIssues": 0,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Third-person past tense, consistent neutral register. No shifts intended."
+  },
+
+  {
+    "id": "clean-he-03",
+    "language": "he-IL",
+    "input": "\"אני לא מבין,\" אמר יוסי. \"למה לא סיפרת לי קודם?\"\n\n\"לא ידעתי איך,\" ענתה לאה. היא הורידה את עיניה. \"פחדתי ממה שתגיד.\"\n\nיוסי לקח נשימה. \"אני לא כועס עלייך. בסדר.\"",
+    "expectClean": true,
+    "expectedConsistencyTypes": [],
+    "maxConsistencyIssues": 0,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Dialogue scene, past tense throughout, consistent informal-conversational register, single POV narrator. No consistency issues intended."
+  },
+
+  {
+    "id": "planted-register-en",
+    "language": "en",
+    "input": "Jake slumped into the chair and kicked his feet up on the desk. The whole thing was a mess, and he didn't care anymore. Whatever.\n\nSubsequently, the individual reconsidered his position in light of the new evidence presented to him, and elected to pursue a more measured course of action.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["register"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted register shift. First paragraph: casual, colloquial, first-person-adjacent narration with slang ('slumped', 'Whatever'). Second paragraph: abruptly formal/bureaucratic register ('Subsequently', 'the individual', 'elected to pursue a more measured course of action'). The shift is unambiguous. Validated by author."
+  },
+
+  {
+    "id": "planted-tense-en",
+    "language": "en",
+    "input": "The soldier walked across the field at dawn. He heard nothing but the wind and the distant crows. His boots left marks in the wet grass.\n\nHe reaches the fence and stops. He looks left, then right. No one is there. He climbs over slowly.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["tense"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted tense shift. First paragraph: simple past ('walked', 'heard', 'left'). Second paragraph: abrupt switch to simple present ('reaches', 'stops', 'looks', 'climbs'). The rest of the content is clean and internally consistent. Validated by author."
+  },
+
+  {
+    "id": "planted-pov-en",
+    "language": "en",
+    "input": "I stood outside the door and hesitated. My heart was beating fast. I didn't know what I would find on the other side.\n\nNatalie thought he looked pale when he finally walked in. She noticed the way his hands shook as he reached for the chair.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["pov"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted POV shift. First paragraph: first-person narrator ('I stood', 'My heart', 'I didn't know'). Second paragraph: head-hops to third-person external view of a different character (Natalie's perspective, 'She noticed'). Classic head-hopping across paragraphs. Validated by author."
+  },
+
+  {
+    "id": "planted-register-he",
+    "language": "he-IL",
+    "input": "\"תבוא כבר,\" קרא יואב. \"אנחנו מאחרים!\" הם רצו ברחוב כמו ילדים, צוחקים ודוחפים אחד את השני.\n\nבהמשך, על בסיס הנסיבות שנוצרו, גיבש יואב עמדה מחודשת באשר לאפשרות הנסיעה המשותפת, ושקל מחדש את ההחלטה.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["register"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Planted register shift: first paragraph is casual/colloquial (dialogue, informal action). Second paragraph is an abrupt shift to formal/bureaucratic Hebrew ('על בסיס הנסיבות', 'גיבש עמדה מחודשת', 'באשר ל'). Only register is planted; tense and POV are stable."
+  },
+
+  {
+    "id": "planted-tense-he",
+    "language": "he-IL",
+    "input": "הם הגיעו לגן בבוקר מוקדם. הילדים רצו לעצים ואספו עלים. השמש הייתה חמה ונעימה.\n\nפתאום מישהו קורא בקול. הילדים עוצרים ומסתכלים סביב. רוח קרה עוברת בין העצים.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["tense"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Planted tense shift: first paragraph past tense ('הגיעו', 'רצו', 'אספו', 'הייתה'). Second paragraph switches to present tense ('קורא', 'עוצרים', 'מסתכלים', 'עוברת'). Only tense is planted; register and POV are stable."
+  },
+
+  {
+    "id": "planted-pov-he",
+    "language": "he-IL",
+    "input": "עמדתי בפתח ולא ידעתי מה לעשות. הלב שלי פעם מהר. חיכיתי שמישהו יפתח את הדלת.\n\nנעמה ראתה אותו עומד שם ותהתה מה הוא חושב. הוא נראה אבוד לחלוטין, והיא הרגישה שהיא צריכה לעזור.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["pov"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Planted POV shift: first paragraph first-person ('עמדתי', 'הלב שלי', 'חיכיתי'). Second paragraph head-hops to third-person view through Naama ('נעמה ראתה', 'היא הרגישה'). Only POV is planted; tense and register are stable throughout."
+  },
+
+  {
+    "id": "clean-he-04",
+    "language": "he-IL",
+    "input": "הייתי חייב לנצח בקרב הזה.\nהסתתרתי מאחורי גזע עץ רחב וניסיתי לשמור על שקט מוחלט, ללא כישופים. בזבוז אנרגייה כדי להיטמע בסביבה זו טעות של טירונים. או של דרומיים.\nהבטתי בגבו של היריב שלי בזמן שבחן את עץ האלון שלפניו. הוא לא זז. כנראה חיכה, כמוני, לתנועה לא נכונה, להזדמנות לתקוף.\nגלי אנרגייה עוצמתיים זרמו ממנו לכל כיוון כשהחליט סוף־סוף לפעול. שוט אנרגייה כחול ובוהק התגבש בידו והוא תקף את העץ בשתי הצלפות חלקות. כשמיקמתי את הבובה מאחורי העץ, ידעתי שהוא ימצא אותה וינסה לתקוף אותה.\nלא ציפיתי שיצליח לחתוך את הגזע ולהפיל את העץ כולו על האדמה.\nאבל זה לא משנה. הוא היה מרוכז בעץ ואני קיבלתי את ההזדמנות שלי לתקוף.\n\"אני לא בטוח שאתה מבין מה זה אומר להסתתר,\" הוא גיחך בקול מתנשא לכיוון הבובה.\nחייכתי. לא יכולתי לעצור את עצמי. \"ואני לא בטוח שאתה מבין מה זה אומר לחשוב.\"\nהוא הסתובב אליי בבת אחת, אבל כבר היה מאוחר מדי. האנרגייה שלי געשה החוצה בגלים, מתחברת לאנרגייה של אחד העצים עד שיכולתי לפקוד עליו כרצוני. ענפיו של העץ התארכו ונמתחו, עד שהתלפפו מסביב ליריב שלי.\n\"הפסדת,\" ציינתי. ניסיתי להקרין ביטחון, אבל הביטחון הזה החל להתערער כשהבנתי שהוא מחייך.\n\"לא,\" שמעתי את החיוך בקולו, \"אתה הפסדת ברגע שבחרת לנסות לתקוף אותי עם עצים. האמת? ציפיתי ממך ליותר.\"\nהענפים שנכרכו סביבו החלו להתרופף וגלי האנרגייה שלי נהדפו, כאילו העץ דוחה אותם במטרה לקלוט את גלי האנרגייה של היריב שלי. למשך כמה שניות עוד החזקתי בעץ תחת שליטתי, אבל בו־זמנית יכולתי לראות בעיני רוחי את כוחותיו של המכשף השני – עוצמתיים ובוהקים, דוחפים את האנרגייה שלי החוצה. כמה שניות אחר כך איבדתי אחיזה בעץ. ארבעה ענפים נשלחו לכיווני במהירות מסחררת, נכרכו סביב ידיי ורגליי ולפני שהספקתי להגיב, מצאתי את עצמי מונף באוויר.\n\"תיכנע.\"\nחשקתי את שיניי וניסיתי להיאבק בענפים. איזה אידיוט אני.\nהזוהר בעיניים שלו התחזק ומצאתי את עצמי תלוי במהופך, ראשי קרוב בצורה מרגיזה לקרקע.\n\"תיכנע,\" הוא חזר.\nנשכתי את שפתיי בתסכול והתאמצתי לבטא את המילה, \"נכנע.\"\nהענפים הרפו ונפלתי על האדמה.\n\"2:1,\" גיל ציין בחיוך.\n\"רק כי בפעם הראשונה לא ידעתי שזו תחרות.\" התרוממתי וניקיתי את העפר והעלים הלחים שנדבקו לבגדיי.\nשנאתי להפסיד לגיל. אימונים איתו בהחלט הוציאו את הצד התחרותי שבי. ידעתי שהוא חזק יותר, אבל אני הייתי חכם יותר ומיומן יותר – הוא לא היה אמור לנצח אותי בכזו בקלות.",
+    "expectClean": true,
+    "expectedConsistencyTypes": [],
+    "maxConsistencyIssues": 0,
+    "notes": "HEBREW - real-world passage from src/docs/test-text.txt. Consistent first-person past-tense battle scene with dialogue; a false-positive trap (local qwen3.5:4b wrongly flagged a dialogue line as register and a within-sentence tense nitpick mislabeled pov). All evaluated cloud models returned []. Validated by user 2026-06-17."
+  }
+]
