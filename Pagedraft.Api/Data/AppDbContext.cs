@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     public DbSet<AnalysisSuggestion> AnalysisSuggestions => Set<AnalysisSuggestion>();
     public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
     public DbSet<AnalysisRunLog> AnalysisRunLogs => Set<AnalysisRunLog>();
+    public DbSet<ChapterStyleProfile> ChapterStyleProfiles => Set<ChapterStyleProfile>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -199,6 +200,19 @@ public class AppDbContext : DbContext
             e.HasIndex(x => x.AnalysisResultId);
         });
 
+        modelBuilder.Entity<ChapterStyleProfile>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.MetricsJson).HasColumnType("nvarchar(max)");
+            // Chapter FK = Cascade so deleting a chapter drops its cached style profile automatically.
+            // Book FK = Restrict (deliberately, to avoid SQL Server's "multiple cascade paths" error);
+            // BooksController.Delete removes ChapterStyleProfiles for the book explicitly before delete.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
+            e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(x => new { x.ChapterId, x.Language }).IsUnique();
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -281,6 +295,11 @@ public class AppDbContext : DbContext
             else if (entry.Entity is AnalysisRunLog rl)
             {
                 if (entry.State == EntityState.Added) rl.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is ChapterStyleProfile csp)
+            {
+                if (entry.State == EntityState.Added) csp.CreatedAt = csp.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) csp.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);
