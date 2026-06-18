@@ -180,7 +180,17 @@ public class AnalysisContextService : IAnalysisContextService
 
             var chapterText = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
             if (string.IsNullOrWhiteSpace(chapterText))
-                return existing; // nothing to (re)build from -> keep the cached profile if any
+            {
+                // Chapter has no analysable content now (cleared or replaced with empty text). We cannot
+                // rebuild a baseline from empty text, and a profile built from the PREVIOUS content is
+                // outdated once the chapter changed. Apply the same freshness check as step 3: return the
+                // cached profile only when it is NOT older than the chapter's last edit; otherwise return
+                // null so scene analysis does not inject a stale [CHAPTER_STYLE_BASELINE] from the old
+                // full chapter.
+                if (existing != null && existing.UpdatedAt >= chapter.UpdatedAt)
+                    return existing;
+                return null;
+            }
 
             // 3. Freshness check: there is NO cache invalidation on chapter edit, so compare
             // timestamps. A profile built at/after the chapter's last edit is fresh; one built

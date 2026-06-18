@@ -812,6 +812,105 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Equal(1, count);
     }
 
+    // ─── 6b. Empty chapter content: do NOT return a stale baseline from the previous full chapter ──
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_EmptyChapterContent_StaleProfile_ReturnsNullWithoutLlm()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Cleared Chapter Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "" // body has been cleared
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            // Baseline cached from the PREVIOUS, non-empty chapter.
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":12}}"
+        });
+        await db.SaveChangesAsync();
+
+        // Force the profile STALE: built before the chapter's clearing edit.
+        var profileEntry = db.Entry(db.ChapterStyleProfiles.Local.Single(p => p.Id == profileId));
+        profileEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        profileEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // No stale baseline is returned for a now-empty chapter (would inject an outdated
+        // [CHAPTER_STYLE_BASELINE]), and we cannot rebuild from empty text.
+        Assert.Null(result);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Empty chapter content must not trigger a baseline rebuild");
+    }
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_EmptyChapterContent_FreshProfile_ReturnsCachedRow()
+    {
+        // Defensive: when the cached profile is NOT older than the chapter's last edit, keep it even on
+        // an empty read (guards a spurious empty content read that did not bump the chapter's UpdatedAt).
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Empty Read Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = ""
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":7}}"
+        });
+        await db.SaveChangesAsync();
+
+        // Force the profile FRESH: chapter's last edit predates the profile build.
+        var chapterEntry = db.Entry(db.Chapters.Local.Single(c => c.Id == chapterId));
+        chapterEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        chapterEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        Assert.NotNull(result);
+        Assert.Equal(profileId, result!.Id);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
     // ─── 7. Model-config regression: Chapter FK = Cascade, Book FK = Restrict (P0 fix guard) ──────
     // The InMemory provider does NOT enforce cascade/restrict at runtime, so a delete-based test
     // would pass regardless of the FK config. Instead assert the configured DeleteBehavior on the
