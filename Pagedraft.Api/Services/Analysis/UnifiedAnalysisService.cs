@@ -354,7 +354,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = targetId.ToString(),
-            JsonMode = analysisType == AnalysisType.LineEdit
+            JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
         _logger.LogInformation("Running {Scope}/{Type} analysis on {TargetId}", scope, analysisType, targetId);
@@ -484,7 +484,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = bookId?.ToString() ?? chapterId?.ToString() ?? sceneId?.ToString() ?? "",
-            JsonMode = analysisType == AnalysisType.LineEdit
+            JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
         _logger.LogInformation("Running {Scope}/{Type} with provided input", scope, analysisType);
@@ -595,7 +595,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = targetId.ToString(),
-            JsonMode = analysisType == AnalysisType.LineEdit
+            JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
         var sb = new StringBuilder();
@@ -727,7 +727,7 @@ public class UnifiedAnalysisService
             Instruction = prompt,
             TaskType = taskType,
             Language = language,
-            JsonMode = analysisType == AnalysisType.LineEdit
+            JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
         var response = await _router.CompleteAsync(request, ct);

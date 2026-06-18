@@ -19,6 +19,20 @@ public record AnalysisContext
     public ChapterBrief? ChapterBrief { get; init; }
     public BookBrief? BookBrief { get; init; }
 
+    /// <summary>
+    /// Cached per-chapter style metrics baseline for the chapter under analysis.
+    /// Populated for LinguisticAnalysis when a chapter is in scope; null otherwise or
+    /// when chapter text is unavailable.
+    /// </summary>
+    public ChapterStyleProfile? ChapterStyleBaseline { get; init; }
+
+    /// <summary>
+    /// Book-wide style averages sourced from BookBible.StyleProfileJson (same shape as
+    /// <see cref="StyleProfile"/>). Provided for LinguisticAnalysis so the prompt can
+    /// compare the chapter baseline against the whole book. Null when no profile exists.
+    /// </summary>
+    public StyleProfileData? BookStyleAverages { get; init; }
+
     public AnalysisScope Scope { get; init; }
     public AnalysisType AnalysisType { get; init; }
     public Guid? BookId { get; init; }

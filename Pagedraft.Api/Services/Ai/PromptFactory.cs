@@ -210,6 +210,8 @@ public class PromptFactory
         BookBrief        = 1 << 3,
         PrecedingContext  = 1 << 4,
         FollowingContext  = 1 << 5,
+        ChapterStyleBaseline = 1 << 6,
+        BookStyleAverages    = 1 << 7,
     }
 
     /// <summary>Which optional context fields are relevant for each analysis type.</summary>
@@ -217,7 +219,7 @@ public class PromptFactory
     {
         AnalysisType.Proofread          => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.Characters,
         AnalysisType.LineEdit           => ContextField.StyleProfile | ContextField.PrecedingContext | ContextField.FollowingContext,
-        AnalysisType.LinguisticAnalysis => ContextField.StyleProfile,
+        AnalysisType.LinguisticAnalysis => ContextField.StyleProfile | ContextField.ChapterStyleBaseline | ContextField.PrecedingContext | ContextField.FollowingContext,
         AnalysisType.LiteraryAnalysis   => ContextField.StyleProfile | ContextField.Characters | ContextField.ChapterBrief | ContextField.BookBrief,
         AnalysisType.Summarization      => ContextField.ChapterBrief | ContextField.PrecedingContext,
         AnalysisType.QA                 => ContextField.BookBrief | ContextField.Characters,
@@ -237,6 +239,17 @@ public class PromptFactory
 
         if (fields.HasFlag(ContextField.StyleProfile) && ctx.StyleProfile is { } style)
             AppendSection(sb, "STYLE_PROFILE", FormatStyleProfile(style, forSuggestions: type == AnalysisType.LineEdit));
+
+        // LinguisticAnalysis style-deviation context: render the chapter's own metric baseline so the
+        // model can compute `deviations` / `consistencyIssues`. Optional — when the source value is
+        // null (or unparseable), AppendSection skips empty content so no markers are emitted (graceful
+        // degradation).
+        // NOTE: a genuine numeric BOOK_STYLE_AVERAGES section (mean of per-chapter ChapterStyleProfile
+        // metrics) plus a book-comparison output field is deferred to Plan 5. The old wiring injected
+        // the qualitative book StyleProfile (already rendered as [STYLE_PROFILE]) under this marker,
+        // duplicating content, so it has been removed rather than left misleading.
+        if (fields.HasFlag(ContextField.ChapterStyleBaseline) && ctx.ChapterStyleBaseline is { } chapterBaseline)
+            AppendSection(sb, "CHAPTER_STYLE_BASELINE", FormatChapterStyleBaseline(chapterBaseline));
 
         if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
@@ -308,6 +321,64 @@ public class PromptFactory
             sb.AppendLine(forSuggestions
                 ? $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal). Match this level in suggestions."
                 : $"Formality score: {s.FormalityScore:F2} (0 = very informal, 1 = very formal).");
+
+        return sb.ToString();
+    }
+
+    // Options for reading ChapterStyleProfile.MetricsJson, which is a serialized
+    // LinguisticAnalysisResult (camelCase via [JsonPropertyName]); case-insensitive to be lenient.
+    private static readonly System.Text.Json.JsonSerializerOptions MetricsReadOpts = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    /// <summary>
+    /// Renders a chapter's cached style baseline (LinguisticAnalysisResult-shaped MetricsJson)
+    /// as plain "metric: value" lines so the model can numerically compare the current scene's
+    /// metrics against the chapter baseline and emit `deviations`. Returns empty (so the section
+    /// is omitted) when MetricsJson is missing or cannot be parsed.
+    /// </summary>
+    private static string FormatChapterStyleBaseline(ChapterStyleProfile profile)
+    {
+        if (string.IsNullOrWhiteSpace(profile.MetricsJson))
+            return string.Empty;
+
+        Pagedraft.Api.Services.Analysis.LinguisticAnalysisResult? metrics;
+        try
+        {
+            metrics = System.Text.Json.JsonSerializer
+                .Deserialize<Pagedraft.Api.Services.Analysis.LinguisticAnalysisResult>(profile.MetricsJson, MetricsReadOpts);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return string.Empty;
+        }
+
+        if (metrics == null)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Chapter-wide baseline metrics (compare the current scene against these numbers):");
+
+        var syntax = metrics.SyntaxMetrics;
+        sb.AppendLine($"- sentenceCount: {syntax.SentenceCount}");
+        sb.AppendLine($"- averageSentenceLength: {syntax.AverageSentenceLength:F1} words");
+        sb.AppendLine($"- complexSentences: {syntax.ComplexSentences}");
+        sb.AppendLine($"- shortestSentence: {syntax.ShortestSentence} words");
+        sb.AppendLine($"- longestSentence: {syntax.LongestSentence} words");
+
+        var morph = metrics.MorphologyMetrics;
+        sb.AppendLine($"- wordCount: {morph.WordCount}");
+        sb.AppendLine($"- uniqueWords: {morph.UniqueWords}");
+        sb.AppendLine($"- averageWordLength: {morph.AverageWordLength:F2}");
+        sb.AppendLine($"- lexicalDensity: {morph.LexicalDensity:F2}");
+
+        var st = metrics.StyleMetrics;
+        sb.AppendLine($"- formality: {st.Formality}");
+        sb.AppendLine($"- readability: {st.Readability:F1}");
+        sb.AppendLine($"- voiceBalance: {st.VoiceBalance}");
+
+        sb.AppendLine($"- grammaticalityScore: {metrics.GrammaticalityScore:F2}");
 
         return sb.ToString();
     }
@@ -538,7 +609,12 @@ public class PromptFactory
     private const string LinguisticHe =
         """
         אתה מומחה לניתוח לשוני. נתח את הטקסט הבא ברמה לשונית מעמיקה.
-        
+
+        ייתכן שיסופק לך הקשר נוסף בתוך סימונים:
+        - [CHAPTER_STYLE_BASELINE] — מדדי הסגנון הבסיסיים של הפרק כולו (קו ייחוס של הפרק עצמו). השווה את מדדי הסצנה שלפניך אל הקו הזה.
+        - [PRECEDING_CONTEXT] / [FOLLOWING_CONTEXT] — הפסקאות שלפני ושאחרי הקטע הנתון, לקריאה בלבד. נתח רק את הטקסט הנתון; השתמש בהקשר הזה כדי לזהות סתירות שחוצות פסקאות (מעברי רישום, מעברי זמן, הפרות נקודת-מבט) בין הסצנה לסביבתה.
+        אם סימון כלשהו אינו מופיע — התעלם ממנו והחזר מערך ריק בשדות התלויים בו.
+
         החזר את התוצאה בפורמט JSON:
         {
           "syntaxMetrics": {
@@ -560,16 +636,37 @@ public class PromptFactory
             "voiceBalance": "active|passive|mixed"
           },
           "grammaticalityScore": 0.9,
-          "summary": "סיכום לשוני תמציתי: רמת השפה, עקביות הסגנון, ונקודות בולטות."
+          "summary": "סיכום לשוני תמציתי: רמת השפה, עקביות הסגנון, ונקודות בולטות.",
+          "deviations": [
+            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "הסבר קצר על משמעות החריגה מהקו הבסיסי של הפרק." }
+          ],
+          "consistencyIssues": [
+            { "type": "register", "span": "ציטוט קצר מהטקסט שבו הבעיה מופיעה", "description": "תיאור הבעיה בקצרה." }
+          ]
         }
-        
+
         מלא ערכים מדויקים ככל האפשר. הציון grammaticalityScore הוא בין 0 ל-1.
+
+        deviations — מערך שבו כל פריט משווה מדד אחד של הסצנה אל הקו הבסיסי של הפרק ([CHAPTER_STYLE_BASELINE]): "metric" = שם המדד (כפי שהוא מופיע במדדים שלמעלה, למשל "averageSentenceLength" או "lexicalDensity"), "sceneValue" = ערך המדד בסצנה הנוכחית, "chapterBaseline" = ערך אותו מדד בקו הבסיסי של הפרק, "note" = משפט אחד קצר וברור בשפה ידידותית לכותב (ללא מונחים טכניים), שמסביר מה המשמעות המעשית של הפער עבור הסצנה (למשל קצב, קריאוּת או חיוּת) ולא רק חוזר על המספרים. כלול רק חריגות בעלות משמעות. אם אין קו בסיסי או אין חריגות — החזר מערך ריק [].
+
+        consistencyIssues — דווח כאן אך ורק על שינויים שחוצים פסקאות בין חלקים שונים של הטקסט. שגיאות דקדוק, כתיב או תחביר אינן שייכות לכאן - הן משפיעות על grammaticalityScore בלבד ואסור לדווח עליהן כאן. בחר את "type" במדויק:
+        - "register" — שינוי ברמת הפורמליות/הטון של הקריינות בין חלקים (למשל: קריינות יומיומית ופשוטה שהופכת לרשמית או ספרותית-מליצית, או להפך).
+        - "tense" — שינוי בזמן הנרטיבי בין חלקים (למשל: מעבר מזמן עבר לזמן הווה באמצע הנרטיב).
+        - "pov" — שינוי בנקודת המבט בין חלקים (למשל: מעבר מגוף ראשון לגוף שלישי, או "קפיצה בין ראשים").
+        "span" = ציטוט קצר מהטקסט, "description" = משפט אחד קצר המתאר את השינוי (ממה למה). דווח לכל היותר על 3-4 הבעיות המשמעותיות ביותר; אם אינך בטוח - העדף מערך ריק [] על פני דיווח שגוי. לדוגמה שלילית: אל תדווח על "משפט עם שני פעלים", "משפט חסר נושא", או כל תצפית דקדוקית ברמת המשפט הבודד. דיאלוג נכתב באופן טבעי בשפה מדוברת ופשוטה יותר מהקריינות - אל תדווח על ההבדל הטבעי בין דברי הדמויות לבין שפת המספר כשינוי רישום; דווח רק על שינוי טון בתוך הקריינות עצמה (או בתוך הדיאלוג) בין חלקים. נצל את [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] לזיהוי חריגות בין פסקאות. אם אין בעיות - החזר מערך ריק [].
+
+        חשוב: כל "note" וכל "description" חייבים להיות משפט אחד קצר בלבד (עד כ-25 מילים). אל תחזור על אותו ניסוח או רעיון יותר מפעם אחת.
         """;
 
     private const string LinguisticEn =
         """
         You are a linguistic analysis expert. Perform a deep linguistic analysis of the following text.
-        
+
+        You may be given additional context inside markers:
+        - [CHAPTER_STYLE_BASELINE] — the baseline style metrics of the whole chapter (the chapter's own reference line). Compare the metrics of the scene in front of you against this baseline.
+        - [PRECEDING_CONTEXT] / [FOLLOWING_CONTEXT] — the paragraphs before and after the given passage, read-only. Analyze only the given text; use this surrounding context to detect cross-paragraph issues (register shifts, tense shifts, POV violations) between the scene and its surroundings.
+        If any marker is absent — ignore it and return an empty array for the fields that depend on it.
+
         Return the result in JSON format:
         {
           "syntaxMetrics": {
@@ -591,10 +688,26 @@ public class PromptFactory
             "voiceBalance": "active|passive|mixed"
           },
           "grammaticalityScore": 0.9,
-          "summary": "Concise linguistic summary: language level, style consistency, and notable features."
+          "summary": "Concise linguistic summary: language level, style consistency, and notable features.",
+          "deviations": [
+            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "Short explanation of what the divergence from the chapter baseline means." }
+          ],
+          "consistencyIssues": [
+            { "type": "register", "span": "short quote from the text where the issue occurs", "description": "Brief description of the issue." }
+          ]
         }
-        
+
         Fill in values as accurately as possible. The grammaticalityScore is between 0 and 1.
+
+        deviations — an array where each item compares ONE scene metric against the chapter baseline ([CHAPTER_STYLE_BASELINE]): "metric" = the metric name (as it appears in the metrics above, e.g. "averageSentenceLength" or "lexicalDensity"), "sceneValue" = the metric's value in the current scene, "chapterBaseline" = the same metric's value in the chapter baseline, "note" = one short, clear sentence in writer-friendly language (no technical jargon) explaining the practical effect of the difference on the scene (e.g. pace, readability, or vividness), not just restating the numbers. Include only meaningful divergences. If there is no baseline or no divergences, return an empty array [].
+
+        consistencyIssues — report ONLY cross-paragraph shifts between different parts of the text. Grammar, spelling, and syntax errors do NOT belong here - they affect grammaticalityScore only and must NOT be reported here. Choose "type" precisely:
+        - "register" — a formality/tone shift in the NARRATION between parts (e.g. plain, casual narration shifting to formal or ornate prose, or vice versa).
+        - "tense" — a narration-tense shift between parts (e.g. past tense shifting to present tense mid-narrative).
+        - "pov" — a perspective shift between parts (e.g. first-person shifting to third-person, or head-hopping).
+        "span" = a short quote from the text where the issue occurs, "description" = one short sentence stating the shift (from what to what). Report at most 3-4 of the most significant issues; when in doubt, prefer an empty array [] over a false positive. Negative examples: do NOT report things like "sentence has two verbs", "sentence lacks a subject", or any per-sentence grammatical observation. Dialogue is naturally written in a more colloquial, simpler register than narration - do NOT report the natural difference between characters' spoken lines and the narrator's prose as a register shift; only flag a tone shift WITHIN the narration itself (or within dialogue) between parts. Use [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] to detect cross-paragraph issues. If none are found, return an empty array [].
+
+        Important: every "note" and "description" must be a single short sentence (max ~25 words). Do not repeat the same phrasing or idea more than once.
         """;
 
     // ── Literary Analysis ───────────────────────────────────────────

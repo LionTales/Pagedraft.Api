@@ -45,6 +45,40 @@ public class LinguisticAnalysisResult
 
     [JsonPropertyName("summary")]
     public string Summary { get; set; } = string.Empty;
+
+    [JsonPropertyName("deviations")]
+    public List<StyleDeviation> Deviations { get; set; } = new();
+
+    [JsonPropertyName("consistencyIssues")]
+    public List<ConsistencyIssue> ConsistencyIssues { get; set; } = new();
+}
+
+public class StyleDeviation
+{
+    [JsonPropertyName("metric")]
+    public string Metric { get; set; } = string.Empty;
+
+    [JsonPropertyName("sceneValue")]
+    public double SceneValue { get; set; }
+
+    [JsonPropertyName("chapterBaseline")]
+    public double ChapterBaseline { get; set; }
+
+    [JsonPropertyName("note")]
+    public string Note { get; set; } = string.Empty;
+}
+
+public class ConsistencyIssue
+{
+    /// <summary>Type: "register" | "tense" | "pov"</summary>
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = string.Empty;
+
+    [JsonPropertyName("span")]
+    public string Span { get; set; } = string.Empty;
+
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = string.Empty;
 }
 
 public class SyntaxMetrics

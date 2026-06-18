@@ -28,4 +28,17 @@ public interface IAnalysisContextService
         Guid targetId,
         AnalysisType analysisType,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Loads the cached per-chapter style-metrics baseline for (chapterId, language), or builds and
+    /// persists one when absent (cache-read-or-build, mirroring the ChunkSummary pattern). The metrics
+    /// reuse the same LLM-backed linguistic computation that produces LinguisticAnalysisResult and are
+    /// stored as JSON on <see cref="Models.ChapterStyleProfile.MetricsJson"/>.
+    /// </summary>
+    /// <returns>The cached or newly built profile, or null when chapter text is unavailable or the build fails.</returns>
+    Task<Models.ChapterStyleProfile?> LoadOrBuildChapterStyleProfileAsync(
+        Guid bookId,
+        Guid chapterId,
+        string language,
+        CancellationToken ct = default);
 }
