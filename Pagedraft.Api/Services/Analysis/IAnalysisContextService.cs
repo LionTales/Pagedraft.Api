@@ -17,6 +17,12 @@ public interface IAnalysisContextService
     /// <param name="scope">Book, Chapter, or Scene.</param>
     /// <param name="targetId">The ID of the target entity (BookId, ChapterId, or SceneId).</param>
     /// <param name="analysisType">Which analysis is being run — determines which optional context fields to load.</param>
+    /// <param name="language">
+    /// The analysis language the caller will run the user-facing pass with (request override or a
+    /// normalized code such as "en"/"he"). Used for the chapter style baseline so its cache key,
+    /// build prompt, and [CHAPTER_STYLE_BASELINE] agree with the analysis language. Falls back to the
+    /// book language when null/empty.
+    /// </param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>
     /// A fully assembled <see cref="Models.AnalysisContext"/> with TargetText always populated
@@ -27,6 +33,7 @@ public interface IAnalysisContextService
         AnalysisScope scope,
         Guid targetId,
         AnalysisType analysisType,
+        string language,
         CancellationToken ct = default);
 
     /// <summary>

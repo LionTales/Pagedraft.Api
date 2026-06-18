@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
@@ -493,6 +494,7 @@ public class ChapterStyleProfileAndLinguisticTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.LinguisticAnalysis,
+            "he",
             CancellationToken.None);
 
         // The qualitative book style profile is loaded into StyleProfile (rendered as [STYLE_PROFILE]).
@@ -546,6 +548,7 @@ public class ChapterStyleProfileAndLinguisticTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.LinguisticAnalysis,
+            "he",
             CancellationToken.None);
 
         // BookStyleAverages should be null when no BookBible / StyleProfile exists
@@ -584,6 +587,7 @@ public class ChapterStyleProfileAndLinguisticTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.Proofread,
+            "he",
             CancellationToken.None);
 
         Assert.Null(context.ChapterStyleBaseline);
@@ -629,6 +633,7 @@ public class ChapterStyleProfileAndLinguisticTests
             AnalysisScope.Chapter,
             middleId,
             AnalysisType.LinguisticAnalysis,
+            "he",
             CancellationToken.None);
 
         // Preceding comes from the previous chapter's tail; following from the next chapter's head.
@@ -664,6 +669,7 @@ public class ChapterStyleProfileAndLinguisticTests
             AnalysisScope.Chapter,
             middleId,
             AnalysisType.LiteraryAnalysis,
+            "he",
             CancellationToken.None);
 
         Assert.Null(context.PrecedingContext);
@@ -890,6 +896,221 @@ public class ChapterStyleProfileAndLinguisticTests
 
         // The other book's profile is untouched.
         Assert.Single(db.ChapterStyleProfiles.Where(p => p.BookId == otherBookId));
+    }
+
+    // ─── 8. Bug 2: chapter-scope LinguisticAnalysis must NOT build a baseline (no self-comparison) ─
+    // For Chapter scope the analysed text IS the whole chapter, so a chapter-vs-itself baseline would
+    // surface stochastic `deviations`. The baseline (and its extra LLM call) is skipped; only Scene
+    // scope compares a scene against its chapter.
+
+    [Fact]
+    public async Task BuildContextAsync_ChapterScopeLinguistic_SkipsBaselineAndLlm()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+
+        db.Books.Add(new Book { Id = bookId, Title = "Chapter Scope Book", Language = "he" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "תוכן הפרק כולו לניתוח לשוני ברמת הפרק."
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var context = await svc.BuildContextAsync(
+            AnalysisScope.Chapter,
+            chapterId,
+            AnalysisType.LinguisticAnalysis,
+            "he",
+            CancellationToken.None);
+
+        // No baseline at chapter scope (would be the chapter compared against itself).
+        Assert.Null(context.ChapterStyleBaseline);
+
+        // The baseline build (a full-chapter LLM pass) is skipped entirely.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Chapter-scope LinguisticAnalysis must not trigger the baseline LLM call");
+
+        // Nothing was cached.
+        Assert.Equal(0, await db.ChapterStyleProfiles.CountAsync());
+    }
+
+    // ─── 8. Bug 1 + Bug 2: scene-scope LinguisticAnalysis builds the baseline using the REQUEST ────
+    // language (override / normalized code), not the raw book language, so the cache key, build prompt
+    // and [CHAPTER_STYLE_BASELINE] agree with the analysis language.
+
+    [Fact]
+    public async Task BuildContextAsync_SceneScopeLinguistic_BuildsBaselineUsingRequestLanguage()
+    {
+        var metricsPayload = """
+            {
+              "syntaxMetrics": { "sentenceCount": 4 },
+              "morphologyMetrics": { "wordCount": 40, "uniqueWords": 30, "averageWordLength": 4.2, "lexicalDensity": 0.55 },
+              "styleMetrics": { "formality": "mixed", "readability": 0.7, "voiceBalance": "mixed" },
+              "grammaticalityScore": 0.9,
+              "summary": "Chapter baseline.",
+              "deviations": [],
+              "consistencyIssues": []
+            }
+            """;
+
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: metricsPayload);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var sceneId = Guid.NewGuid();
+
+        // Book language is Hebrew, but the analysis runs with an English override.
+        db.Books.Add(new Book { Id = bookId, Title = "Override Book", Language = "he" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Order = 1,
+            Title = "Chapter",
+            ContentText = "The full chapter text used to compute the style baseline."
+        });
+        // A real, round-trippable SFDT (the ultra-minimal CreateMinimalSfdtFromText payload yields
+        // empty text through Syncfusion in the test host, which would make ResolveSceneAsync throw).
+        var sceneSfdt = new SfdtConversionService().ConvertToSfdt(
+            new System.Collections.Generic.List<DocumentFormat.OpenXml.OpenXmlElement>
+            {
+                new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                    new DocumentFormat.OpenXml.Wordprocessing.Run(
+                        new DocumentFormat.OpenXml.Wordprocessing.Text("The scene under analysis with several words here.")))
+            }).SfdtJson;
+        db.Scenes.Add(new Scene
+        {
+            Id = sceneId,
+            ChapterId = chapterId,
+            Order = 1,
+            Title = "Scene",
+            ContentSfdt = sceneSfdt
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var context = await svc.BuildContextAsync(
+            AnalysisScope.Scene,
+            sceneId,
+            AnalysisType.LinguisticAnalysis,
+            "en",
+            CancellationToken.None);
+
+        // Baseline built for scene scope.
+        Assert.NotNull(context.ChapterStyleBaseline);
+
+        // Bug 1: the baseline is keyed/built with the REQUEST language ("en"), not the book's "he".
+        Assert.Equal("en", context.ChapterStyleBaseline!.Language);
+        var persisted = await db.ChapterStyleProfiles.SingleAsync();
+        Assert.Equal("en", persisted.Language);
+
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Once,
+            "Scene-scope LinguisticAnalysis builds the chapter baseline once");
+    }
+
+    // ─── 8. Bug 3: a failed stale-refresh save must not leave a tracked Modified entity ────────────
+    // If the refresh SaveChanges throws, the profile must be detached so a later SaveChanges on the
+    // same scoped DbContext (e.g. from UnifiedAnalysisService) is not poisoned by the pending change.
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_StaleRefreshSaveFails_DoesNotLeaveTrackedModifiedEntity()
+    {
+        var newMetricsJson = JsonSerializer.Serialize(new
+        {
+            syntaxMetrics = new { sentenceCount = 9 },
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        });
+
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        using var db = new ThrowOnSaveDbContext(options);
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+        const string oldMetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":3}}";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Save Fail Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "תוכן הפרק שהשתנה לאחר בניית הפרופיל."
+        });
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = oldMetricsJson
+        });
+        await db.SaveChangesAsync();
+
+        // Force stale so the refresh path runs.
+        var profileEntry = db.Entry(db.ChapterStyleProfiles.Local.Single(p => p.Id == profileId));
+        profileEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        profileEntry.State = EntityState.Unchanged;
+
+        var routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AiResponse { Content = newMetricsJson, Model = "m", Provider = "p" });
+
+        var svc = new AnalysisContextService(
+            db,
+            new SfdtConversionService(),
+            routerMock.Object,
+            new PromptFactory(),
+            NullLogger<AnalysisContextService>.Instance);
+
+        // Make the stale-refresh SaveChanges throw.
+        db.ThrowOnSave = true;
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // Degrades gracefully: returns the freshly computed baseline rather than null.
+        Assert.NotNull(result);
+
+        // The failed refresh must NOT leave a tracked Modified ChapterStyleProfile.
+        Assert.DoesNotContain(
+            db.ChangeTracker.Entries<ChapterStyleProfile>(),
+            e => e.State == EntityState.Modified);
+
+        // A later SaveChanges on the same context succeeds (no poisoned pending change to retry).
+        db.ThrowOnSave = false;
+        var ex = await Record.ExceptionAsync(() => db.SaveChangesAsync());
+        Assert.Null(ex);
+    }
+
+    /// <summary>AppDbContext whose SaveChangesAsync can be made to throw, to simulate a save failure.</summary>
+    private sealed class ThrowOnSaveDbContext : AppDbContext
+    {
+        public bool ThrowOnSave { get; set; }
+
+        public ThrowOnSaveDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+            => ThrowOnSave
+                ? throw new DbUpdateException("Simulated stale-refresh save failure")
+                : base.SaveChangesAsync(cancellationToken);
     }
 
     // ─── Helper: build a DI ServiceProvider matching TextNormalizationAndContextTests convention ─

@@ -72,6 +72,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.Proofread,
+            "he",
             CancellationToken.None);
 
         Assert.Equal("זהו טקסט לפרק הראשון.", context.TargetText);
@@ -124,6 +125,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.Proofread,
+            "he",
             CancellationToken.None);
 
         Assert.NotNull(context.Characters);
@@ -157,6 +159,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.Proofread,
+            "he",
             CancellationToken.None);
 
         Assert.NotNull(context.Characters);
@@ -192,7 +195,7 @@ public class TextNormalizationAndContextTests
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            svc.BuildContextAsync(AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, cts.Token));
+            svc.BuildContextAsync(AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", cts.Token));
     }
 
     [Fact]
@@ -392,6 +395,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             middleChapter.Id,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.NotNull(middleContext.PrecedingContext);
@@ -404,6 +408,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             firstChapter.Id,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.Null(firstContext.PrecedingContext);
@@ -414,6 +419,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             lastChapter.Id,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.NotNull(lastContext.PrecedingContext);
@@ -466,6 +472,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.NotNull(context.StyleProfile);
@@ -511,6 +518,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.Null(context.StyleProfile);
@@ -555,6 +563,7 @@ public class TextNormalizationAndContextTests
             AnalysisScope.Chapter,
             chapterId,
             AnalysisType.LineEdit,
+            "he",
             CancellationToken.None);
 
         Assert.Equal(AnalysisScope.Chapter, context.Scope);

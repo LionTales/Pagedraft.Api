@@ -304,7 +304,7 @@ public class UnifiedAnalysisService
         Guid? jobId = null,
         CancellationToken ct = default)
     {
-        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, language, ct);
         var inputText = context.TargetText;
         var bookId = context.BookId;
         var chapterId = context.ChapterId;
@@ -576,7 +576,7 @@ public class UnifiedAnalysisService
         string language,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
-        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, ct);
+        var context = await _contextService.BuildContextAsync(scope, targetId, analysisType, language, ct);
         var inputText = context.TargetText;
         var bookId = context.BookId;
         var chapterId = context.ChapterId;

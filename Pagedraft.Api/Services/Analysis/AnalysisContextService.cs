@@ -60,6 +60,7 @@ public class AnalysisContextService : IAnalysisContextService
         AnalysisScope scope,
         Guid targetId,
         AnalysisType analysisType,
+        string language,
         CancellationToken ct = default)
     {
         var (text, bookId, chapterId, sceneId) = scope switch
@@ -99,21 +100,28 @@ public class AnalysisContextService : IAnalysisContextService
             styleProfile = await LoadStyleProfileAsync(bookId.Value, ct);
         }
 
-        // LinguisticAnalysis needs a per-chapter metrics baseline so the prompt path can flag style
-        // deviations. Only attempt when a chapter is in scope; degrade gracefully (leave null) when
-        // text/profile is missing.
+        // LinguisticAnalysis compares a SCENE's metrics against its chapter baseline, so the baseline
+        // is only meaningful at Scene scope. Skip it for Chapter scope: there the analysed text IS the
+        // whole chapter, so comparing the chapter against its own (separately, stochastically computed)
+        // metrics would surface spurious `deviations` even when nothing changed. Book scope has no
+        // single chapter. The chapter-vs-book reference is deferred to Plan 5.
         // NOTE: BookStyleAverages is intentionally left null here. The previous wiring reused the
         // qualitative book StyleProfileData (already injected as [STYLE_PROFILE]), which duplicated
         // identical content under a [BOOK_STYLE_AVERAGES] marker that promised numeric metrics.
         // Real numeric book-average style metrics (mean of per-chapter ChapterStyleProfile metrics)
         // plus a book-comparison output field are deferred to Plan 5.
         ChapterStyleProfile? chapterStyleBaseline = null;
-        if (analysisType is AnalysisType.LinguisticAnalysis && bookId.HasValue && chapterId.HasValue)
+        if (scope == AnalysisScope.Scene && analysisType is AnalysisType.LinguisticAnalysis
+            && bookId.HasValue && chapterId.HasValue)
         {
-            // Language is resolved from book.Language; a per-request analysis may use a different
-            // language override, but the chapter baseline uses the book default (Plan 5 territory).
+            // Use the SAME language the user-facing analysis runs with (request override or normalized
+            // code) so the baseline cache key, its build prompt, and [CHAPTER_STYLE_BASELINE] all agree
+            // with the analysis language. Fall back to the book language only when none was supplied.
+            var baselineLanguage = string.IsNullOrWhiteSpace(language)
+                ? await ResolveLanguageAsync(bookId.Value, ct)
+                : language;
             chapterStyleBaseline = await LoadOrBuildChapterStyleProfileAsync(
-                bookId.Value, chapterId.Value, await ResolveLanguageAsync(bookId.Value, ct), ct);
+                bookId.Value, chapterId.Value, baselineLanguage, ct);
         }
 
         return new AnalysisContext
@@ -194,7 +202,19 @@ public class AnalysisContextService : IAnalysisContextService
             {
                 // Refresh the stale row in place (UpdatedAt re-stamped by SaveChanges override).
                 existing.MetricsJson = metricsJson;
-                await _db.SaveChangesAsync(ct);
+                try
+                {
+                    await _db.SaveChangesAsync(ct);
+                }
+                catch (DbUpdateException ex)
+                {
+                    // Persisting the refreshed baseline failed. Detach the entity so its now-Modified
+                    // state is NOT retried by a later SaveChangesAsync on this shared scoped DbContext
+                    // (which would fail the whole analysis save). Return the freshly computed metrics so
+                    // THIS analysis still uses an up-to-date baseline, just uncached.
+                    _logger.LogWarning(ex, "Failed to refresh stale ChapterStyleProfile for chapter {ChapterId}", chapterId);
+                    _db.Entry(existing).State = EntityState.Detached;
+                }
                 return existing;
             }
 
