@@ -708,7 +708,7 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
-    /// Run analysis without persistence — used internally by BookIntelligenceService
+    /// Run analysis without persistence - used internally by BookIntelligenceService
     /// for chapter summarization where the result feeds into a larger pipeline.
     /// </summary>
     public async Task<string> RunRawAsync(
@@ -966,7 +966,7 @@ public class UnifiedAnalysisService
 
     /// <summary>
     /// Detects opening dialogue markers: standard double quote, Hebrew gershayim (״),
-    /// left curly quote (\u201C), em dash (—), and en dash (–).
+    /// left curly quote (\u201C), em dash (-), and en dash (-).
     /// </summary>
     private static readonly Regex DialogueStartPattern = new(
         "^\\s*[\"\u201C\u05F4\u2014\u2013]",
@@ -1005,7 +1005,7 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
-    /// Returns true if the segment is part of an ongoing dialogue block — either it
+    /// Returns true if the segment is part of an ongoing dialogue block - either it
     /// opens with a dialogue marker or it is a short attribution line.
     /// Used by the dialogue-aware chunking loop to decide whether extending the current
     /// chunk (up to <see cref="DialogueOverflowMultiplier"/>) is preferable to splitting.
@@ -1697,7 +1697,7 @@ public class UnifiedAnalysisService
         try
         {
             // Strip markdown fence markers only (marker + optional language tag),
-            // not the rest of the line — safe regardless of newline presence.
+            // not the rest of the line - safe regardless of newline presence.
             var stripped = Regex.Replace(content, @"```[a-zA-Z]*[ \t]*\n?", "");
             stripped = StripBomAndBidiWrapper(stripped);
 
@@ -2348,6 +2348,40 @@ public class UnifiedAnalysisService
                     "LineEdit AttachSuggestions: failed to deserialize structuredResult into LineEditResult. structuredResult preview={Preview}",
                     TruncateForAudit(structuredJson, 200));
                 // Ignore malformed structured result; we still persist raw text.
+            }
+        }
+        else if (analysisType == AnalysisType.LinguisticAnalysis && structuredJson is not null)
+        {
+            // Additive: consistency issues from the structured linguistic result are also persisted
+            // as navigate-only AnalysisSuggestions (with offsets where the span anchors). The
+            // deviations/summary/consistency chips still read StructuredResult as before.
+            try
+            {
+                var parsed = System.Text.Json.JsonSerializer.Deserialize<LinguisticAnalysisResult>(structuredJson, JsonOpts);
+                if (parsed is not null)
+                {
+                    var suggestions = _suggestionDiff.ComputeConsistencyIssueSuggestions(parsed.ConsistencyIssues, inputText);
+                    for (var i = 0; i < suggestions.Count; i++)
+                    {
+                        suggestions[i].OrderIndex = i;
+                        suggestions[i].CreatedAt = DateTimeOffset.UtcNow;
+                        result.Suggestions.Add(suggestions[i]);
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "LinguisticAnalysis AttachSuggestions: structured JSON deserialized to null LinguisticAnalysisResult. structuredResult preview={Preview}",
+                        TruncateForAudit(structuredJson, 200));
+                }
+            }
+            catch (System.Text.Json.JsonException ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "LinguisticAnalysis AttachSuggestions: failed to deserialize structuredResult into LinguisticAnalysisResult. structuredResult preview={Preview}",
+                    TruncateForAudit(structuredJson, 200));
+                // Ignore malformed structured result; we still persist raw text + structured chips.
             }
         }
     }
