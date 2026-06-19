@@ -8,8 +8,8 @@ public class AnalysisSuggestion
     public Guid AnalysisResultId { get; set; }
     public string OriginalText { get; set; } = string.Empty;
     public string SuggestedText { get; set; } = string.Empty;
-    public int StartOffset { get; set; }
-    public int EndOffset { get; set; }
+    public int? StartOffset { get; set; }
+    public int? EndOffset { get; set; }
     public string? Reason { get; set; }
     public string? Category { get; set; }
     public string? Explanation { get; set; }

@@ -71,12 +71,18 @@ public class AnalysisContextService : IAnalysisContextService
             _ => throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported analysis scope")
         };
 
-        // LineEdit and LinguisticAnalysis both use the surrounding paragraphs: LineEdit for
-        // contextual suggestions, LinguisticAnalysis to detect cross-paragraph consistency
-        // breaks (register/tense/POV) at scene boundaries.
+        // LineEdit uses the surrounding paragraphs at any scope for contextual suggestions.
+        // LinguisticAnalysis pulls the envelope ONLY at Scene scope, to detect cross-paragraph
+        // consistency breaks (register/tense/POV) at scene boundaries WITHIN a chapter. At Chapter
+        // scope the chapter is self-contained, so adjacent-chapter context is intentionally omitted
+        // for LinguisticAnalysis: pulling it would surface cross-chapter issues that are not
+        // navigable in this unit (the model could quote a span from a neighboring chapter). The
+        // context-reading infrastructure (ResolveContextEnvelopeAsync / ContextField wiring) stays
+        // in place for future cross-chapter features.
         string? precedingContext = null;
         string? followingContext = null;
-        if (analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis)
+        if (analysisType is AnalysisType.LineEdit
+            || (analysisType is AnalysisType.LinguisticAnalysis && scope == AnalysisScope.Scene))
         {
             (precedingContext, followingContext) =
                 await ResolveContextEnvelopeAsync(scope, bookId, chapterId, sceneId, ct);

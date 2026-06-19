@@ -208,7 +208,7 @@ public class SuggestionDiffService
 
             // A range can read as multiple ORIGINAL words only because a space between them was
             // DELETED (e.g. "ל הראות" → "להראות"): the correction joins two words into one. Splitting
-            // such a range into per-word sub-ranges destroys the edit — each half then maps to an
+            // such a range into per-word sub-ranges destroys the edit - each half then maps to an
             // unchanged word and the join is lost. If every diff block touching this range deletes (or
             // inserts) only whitespace, the multi-word count is an artifact of the join; keep the range
             // whole so the join surfaces as one suggestion.
@@ -412,6 +412,129 @@ public class SuggestionDiffService
         return suggestions;
     }
 
+    /// <summary>
+    /// Compute navigate-only suggestions for a structured ConsistencyAnalysis result by mapping each
+    /// issue's span back into the normalized document text via IndexOf.
+    ///
+    /// Anchoring rule: a consistency issue is only surfaced when its span is located in the analyzed
+    /// text. Matched spans get concrete StartOffset/EndOffset (in normalized space) plus context slices.
+    /// Out-of-target spans (e.g. quoted from PRECEDING/FOLLOWING context) and blank spans are dropped
+    /// (skipped) because they are not navigable in this unit - exactly like ComputeLineEditSuggestions
+    /// skips unmatched spans. No null-offset fallback item is emitted.
+    ///
+    /// Ordering: consistency issues arrive in SIGNIFICANCE order (the prompt asks for "the most
+    /// significant issues"), NOT document order. So each issue is located independently from offset 0
+    /// rather than from a monotonic cursor; this prevents an earlier-emitted issue whose span sits late
+    /// in the chapter from hiding a later-emitted issue whose span sits earlier. To keep genuinely
+    /// repeated identical spans distinct, a list of already-consumed (start,end) ranges is tracked and
+    /// each issue PREFERS the first occurrence of its span that does not overlap an already-claimed
+    /// range. When no distinct occurrence is free but the span IS present in the text - which happens
+    /// routinely because different issue types (tense vs POV/register) quote the same or overlapping
+    /// 8-15 word window - the issue falls back to the first occurrence rather than being dropped, so a
+    /// valid in-text anchor is never discarded just because another issue claimed the same passage.
+    /// Only spans absent from the analyzed text (e.g. quoted from PRECEDING/FOLLOWING context) are dropped.
+    /// </summary>
+    public List<AnalysisSuggestion> ComputeConsistencyIssueSuggestions(
+        IReadOnlyList<ConsistencyIssue> issues,
+        string inputText)
+    {
+        var suggestions = new List<AnalysisSuggestion>();
+        if (issues == null || issues.Count == 0)
+            return suggestions;
+
+        var normalizedDocument = TextNormalization.NormalizeTextForAnalysis(inputText);
+        // Track ranges already claimed by earlier issues so two issues sharing identical span text map
+        // to the first then the second occurrence (preserving the RepeatedPhrase behavior).
+        var consumed = new List<(int Start, int End)>();
+
+        foreach (var issue in issues)
+        {
+            var rawSpan = issue.Span ?? string.Empty;
+            var normalizedSpan = TextNormalization.NormalizeTextForAnalysis(rawSpan);
+            var category = "consistency-" + (issue.Type ?? string.Empty).Trim().ToLowerInvariant();
+            var reason = issue.Description;
+
+            if (string.IsNullOrWhiteSpace(normalizedSpan))
+            {
+                // No span text at all - not navigable, so drop the issue (no fallback item).
+                continue;
+            }
+
+            // Scan every occurrence of the span from offset 0 (independent of issue emission order).
+            // Prefer the first occurrence whose [start,end) range does not overlap a range already
+            // claimed by an earlier issue, so genuinely repeated identical phrases map to successive
+            // positions. Remember the very first occurrence regardless of overlap: it is the fallback
+            // anchor when no distinct occurrence is free.
+            var firstStart = -1;
+            var startOffset = -1;
+            var fromIndex = 0;
+            while (true)
+            {
+                var idx = normalizedDocument.IndexOf(normalizedSpan, fromIndex, StringComparison.Ordinal);
+                if (idx < 0)
+                    break;
+
+                var candidateStart = idx;
+                var candidateEnd = idx + normalizedSpan.Length;
+
+                if (firstStart < 0)
+                    firstStart = candidateStart;
+
+                var overlaps = false;
+                foreach (var (cStart, cEnd) in consumed)
+                {
+                    if (candidateStart < cEnd && cStart < candidateEnd)
+                    {
+                        overlaps = true;
+                        break;
+                    }
+                }
+
+                if (!overlaps)
+                {
+                    startOffset = candidateStart;
+                    break;
+                }
+
+                // This occurrence is already claimed; advance one character past its start to find the
+                // next occurrence (handles overlapping repeats too).
+                fromIndex = idx + 1;
+            }
+
+            if (firstStart < 0)
+            {
+                // Span not present in the analyzed text at all - it is out of target (e.g. quoted from
+                // PRECEDING/FOLLOWING context) and therefore not navigable in this unit, so drop it.
+                continue;
+            }
+
+            // No distinct (non-overlapping) occurrence was free, but the span IS in the text. This is the
+            // common case where different issue types (tense vs POV/register) quote the same or
+            // overlapping passage and it appears only once. Fall back to the first occurrence so every
+            // issue with a valid in-text anchor is kept rather than silently dropped.
+            if (startOffset < 0)
+                startOffset = firstStart;
+
+            var endOffset = startOffset + normalizedSpan.Length;
+
+            consumed.Add((startOffset, endOffset));
+
+            suggestions.Add(new AnalysisSuggestion
+            {
+                StartOffset = startOffset,
+                EndOffset = endOffset,
+                OriginalText = rawSpan,
+                SuggestedText = string.Empty,
+                Reason = reason,
+                Category = category,
+                ContextBefore = normalizedDocument[Math.Max(0, startOffset - 50)..startOffset],
+                ContextAfter = normalizedDocument[endOffset..Math.Min(normalizedDocument.Length, endOffset + 50)]
+            });
+        }
+
+        return suggestions;
+    }
+
     private static bool IsMeaningfulSuggestion(AnalysisSuggestion s)
     {
         if (string.Equals(s.OriginalText, s.SuggestedText, StringComparison.Ordinal))
@@ -424,7 +547,7 @@ public class SuggestionDiffService
         if (string.Equals(o, g, StringComparison.Ordinal))
         {
             // Trimming makes them equal, so the ONLY change is leading/trailing whitespace on the
-            // span. That is usually a span-boundary artifact (drop it) — UNLESS removing that
+            // span. That is usually a span-boundary artifact (drop it) - UNLESS removing that
             // whitespace genuinely changes adjacency, i.e. it sat between this token and a
             // neighbouring non-whitespace character (e.g. a stray space before a period:
             // "מסמיקה ." → "מסמיקה."). In that case it is a real punctuation/spacing correction.
