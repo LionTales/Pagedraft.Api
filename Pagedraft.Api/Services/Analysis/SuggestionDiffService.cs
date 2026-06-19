@@ -427,7 +427,12 @@ public class SuggestionDiffService
     /// rather than from a monotonic cursor; this prevents an earlier-emitted issue whose span sits late
     /// in the chapter from hiding a later-emitted issue whose span sits earlier. To keep genuinely
     /// repeated identical spans distinct, a list of already-consumed (start,end) ranges is tracked and
-    /// each issue claims the FIRST occurrence of its span that does not overlap an already-claimed range.
+    /// each issue PREFERS the first occurrence of its span that does not overlap an already-claimed
+    /// range. When no distinct occurrence is free but the span IS present in the text - which happens
+    /// routinely because different issue types (tense vs POV/register) quote the same or overlapping
+    /// 8-15 word window - the issue falls back to the first occurrence rather than being dropped, so a
+    /// valid in-text anchor is never discarded just because another issue claimed the same passage.
+    /// Only spans absent from the analyzed text (e.g. quoted from PRECEDING/FOLLOWING context) are dropped.
     /// </summary>
     public List<AnalysisSuggestion> ComputeConsistencyIssueSuggestions(
         IReadOnlyList<ConsistencyIssue> issues,
@@ -455,11 +460,13 @@ public class SuggestionDiffService
                 continue;
             }
 
-            // Scan every occurrence of the span from offset 0 (independent of issue emission order) and
-            // pick the first whose [start,end) range does not overlap a range already claimed by an
-            // earlier issue.
+            // Scan every occurrence of the span from offset 0 (independent of issue emission order).
+            // Prefer the first occurrence whose [start,end) range does not overlap a range already
+            // claimed by an earlier issue, so genuinely repeated identical phrases map to successive
+            // positions. Remember the very first occurrence regardless of overlap: it is the fallback
+            // anchor when no distinct occurrence is free.
+            var firstStart = -1;
             var startOffset = -1;
-            var endOffset = -1;
             var fromIndex = 0;
             while (true)
             {
@@ -469,6 +476,9 @@ public class SuggestionDiffService
 
                 var candidateStart = idx;
                 var candidateEnd = idx + normalizedSpan.Length;
+
+                if (firstStart < 0)
+                    firstStart = candidateStart;
 
                 var overlaps = false;
                 foreach (var (cStart, cEnd) in consumed)
@@ -483,7 +493,6 @@ public class SuggestionDiffService
                 if (!overlaps)
                 {
                     startOffset = candidateStart;
-                    endOffset = candidateEnd;
                     break;
                 }
 
@@ -492,13 +501,21 @@ public class SuggestionDiffService
                 fromIndex = idx + 1;
             }
 
-            if (startOffset < 0)
+            if (firstStart < 0)
             {
-                // Span not found in the analyzed text (or every occurrence already claimed) - it is out
-                // of target (e.g. quoted from PRECEDING/FOLLOWING context) and therefore not navigable
-                // in this unit, so drop it.
+                // Span not present in the analyzed text at all - it is out of target (e.g. quoted from
+                // PRECEDING/FOLLOWING context) and therefore not navigable in this unit, so drop it.
                 continue;
             }
+
+            // No distinct (non-overlapping) occurrence was free, but the span IS in the text. This is the
+            // common case where different issue types (tense vs POV/register) quote the same or
+            // overlapping passage and it appears only once. Fall back to the first occurrence so every
+            // issue with a valid in-text anchor is kept rather than silently dropped.
+            if (startOffset < 0)
+                startOffset = firstStart;
+
+            var endOffset = startOffset + normalizedSpan.Length;
 
             consumed.Add((startOffset, endOffset));
 

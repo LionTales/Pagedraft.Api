@@ -456,6 +456,73 @@ public class SuggestionDiffServiceTests
     }
 
     [Fact]
+    public void ComputeConsistencyIssueSuggestions_DistinctIssuesShareSingleOccurrenceSpan_BothAnchoredNotDropped()
+    {
+        // Two DIFFERENT issue types quote the SAME passage, which appears exactly once in the text.
+        // The old overlap-dedup dropped the second issue (no other occurrence to claim); but distinct
+        // issues legitimately share an anchor, so BOTH must survive and anchor to that one occurrence.
+        const string inputText = "She walks to the door and opened it slowly, then she leaves the room.";
+        const string sharedSpan = "She walks to the door and opened it slowly";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = sharedSpan, Description = "tense shift: walks vs opened" },
+            new() { Type = "pov",   Span = sharedSpan, Description = "pov phrasing in the same passage" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        // Both issues survive (the bug surfaced only the first in significance order).
+        Assert.Equal(2, suggestions.Count);
+        Assert.Contains(suggestions, s => s.Category == "consistency-tense");
+        Assert.Contains(suggestions, s => s.Category == "consistency-pov");
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var idx = normDoc.IndexOf(sharedSpan, StringComparison.Ordinal);
+        Assert.True(idx >= 0, "fixture: shared span must be present once in the text");
+        // Span occurs once, so both issues anchor to that single occurrence (overlap is allowed here).
+        Assert.All(suggestions, s =>
+        {
+            Assert.Equal(idx, s.StartOffset);
+            Assert.Equal(idx + sharedSpan.Length, s.EndOffset);
+        });
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_DistinctIssuesOverlappingWindows_BothAnchored()
+    {
+        // Tense and POV issues quote OVERLAPPING (not identical) windows over the same sentence. The
+        // second window's only occurrence overlaps the first's claimed range; it must still anchor to
+        // its real position rather than being dropped.
+        const string inputText = "He walks into the kitchen and she opened the window while they watch the rain.";
+        const string tenseWindow = "He walks into the kitchen and she opened";       // earlier window
+        const string povWindow   = "kitchen and she opened the window while they";   // overlaps tenseWindow
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var tenseIdx = normDoc.IndexOf(tenseWindow, StringComparison.Ordinal);
+        var povIdx = normDoc.IndexOf(povWindow, StringComparison.Ordinal);
+        Assert.True(tenseIdx >= 0 && povIdx >= 0, "fixture: both windows present");
+        // Sanity-check the fixture: the two windows really overlap in text.
+        Assert.True(povIdx < tenseIdx + tenseWindow.Length && tenseIdx < povIdx + povWindow.Length,
+            "fixture: windows must overlap so the dedup path is exercised");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = tenseWindow, Description = "tense shift" },
+            new() { Type = "pov",   Span = povWindow,   Description = "pov shift" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Equal(2, suggestions.Count);
+        var tense = Assert.Single(suggestions, s => s.Category == "consistency-tense");
+        var pov = Assert.Single(suggestions, s => s.Category == "consistency-pov");
+        // Each maps to its own window's real position even though they overlap.
+        Assert.Equal(tenseIdx, tense.StartOffset);
+        Assert.Equal(povIdx, pov.StartOffset);
+    }
+
+    [Fact]
     public void ComputeConsistencyIssueSuggestions_UnmatchedSpan_IsDropped()
     {
         // Span is not present in the analyzed text at all. It is not navigable in this unit, so it
