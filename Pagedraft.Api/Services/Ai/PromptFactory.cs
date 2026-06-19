@@ -641,7 +641,7 @@ public class PromptFactory
             { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "הסבר קצר על משמעות החריגה מהקו הבסיסי של הפרק." }
           ],
           "consistencyIssues": [
-            { "type": "register", "span": "ציטוט קצר מהטקסט שבו הבעיה מופיעה", "description": "תיאור הבעיה בקצרה." }
+            { "type": "register", "span": "8-15 מילים המועתקות מילה-במילה מהטקסט (מחרוזת מדויקת, ללא שלוש נקודות, ללא מירכאות נוספות)", "description": "תיאור הבעיה בקצרה." }
           ]
         }
 
@@ -653,7 +653,7 @@ public class PromptFactory
         - "register" — שינוי ברמת הפורמליות/הטון של הקריינות בין חלקים (למשל: קריינות יומיומית ופשוטה שהופכת לרשמית או ספרותית-מליצית, או להפך).
         - "tense" — שינוי בזמן הנרטיבי בין חלקים (למשל: מעבר מזמן עבר לזמן הווה באמצע הנרטיב).
         - "pov" — שינוי בנקודת המבט בין חלקים (למשל: מעבר מגוף ראשון לגוף שלישי, או "קפיצה בין ראשים").
-        "span" = ציטוט קצר מהטקסט, "description" = משפט אחד קצר המתאר את השינוי (ממה למה). דווח לכל היותר על 3-4 הבעיות המשמעותיות ביותר; אם אינך בטוח - העדף מערך ריק [] על פני דיווח שגוי. לדוגמה שלילית: אל תדווח על "משפט עם שני פעלים", "משפט חסר נושא", או כל תצפית דקדוקית ברמת המשפט הבודד. דיאלוג נכתב באופן טבעי בשפה מדוברת ופשוטה יותר מהקריינות - אל תדווח על ההבדל הטבעי בין דברי הדמויות לבין שפת המספר כשינוי רישום; דווח רק על שינוי טון בתוך הקריינות עצמה (או בתוך הדיאלוג) בין חלקים. נצל את [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] לזיהוי חריגות בין פסקאות. אם אין בעיות - החזר מערך ריק [].
+        "span" = מחרוזת מתוך הטקסט הנתון, מועתקת מילה-במילה ותו-בתו, מהמקום שבו השינוי מופיע לראשונה. קריטי: ה-span חייב להיות ציטוט מילה-במילה מהטקסט הנתון לניתוח בלבד — לעולם לא מ-[PRECEDING_CONTEXT] או מ-[FOLLOWING_CONTEXT]. כאשר השינוי הוא ביחס להקשר הסובב, צטט את המשפט שבתוך הטקסט הנתון שבו השינוי מתבטא. קריטי: ה-span חייב להימצא בטקסט הנתון בחיפוש מחרוזת מדויק. העתק רצף רציף של כ-8 עד 15 מילים ישירות מהטקסט. אל תנסח מחדש, אל תסכם, אל תתקן ואל תשנה כתיב. אל תוסיף מירכאות, שלוש נקודות ("..." או "…"), סוגריים, או מילים שאינן בטקסט. אל תדלג על מילים ואל תחבר קטעים שאינם צמודים זה לזה. אם הקטע הרלוונטי ארוך - העתק רק את 8-15 המילים הראשונות שלו מילה-במילה במקום לקצר עם שלוש נקודות. "description" = משפט אחד קצר המתאר את השינוי (ממה למה). דווח לכל היותר על 3-4 הבעיות המשמעותיות ביותר; אם אינך בטוח - העדף מערך ריק [] על פני דיווח שגוי. לדוגמה שלילית: אל תדווח על "משפט עם שני פעלים", "משפט חסר נושא", או כל תצפית דקדוקית ברמת המשפט הבודד. דיאלוג נכתב באופן טבעי בשפה מדוברת ופשוטה יותר מהקריינות - אל תדווח על ההבדל הטבעי בין דברי הדמויות לבין שפת המספר כשינוי רישום; דווח רק על שינוי טון בתוך הקריינות עצמה (או בתוך הדיאלוג) בין חלקים. אם [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] סופקו, ניתן להיעזר בהם רק כדי לזהות שינוי, אך ה-span שאתה מצטט חייב תמיד להגיע מהטקסט הנתון לניתוח עצמו. אם אין בעיות - החזר מערך ריק [].
 
         חשוב: כל "note" וכל "description" חייבים להיות משפט אחד קצר בלבד (עד כ-25 מילים). אל תחזור על אותו ניסוח או רעיון יותר מפעם אחת.
         """;
@@ -693,7 +693,7 @@ public class PromptFactory
             { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "Short explanation of what the divergence from the chapter baseline means." }
           ],
           "consistencyIssues": [
-            { "type": "register", "span": "short quote from the text where the issue occurs", "description": "Brief description of the issue." }
+            { "type": "register", "span": "8-15 words copied verbatim from the text (exact substring, no ellipsis, no added quotes)", "description": "Brief description of the issue." }
           ]
         }
 
@@ -705,7 +705,7 @@ public class PromptFactory
         - "register" — a formality/tone shift in the NARRATION between parts (e.g. plain, casual narration shifting to formal or ornate prose, or vice versa).
         - "tense" — a narration-tense shift between parts (e.g. past tense shifting to present tense mid-narrative).
         - "pov" — a perspective shift between parts (e.g. first-person shifting to third-person, or head-hopping).
-        "span" = a short quote from the text where the issue occurs, "description" = one short sentence stating the shift (from what to what). Report at most 3-4 of the most significant issues; when in doubt, prefer an empty array [] over a false positive. Negative examples: do NOT report things like "sentence has two verbs", "sentence lacks a subject", or any per-sentence grammatical observation. Dialogue is naturally written in a more colloquial, simpler register than narration - do NOT report the natural difference between characters' spoken lines and the narrator's prose as a register shift; only flag a tone shift WITHIN the narration itself (or within dialogue) between parts. Use [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] to detect cross-paragraph issues. If none are found, return an empty array [].
+        "span" = an EXACT, VERBATIM substring copied character-for-character from the analyzed text where the shift first becomes visible. CRITICAL: the span MUST be a verbatim quote from the ANALYZED text only — NEVER from [PRECEDING_CONTEXT] or [FOLLOWING_CONTEXT]. When the shift is relative to the surrounding context, quote the sentence WITHIN the analyzed text that exhibits the shift. CRITICAL: the span MUST be findable in the analyzed text by an exact-substring search. Copy a contiguous run of about 8 to 15 words straight from the text. Do NOT paraphrase, summarize, fix, or re-spell it. Do NOT add quotation marks, ellipsis ("..." or "…"), brackets, or any words that are not in the text. Do NOT skip words or join non-adjacent fragments. If the relevant passage is long, copy only its first ~8-15 words verbatim rather than truncating with an ellipsis. "description" = one short sentence stating the shift (from what to what). Report at most 3-4 of the most significant issues; when in doubt, prefer an empty array [] over a false positive. Negative examples: do NOT report things like "sentence has two verbs", "sentence lacks a subject", or any per-sentence grammatical observation. Dialogue is naturally written in a more colloquial, simpler register than narration - do NOT report the natural difference between characters' spoken lines and the narrator's prose as a register shift; only flag a tone shift WITHIN the narration itself (or within dialogue) between parts. If [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT] are provided, you may use them only to DETECT a shift, but the span you quote must always come from the analyzed text itself. If none are found, return an empty array [].
 
         Important: every "note" and "description" must be a single short sentence (max ~25 words). Do not repeat the same phrasing or idea more than once.
         """;
