@@ -67,7 +67,7 @@ public class SuggestionDiffServiceTests
         Assert.True(suggestion.StartOffset >= 0);
         Assert.True(suggestion.EndOffset > suggestion.StartOffset);
 
-        var span = TextNormalization.NormalizeTextForAnalysis(original)[suggestion.StartOffset..suggestion.EndOffset];
+        var span = TextNormalization.NormalizeTextForAnalysis(original)[suggestion.StartOffset!.Value..suggestion.EndOffset!.Value];
         Assert.Equal(suggestion.OriginalText, span);
 
         Assert.Equal("world", suggestion.OriginalText.TrimEnd(',', ' '));
@@ -128,8 +128,8 @@ public class SuggestionDiffServiceTests
 
         foreach (var s in suggestions)
         {
-            Assert.InRange(s.StartOffset, 0, originalNorm.Length);
-            Assert.InRange(s.EndOffset, s.StartOffset, originalNorm.Length);
+            Assert.InRange(s.StartOffset!.Value, 0, originalNorm.Length);
+            Assert.InRange(s.EndOffset!.Value, s.StartOffset.Value, originalNorm.Length);
         }
     }
 
@@ -154,7 +154,7 @@ public class SuggestionDiffServiceTests
         Assert.Contains("משפט שני משופר", suggestion.SuggestedText);
 
         var normDoc = TextNormalization.NormalizeTextForAnalysis(doc);
-        var slice = normDoc[suggestion.StartOffset..suggestion.EndOffset];
+        var slice = normDoc[suggestion.StartOffset!.Value..suggestion.EndOffset!.Value];
         Assert.Equal("משפט שני", slice);
     }
 
@@ -323,6 +323,245 @@ public class SuggestionDiffServiceTests
         Assert.True(suggestion.ContextAfter!.Length > 0);
         Assert.True(suggestion.ContextBefore.Length <= 50, "ContextBefore should be at most 50 characters");
         Assert.True(suggestion.ContextAfter.Length <= 50, "ContextAfter should be at most 50 characters");
+    }
+
+    // -----------------------------------------------------------------------
+    // ComputeConsistencyIssueSuggestions tests
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_VerbatimSpan_CorrectOffsetsInNormalizedSpace()
+    {
+        // The span is verbatim text that exists in the document.
+        // Expected offsets must match where the span sits in the normalized document.
+        const string inputText = "He walked slowly down the street. He ran fast.";
+        const string spanRaw = "walked slowly";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var normSpan = TextNormalization.NormalizeTextForAnalysis(spanRaw);
+        var expectedStart = normDoc.IndexOf(normSpan, StringComparison.Ordinal);
+        var expectedEnd = expectedStart + normSpan.Length;
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = spanRaw, Description = "tense shift" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedEnd, suggestion.EndOffset);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_BidiSpan_MatchesAfterNormalization()
+    {
+        // Span contains an LRM bidi mark (‎) that the document does not have.
+        // After normalization both are stripped, so the span is still found.
+        const string inputText = "הוא הלך לאט במסדרון. הוא רץ מהר.";
+        // Span has a trailing LRM bidi mark that the document text does not contain.
+        var spanRaw = "הלך לאט‎";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = spanRaw, Description = "register shift" }
+        };
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var normSpan = TextNormalization.NormalizeTextForAnalysis(spanRaw);
+        var expectedStart = normDoc.IndexOf(normSpan, StringComparison.Ordinal);
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.NotNull(suggestion.StartOffset);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedStart + normSpan.Length, suggestion.EndOffset);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_RepeatedPhrase_DistinctNonOverlappingOffsets()
+    {
+        // The same phrase appears twice; the second issue must map to the second occurrence.
+        const string inputText = "She smiled. Then she smiled again.";
+        const string spanRaw = "smiled";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "pov", Span = spanRaw, Description = "first occurrence" },
+            new() { Type = "pov", Span = spanRaw, Description = "second occurrence" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Equal(2, suggestions.Count);
+        var first = suggestions[0];
+        var second = suggestions[1];
+        // Both must be matched (non-null offsets).
+        Assert.NotNull(first.StartOffset);
+        Assert.NotNull(second.StartOffset);
+        // Second occurrence must start after first occurrence ends.
+        Assert.True(second.StartOffset > first.StartOffset, "Second match must be past first match");
+        Assert.True(second.StartOffset >= first.EndOffset, "Offsets must not overlap");
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_IssuesOutOfDocumentOrder_AllMatchedNoneDropped()
+    {
+        // Issues arrive in SIGNIFICANCE order, not document order: issues[0]'s span sits LATER in the
+        // document than issues[1]'s span. The old monotonic-searchStart code advanced the cursor past
+        // issues[0]'s (later) match, so IndexOf for issues[1]'s (earlier) span returned -1 and the
+        // issue was silently dropped. The fix locates each issue independently from offset 0, so both
+        // are matched and issues[1] maps to its REAL earlier offset.
+        const string inputText = "The tense slip is here near the start. Much later the POV shift appears.";
+        const string laterSpan = "POV shift appears";   // sits later in the document
+        const string earlierSpan = "tense slip is here"; // sits earlier in the document
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        // Sanity-check the fixture: the first-emitted span really is later than the second-emitted span.
+        var laterIdx = normDoc.IndexOf(laterSpan, StringComparison.Ordinal);
+        var earlierIdx = normDoc.IndexOf(earlierSpan, StringComparison.Ordinal);
+        Assert.True(laterIdx > earlierIdx, "fixture: issues[0] span must sit later than issues[1] span");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "pov",   Span = laterSpan,   Description = "emitted first, located later" },
+            new() { Type = "tense", Span = earlierSpan, Description = "emitted second, located earlier" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        // Both must survive (this is what fails against the old monotonic-cursor code).
+        Assert.Equal(2, suggestions.Count);
+
+        var firstEmitted = suggestions[0];  // the later span
+        var secondEmitted = suggestions[1]; // the earlier span
+
+        Assert.NotNull(firstEmitted.StartOffset);
+        Assert.NotNull(firstEmitted.EndOffset);
+        Assert.NotNull(secondEmitted.StartOffset);
+        Assert.NotNull(secondEmitted.EndOffset);
+
+        // Each suggestion must map to its real span position in normalized space.
+        Assert.Equal(laterIdx, firstEmitted.StartOffset);
+        Assert.Equal(laterIdx + laterSpan.Length, firstEmitted.EndOffset);
+        Assert.Equal(earlierIdx, secondEmitted.StartOffset);
+        Assert.Equal(earlierIdx + earlierSpan.Length, secondEmitted.EndOffset);
+
+        // The second-emitted issue's REAL position is earlier than the first-emitted issue's.
+        Assert.True(
+            secondEmitted.StartOffset < firstEmitted.StartOffset,
+            "issues[1] must map to its real earlier offset, before issues[0]'s offset");
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_UnmatchedSpan_IsDropped()
+    {
+        // Span is not present in the analyzed text at all. It is not navigable in this unit, so it
+        // must be dropped entirely (no null-offset fallback item).
+        const string inputText = "A completely different sentence.";
+        const string spanRaw = "text not found anywhere";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = spanRaw, Description = "unmatched issue" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        // Dropped - nothing surfaced for an all-unmatched input.
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_SpanFromContextNotInTarget_IsDropped()
+    {
+        // Mimics the cross-chapter bug: the model detected a register/POV shift relative to the
+        // surrounding chapters and quoted a sentence from that NEIGHBORING context. The span is a
+        // verbatim sentence that exists only in some OTHER text, NOT in the analyzed target chapter.
+        // Because it cannot be located in the analyzed unit, it is not navigable and must be dropped.
+        const string targetChapter =
+            "The morning was quiet. Sarah opened the shutters and let the light spill across the floor.";
+        // This sentence exists only in the PRECEDING_CONTEXT (the previous chapter), never in the target.
+        const string spanFromOtherChapter =
+            "Down in the harbor the old fishermen mended their nets before dawn";
+
+        // Sanity: the span really is absent from the analyzed text.
+        Assert.DoesNotContain(spanFromOtherChapter, targetChapter, StringComparison.Ordinal);
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = spanFromOtherChapter, Description = "register shift vs previous chapter" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, targetChapter);
+
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_CategoryMapping_RegisterTensePov()
+    {
+        // Each issue type must produce the correct "consistency-{type}" category.
+        const string inputText = "He runs. She walked. They think.";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = "He runs",   Description = "register" },
+            new() { Type = "tense",    Span = "She walked", Description = "tense"    },
+            new() { Type = "pov",      Span = "They think", Description = "pov"      }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Equal(3, suggestions.Count);
+        Assert.Contains(suggestions, s => s.Category == "consistency-register");
+        Assert.Contains(suggestions, s => s.Category == "consistency-tense");
+        Assert.Contains(suggestions, s => s.Category == "consistency-pov");
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_CategoryMapping_NormalizesTypeCase()
+    {
+        // Mixed-case and whitespace-padded Type values must be trimmed + lowercased in the category.
+        const string inputText = "He runs. She walked. They think.";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = " Register ", Span = "He runs",   Description = "register padded" },
+            new() { Type = "Tense",      Span = "She walked", Description = "tense mixed"    },
+            new() { Type = "POV",        Span = "They think", Description = "pov upper"      }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Equal(3, suggestions.Count);
+        Assert.Contains(suggestions, s => s.Category == "consistency-register");
+        Assert.Contains(suggestions, s => s.Category == "consistency-tense");
+        Assert.Contains(suggestions, s => s.Category == "consistency-pov");
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_SuggestedTextIsAlwaysEmpty()
+    {
+        // SuggestedText must be "" for every produced suggestion (navigate-only v1).
+        // Both spans are present in the analyzed text so both are surfaced (matched spans only).
+        const string inputText = "He walked. She ran.";
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense",    Span = "walked", Description = "tense shift" },
+            new() { Type = "register", Span = "ran",    Description = "register shift" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Equal(2, suggestions.Count);
+        foreach (var s in suggestions)
+        {
+            Assert.Equal(string.Empty, s.SuggestedText);
+        }
     }
 }
 
