@@ -348,7 +348,7 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Equal(14.0, dev.ChapterBaseline, precision: 5);
         Assert.Equal("Scene sentences are notably longer than chapter baseline.", dev.Note);
 
-        // ConsistencyIssues — all three types
+        // ConsistencyIssues - all three types
         Assert.Equal(3, roundTripped.ConsistencyIssues.Count);
         Assert.Equal("register", roundTripped.ConsistencyIssues[0].Type);
         Assert.Equal("paragraph 3", roundTripped.ConsistencyIssues[0].Span);
@@ -441,7 +441,7 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Contains("\"description\"", json);
     }
 
-    // ─── 4. BuildContextAsync wiring — LinguisticAnalysis scope with StyleProfile present ─────
+    // ─── 4. BuildContextAsync wiring - LinguisticAnalysis scope with StyleProfile present ─────
 
     [Fact]
     public async Task BuildContextAsync_LinguisticAnalysis_WithStyleProfile_PopulatesStyleProfile_AndBookStyleAveragesIsNull()
@@ -508,7 +508,7 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Null(context.BookStyleAverages);
     }
 
-    // ─── 4. BuildContextAsync wiring — LinguisticAnalysis scope, no StyleProfile → null ──────
+    // ─── 4. BuildContextAsync wiring - LinguisticAnalysis scope, no StyleProfile → null ──────
 
     [Fact]
     public async Task BuildContextAsync_LinguisticAnalysis_WithoutStyleProfile_BookStyleAveragesIsNull()
@@ -559,7 +559,7 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Equal(AnalysisScope.Chapter, context.Scope);
     }
 
-    // ─── 4. BuildContextAsync wiring — non-LinguisticAnalysis → baseline stays null ──────────
+    // ─── 4. BuildContextAsync wiring - non-LinguisticAnalysis → baseline stays null ──────────
 
     [Fact]
     public async Task BuildContextAsync_NonLinguisticScope_ChapterStyleBaselineIsNull()
@@ -582,7 +582,7 @@ public class ChapterStyleProfileAndLinguisticTests
 
         var svc = provider.GetRequiredService<IAnalysisContextService>();
 
-        // Proofread is not LinguisticAnalysis — ChapterStyleBaseline must remain null
+        // Proofread is not LinguisticAnalysis - ChapterStyleBaseline must remain null
         var context = await svc.BuildContextAsync(
             AnalysisScope.Chapter,
             chapterId,
@@ -594,12 +594,14 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Null(context.BookStyleAverages);
     }
 
-    // ─── 5. Context envelope wiring — LinguisticAnalysis pulls preceding/following neighbours ──
-    // Regression test for the follow-up that wired the context envelope into the LinguisticAnalysis
-    // scope (so the prompt can detect cross-paragraph register/tense/POV breaks at scene boundaries).
+    // ─── 5. Context envelope wiring - LinguisticAnalysis pulls preceding/following neighbours ──
+    // Regression test: chapter-scope LinguisticAnalysis no longer pulls the adjacent-chapter context
+    // envelope. At Chapter scope the chapter is self-contained, so injecting neighbouring-chapter text
+    // would surface cross-chapter consistency issues that are not navigable in this unit. The envelope
+    // is reserved for Scene scope (within-chapter boundary detection).
 
     [Fact]
-    public async Task BuildContextAsync_LinguisticAnalysis_PopulatesContextEnvelopeFromAdjacentChapters()
+    public async Task BuildContextAsync_ChapterScopeLinguistic_DoesNotPullAdjacentChapterEnvelope()
     {
         var metricsPayload = """
             {
@@ -636,14 +638,97 @@ public class ChapterStyleProfileAndLinguisticTests
             "he",
             CancellationToken.None);
 
-        // Preceding comes from the previous chapter's tail; following from the next chapter's head.
-        Assert.False(string.IsNullOrWhiteSpace(context.PrecedingContext), "PrecedingContext should be populated for LinguisticAnalysis");
-        Assert.Contains("הקודם", context.PrecedingContext!);
-        Assert.False(string.IsNullOrWhiteSpace(context.FollowingContext), "FollowingContext should be populated for LinguisticAnalysis");
-        Assert.Contains("הבא", context.FollowingContext!);
+        // At Chapter scope the adjacent-chapter envelope is intentionally omitted for LinguisticAnalysis,
+        // so neighbours stay null (the chapter is treated as self-contained).
+        Assert.Null(context.PrecedingContext);
+        Assert.Null(context.FollowingContext);
     }
 
-    // ─── 5. Context envelope wiring — non-envelope analysis type leaves neighbours null ────────
+    // ─── 5. Context envelope wiring - Scene-scope LinguisticAnalysis DOES pull the envelope ─────
+    // Companion positive test for BuildContextAsync_ChapterScopeLinguistic_DoesNotPullAdjacentChapterEnvelope.
+    // At Scene scope the adjacent-scene envelope IS pulled so the prompt can detect cross-paragraph
+    // register/tense/POV breaks at scene boundaries within a chapter. A future refactor that
+    // accidentally drops the Scene-scope envelope would be caught here.
+
+    [Fact]
+    public async Task BuildContextAsync_SceneScopeLinguistic_PullsContextEnvelope()
+    {
+        // LLM returns valid metrics so LoadOrBuildChapterStyleProfileAsync (called at Scene scope)
+        // can build the chapter baseline without failing.
+        var metricsPayload = """
+            {
+              "syntaxMetrics": { "sentenceCount": 3 },
+              "morphologyMetrics": { "wordCount": 30, "uniqueWords": 25, "averageWordLength": 4.0, "lexicalDensity": 0.5 },
+              "styleMetrics": { "formality": "literary", "readability": 0.75, "voiceBalance": "active" },
+              "grammaticalityScore": 0.9,
+              "summary": "Chapter baseline for scene envelope test.",
+              "deviations": [],
+              "consistencyIssues": []
+            }
+            """;
+
+        using var provider = BuildServiceProvider(out _, llmResponse: metricsPayload);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId    = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var prevSceneId   = Guid.NewGuid();
+        var middleSceneId = Guid.NewGuid();
+        var nextSceneId   = Guid.NewGuid();
+
+        // Build real, round-trippable SFDT for each scene so SfdtConversionService.GetTextFromSfdt
+        // returns the planted marker text (a minimal JSON SFDT yields empty text in the test host).
+        var sfdtSvc = new SfdtConversionService();
+
+        static string MakeSfdt(SfdtConversionService s, string text) =>
+            s.ConvertToSfdt(
+                new System.Collections.Generic.List<DocumentFormat.OpenXml.OpenXmlElement>
+                {
+                    new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                        new DocumentFormat.OpenXml.Wordprocessing.Run(
+                            new DocumentFormat.OpenXml.Wordprocessing.Text(text)))
+                }).SfdtJson;
+
+        // Distinctive marker text planted in each neighbour – asserted below to appear in the envelope.
+        const string prevSceneMarker   = "PREV_SCENE_TAIL_MARKER unique text from previous scene";
+        const string middleSceneText   = "Middle scene content under analysis for linguistic check.";
+        const string nextSceneMarker   = "NEXT_SCENE_HEAD_MARKER unique text from following scene";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Scene Envelope Book", Language = "he" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Order = 1,
+            Title = "Chapter With Scenes",
+            ContentText = "Chapter prose that covers the whole chapter."
+        });
+        // Three scenes in the same chapter, ordered 0-1-2.
+        db.Scenes.Add(new Scene { Id = prevSceneId,   ChapterId = chapterId, Order = 0, Title = "Prev",   ContentSfdt = MakeSfdt(sfdtSvc, prevSceneMarker)  });
+        db.Scenes.Add(new Scene { Id = middleSceneId, ChapterId = chapterId, Order = 1, Title = "Middle", ContentSfdt = MakeSfdt(sfdtSvc, middleSceneText)  });
+        db.Scenes.Add(new Scene { Id = nextSceneId,   ChapterId = chapterId, Order = 2, Title = "Next",   ContentSfdt = MakeSfdt(sfdtSvc, nextSceneMarker)  });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var context = await svc.BuildContextAsync(
+            AnalysisScope.Scene,
+            middleSceneId,
+            AnalysisType.LinguisticAnalysis,
+            "he",
+            CancellationToken.None);
+
+        // At Scene scope the context envelope IS pulled for LinguisticAnalysis.
+        // PrecedingContext comes from the tail of the previous scene's SFDT text.
+        // FollowingContext comes from the head of the next scene's SFDT text.
+        Assert.NotNull(context.PrecedingContext);
+        Assert.NotNull(context.FollowingContext);
+
+        Assert.Contains(prevSceneMarker, context.PrecedingContext, StringComparison.Ordinal);
+        Assert.Contains(nextSceneMarker, context.FollowingContext, StringComparison.Ordinal);
+    }
+
+    // ─── 5. Context envelope wiring - non-envelope analysis type leaves neighbours null ────────
 
     [Fact]
     public async Task BuildContextAsync_LiteraryAnalysis_LeavesContextEnvelopeNull()
@@ -818,7 +903,7 @@ public class ChapterStyleProfileAndLinguisticTests
     public async Task LoadOrBuildChapterStyleProfileAsync_StaleProfile_RebuildFails_ReturnsNullNotStaleRow()
     {
         // The chapter has (new) content so a rebuild is attempted, but the LLM yields nothing. The
-        // stale cached row must NOT be returned — that would inject an outdated [CHAPTER_STYLE_BASELINE]
+        // stale cached row must NOT be returned - that would inject an outdated [CHAPTER_STYLE_BASELINE]
         // and produce spurious deviations.
         using var provider = BuildServiceProvider(out var routerMock, llmResponse: "");
         var db = provider.GetRequiredService<AppDbContext>();
