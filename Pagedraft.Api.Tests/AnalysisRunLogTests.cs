@@ -15,6 +15,7 @@ using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
+using Pagedraft.Api.Services.Analysis.Hebrew;
 using Xunit;
 
 namespace Pagedraft.Api.Tests;
@@ -72,7 +73,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -154,7 +156,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -244,7 +247,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -333,7 +337,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -425,7 +430,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -493,7 +499,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var result = await svc.RunWithInputAsync(
             AnalysisScope.Book,
@@ -543,7 +550,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -647,7 +655,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -720,7 +729,8 @@ public class AnalysisRunLogTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions()));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunLineEditChunkedAsync",

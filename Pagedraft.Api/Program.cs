@@ -49,6 +49,10 @@ builder.Services.AddSingleton<AnalysisProgressTracker>();
 builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
+// Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
+builder.Services.Configure<Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions>(
+    builder.Configuration.GetSection(Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions.SectionName));
+builder.Services.AddSingleton<Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker>();
 builder.Services.AddSingleton<PromptFactory>();
 builder.Services.AddScoped<IEmbeddingService, StubEmbeddingService>();
 builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
