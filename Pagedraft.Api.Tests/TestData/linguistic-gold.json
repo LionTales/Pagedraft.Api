@@ -1,6 +1,6 @@
 [
   {
-    "_README": "HEBREW VALIDATION REQUIRED — All Hebrew-language entries in this file are AI-authored drafts that MUST be reviewed and approved by a native Hebrew speaker before the bake-off results are considered trustworthy. The following entry ids contain Hebrew text that needs validation: clean-he-01, clean-he-02, clean-he-03, planted-register-he, planted-tense-he, planted-pov-he. English entries (clean-en-01, planted-register-en, planted-tense-en, planted-pov-en) are self-validated by the author. See each entry's 'notes' field for details on what to check."
+    "_README": "HEBREW VALIDATION REQUIRED — All Hebrew-language entries in this file are AI-authored drafts that MUST be reviewed and approved by a native Hebrew speaker before the bake-off results are considered trustworthy. The following entry ids contain Hebrew text that needs validation: clean-he-01, clean-he-02, clean-he-03, clean-he-04, planted-register-he, planted-tense-he, planted-pov-he, planted-pov-headhop-he, planted-tense-slip-he, planted-register-drift-he, planted-anchor-leak-he. English entries (clean-en-01, planted-register-en, planted-tense-en, planted-pov-en, planted-pov-headhop-en, planted-tense-slip-en, planted-register-drift-en) are self-validated by the author. See each entry's 'notes' field for details on what to check. EXPANSION 2026-06-19 (eval-c01): added 6 within-chapter cases (planted-pov-headhop-{en,he}, planted-tense-slip-{en,he}, planted-register-drift-{en,he}) — longer self-contained single chapters where the gemma4:12b baseline under-recalls the shift; POV head-hop was the proven miss in the pre-expansion baseline (planted-pov-en and planted-pov-he both returned []). These follow the proofread-gold-growth habit (each is a real failure the model currently misses). EXPANSION 2026-06-19 (anchor-leak): added planted-anchor-leak-he - the real app passage where the model DETECTED all 3 issues (tense/pov/register) but the user saw only 2 cards because it re-quoted 'ועוצר' as 'ועצר' and the verbatim anchor dropped the tense card. This is the regression reproducer for the new post-anchoring survival metric (it should detect 3 but service-anchor < detected for the mis-quoted span)."
   },
 
   {
@@ -111,5 +111,75 @@
     "expectedConsistencyTypes": [],
     "maxConsistencyIssues": 0,
     "notes": "HEBREW - real-world passage from src/docs/test-text.txt. Consistent first-person past-tense battle scene with dialogue; a false-positive trap (local qwen3.5:4b wrongly flagged a dialogue line as register and a within-sentence tense nitpick mislabeled pov). All evaluated cloud models returned []. Validated by user 2026-06-17."
+  },
+
+  {
+    "id": "planted-pov-headhop-en",
+    "language": "en",
+    "input": "Daniel pushed open the cafe door and let the warmth fold around him. He had walked the long way again, the way that passed her old street, and he told himself it meant nothing. He found a table by the window and sat with his coat still on.\n\nHe ordered black coffee and turned the cup in his hands without drinking it. The radio behind the counter was playing something he half remembered. He watched the door and pretended he wasn't watching it.\n\nWhen Mara finally came in, the cold air came with her. Daniel lifted his hand, then lowered it, unsure whether she had seen him. He rehearsed the first sentence in his head and hated every version of it.\n\nMara saw him at once and felt her stomach tighten. She had hoped he would not come, and now that he had, she did not know where to put her hands. She wondered if he could tell how little she had slept, and she decided that she would not be the first to apologize.\n\nShe crossed the room slowly, counting her own steps, holding the strap of her bag like a rope. Whatever he had come to say, she promised herself she would listen and give nothing away.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["pov"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted POV head-hop (the Daniel/Mara passage from the prior manual test). The chapter is firmly in Daniel's close third-person POV for the first three paragraphs (his walk, his rehearsed sentence, what he 'told himself'). The fourth paragraph head-hops into Mara's interiority ('felt her stomach tighten', 'she wondered', 'she decided') — a viewpoint Daniel cannot access. Only POV is planted; tense (past) and register (literary) are stable. Embedded in a longer self-contained chapter so a conservative model is more likely to miss it (gemma4:12b missed the shorter planted-pov-en in the pre-expansion baseline). Validated by author."
+  },
+
+  {
+    "id": "planted-pov-headhop-he",
+    "language": "he-IL",
+    "input": "דניאל דחף את דלת בית הקפה ונתן לחום לעטוף אותו. שוב הלך בדרך הארוכה, זו שעוברת ליד הרחוב הישן שלה, ואמר לעצמו שזה לא אומר כלום. הוא מצא שולחן ליד החלון והתיישב בלי להוריד את המעיל.\n\nהוא הזמין קפה שחור וסובב את הספל בין ידיו בלי לשתות. הרדיו מאחורי הדלפק ניגן משהו שזכר במעורפל. הוא הביט בדלת והעמיד פנים שאינו מביט בה.\n\nכשמרה סוף-סוף נכנסה, האוויר הקר נכנס איתה. דניאל הרים את ידו, ואז הוריד אותה, לא בטוח אם ראתה אותו. הוא חזר בראשו על המשפט הראשון ושנא כל גרסה שלו.\n\nמרה ראתה אותו מיד והרגישה את הבטן שלה מתכווצת. היא קיוותה שלא יבוא, ועכשיו, כשבא, לא ידעה איפה להניח את הידיים. היא תהתה אם הוא מבחין כמה מעט ישנה, והחליטה בלבה שלא תהיה הראשונה להתנצל.\n\nהיא חצתה את החדר לאט, סופרת את צעדיה, אוחזת ברצועת התיק כמו בחבל. מה שלא בא לומר, הבטיחה לעצמה שתקשיב ולא תיתן לו דבר.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["pov"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Hebrew mirror of planted-pov-headhop-en (the Daniel/Mara head-hop). First three paragraphs are close third-person on Daniel ('אמר לעצמו', 'חזר בראשו'). The fourth paragraph head-hops into Mara's interiority ('הרגישה את הבטן שלה מתכווצת', 'היא תהתה', 'החליטה בלבה') — inaccessible to Daniel's viewpoint. Only POV is planted; tense (past) and register (literary) stable. Native reviewer: confirm the head-hop reads as an unambiguous POV violation and that the prose is natural literary Hebrew."
+  },
+
+  {
+    "id": "planted-tense-slip-en",
+    "language": "en",
+    "input": "The harvest had ended early that year, and the village settled into the slow weeks before the cold. Old Tomas mended his nets by the door while the children chased the last of the geese across the yard. Everyone agreed it had been a kind autumn.\n\nIn the evenings the families gathered at the long house and shared what little news the road had carried. They spoke of the market town, of the price of salt, of a stranger who had passed through and asked too many questions. No one thought much of it at the time.\n\nTomas walks down to the water before dawn. He checks each net in turn and finds the third one torn. He kneels on the cold stones and works the knots loose, and he does not hear the footsteps behind him until they are very close.\n\nBy the time the others woke, Tomas was gone, and only the mended nets remained, folded neatly where he always left them.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["tense"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted tense slip (the past->present slip from the prior manual test). The chapter is past tense throughout ('had ended', 'mended', 'gathered', 'woke', 'was gone') except the third paragraph, which slips into present ('walks', 'checks', 'finds', 'kneels', 'does not hear'). The surrounding past-tense narration resumes in the final paragraph, making the slip a clear internal inconsistency rather than an intentional style. Only tense is planted; POV (third-person) and register (literary) are stable. Embedded in a longer chapter so the model must localize the slipped paragraph. Validated by author."
+  },
+
+  {
+    "id": "planted-tense-slip-he",
+    "language": "he-IL",
+    "input": "הקציר הסתיים מוקדם באותה שנה, והכפר שקע בשבועות האיטיים שלפני הקור. תומס הזקן תיקן את הרשתות ליד הפתח, והילדים רדפו אחרי האווזים האחרונים בחצר. כולם הסכימו שזה היה סתיו רחום.\n\nבערבים התאספו המשפחות בבית הארוך וחלקו את מעט החדשות שהדרך הביאה. הם דיברו על העיר, על מחיר המלח, על זר שעבר ושאל יותר מדי שאלות. איש לא חשב על כך הרבה באותו זמן.\n\nתומס יורד אל המים לפני עלות השחר. הוא בודק כל רשת בתורה ומגלה שהשלישית קרועה. הוא כורע על האבנים הקרות ומשחרר את הקשרים, ואינו שומע את הצעדים מאחוריו עד שהם קרובים מאוד.\n\nכשהאחרים התעוררו, תומס כבר איננו, ורק הרשתות המתוקנות נשארו, מקופלות בקפידה במקום שבו תמיד הניח אותן.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["tense"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Hebrew mirror of planted-tense-slip-en. Past tense throughout ('הסתיים', 'תיקן', 'התאספו', 'התעוררו') except the third paragraph, which slips to present ('יורד', 'בודק', 'מגלה', 'כורע', 'אינו שומע'). Past-tense narration resumes in the final paragraph. Only tense is planted; POV (third-person) and register stable. Native reviewer: confirm the third paragraph reads unambiguously as a present-tense slip inside a past-tense narrative (Hebrew present-tense participles vs past-tense verbs) and that no other reading makes it intentional."
+  },
+
+  {
+    "id": "planted-register-drift-en",
+    "language": "en",
+    "input": "Rain had been falling since noon, and the lighthouse keeper climbed the iron stairs with a lamp in one hand. The steps were slick and the wind found every gap in the old walls. He had made this climb ten thousand times, and his knees remembered each one.\n\nAt the top he trimmed the wick and watched the beam swing out over the black water. A ship was somewhere out there, beating against the weather, and he wished it home the way he wished every ship home, quietly, without expecting an answer.\n\nThe operational parameters of the facility necessitate continuous illumination during periods of reduced visibility. Maintenance personnel are required to conduct hourly inspections of the apparatus and to document any deviation from the prescribed luminous output in the designated logbook.\n\nHe set the lamp down and pressed his forehead to the cold glass. Out in the dark, far off, a single light answered his, and he let out a breath he had not known he was holding.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["register"],
+    "maxConsistencyIssues": 3,
+    "notes": "English planted register drift WITHIN the narration. Paragraphs 1, 2, and 4 are warm literary prose (the keeper's interior, sensory detail). Paragraph 3 abruptly shifts to dry bureaucratic/technical register ('operational parameters', 'necessitate continuous illumination', 'maintenance personnel are required', 'designated logbook') before the literary voice resumes. This is a narration-internal register shift (no dialogue involved), so it does NOT fall under the dialogue-vs-narration exemption. Only register is planted; tense (past) and POV (third-person) are stable. Validated by author."
+  },
+
+  {
+    "id": "planted-register-drift-he",
+    "language": "he-IL",
+    "input": "הגשם ירד מאז הצהריים, ושומר המגדלור טיפס במדרגות הברזל ובידו האחת מנורה. המדרגות היו חלקלקות והרוח מצאה כל סדק בקירות הישנים. הוא עשה את הטיפוס הזה אלפי פעמים, וברכיו זכרו כל אחת מהן.\n\nבמעלה גזר את הפתיל והביט באלומה נשלחת אל המים השחורים. אי-שם בחוץ הייתה ספינה, נאבקת במזג האוויר, והוא איחל לה שתשוב הביתה כפי שאיחל לכל ספינה, בשקט, בלי לצפות לתשובה.\n\nתפעול המתקן מחייב תאורה רציפה בתקופות של ראות מופחתת. על אנשי התחזוקה לבצע בדיקות שעתיות של המנגנון ולתעד כל סטייה מעוצמת התאורה הנדרשת ביומן הייעודי שהוקצה לכך.\n\nהוא הניח את המנורה והצמיד את מצחו אל הזכוכית הקרה. הרחק בחושך, אור בודד השיב לאורו, והוא שחרר נשימה שלא ידע שהוא עוצר.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["register"],
+    "maxConsistencyIssues": 3,
+    "notes": "HEBREW DRAFT — REQUIRES NATIVE SPEAKER VALIDATION. Hebrew mirror of planted-register-drift-en. Paragraphs 1, 2, and 4 are warm literary Hebrew prose. Paragraph 3 shifts abruptly to dry bureaucratic/technical register ('תפעול המתקן מחייב', 'על אנשי התחזוקה לבצע', 'יומן הייעודי שהוקצה') before the literary voice resumes. Narration-internal register shift (no dialogue), so the dialogue-vs-narration exemption does not apply. Only register is planted; tense (past) and POV (third-person) stable. Native reviewer: confirm paragraph 3 reads as an unambiguous bureaucratic-register intrusion into literary narration."
+  },
+
+  {
+    "id": "planted-anchor-leak-he",
+    "language": "he-IL",
+    "input": "דניאל הלך לאורך חומת הנמל בעוד האור האחרון נמוג מן השמיים. הוא לא ישן יומיים, והקור גרם לידיו לכאוב. הסירות נקשו בעדינות על המזח, והוא ספר אותן מתוך הרגל, כפי שאביו נהג לעשות פעם.\n\nהוא מגיע אל קצה החומה ועוצר. המגדלור מהבהב פעם, פעמיים, והמים משחירים תחתיו. הוא ממתין שם, מקשיב, בעוד העיר מאחוריו נרדמת.\n\nמעברו השני של הכיכר, מרה התבוננה בו מבעד לחלונה. היא חשבה שהוא נראה רזה מתמיד, כמעט חלול, ותהתה אם אכל משהו בכלל. היא מעולם לא סיפרה לו עד כמה דאגה.\n\nבהמשך לכך, עזב האדם הנ\"ל את המקום בהתאם להנחיות העירוניות הרלוונטיות, לאחר שווידא תחילה כי לא נותרו התחייבויות נוספות.",
+    "expectClean": false,
+    "expectedConsistencyTypes": ["tense", "pov", "register"],
+    "maxConsistencyIssues": 4,
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. Regression reproducer for the verbatim-anchoring leak: in a real app run the model DETECTED all three issues but the user saw only 2 cards because the model re-quoted the present-tense verb 'ועוצר' as 'ועצר', so the exact-substring anchor failed and the tense card was dropped. The input preserves 'ועוצר' verbatim in paragraph 2. Three planted defects: (1) tense - paragraph 1 is past tense ('הלך', 'ספר') but paragraph 2 slips to present tense ('מגיע', 'ועוצר', 'מהבהב', 'ממתין'); (2) pov - paragraphs 1-2 follow Daniel, paragraph 3 head-hops into Mara's interiority ('היא חשבה', 'תהתה', 'מעולם לא סיפרה'); (3) register - paragraph 4 breaks the literary voice with a bureaucratic register ('בהמשך לכך', 'האדם הנ\"ל', 'בהתאם להנחיות העירוניות הרלוונטיות'). Native reviewer: confirm all three read as unambiguous shifts and that 'ועוצר' is natural present-tense Hebrew that a model might mis-transcribe as past 'ועצר'."
   }
 ]

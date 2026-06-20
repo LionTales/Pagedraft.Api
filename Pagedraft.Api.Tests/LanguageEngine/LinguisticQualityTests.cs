@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Pagedraft.Api.Models;
+using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
@@ -93,8 +94,8 @@ public class LinguisticQualityTests
     };
 
     // Single-model scorer model (used by the non-bake-off Fact). Kept identical to the production default
-    // so the headline number reflects what ships.
-    private const string LinguisticModel = "qwen3.5:9b";
+    // (appsettings.json Ai:FeatureModels:LinguisticAnalysis) so the headline number reflects what ships.
+    private const string LinguisticModel = "gemma4:12b";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -164,6 +165,37 @@ public class LinguisticQualityTests
         _output.WriteLine($"Type accuracy:         {score.TypeAccuracy.ToString("P0", CultureInfo.InvariantCulture)} ({score.TypeAccuracyHits}/{score.PlantedCases})");
         _output.WriteLine($"Errored/timed-out:     {score.Errors}");
         _output.WriteLine($"Composite:             {score.Composite.ToString("F3", CultureInfo.InvariantCulture)}");
+
+        // ─── Post-anchoring survival (additive; planted cases only) ────────────────────────────────────
+        // Measures the SECOND leak the detection metrics above cannot see: a detected consistencyIssue
+        // whose span is mis-quoted fails verbatim anchoring and never becomes a user-visible card. recall
+        // can read 100% while cards are dropped. exactAnchorSurvival isolates the prompt's verbatim-quoting
+        // quality; serviceAnchorSurvival reflects what production anchoring (SuggestionDiffService) emits.
+        _output.WriteLine("");
+        _output.WriteLine("=== Post-anchoring survival (planted cases) ===");
+        _output.WriteLine($"Detected issues:       {score.SurvivalDetected}");
+        _output.WriteLine($"Exact-anchored:        {score.SurvivalExactAnchored} (span is an exact verbatim substring of normalized input)");
+        _output.WriteLine($"Service-anchored:      {score.SurvivalServiceAnchored} (cards SuggestionDiffService actually produces)");
+        _output.WriteLine($"Exact-anchor survival: {score.ExactAnchorSurvival.ToString("P0", CultureInfo.InvariantCulture)} ({score.SurvivalExactAnchored}/{score.SurvivalDetected})");
+        _output.WriteLine($"Service-anchor survival: {score.ServiceAnchorSurvival.ToString("P0", CultureInfo.InvariantCulture)} ({score.SurvivalServiceAnchored}/{score.SurvivalDetected})");
+        if (score.SurvivalLossLines is { Count: > 0 })
+        {
+            _output.WriteLine("Cases where a detected issue did NOT become a card (detection -> anchoring leak):");
+            foreach (var line in score.SurvivalLossLines)
+                _output.WriteLine(line);
+        }
+        else
+        {
+            _output.WriteLine("No anchoring leaks: every detected issue on every planted case survived into a card.");
+        }
+
+        // Anchor QUALITY (additive): produced cards whose span starts/ends inside a word - should be 0.
+        _output.WriteLine($"Mid-word anchors:      {score.MidWordAnchors} (anchored spans that start/end inside a word - should be 0)");
+        if (score.MidWordAnchorLines is { Count: > 0 })
+        {
+            foreach (var line in score.MidWordAnchorLines)
+                _output.WriteLine(line);
+        }
 
         // Reporting benchmark, not a pass/fail gate on model quality — assert only that the run
         // completed over the gold set so the numbers surface without failing CI for model regressions.
@@ -317,6 +349,26 @@ public class LinguisticQualityTests
         var typeAccuracyHits = 0;        // planted cases where some returned type matched the expected set
         var errors = 0;
 
+        // ─── Post-anchoring SURVIVAL metric (additive; does NOT affect composite/recall/typeAccuracy) ──
+        // For each PLANTED case we measure how many of the model's DETECTED consistencyIssues survive
+        // verbatim anchoring into user-visible cards. This catches the leak where the model detects an
+        // issue but mis-quotes its span (e.g. "ועוצר" re-quoted as "ועצר"), so the exact-substring
+        // anchor fails and the card never appears.
+        var survivalTotalDetected = 0;       // sum of detected consistencyIssues over planted cases
+        var survivalTotalExactAnchored = 0;  // of those, spans that are exact verbatim substrings (harness-computed)
+        var survivalTotalServiceAnchored = 0;// of those, cards the production anchoring actually produces
+        var survivalDiffService = new SuggestionDiffService();
+        var survivalLossLines = new List<string>(); // per-case lines where serviceAnchored < detected
+
+        // ─── Anchor QUALITY (additive) ──────────────────────────────────────────────────────────────
+        // Survival above counts how many detected issues become cards. This second metric checks the
+        // QUALITY of each produced card's anchor: that its span does NOT start or end MID-WORD in the
+        // normalized input (the near-match fallback's fixed-length window used to clip a leading/trailing
+        // letter). A clean anchor starts at index 0 or after whitespace, and ends at the input end or
+        // before whitespace/punctuation. Should be 0; any offender names the case id + offending span.
+        var midWordAnchors = 0;
+        var midWordAnchorLines = new List<string>();
+
         if (perCaseOutput)
         {
             _output.WriteLine("=== Linguistic consistency per-case ===");
@@ -407,6 +459,77 @@ public class LinguisticQualityTests
                     string.Equals(t?.Trim(), i.Type?.Trim(), StringComparison.OrdinalIgnoreCase)));
                 if (recall) plantedRecallHits++;
                 if (typeHit) typeAccuracyHits++;
+
+                // ─── Post-anchoring survival (additive; planted cases only) ────────────────────────────
+                // detected:        consistencyIssues the model returned for this case.
+                // exactAnchored:    of those, how many spans are an EXACT verbatim substring of the
+                //                   normalized input — computed INDEPENDENTLY here (normalize input and
+                //                   each span via the same NormalizeTextForAnalysis, Ordinal IndexOf >= 0).
+                //                   Isolates the prompt's verbatim-quoting quality, stable regardless of the
+                //                   production method's internals.
+                // serviceAnchored: cards the PRODUCTION anchoring (SuggestionDiffService) actually emits.
+                var detected = issues.Count;
+                var normalizedInput = TextNormalization.NormalizeTextForAnalysis(c.Input);
+                var exactAnchored = issues.Count(i =>
+                {
+                    var normalizedSpan = TextNormalization.NormalizeTextForAnalysis(i.Span ?? string.Empty);
+                    return !string.IsNullOrEmpty(normalizedSpan)
+                           && normalizedInput.IndexOf(normalizedSpan, StringComparison.Ordinal) >= 0;
+                });
+                var serviceSuggestions = survivalDiffService
+                    .ComputeConsistencyIssueSuggestions(issues, c.Input);
+                var serviceAnchored = serviceSuggestions.Count;
+
+                survivalTotalDetected += detected;
+                survivalTotalExactAnchored += exactAnchored;
+                survivalTotalServiceAnchored += serviceAnchored;
+
+                // Anchor-quality check: every produced card's [StartOffset,EndOffset) must sit on whole-word
+                // boundaries in the normalized input. Start is clean when it is index 0 or preceded by
+                // whitespace; end is clean when it is the input end or followed by whitespace/punctuation
+                // (punctuation glued to the word is fine; another word's letter is not). A mid-word anchor
+                // means the highlight clipped a letter (the near-match fixed-length-window bug).
+                foreach (var sug in serviceSuggestions)
+                {
+                    if (sug.StartOffset is not int so || sug.EndOffset is not int eo)
+                        continue;
+                    if (so < 0 || eo > normalizedInput.Length || so >= eo)
+                        continue;
+
+                    var startMidWord = so > 0 && !char.IsWhiteSpace(normalizedInput[so - 1]);
+                    var endMidWord = eo < normalizedInput.Length
+                        && !char.IsWhiteSpace(normalizedInput[eo])
+                        && !char.IsPunctuation(normalizedInput[eo]);
+
+                    if (startMidWord || endMidWord)
+                    {
+                        midWordAnchors++;
+                        var where = startMidWord && endMidWord ? "start+end" : startMidWord ? "start" : "end";
+                        midWordAnchorLines.Add(
+                            $"  {c.Id}: {where} mid-word anchor on span '{Truncate(sug.OriginalText, 40)}'");
+                    }
+                }
+
+                if (serviceAnchored < detected)
+                {
+                    // An issue was DETECTED but did NOT become a card. Name the lost issue type(s) so the
+                    // leak is visible. The dropped issues are those whose span fails verbatim anchoring;
+                    // approximate "which types were lost" as the types whose span is not an exact substring.
+                    var lostTypes = issues
+                        .Where(i =>
+                        {
+                            var ns = TextNormalization.NormalizeTextForAnalysis(i.Span ?? string.Empty);
+                            return string.IsNullOrEmpty(ns)
+                                   || normalizedInput.IndexOf(ns, StringComparison.Ordinal) < 0;
+                        })
+                        .Select(i => string.IsNullOrWhiteSpace(i.Type) ? "(no-type)" : i.Type.Trim())
+                        .ToList();
+                    var lostLabel = lostTypes.Count > 0
+                        ? string.Join(",", lostTypes.Distinct(StringComparer.OrdinalIgnoreCase))
+                        : "(span re-quote / overlap)";
+                    survivalLossLines.Add(
+                        $"  {c.Id}: detected {detected} -> cards {serviceAnchored} (lost type(s): {lostLabel})");
+                }
                 if (perCaseOutput)
                 {
                     var returnedTypes = issues.Count > 0
@@ -425,10 +548,19 @@ public class LinguisticQualityTests
         var cleanFpRate = cleanCases > 0 ? (double)cleanFalsePositives / cleanCases : 0.0;
         var composite = Composite(plantedRecall, typeAccuracy, cleanFpRate);
 
+        // Survival rates over planted cases (additive reporting; not part of the composite).
+        var exactAnchorSurvival = survivalTotalDetected > 0
+            ? (double)survivalTotalExactAnchored / survivalTotalDetected : 0.0;
+        var serviceAnchorSurvival = survivalTotalDetected > 0
+            ? (double)survivalTotalServiceAnchored / survivalTotalDetected : 0.0;
+
         return new ModelScore(
             cleanCases, cleanFalsePositives, cleanOverCapCases,
             plantedCases, plantedRecallHits, typeAccuracyHits, errors,
-            plantedRecall, typeAccuracy, composite);
+            plantedRecall, typeAccuracy, composite,
+            survivalTotalDetected, survivalTotalExactAnchored, survivalTotalServiceAnchored,
+            exactAnchorSurvival, serviceAnchorSurvival, survivalLossLines,
+            midWordAnchors, midWordAnchorLines);
     }
 
     /// <summary>Resolve the bake-off model list from the env var (comma-separated) or the default shortlist.</summary>
@@ -468,11 +600,19 @@ public class LinguisticQualityTests
         return s.Length <= max ? s : s[..(max - 1)] + "...";
     }
 
-    /// <summary>Aggregated per-model score; derived rates are computed by ScoreModelAsync and carried here.</summary>
+    /// <summary>
+    /// Aggregated per-model score; derived rates are computed by ScoreModelAsync and carried here.
+    /// The Survival* fields are an ADDITIVE post-anchoring metric over planted cases (how many detected
+    /// consistencyIssues survive verbatim anchoring into user-visible cards); they are NOT part of the
+    /// composite/recall/typeAccuracy numbers.
+    /// </summary>
     private readonly record struct ModelScore(
         int CleanCases, int CleanFalsePositives, int CleanOverCapCases,
         int PlantedCases, int PlantedRecallHits, int TypeAccuracyHits, int Errors,
-        double PlantedRecall, double TypeAccuracy, double Composite);
+        double PlantedRecall, double TypeAccuracy, double Composite,
+        int SurvivalDetected, int SurvivalExactAnchored, int SurvivalServiceAnchored,
+        double ExactAnchorSurvival, double ServiceAnchorSurvival, List<string> SurvivalLossLines,
+        int MidWordAnchors, List<string> MidWordAnchorLines);
 
     private sealed record BakeoffRow(
         string Model, int CleanFalsePositives, double PlantedRecall, double TypeAccuracy, double Composite, bool Ok);
@@ -593,6 +733,46 @@ public class LinguisticQualityTests
     // Shared prompt factory — the structured instruction is the same for every model, so build it once.
     private static readonly PromptFactory _promptFactory = new();
 
+    // ─── Env-var knobs for the decoding-param sweep (params-f01) ──────────────────────────────────
+    // Set these before running the gold harness to override the LinguisticAnalysis tuning injected into
+    // the test DI. They are HARNESS-ONLY — they do NOT affect the production code path.
+    // Values flow: env var -> CreateRouter -> AiOptions.ProviderSettings["Ollama_LinguisticAnalysis"]
+    //              -> OllamaProvider.GetTuning -> Ollama request options.
+    // Unset (or blank) = use the appsettings.json production defaults listed below as fallback values.
+    private const string EnvTemperature   = "LINGUISTIC_TEMPERATURE";    // e.g. "0.4"
+    private const string EnvNumPredict    = "LINGUISTIC_NUM_PREDICT";    // e.g. "5120"
+    private const string EnvNumCtx        = "LINGUISTIC_NUM_CTX";        // e.g. "16384"
+    private const string EnvRepeatPenalty = "LINGUISTIC_REPEAT_PENALTY"; // e.g. "1.2"
+
+    // Appsettings production defaults for Ollama_LinguisticAnalysis — wired here so the harness
+    // measures the same params the real API path uses (instead of OllamaProvider's bare fallback of
+    // { Temperature=0.2, NumPredict=2048 }). Kept in sync with appsettings.json manually.
+    private const double DefaultLinguisticTemperature   = 0.2;
+    private const int    DefaultLinguisticNumPredict    = 5120;
+    private const int    DefaultLinguisticNumCtx        = 16384;
+    private const double DefaultLinguisticRepeatPenalty = 1.2;
+
+    /// <summary>
+    /// Build the ProviderTuningOptions for Ollama_LinguisticAnalysis, preferring env-var overrides
+    /// then falling back to the production appsettings defaults above. Used only by the harness.
+    /// </summary>
+    private static ProviderTuningOptions ResolveLinguisticTuning()
+    {
+        static double ParseDouble(string? raw, double fallback)
+            => double.TryParse(raw, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
+        static int ParseInt(string? raw, int fallback)
+            => int.TryParse(raw, out var v) ? v : fallback;
+
+        return new ProviderTuningOptions
+        {
+            Temperature   = ParseDouble(Environment.GetEnvironmentVariable(EnvTemperature),   DefaultLinguisticTemperature),
+            NumPredict    = ParseInt(   Environment.GetEnvironmentVariable(EnvNumPredict),    DefaultLinguisticNumPredict),
+            NumCtx        = ParseInt(   Environment.GetEnvironmentVariable(EnvNumCtx),        DefaultLinguisticNumCtx),
+            RepeatPenalty = ParseDouble(Environment.GetEnvironmentVariable(EnvRepeatPenalty), DefaultLinguisticRepeatPenalty)
+        };
+    }
+
     private static IAiRouter CreateRouter(string provider, string model)
     {
         // Override Ai:DefaultProvider/DefaultModel AND Ai:FeatureModels:LinguisticAnalysis in the SAME
@@ -626,6 +806,12 @@ public class LinguisticQualityTests
         // Cloud / OpenAI-compatible providers resolve their HttpClient via the DEFAULT, unnamed
         // _httpFactory.CreateClient() — register it with the same generous timeout.
         services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+
+        // Resolve the per-sweep tuning from env vars (or production appsettings defaults) so the
+        // harness measures the same Ollama options that the real API path would use.
+        // HARNESS-ONLY: this block has no effect on production code paths.
+        var linguisticTuning = ResolveLinguisticTuning();
+
         services.Configure<AiOptions>(opts =>
         {
             opts.DefaultProvider = provider;
@@ -633,6 +819,12 @@ public class LinguisticQualityTests
             opts.FeatureModels = new Dictionary<string, FeatureModelOptions>(StringComparer.OrdinalIgnoreCase)
             {
                 ["LinguisticAnalysis"] = new FeatureModelOptions { Provider = provider, Model = model }
+            };
+            // Wire ProviderSettings so OllamaProvider.GetTuning resolves Ollama_LinguisticAnalysis
+            // instead of falling through to its bare default { Temperature=0.2, NumPredict=2048 }.
+            opts.ProviderSettings = new Dictionary<string, ProviderTuningOptions>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Ollama_LinguisticAnalysis"] = linguisticTuning
             };
         });
         services.AddSingleton<PromptFactory>();
