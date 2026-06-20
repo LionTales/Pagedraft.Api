@@ -31,6 +31,7 @@ public class UnifiedAnalysisService
     private readonly AnalysisProgressTracker _progress;
     private readonly IAnalysisContextService _contextService;
     private readonly SuggestionDiffService _suggestionDiff;
+    private readonly Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker _ktivMaleChecker;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -47,7 +48,8 @@ public class UnifiedAnalysisService
         ILogger<UnifiedAnalysisService> logger,
         AnalysisProgressTracker progress,
         IAnalysisContextService contextService,
-        SuggestionDiffService suggestionDiff)
+        SuggestionDiffService suggestionDiff,
+        Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker ktivMaleChecker)
     {
         _db = db;
         _router = router;
@@ -58,6 +60,7 @@ public class UnifiedAnalysisService
         _progress = progress;
         _contextService = contextService;
         _suggestionDiff = suggestionDiff;
+        _ktivMaleChecker = ktivMaleChecker;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -428,7 +431,8 @@ public class UnifiedAnalysisService
             isStreaming: false,
             isRunWithInput: false,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated);
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            language: language);
 
         _db.AnalysisResults.Add(result);
 
@@ -537,7 +541,8 @@ public class UnifiedAnalysisService
             isStreaming: false,
             isRunWithInput: true,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated);
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            language: language);
 
         _db.AnalysisResults.Add(result);
 
@@ -680,7 +685,8 @@ public class UnifiedAnalysisService
             isStreaming: true,
             isRunWithInput: false,
             applyProofreadHeuristics: true,
-            proofreadUnrelatedOverride: proofreadUnrelated);
+            proofreadUnrelatedOverride: proofreadUnrelated,
+            language: language);
 
         _db.AnalysisResults.Add(result);
 
@@ -1584,7 +1590,7 @@ public class UnifiedAnalysisService
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
-        AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
+        AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false, language: language);
 
         _db.AnalysisResults.Add(result);
 
@@ -2129,6 +2135,78 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
+    /// Merge the deterministic ktiv-male (full-spelling) suggestions into the LLM proofread suggestion
+    /// list, resolving same-word conflicts so the NORMATIVE deterministic spelling wins the word.
+    ///
+    /// For each ktiv suggestion <c>km</c> (a single-token haser→male hit), against the proofread
+    /// suggestions that overlap its span:
+    ///  (a) no overlap  → add km (it is a new, independent suggestion).
+    ///  (b) an overlapping proofread suggestion already agrees (same SuggestedText as km) → keep the
+    ///      proofread one, drop km (no duplicate).
+    ///  (c) the overlapping proofread suggestion(s) DIFFER from km and every one is contained within or
+    ///      equal to km's token span (same-word competition) → remove those competing proofread
+    ///      suggestions and add km (the deterministic normative spelling wins the word).
+    ///  (d) an overlapping proofread suggestion extends BEYOND km's token span (a broader multi-word
+    ///      LLM rewrite that happens to include this word) → keep the proofread suggestion, drop km (do
+    ///      not fragment a broader fix).
+    ///
+    /// Offsets are nullable; suggestions without both offsets cannot overlap and are treated as
+    /// non-overlapping. Order-stable: the returned list preserves the proofread order with any
+    /// surviving ktiv suggestions appended in their original order. The caller re-assigns OrderIndex.
+    /// </summary>
+    internal static List<AnalysisSuggestion> MergeKtivMaleIntoProofread(
+        List<AnalysisSuggestion> proofread,
+        IReadOnlyList<AnalysisSuggestion> ktiv)
+    {
+        if (ktiv == null || ktiv.Count == 0)
+            return proofread;
+
+        foreach (var km in ktiv)
+        {
+            // A ktiv hit without a fully-anchored span cannot reason about overlaps; append it as-is
+            // (matches the conservative "no overlap → add" path).
+            if (!km.StartOffset.HasValue || !km.EndOffset.HasValue)
+            {
+                proofread.Add(km);
+                continue;
+            }
+
+            var kmStart = km.StartOffset.Value;
+            var kmEnd = km.EndOffset.Value;
+
+            var overlapping = proofread
+                .Where(s => s.StartOffset.HasValue && s.EndOffset.HasValue &&
+                            kmStart < s.EndOffset.Value && s.StartOffset.Value < kmEnd)
+                .ToList();
+
+            // (a) No overlapping proofread suggestion → add km unchanged.
+            if (overlapping.Count == 0)
+            {
+                proofread.Add(km);
+                continue;
+            }
+
+            // (b) An overlapping proofread suggestion already agrees on the male form → keep it, drop km.
+            if (overlapping.Exists(s => string.Equals(s.SuggestedText, km.SuggestedText, StringComparison.Ordinal)))
+                continue;
+
+            // (d) Any overlapping proofread suggestion extends BEYOND km's token span → it is a broader
+            //     multi-word rewrite; keep it and drop km so we never fragment a wider fix.
+            var anyExtendsBeyond = overlapping.Exists(s =>
+                s.StartOffset!.Value < kmStart || s.EndOffset!.Value > kmEnd);
+            if (anyExtendsBeyond)
+                continue;
+
+            // (c) Every overlapping proofread suggestion differs from km and is contained within/equal to
+            //     km's token span → same-word competition; the deterministic spelling wins the word.
+            proofread.RemoveAll(s => overlapping.Contains(s));
+            proofread.Add(km);
+        }
+
+        return proofread;
+    }
+
+    /// <summary>
     /// Archive the previous Active analysis for the same (BookId, ChapterId, SceneId, Scope, AnalysisType),
     /// and mark any pending suggestions as Superseded.
     /// </summary>
@@ -2252,7 +2330,8 @@ public class UnifiedAnalysisService
         bool isStreaming,
         bool isRunWithInput,
         bool applyProofreadHeuristics,
-        bool? proofreadUnrelatedOverride = null)
+        bool? proofreadUnrelatedOverride = null,
+        string? language = null)
     {
         if (analysisType == AnalysisType.Proofread)
         {
@@ -2298,6 +2377,16 @@ public class UnifiedAnalysisService
             }
 
             var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+
+            // Deterministic Hebrew ktiv-male (full-spelling) sub-check. Appends haser→male spelling
+            // suggestions for Hebrew text when the house-style toggle is on (Ai:HebrewStyle:EnforceKtivMale,
+            // default ON). Suggestion-only (never auto-fix); gated to Hebrew so the English path is untouched.
+            // The deterministic ktiv normative spelling WINS a same-word conflict (see
+            // MergeKtivMaleIntoProofread for the per-suggestion conflict-resolution rules) so a (possibly
+            // wrong) LLM rewrite touching the same token never silently suppresses the correct spelling.
+            var ktivMaleSuggestions = _ktivMaleChecker.FindSuggestions(inputText, language ?? result.Language ?? string.Empty);
+            suggestions = MergeKtivMaleIntoProofread(suggestions, ktivMaleSuggestions);
+
             for (var i = 0; i < suggestions.Count; i++)
             {
                 suggestions[i].OrderIndex = i;
