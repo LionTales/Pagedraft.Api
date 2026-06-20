@@ -12,3 +12,4 @@ public record SceneUpdatedEvent(Guid BookId, Guid ChapterId, Guid SceneId, DateT
 public record SceneDeletedEvent(Guid BookId, Guid ChapterId, Guid SceneId);
 public record ScenesReorderedEvent(Guid BookId, Guid ChapterId, List<SceneOrderItem> NewOrder);
 public record SceneOrderItem(Guid SceneId, int Order);
+public record ScenesClearedEvent(Guid BookId, Guid ChapterId, List<Guid> ClearedSceneIds);
