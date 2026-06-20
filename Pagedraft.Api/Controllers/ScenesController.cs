@@ -65,6 +65,13 @@ public class ScenesController : ControllerBase
         return NoContent();
     }
 
+    [HttpDelete]
+    public async Task<ActionResult> ClearAll(Guid bookId, Guid chapterId, CancellationToken ct)
+    {
+        if (!await _sceneService.ClearScenesForChapterAsync(bookId, chapterId, ct)) return NotFound();
+        return NoContent();
+    }
+
     [HttpPut("reorder")]
     public async Task<ActionResult<List<SceneSummaryDto>>> Reorder(Guid bookId, Guid chapterId, [FromBody] ReorderScenesRequest req, CancellationToken ct)
     {
