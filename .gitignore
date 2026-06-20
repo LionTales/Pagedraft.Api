@@ -15,4 +15,5 @@
 ### Other generated artifacts
 *.log
 *.cache
+**/TestResults/
 
