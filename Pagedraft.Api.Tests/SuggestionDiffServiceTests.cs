@@ -630,5 +630,333 @@ public class SuggestionDiffServiceTests
             Assert.Equal(string.Empty, s.SuggestedText);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Near-match anchoring fallback tests
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_ExactSpan_AnchorsAtRightOffset_OriginalTextUnchanged()
+    {
+        // Regression: an exactly-quoted span still anchors at its real offset and keeps the model's
+        // verbatim text - the near-match fallback must not interfere with the exact-match path.
+        const string inputText = "Now the highway stretches ahead of us and the fields slide past the window.";
+        const string spanRaw = "the highway stretches ahead of us";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var expectedStart = normDoc.IndexOf(spanRaw, StringComparison.Ordinal);
+        Assert.True(expectedStart >= 0, "fixture: span must be an exact substring");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = spanRaw, Description = "tense shift" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedStart + spanRaw.Length, suggestion.EndOffset);
+        // OriginalText is the model's verbatim span (unchanged) on the exact path.
+        Assert.Equal(spanRaw, suggestion.OriginalText);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_HebrewMorphologicalNearMiss_AnchorsToRealDocumentText()
+    {
+        // The measured leak: the document has the present-tense "ועוצר" but the model mis-quoted it as
+        // the past-tense "ועצר" (one character shorter). The exact-substring anchor failed and the tense
+        // card was dropped. The near-match fallback must anchor to the REAL document text "ועוצר".
+        const string inputText = "הוא רץ אל הדלת ועוצר ליד הסף, מביט החוצה אל הרחוב השקט.";
+        const string misquotedSpan = "הוא רץ אל הדלת ועצר ליד הסף"; // "ועצר" (past) vs document "ועוצר" (present)
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        var correctSpan = "הוא רץ אל הדלת ועוצר ליד הסף";
+        var expectedStart = normDoc.IndexOf(correctSpan, StringComparison.Ordinal);
+        Assert.True(expectedStart >= 0, "fixture: real document text must be present");
+        Assert.True(normDoc.IndexOf(misquotedSpan, StringComparison.Ordinal) < 0,
+            "fixture: the mis-quoted span must NOT be an exact substring");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = misquotedSpan, Description = "present-tense slip" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedStart + correctSpan.Length, suggestion.EndOffset);
+        // OriginalText is the REAL document text, not the model's mis-quote.
+        Assert.Equal(correctSpan, suggestion.OriginalText);
+        // Offsets are in normalized space and select exactly the anchored text.
+        Assert.Equal(correctSpan, normDoc[suggestion.StartOffset!.Value..suggestion.EndOffset!.Value]);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_EnglishOneCharNearMiss_AnchorsToRealDocumentText()
+    {
+        // English analog of the Hebrew morphological slip: the document has "stretches" but the model
+        // quoted "streches" (one letter dropped). The near-match fallback anchors to the real text.
+        const string inputText = "Now the highway stretches ahead of us and the fields slide past the window.";
+        const string misquotedSpan = "the highway streches ahead of us"; // "streches" vs document "stretches"
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        const string correctSpan = "the highway stretches ahead of us";
+        var expectedStart = normDoc.IndexOf(correctSpan, StringComparison.Ordinal);
+        Assert.True(expectedStart >= 0, "fixture: real document text must be present");
+        Assert.True(normDoc.IndexOf(misquotedSpan, StringComparison.Ordinal) < 0,
+            "fixture: the mis-quoted span must NOT be an exact substring");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = misquotedSpan, Description = "tense slip" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedStart + correctSpan.Length, suggestion.EndOffset);
+        Assert.Equal(correctSpan, suggestion.OriginalText);
+        Assert.Equal(correctSpan, normDoc[suggestion.StartOffset!.Value..suggestion.EndOffset!.Value]);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_AmbiguousNearMatch_IsDropped()
+    {
+        // Two equally-good near-match windows exist (the span is one edit away from BOTH), so the match
+        // is ambiguous. The uniqueness guard must DROP the issue rather than guess which window to anchor.
+        // Document contains both "the red gate stood open wide" and "the bed gate stood open wide";
+        // the span "the led gate stood open wide" is exactly one substitution from each.
+        const string inputText =
+            "Near the orchard the red gate stood open wide. Far across the yard the bed gate stood open wide.";
+        const string ambiguousSpan = "the led gate stood open wide";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        Assert.True(normDoc.IndexOf(ambiguousSpan, StringComparison.Ordinal) < 0,
+            "fixture: span must not be an exact substring");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = ambiguousSpan, Description = "ambiguous near-match" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        // Ambiguous -> dropped, no false anchor.
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_GenuinelyAbsentSpan_IsStillDropped()
+    {
+        // A span quoted from OUTSIDE the analyzed unit (e.g. from preceding/following context) is not a
+        // near-miss of anything in the body. The tight threshold + uniqueness guard must keep dropping it.
+        const string targetChapter =
+            "The morning was quiet. Sarah opened the shutters and let the light spill across the floor.";
+        const string spanFromElsewhere =
+            "Down in the harbor the old fishermen mended their nets before dawn";
+
+        Assert.DoesNotContain(spanFromElsewhere, targetChapter, StringComparison.Ordinal);
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = spanFromElsewhere, Description = "absent span" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, targetChapter);
+
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_DeletionNearMiss_SnapsToWholeWordsNotMidWord()
+    {
+        // The exact live leak: the model dropped a letter in its span ("ועצר" for the document's
+        // "ועוצר", a DELETION). Because the near-match fallback uses a FIXED-LENGTH window and the
+        // mis-quote is one char shorter than the real text, the window anchored one char late and shaved
+        // the leading "ה" - the card highlighted "וא מגיע ... פעמיים" instead of "הוא מגיע ... פעמיים".
+        // The word-boundary snap must restore the full leading word "הוא" and end on a whole word.
+        const string inputText =
+            "הוא מגיע אל קצה החומה ועוצר. המגדלור מהבהב פעם, פעמיים, והמים שוטפים את הסלעים.";
+        // Span has "ועצר" (dropped vav) - a 1-char deletion vs the document's "ועוצר".
+        const string misquotedSpan = "הוא מגיע אל קצה החומה ועצר. המגדלור מהבהב פעם, פעמיים";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        Assert.True(normDoc.IndexOf(misquotedSpan, StringComparison.Ordinal) < 0,
+            "fixture: the mis-quoted span must NOT be an exact substring");
+        var hePos = normDoc.IndexOf("הוא", StringComparison.Ordinal);
+        Assert.True(hePos >= 0, "fixture: 'הוא' must be present in the document");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = misquotedSpan, Description = "tense slip (dropped vav)" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+
+        // The highlight starts on the WHOLE word "הוא" (not the shaved "וא").
+        Assert.StartsWith("הוא", suggestion.OriginalText);
+
+        // StartOffset points exactly at the "ה" of "הוא" in the normalized text (the leading char was
+        // restored, not shaved).
+        Assert.Equal(hePos, suggestion.StartOffset);
+
+        var startOffset = suggestion.StartOffset!.Value;
+        var endOffset = suggestion.EndOffset!.Value;
+
+        // The span ends on a whole word: end is at string end or sits on a word boundary (the next char
+        // is whitespace or punctuation, never another word's letter). Here it ends on "פעמיים" with a
+        // following comma.
+        Assert.True(endOffset == normDoc.Length
+                    || char.IsWhiteSpace(normDoc[endOffset])
+                    || char.IsPunctuation(normDoc[endOffset]),
+            "anchored span must end on a whole-word boundary");
+        Assert.EndsWith("פעמיים", suggestion.OriginalText.TrimEnd());
+
+        // The anchored OriginalText is exactly the normalized document slice it points to.
+        Assert.Equal(normDoc[startOffset..endOffset], suggestion.OriginalText);
+
+        // Start is itself a whole-word boundary (start of text or preceded by whitespace/punctuation).
+        Assert.True(startOffset == 0
+                    || char.IsWhiteSpace(normDoc[startOffset - 1])
+                    || char.IsPunctuation(normDoc[startOffset - 1]),
+            "anchored span must start on a whole-word boundary");
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_EnglishDeletionNearMiss_SnapsToWholeWords()
+    {
+        // English analog of the deletion leak: the document reads "stops" but the model quoted "stps"
+        // (a 1-char deletion). A fixed-length window would clip a neighbouring word; the word-boundary
+        // snap must keep both ends on whole words (no mid-word start/end).
+        const string inputText = "She walks to the shore and he stops there quietly before the tide turns.";
+        const string misquotedSpan = "he stps there quietly"; // "stps" vs document "stops"
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        Assert.True(normDoc.IndexOf(misquotedSpan, StringComparison.Ordinal) < 0,
+            "fixture: the mis-quoted span must NOT be an exact substring");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = misquotedSpan, Description = "tense slip (dropped letter)" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        var suggestion = Assert.Single(suggestions);
+
+        var startOffset = suggestion.StartOffset!.Value;
+        var endOffset = suggestion.EndOffset!.Value;
+
+        // Neither end is mid-word: start is at index 0 or preceded by whitespace; end is at the input
+        // end or followed by whitespace.
+        Assert.True(startOffset == 0 || char.IsWhiteSpace(normDoc[startOffset - 1]),
+            "anchored span must start on a whole-word boundary");
+        Assert.True(endOffset == normDoc.Length || char.IsWhiteSpace(normDoc[endOffset]),
+            "anchored span must end on a whole-word boundary");
+
+        // Anchors to the real document words "stops" / "quietly" (whole, not clipped).
+        Assert.Contains("stops", suggestion.OriginalText);
+        Assert.StartsWith("he ", suggestion.OriginalText);
+        Assert.EndsWith("quietly", suggestion.OriginalText.TrimEnd());
+        Assert.Equal(normDoc[startOffset..endOffset], suggestion.OriginalText);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_NearMatchOffsets_AreInNormalizedSpaceAndCorrect()
+    {
+        // The document carries a bidi mark and a hard line break that normalization strips; the near-match
+        // offsets must index into the NORMALIZED document, not the raw input, and select the real text.
+        var inputRaw = "‏פתיח קצר.\r\nהוא רץ אל הדלת ועוצר ליד הסף, ואז ממשיך.";
+        const string misquotedSpan = "הוא רץ אל הדלת ועצר ליד הסף"; // past-tense mis-quote of "ועוצר"
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputRaw);
+        const string correctSpan = "הוא רץ אל הדלת ועוצר ליד הסף";
+        var expectedStart = normDoc.IndexOf(correctSpan, StringComparison.Ordinal);
+        Assert.True(expectedStart >= 0);
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "tense", Span = misquotedSpan, Description = "tense slip with bidi/crlf" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputRaw);
+
+        var suggestion = Assert.Single(suggestions);
+        Assert.Equal(expectedStart, suggestion.StartOffset);
+        Assert.Equal(expectedStart + correctSpan.Length, suggestion.EndOffset);
+        // Offsets index normalized space and select exactly the real document text.
+        Assert.Equal(correctSpan, normDoc[suggestion.StartOffset!.Value..suggestion.EndOffset!.Value]);
+        Assert.Equal(correctSpan, suggestion.OriginalText);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_ContextBleedSpan_ProseSimilarToBodyWindow_IsDropped()
+    {
+        // The reopened-risk regression: at Scene scope the model is still handed PRECEDING/FOLLOWING
+        // context it can quote from, so a detected issue's span can be a sentence from that neighboring
+        // context that is genuinely ABSENT from the analyzed body - yet PROSE-SIMILAR to a body window.
+        //
+        // This span ("the old harbof walt was bold and the gray wager ruse") differs from the body window
+        // "the old harbor wall was cold and the grey water rose" by SIX scattered single-char edits - well
+        // inside the old percentage budget (ceil(0.12 * 52) = 7) - while sharing only the short stopword run
+        // "the old" (~13% of the span), NOT a multi-word content run. Before the fix the near-match fallback
+        // (generous 7-edit budget + full-offset scan) uniquely anchored it onto the body window, re-opening
+        // exactly the out-of-unit false-anchor the be-c01 decision closed. After the fix it is dropped: the
+        // shared exact word-run is too short (< 25% of the span) AND the real distance (6) exceeds the hard
+        // 4-edit cap. The morphological near-misses (one word differs by 1 char) keep a LONG exact run, so
+        // they still anchor - this only sheds prose-similar context bleed.
+        const string inputText =
+            "Near the shore the old harbor wall was cold and the grey water rose at noon.";
+        const string contextBleedSpan =
+            "the old harbof walt was bold and the gray wager ruse";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        Assert.True(normDoc.IndexOf(contextBleedSpan, StringComparison.Ordinal) < 0,
+            "fixture: span must not be an exact substring of the body");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = contextBleedSpan, Description = "register shift vs preceding context" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        // Out-of-unit prose-similar span -> dropped, no false body anchor.
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void ComputeConsistencyIssueSuggestions_HebrewContextBleedSpan_ProseSimilarToBodyWindow_IsDropped()
+    {
+        // Hebrew analog of the context-bleed regression. The span reads like a sentence quoted from the
+        // preceding scene/chapter that is absent from the analyzed body but prose-similar to a body window:
+        // many content words are perturbed by a single character each (הנהר->הנחר, הקר->הקור, סגריר->סגרירי,
+        // רחש->רחשי, המים->המימ, הסלעים->הסלאים), so it lands inside the old percentage budget while sharing
+        // only the short connective run "ושמענו את" (~15% of the span). Before the fix it falsely anchored
+        // onto the body; after the fix it is dropped (short word-run + over the 4-edit cap). A true
+        // morphological slip, where only ONE word differs, keeps a long exact run and still anchors.
+        const string inputText =
+            "ירדנו אל הנהר הקר ביום סגריר ושמענו את רחש המים בין הסלעים החלקלקים.";
+        const string contextBleedSpan =
+            "ירדנו אל הנחר הקור ביום סגרירי ושמענו את רחשי המימ בין הסלאים";
+
+        var normDoc = TextNormalization.NormalizeTextForAnalysis(inputText);
+        Assert.True(normDoc.IndexOf(contextBleedSpan, StringComparison.Ordinal) < 0,
+            "fixture: span must not be an exact substring of the body");
+
+        var issues = new List<ConsistencyIssue>
+        {
+            new() { Type = "register", Span = contextBleedSpan, Description = "register shift vs preceding scene" }
+        };
+
+        var suggestions = _sut.ComputeConsistencyIssueSuggestions(issues, inputText);
+
+        Assert.Empty(suggestions);
+    }
 }
 

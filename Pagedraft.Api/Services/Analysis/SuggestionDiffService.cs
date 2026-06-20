@@ -19,6 +19,16 @@ public class SuggestionDiffService
     // Target one-word-level proofread suggestions; larger rewrites belong in Line Edit.
     private const int MaxWordsPerSuggestion = 1;
 
+    // Near-match anchoring bounds (see FindUniqueNearMatch). A genuine morphological mis-quote (the only
+    // case the near-match recovers) is a 1-2 edit slip on a single word, so we hard-cap the absolute edit
+    // budget rather than let the percentage threshold grant 5-10 edits on a long span - a budget that wide
+    // lets a span quoted from PRECEDING/FOLLOWING context (still injected at Scene scope) drift onto a
+    // merely prose-similar body window. The span must ALSO share a verbatim multi-word run covering at
+    // least MinWordRunFractionOfSpan of its length, so a span that overlaps the body only in a short
+    // stopword run ("the old", "ושמענו את") is dropped, not fuzzily anchored.
+    private const int MaxNearMatchEditDistance = 4;
+    private const double MinWordRunFractionOfSpan = 0.25;
+
     /// <summary>
     /// Compute proofread suggestions by diffing original document text with the proofread result text.
     /// Offsets are in the normalized original text and later mapped back when applying highlights.
@@ -54,6 +64,7 @@ public class SuggestionDiffService
             var s = block.DeleteStartA;
             var e = s + block.DeleteCountA;
 
+            // NOTE: SnapToWordBoundaries does the same expansion for the consistency near-match path - duplication is intentional; consolidate deliberately when refactoring.
             // Expand to word boundaries
             while (s > 0 && IsWordChar(normOrig[s - 1]))
                 s--;
@@ -503,8 +514,61 @@ public class SuggestionDiffService
 
             if (firstStart < 0)
             {
-                // Span not present in the analyzed text at all - it is out of target (e.g. quoted from
-                // PRECEDING/FOLLOWING context) and therefore not navigable in this unit, so drop it.
+                // Span is not an exact substring of the analyzed text. Before dropping, try a CONSERVATIVE
+                // near-match: the model frequently mis-quotes a span by a 1-2 char morphological slip
+                // (e.g. Hebrew present "ועוצר" written as past "ועצר"), which would otherwise lose a real,
+                // detected issue. We accept a near-match ONLY when (1) the span shares a verbatim multi-word
+                // run covering >= 25% of its length with the body, (2) the best window is within a hard cap
+                // of 4 edits, and (3) the window is unambiguous. Anything looser is dropped so a span quoted
+                // from PRECEDING/FOLLOWING context (genuinely absent here) cannot falsely anchor into the body.
+                var nearMatch = FindUniqueNearMatch(normalizedDocument, normalizedSpan);
+                if (nearMatch is null)
+                {
+                    // No exact match and no safe near-match - the span is out of target (e.g. quoted from
+                    // PRECEDING/FOLLOWING context) and therefore not navigable in this unit, so drop it.
+                    continue;
+                }
+
+                var (nearStart, nearEnd) = nearMatch.Value;
+
+                // Snap the near-match window to whole-word boundaries. The fallback uses a FIXED-LENGTH
+                // window, but a mis-quote that differs in LENGTH (an inserted/deleted char, e.g. Hebrew
+                // "ועצר" for the document's "ועוצר") makes that window off by the length delta at one end -
+                // so it can start or end MID-WORD (e.g. highlighting "וא" instead of "הוא", shaving the
+                // leading "ה"). Expand the window outward over any clipped word so the highlight is always
+                // clean, navigable whole words (the snap stops at whitespace/punctuation, so it completes
+                // the partial word without swallowing a following separate word or adjacent punctuation).
+                // Scoped to the near-match fallback ONLY: the exact-match path is already verbatim/word-aligned.
+                (nearStart, nearEnd) = SnapToWordBoundaries(normalizedDocument, nearStart, nearEnd);
+
+                // CONTRACT (intentional asymmetry with the exact-match path above): the near-match path
+                // does NOT consult `consumed` to disambiguate overlapping occurrences. Two reasons make a
+                // consumed-aware near-match path unnecessary here:
+                //  1. FindUniqueNearMatch already DROPS any span with two non-overlapping plausible windows
+                //     (bestIsTied -> null). So the only window it ever returns is the single unambiguous
+                //     one; there is no "second free occurrence" to skip to even if we wanted one.
+                //  2. Per f5e1391, distinct issues that legitimately share one span are BOTH kept, anchored
+                //     to that shared window - overlap is ACCEPTABLE, not a bug to de-dup. The exact path
+                //     encodes the same rule via its first-occurrence fallback; the near path reaches the
+                //     same outcome simply by anchoring to its one unique window.
+                // We still record this window in `consumed` so a LATER exact-match issue can prefer a
+                // different occurrence around it (one-directional: exact reads consumed, near only writes).
+                consumed.Add((nearStart, nearEnd));
+
+                // Anchor to the REAL document text of the (snapped) window, not the model's mis-quoted span,
+                // so the highlight covers actual, navigable whole-word text.
+                var nearText = normalizedDocument[nearStart..nearEnd];
+                suggestions.Add(new AnalysisSuggestion
+                {
+                    StartOffset = nearStart,
+                    EndOffset = nearEnd,
+                    OriginalText = nearText,
+                    SuggestedText = string.Empty,
+                    Reason = reason,
+                    Category = category,
+                    ContextBefore = normalizedDocument[Math.Max(0, nearStart - 50)..nearStart],
+                    ContextAfter = normalizedDocument[nearEnd..Math.Min(normalizedDocument.Length, nearEnd + 50)]
+                });
                 continue;
             }
 
@@ -533,6 +597,244 @@ public class SuggestionDiffService
         }
 
         return suggestions;
+    }
+
+    /// <summary>
+    /// Conservative near-match anchor for a consistency span that is NOT an exact substring of the
+    /// document. Returns the [start,end) of the single best-matching window in <paramref name="document"/>
+    /// for <paramref name="span"/> ONLY when the match is safe:
+    /// <list type="bullet">
+    /// <item>(a) word-run anchored: the span shares a VERBATIM contiguous multi-word run with the document
+    /// that covers at least <see cref="MinWordRunFractionOfSpan"/> of the span's length. A genuine
+    /// morphological mis-quote leaves all but one word intact, so it keeps a long exact run; a span quoted
+    /// from PRECEDING/FOLLOWING context overlaps the body (if at all) only in a short stopword run and is
+    /// dropped here. This anchor also bounds the search to windows aligned on that run - there is no
+    /// full-document scan - AND</item>
+    /// <item>(b) near-miss within a HARD cap: the window's Levenshtein distance to the span is within
+    /// min(ceil(0.12 * span.Length), <see cref="MaxNearMatchEditDistance"/>) - the cap keeps a long span
+    /// from earning a 5-10 edit budget that a merely prose-similar window could satisfy; AND</item>
+    /// <item>(c) unambiguous: no OTHER non-overlapping window is also within that threshold - if two
+    /// windows are both plausible we DROP rather than guess.</item>
+    /// </list>
+    /// Returns null when no safe, unique near-match exists (e.g. a span quoted from surrounding context
+    /// that is genuinely absent here), so such spans are still dropped.
+    /// </summary>
+    private static (int Start, int End)? FindUniqueNearMatch(string document, string span)
+    {
+        if (string.IsNullOrEmpty(span) || string.IsNullOrEmpty(document))
+            return null;
+        if (span.Length > document.Length)
+            return null;
+
+        // (a) Require a verbatim multi-word run shared with the document, covering a meaningful fraction of
+        // the span. No run (or only a short stopword run) -> not a morphological mis-quote of any body
+        // window -> drop. This is the primary guard against re-admitting out-of-unit context-bleed spans,
+        // and it also gives us the candidate-window anchor (so we never scan every document offset).
+        var fragment = LongestExactWordRunSubstring(document, span, out var fragmentOffsetInSpan);
+        if (string.IsNullOrEmpty(fragment))
+            return null;
+        if (fragment.Length < MinWordRunFractionOfSpan * span.Length)
+            return null;
+
+        // (b) Hard-cap the edit budget. A real morphological slip is 1-2 edits; the percentage threshold is
+        // kept only as an UPPER bound so short spans are not over-budgeted, but it can never exceed the cap.
+        var threshold = Math.Min(
+            Math.Max(2, (int)Math.Ceiling(0.12 * span.Length)),
+            MaxNearMatchEditDistance);
+
+        // Candidate window starts, aligned so the exact word-run fragment lands where it sits in the span.
+        var candidateStarts = CollectNearMatchCandidateStarts(document, fragment, fragmentOffsetInSpan);
+
+        // For tolerance to small length differences (an inserted/deleted char shifts the true end),
+        // test a few window lengths around the span length at each candidate start.
+        var bestStart = -1;
+        var bestEnd = -1;
+        var bestDistance = int.MaxValue;
+        var bestIsTied = false;
+
+        foreach (var start in candidateStarts)
+        {
+            for (var len = span.Length - threshold; len <= span.Length + threshold; len++)
+            {
+                if (len <= 0)
+                    continue;
+                if (start + len > document.Length)
+                    continue;
+
+                var window = document.Substring(start, len);
+                var distance = BoundedLevenshtein(window, span, threshold);
+                if (distance > threshold)
+                    continue;
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestStart = start;
+                    bestEnd = start + len;
+                    bestIsTied = false;
+                }
+                else if (distance == bestDistance && bestStart >= 0)
+                {
+                    // Another window ties the current best. Overlapping windows (same region, slightly
+                    // different length) are the SAME match; a non-overlapping tie is a true ambiguity.
+                    var overlaps = start < bestEnd && bestStart < start + len;
+                    if (!overlaps)
+                        bestIsTied = true;
+                }
+            }
+        }
+
+        if (bestStart < 0)
+            return null; // no window within the tight threshold
+
+        if (bestIsTied)
+            return null; // ambiguous - two non-overlapping windows equally good; do not guess
+
+        return (bestStart, bestEnd);
+    }
+
+    /// <summary>
+    /// Expand a [start,end) window so neither end clips a word in <paramref name="text"/>: move the start
+    /// back over any partial word it begins inside, and the end forward over any partial word it ends
+    /// inside. "Word" here means a run of word characters (letters/digits); the scan STOPS at whitespace
+    /// OR punctuation. Used to clean up a near-match fallback window that, because it is fixed-length while
+    /// the mis-quote differs in length (insertion/deletion), can land mid-word at one end (e.g. clipping a
+    /// leading "ה" so "הוא" becomes "וא"). Stopping at punctuation - not just whitespace - means we only
+    /// complete the clipped word: we never swallow a following SEPARATE word, and we never absorb adjacent
+    /// punctuation that the window legitimately stopped before (e.g. a trailing comma).
+    /// </summary>
+    private static (int Start, int End) SnapToWordBoundaries(string text, int start, int end)
+    {
+        if (string.IsNullOrEmpty(text))
+            return (start, end);
+
+        // Clamp into range first so the scan below is safe.
+        start = Math.Max(0, Math.Min(start, text.Length));
+        end = Math.Max(start, Math.Min(end, text.Length));
+
+        // Move start BACK only while it sits inside a word (the char just before it is a word char).
+        while (start > 0 && IsWordChar(text[start - 1]))
+            start--;
+
+        // Move end FORWARD only while it sits inside a word (the char at it is a word char).
+        while (end < text.Length && IsWordChar(text[end]))
+            end++;
+
+        return (start, end);
+    }
+
+    /// <summary>
+    /// Build the set of candidate window start offsets for the near-match search by aligning a window to
+    /// every occurrence of the distinctive exact word-run <paramref name="fragment"/> in the document, so
+    /// that fragment lands where it sits inside the span (<paramref name="fragmentOffsetInSpan"/>). The
+    /// caller (<see cref="FindUniqueNearMatch"/>) only invokes this once a non-empty, sufficiently long
+    /// fragment is established, so there is no full-document fallback scan: a span with no distinctive
+    /// shared run is dropped before reaching here.
+    /// </summary>
+    private static IEnumerable<int> CollectNearMatchCandidateStarts(
+        string document, string fragment, int fragmentOffsetInSpan)
+    {
+        var starts = new HashSet<int>();
+        if (string.IsNullOrEmpty(fragment))
+            return starts;
+
+        var from = 0;
+        while (true)
+        {
+            var idx = document.IndexOf(fragment, from, StringComparison.Ordinal);
+            if (idx < 0)
+                break;
+            // Align the window so the fragment sits where it does inside the span.
+            var windowStart = idx - fragmentOffsetInSpan;
+            if (windowStart >= 0 && windowStart < document.Length)
+                starts.Add(windowStart);
+            from = idx + 1;
+        }
+
+        return starts;
+    }
+
+    /// <summary>
+    /// Find the longest contiguous run of whole words in <paramref name="span"/> that appears verbatim
+    /// in <paramref name="document"/>. Returns that fragment and its character offset within the span,
+    /// or empty when no multi-character word-run from the span is a document substring.
+    /// </summary>
+    private static string LongestExactWordRunSubstring(string document, string span, out int offsetInSpan)
+    {
+        offsetInSpan = 0;
+        var words = SplitWordsWithOffsets(span);
+        if (words.Count == 0)
+            return string.Empty;
+
+        var best = string.Empty;
+        // Try every contiguous word-run, longest first, and keep the first (longest) that is a substring.
+        for (var startWord = 0; startWord < words.Count; startWord++)
+        {
+            for (var endWord = words.Count - 1; endWord >= startWord; endWord--)
+            {
+                var startChar = words[startWord].Offset;
+                var endChar = words[endWord].Offset + words[endWord].Length;
+                var candidate = span.Substring(startChar, endChar - startChar);
+                if (candidate.Length <= best.Length)
+                    continue; // cannot beat current best
+                if (document.IndexOf(candidate, StringComparison.Ordinal) >= 0)
+                {
+                    best = candidate;
+                    offsetInSpan = startChar;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private static List<(int Offset, int Length)> SplitWordsWithOffsets(string s)
+    {
+        var words = new List<(int Offset, int Length)>();
+        var i = 0;
+        while (i < s.Length)
+        {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+            if (i >= s.Length) break;
+            var start = i;
+            while (i < s.Length && !char.IsWhiteSpace(s[i])) i++;
+            words.Add((start, i - start));
+        }
+        return words;
+    }
+
+    /// <summary>
+    /// Levenshtein edit distance between <paramref name="a"/> and <paramref name="b"/>, short-circuiting
+    /// to <c>threshold + 1</c> as soon as the whole row exceeds the threshold (so far-apart strings cost
+    /// little). Used by the near-match anchor to reject anything outside the tight threshold cheaply.
+    /// </summary>
+    private static int BoundedLevenshtein(string a, string b, int threshold)
+    {
+        if (Math.Abs(a.Length - b.Length) > threshold)
+            return threshold + 1;
+
+        var prev = new int[b.Length + 1];
+        var curr = new int[b.Length + 1];
+        for (var j = 0; j <= b.Length; j++)
+            prev[j] = j;
+
+        for (var i = 1; i <= a.Length; i++)
+        {
+            curr[0] = i;
+            var rowMin = curr[0];
+            for (var j = 1; j <= b.Length; j++)
+            {
+                var cost = a[i - 1] == b[j - 1] ? 0 : 1;
+                curr[j] = Math.Min(Math.Min(prev[j] + 1, curr[j - 1] + 1), prev[j - 1] + cost);
+                if (curr[j] < rowMin) rowMin = curr[j];
+            }
+            if (rowMin > threshold)
+                return threshold + 1; // every alignment already exceeds the threshold
+
+            (prev, curr) = (curr, prev);
+        }
+
+        return prev[b.Length];
     }
 
     private static bool IsMeaningfulSuggestion(AnalysisSuggestion s)
