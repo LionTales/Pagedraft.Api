@@ -94,6 +94,13 @@ public class ProofreadQualityTests
     private const string BakeoffCaseIdsEnvVar = "PROOFREAD_BAKEOFF_CASE_IDS";
     private const string BakeoffMaxCasesEnvVar = "PROOFREAD_BAKEOFF_MAX_CASES";
 
+    // Env var to select WHICH gold file the bake-off scores (default the Hebrew gold). Set to
+    // "proofread-gold-en.json" to score the English gold through the SAME scorer/columns
+    // (precision/recall/fp-rate/overreach/F0.5) — no scoring-logic fork. Resolved + logged at the
+    // call site (no silent default), mirroring the other PROOFREAD_BAKEOFF_* knobs.
+    private const string BakeoffGoldEnvVar = "PROOFREAD_BAKEOFF_GOLD";
+    private const string DefaultGoldFile = "proofread-gold.json";
+
     // Default bake-off shortlist: models actually pulled on the RTX 4070 laptop (~8 GB VRAM).
     // hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest (DictaLM-3.0-12B) is the production default (Ai:FeatureModels:Proofread in appsettings).
     // DictaLM tag is :latest (the locally pulled tag). 24B models are intentionally EXCLUDED
@@ -122,10 +129,12 @@ public class ProofreadQualityTests
             return;
         }
 
-        var cases = LoadProofreadGold();
+        var goldFile = ResolveGoldFileName();
+        _output.WriteLine($"Loading proofread gold: {goldFile} ({BakeoffGoldEnvVar} env)");
+        var cases = LoadProofreadGold(goldFile);
         if (cases.Length == 0)
         {
-            _output.WriteLine("No gold cases in proofread-gold.json.");
+            _output.WriteLine($"No gold cases in {goldFile}.");
             return;
         }
 
@@ -196,10 +205,12 @@ public class ProofreadQualityTests
             return;
         }
 
-        var cases = LoadProofreadGold();
+        var goldFile = ResolveGoldFileName();
+        _output.WriteLine($"Loading proofread gold: {goldFile} ({BakeoffGoldEnvVar} env)");
+        var cases = LoadProofreadGold(goldFile);
         if (cases.Length == 0)
         {
-            _output.WriteLine("No gold cases in proofread-gold.json.");
+            _output.WriteLine($"No gold cases in {goldFile}.");
             return;
         }
         // COST CONTROL: subset the gold for cloud runs (PROOFREAD_BAKEOFF_CASE_IDS / _MAX_CASES). Always
@@ -544,6 +555,17 @@ public class ProofreadQualityTests
         return string.IsNullOrWhiteSpace(raw) ? "Ollama" : raw.Trim();
     }
 
+    /// <summary>
+    /// Resolve WHICH gold file the bake-off scores from <c>PROOFREAD_BAKEOFF_GOLD</c>; defaults to the
+    /// Hebrew gold (<c>proofread-gold.json</c>). Set to <c>proofread-gold-en.json</c> to score the
+    /// English gold through the same scorer. The resolved name is logged at the call site (no silent default).
+    /// </summary>
+    private static string ResolveGoldFileName()
+    {
+        var raw = Environment.GetEnvironmentVariable(BakeoffGoldEnvVar);
+        return string.IsNullOrWhiteSpace(raw) ? DefaultGoldFile : raw.Trim();
+    }
+
     /// <summary>True when an OpenRouter API key is reachable (env AI_OPENROUTER_APIKEY).</summary>
     private static bool OpenRouterKeyPresent()
         => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AI_OPENROUTER_APIKEY"));
@@ -735,9 +757,16 @@ public class ProofreadQualityTests
 
     // ─── Gold loading ───
 
-    private static HebrewRegressionCase[] LoadProofreadGold()
+    /// <summary>
+    /// Load + deserialize a proofread gold file from <c>TestData/{fileName}</c>. Defaults to the Hebrew
+    /// gold (<c>proofread-gold.json</c>) so the regression/quality callers are unchanged; the bake-off
+    /// passes a name resolved from <c>PROOFREAD_BAKEOFF_GOLD</c> (e.g. <c>proofread-gold-en.json</c>).
+    /// <c>internal static</c> so the deterministic English-gold smoke test can reuse this exact loader
+    /// (same path + deserializer) instead of duplicating the JSON config.
+    /// </summary>
+    internal static HebrewRegressionCase[] LoadProofreadGold(string fileName = DefaultGoldFile)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "TestData", "proofread-gold.json");
+        var path = Path.Combine(AppContext.BaseDirectory, "TestData", fileName);
         if (!File.Exists(path))
             return Array.Empty<HebrewRegressionCase>();
         var json = File.ReadAllText(path);
