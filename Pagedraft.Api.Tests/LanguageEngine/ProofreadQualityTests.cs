@@ -174,17 +174,16 @@ public class ProofreadQualityTests
         var models = ResolveBakeoffModels();
         var parsed = models.Select(m => ParseCandidate(m, defaultProvider)).ToArray();
 
-        // Skip-gate by provider mix (mirrors LinguisticQualityTests, and preserves the prior
-        // per-candidate cloud support):
-        //  - OpenRouter (cloud): needs an API key. If the sweep includes ANY OpenRouter candidate and no
-        //    key is present, skip cleanly so CI stays green — same gate as the linguistic cloud bake-off.
+        // Skip-gate by provider mix (preserves the prior per-candidate cloud support):
+        //  - OpenRouter (cloud): needs an API key. Skip the whole sweep ONLY when EVERY candidate is
+        //    OpenRouter and no key is present (nothing else to run). A MIXED list still runs its local Ollama
+        //    / other-cloud rows and records NA for the unkeyed OpenRouter ones - same as a missing
+        //    Anthropic/OpenAI key, which yields an NA row rather than blocking the sweep.
         //  - Ollama (local): needs a live server. If EVERY candidate is Ollama and Ollama is down there is
-        //    nothing to run -> skip. If a cloud candidate is present, proceed even with Ollama down (a
-        //    missing Anthropic/OpenAI key simply yields an NA row, as before).
-        if (parsed.Any(p => p.Provider.Equals("OpenRouter", StringComparison.OrdinalIgnoreCase)) &&
-            !OpenRouterKeyPresent())
+        //    nothing to run -> skip. If a cloud candidate is present, proceed even with Ollama down.
+        if (ShouldSkipForMissingOpenRouterKey(parsed, OpenRouterKeyPresent()))
         {
-            _output.WriteLine("SKIPPED: an OpenRouter candidate is present but no API key found " +
+            _output.WriteLine("SKIPPED: every candidate is OpenRouter but no API key found " +
                               "(env AI_OPENROUTER_APIKEY or config Ai:Providers:OpenRouter:ApiKey). " +
                               "Skipping the cloud bake-off so CI stays green.");
             return;
@@ -316,6 +315,30 @@ public class ProofreadQualityTests
 
         // Reporting benchmark, not a quality gate — assert only that the run iterated the model list.
         Assert.True(models.Length > 0);
+    }
+
+    /// <summary>
+    /// Skip-gate logic (pure, no network): a missing OpenRouter key must skip the bake-off ONLY when every
+    /// candidate is OpenRouter. A MIXED list keeps running its local Ollama / other-cloud rows (the unkeyed
+    /// OpenRouter rows just record NA) - the regression the old <c>Any(...)</c> gate caused.
+    /// </summary>
+    [Fact]
+    public void ModelBakeoff_MissingOpenRouterKey_SkipsOnlyWhenEveryCandidateIsOpenRouter()
+    {
+        (string Provider, string Model)[] mixed = { ("OpenRouter", "vendor/cloud-model"), ("Ollama", "gemma4:12b") };
+        (string Provider, string Model)[] allOpenRouter = { ("OpenRouter", "vendor/a"), ("OpenRouter", "vendor/b") };
+        (string Provider, string Model)[] allOllama = { ("Ollama", "gemma4:12b"), ("Ollama", "qwen2.5:14b") };
+
+        // The bug: a mixed list with a missing key must NOT skip -> its Ollama rows still run.
+        Assert.False(ShouldSkipForMissingOpenRouterKey(mixed, openRouterKeyPresent: false));
+        // All-OpenRouter with no key => nothing to run => skip cleanly.
+        Assert.True(ShouldSkipForMissingOpenRouterKey(allOpenRouter, openRouterKeyPresent: false));
+        // All-OpenRouter WITH a key => run (do not skip).
+        Assert.False(ShouldSkipForMissingOpenRouterKey(allOpenRouter, openRouterKeyPresent: true));
+        // No OpenRouter candidate at all => the OpenRouter key gate never applies.
+        Assert.False(ShouldSkipForMissingOpenRouterKey(allOllama, openRouterKeyPresent: false));
+        // Empty list => nothing to skip on this gate.
+        Assert.False(ShouldSkipForMissingOpenRouterKey(Array.Empty<(string, string)>(), openRouterKeyPresent: false));
     }
 
     /// <summary>
@@ -524,6 +547,20 @@ public class ProofreadQualityTests
     /// <summary>True when an OpenRouter API key is reachable (env AI_OPENROUTER_APIKEY).</summary>
     private static bool OpenRouterKeyPresent()
         => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AI_OPENROUTER_APIKEY"));
+
+    /// <summary>
+    /// Whether the WHOLE bake-off must be skipped for a missing OpenRouter key. Only when EVERY candidate is
+    /// OpenRouter (so there is genuinely nothing else to run). A MIXED list is NOT skipped: its non-OpenRouter
+    /// rows (local Ollama, other cloud) still run while the unkeyed OpenRouter rows record NA via the
+    /// per-candidate try/catch - matching the pre-OpenRouter bake-off behavior. Using <c>Any</c> here (the
+    /// old gate) wrongly skipped a mixed list's local rows.
+    /// </summary>
+    private static bool ShouldSkipForMissingOpenRouterKey(
+        IReadOnlyList<(string Provider, string Model)> parsed, bool openRouterKeyPresent)
+    {
+        if (openRouterKeyPresent || parsed.Count == 0) return false;
+        return parsed.All(p => p.Provider.Equals("OpenRouter", StringComparison.OrdinalIgnoreCase));
+    }
 
     /// <summary>
     /// Cost-control subset for the bake-off: when PROOFREAD_BAKEOFF_CASE_IDS is set, keep only those gold
