@@ -17,6 +17,16 @@ public class HebrewRegressionCase
     public ProofreadCorrection[]? ExpectedCorrections { get; set; }
     /// <summary>If true, expect the proofread engine to return no changes for this input.</summary>
     public bool? ShouldHaveNoChanges { get; set; }
+    /// <summary>
+    /// Corrections the proofread engine must NOT emit — meaning-changing rewrites / overreach. Each
+    /// entry names an erroneous edit (an OriginalText span and the over-reaching SuggestedText) that, if
+    /// produced, counts as an overreach false positive even when the case ALSO has a legitimate expected
+    /// correction at the same location. This captures the failure class the loose location-only matcher
+    /// would otherwise miss: changing the RIGHT word to the WRONG (meaning-changing) replacement.
+    /// A forbidden entry whose Suggested is left empty matches ANY produced replacement at that span,
+    /// i.e. "this span must NOT be touched at all".
+    /// </summary>
+    public ProofreadCorrection[]? ForbiddenCorrections { get; set; }
 }
 
 /// <summary>A single correction entry emitted by the proofread engine.</summary>
