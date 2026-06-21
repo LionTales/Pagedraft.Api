@@ -1,0 +1,327 @@
+[
+  {
+    "id": "en-inj-01",
+    "input": "She recieved the letter on a cold morning.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "recieved",
+        "suggested": "received",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "She received the letter on a cold morning.",
+    "_note": "Classic i-before-e spelling error 'recieved' -> 'received'. Minimal single-word span."
+  },
+  {
+    "id": "en-inj-02",
+    "input": "They kept the two ledgers seperate for years.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "seperate",
+        "suggested": "separate",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "They kept the two ledgers separate for years.",
+    "_note": "Common spelling error 'seperate' -> 'separate'."
+  },
+  {
+    "id": "en-inj-03",
+    "input": "He was definately going to miss the last train.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "definately",
+        "suggested": "definitely",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "He was definitely going to miss the last train.",
+    "_note": "Common spelling error 'definately' -> 'definitely'."
+  },
+  {
+    "id": "en-inj-04",
+    "input": "The children was tired after the long walk home.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "children was",
+        "suggested": "children were",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "The children were tired after the long walk home.",
+    "_note": "Subject-verb agreement: plural 'children' takes 'were', not 'was'. Minimal span covers the noun+verb pair."
+  },
+  {
+    "id": "en-inj-05",
+    "input": "Their going to the harbor before the tide turns.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "Their",
+        "suggested": "They're",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "They're going to the harbor before the tide turns.",
+    "_note": "Their/they're confusion: the contraction 'they are' is required before 'going'."
+  },
+  {
+    "id": "en-inj-06",
+    "input": "The old house had lost it's roof in the storm.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "it's",
+        "suggested": "its",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "The old house had lost its roof in the storm.",
+    "_note": "Its/it's confusion: possessive 'its' required, not the contraction 'it is'."
+  },
+  {
+    "id": "en-inj-07",
+    "input": "She set the lantern down over their by the door.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "their",
+        "suggested": "there",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "She set the lantern down over there by the door.",
+    "_note": "Their/there confusion: the locative 'there' is required after 'over'."
+  },
+  {
+    "id": "en-inj-08",
+    "input": "He closed the gate and walked back to the house",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "house",
+        "suggested": "house.",
+        "category": "punctuation"
+      }
+    ],
+    "expectedCorrectedText": "He closed the gate and walked back to the house.",
+    "_note": "Missing terminal period. Minimal span attaches the period to the final word."
+  },
+  {
+    "id": "en-inj-09",
+    "input": "The morning  fog rolled in from the sea.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "morning  fog",
+        "suggested": "morning fog",
+        "category": "whitespace"
+      }
+    ],
+    "expectedCorrectedText": "The morning fog rolled in from the sea.",
+    "_note": "Stray double space between 'morning' and 'fog' collapsed to a single space."
+  },
+  {
+    "id": "en-inj-10",
+    "input": "That umbrella by the door is your's, I believe.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "your's",
+        "suggested": "yours",
+        "category": "punctuation"
+      }
+    ],
+    "expectedCorrectedText": "That umbrella by the door is yours, I believe.",
+    "_note": "Incorrect apostrophe in possessive pronoun: 'your's' -> 'yours'."
+  },
+  {
+    "id": "en-inj-11",
+    "input": "The old latch wont catch when it is cold.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "wont",
+        "suggested": "won't",
+        "category": "punctuation"
+      }
+    ],
+    "expectedCorrectedText": "The old latch won't catch when it is cold.",
+    "_note": "Missing apostrophe in the contraction 'won't'. Clean literary carrier: 'wont' appears exactly once and in a context where only the contraction meaning fits (the latch refuses to catch), eliminating the 'as was his wont' false-noun reading that made the previous carrier ambiguous."
+  },
+  {
+    "id": "en-inj-12",
+    "input": "Each of the travelers were carrying a heavy pack.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "travelers were",
+        "suggested": "travelers was",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "Each of the travelers was carrying a heavy pack.",
+    "_note": "Subject-verb agreement: the subject is 'Each' (singular), so the verb must be 'was'. Minimal span covers the noun+verb pair the model would naturally edit."
+  },
+
+  {
+    "id": "en-clean-01",
+    "input": "Chapter One",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "A chapter heading legitimately lacks terminal punctuation. A naive proofreader adds a period — a classic false positive. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-02",
+    "input": "The Long Road Home",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "A title-cased chapter/section heading with no terminal punctuation. Headings do not take periods. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-03",
+    "input": "The harbor was quiet that morning; not a single gull cried.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct literary use of a semicolon joining two independent clauses. A model might wrongly 'fix' it into a period or comma. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-04",
+    "input": "She paused at the threshold — the room beyond was darker than she remembered.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct literary use of an em-dash for a dramatic break. The proofreader must not 'simplify' it to a comma. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-05",
+    "input": "He poured the tea and waited for her to speak.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Grammatically correct, clean sentence requiring no change."
+  },
+  {
+    "id": "en-clean-06",
+    "input": "The letter lay unopened on the kitchen table for three days.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Clean sentence requiring no change."
+  },
+  {
+    "id": "en-clean-07",
+    "input": "Neither the captain nor his crew was prepared for the storm.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct subject-verb agreement with 'neither...nor' (singular verb agrees with the nearer subject 'crew'). A model might wrongly change 'was' to 'were'. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-08",
+    "input": "It was the kind of silence that settles over a house at dusk.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Clean literary sentence requiring no change."
+  },
+  {
+    "id": "en-clean-09",
+    "input": "They had walked for hours, and still the mountains seemed no closer.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct comma before a coordinating conjunction joining two independent clauses. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-10",
+    "input": "Whose coat is this, and why is it soaking wet?",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct use of 'whose' (possessive) and a well-formed compound question. A model might wrongly swap 'whose' for 'who's'. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-11",
+    "input": "The fewer interruptions there are, the sooner we will finish.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Correct use of 'fewer' with a countable noun and a clean correlative construction. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-clean-12",
+    "input": "He spoke softly, as though afraid the walls might overhear.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Clean literary sentence requiring no change."
+  },
+
+  {
+    "id": "en-overreach-01",
+    "input": "She felt a deep sadness.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "sadness",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "The whole sentence is clean (shouldHaveNoChanges). 'sadness' is correctly spelled and correctly used; the model must not swap it for a synonym (e.g. 'sorrow', 'melancholy'). Empty 'suggested' = ANY edit to that span is an overreach false positive. Mirrors Hebrew overreach-ms-01 'must not touch this span at all' encoding."
+  },
+  {
+    "id": "en-overreach-02",
+    "input": "He was not unkind.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "not unkind",
+        "suggested": "kind",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Litotes — intentional double negative carrying a softer meaning than 'kind'. The sentence is clean (shouldHaveNoChanges). The named forbidden replacement 'not unkind' -> 'kind' is a MEANING CHANGE the model must not make. Mirrors Hebrew overreach-ms-02 named-replacement encoding (forbids the specific bad rewrite)."
+  },
+  {
+    "id": "en-overreach-03",
+    "input": "He glanced at the calender on the wall.",
+    "language": "en-US",
+    "expectedCorrections": [
+      {
+        "original": "calender",
+        "suggested": "calendar",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "He glanced at the calendar on the wall.",
+    "forbiddenCorrections": [
+      {
+        "original": "calender",
+        "suggested": "schedule",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Mirrors Hebrew overreach-ms-02 (עתון) exactly: the ONLY correct fix is the spelling fix 'calender' -> 'calendar' (a misspelling of the date grid). A tempting over-correction at the SAME span changes the word to 'schedule' — a MEANING CHANGE. Without the forbiddenCorrections guard, CorrectionsMatch's location-only fallback (line 707: origP == origE) would credit 'calender'→'schedule' as satisfying the expected 'calender'→'calendar' correction, falsely inflating recall. ForbiddenMatch (two-gate when suggested is non-empty: origin span PLUS specific replacement must align) pulls the overreach candidate out of the pool FIRST, so it is counted as overreach and is NOT eligible to satisfy the expected correction. Case has BOTH expectedCorrections and forbiddenCorrections."
+  },
+
+  {
+    "id": "en-dialect-01",
+    "input": "\"I ain't goin',\" he said, folding his arms.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Intentional non-standard dialogue: 'ain't' and the dropped-g 'goin''. This is deliberate register, not error. The proofreader must preserve it (exercises the 'Preserve intentional shifts of register' rule). Must be left UNCHANGED."
+  },
+  {
+    "id": "en-dialect-02",
+    "input": "\"Reckon we oughta head back 'fore it gets dark,\" the old man muttered.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Intentional colloquial/dialect dialogue: 'Reckon', 'oughta', and the elided ''fore'. Deliberate register, not error. Must be left UNCHANGED."
+  },
+  {
+    "id": "en-dialect-03",
+    "input": "\"Nothin' but trouble down that road,\" she whispered.",
+    "language": "en-US",
+    "shouldHaveNoChanges": true,
+    "_note": "Intentional dropped-g dialect ('Nothin'') inside dialogue. Deliberate register, not error. Must be left UNCHANGED."
+  }
+]
