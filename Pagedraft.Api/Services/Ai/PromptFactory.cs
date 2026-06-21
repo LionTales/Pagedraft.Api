@@ -44,8 +44,8 @@ public class PromptFactory
         {
             var system = isHebrew ? HebrewSystemBase : EnglishProofreadSystem;
             var instruction = isHebrew
-                ? "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. אם אין שגיאות, החזר את הטקסט כפי שהוא. החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים או תוספות. אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש."
-                : "Receive a text and return **only** the corrected version, with no explanations or additions. Do not change paragraph structure unless there is a clear error. Do not add new content.";
+                ? "קבל קטע טקסט בעברית. תקן כל שגיאת כתיב, דקדוק, ניקוד או פיסוק שאתה מזהה. אל תחליף מילה במילה נרדפת ואל תשנה את המשמעות — תקן את שגיאת הכתיב במילה עצמה (למשל \"עתון\" ל\"עיתון\", לא ל\"עיתונות\") ואל תהפוך צירוף תקין למבע אחר (למשל אל תשנה \"עצמה רגשית\" ל\"עוצמת רגשות\"). אל תתקן ערבוב רישומים מכוון (למשל שפה מדוברת בדיאלוג). אם אין שגיאות, החזר את הטקסט כפי שהוא. החזר **רק** את הגרסה המתוקנת (או המקורית אם אין שינויים), בלי הסברים או תוספות. אל תשנה את מבנה הפסקאות אלא אם יש טעות ברורה. אל תוסיף תוכן חדש."
+                : "Receive a text and return **only** the corrected version, with no explanations or additions. Do not replace a word with a synonym and do not change the meaning — fix the spelling of the word itself and keep the same word and meaning; do not turn a correct phrase into a different expression. Preserve intentional shifts of register (for example colloquial speech in dialogue). Do not change paragraph structure unless there is a clear error. Do not add new content.";
             return (system, instruction);
         }
 
@@ -442,6 +442,7 @@ public class PromptFactory
         אם מופיע [CHARACTER_REGISTER] — השתמש בו לאימות התאמת מין (נטיית פועל, תואר, כינוי), עקביות כתיב שמות, וזיהוי כינויי גוף.
 
         אל תשנה סגנון, ניסוח או מבנה פסקאות — רק שגיאות ברורות.
+        אל תחליף מילה במילה נרדפת ואל תשנה את המשמעות. תקן את שגיאת הכתיב במילה עצמה (למשל "עתון" ל"עיתון", לא ל"עיתונות") ושמר על אותה מילה ואותה משמעות. אל תהפוך צירוף תקין למבע אחר (למשל אל תשנה "עצמה רגשית" ל"עוצמת רגשות").
         אל תתקן ערבוב רישומים מכוון (למשל שפה מדוברת בדיאלוג לעומת לשון ספרותית בתיאור).
         אם אין שגיאות, החזר את הטקסט כפי שהוא.
         החזר רק את הטקסט המתוקן — בלי הסברים, תוויות או כותרות כמו "הטקסט המתוקן:".
@@ -458,6 +459,8 @@ public class PromptFactory
         If [CHARACTER_REGISTER] is present — use it to verify name spelling consistency, pronoun agreement, and gender-specific language.
 
         Do not change style, wording, or paragraph structure — only clear errors.
+        Do not replace a word with a synonym and do not change the meaning. Fix the spelling of the word itself and keep the same word and the same meaning; do not turn a correct phrase into a different expression.
+        Preserve intentional shifts of register (for example colloquial speech in dialogue versus literary prose in narration); do not "fix" them.
         If no errors are found, return the text as-is.
         Return only the corrected text — no explanations, labels, or preambles like "Corrected text:".
         Do not continue the story or add new content.

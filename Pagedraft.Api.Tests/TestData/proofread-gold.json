@@ -655,5 +655,55 @@
     ],
     "expectedCorrectedText": "הוא נראה מתוח.",
     "_note": "Injected a doubled word: 'מתוח' repeated. Source: 'הוא נראה מתוח.'"
+  },
+
+  {
+    "id": "overreach-ms-01",
+    "input": "הסצנה הזו דורשת עצמה רגשית.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "עצמה",
+        "suggested": "עוצמה",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "הסצנה הזו דורשת עוצמה רגשית.",
+    "forbiddenCorrections": [
+      {
+        "original": "רגשית",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Provenance: 2026-06-20 live qwen3.5:9b run. The ONLY correct fix is the ktiv-male spelling עצמה->עוצמה. The model overreached to 'עוצמת רגשות', also turning the adjective רגשית (emotional) into the noun רגשות (emotions) — a MEANING CHANGE. forbiddenCorrections forbids ANY edit to רגשית (empty suggested = must not touch this span at all), so a model that rewrites it is scored as an overreach false positive instead of being silently credited."
+  },
+  {
+    "id": "overreach-ms-02",
+    "input": "הוא קרא על כך בעתון.",
+    "language": "he-IL",
+    "expectedCorrections": [
+      {
+        "original": "עתון",
+        "suggested": "עיתון",
+        "category": "spelling"
+      }
+    ],
+    "expectedCorrectedText": "הוא קרא על כך בעיתון.",
+    "forbiddenCorrections": [
+      {
+        "original": "עתון",
+        "suggested": "עתונות",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Provenance: 2026-06-20 live qwen3.5:9b run. Correct ktiv-male fix is עתון->עיתון (add the yod). The model changed it to עתונות (the press) — both a MEANING CHANGE (newspaper -> the press) AND still ktiv-haser (the full form is עיתונות). forbiddenCorrections names the specific bad replacement עתון->עתונות: because it touches the right ORIGINAL span (עתון), the loose location-only matcher would otherwise credit it as the correct ktiv fix and inflate recall AND precision. The forbidden term pulls it out FIRST, so it counts as overreach and is NOT eligible to satisfy the expected עיתון correction."
+  },
+  {
+    "id": "clean-overreach-ms-03",
+    "input": "פרק ראשון\n\nהיא הביטה בחלון וחשבה על מה שעוד צפוי לקרות.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true,
+    "_note": "Provenance: 2026-06-20 overreach measurement. A CLEAN passage — a chapter heading ('פרק ראשון') plus a correct sentence — that the proofreader must leave UNCHANGED. Any correction here is a false positive (shouldHaveNoChanges drives the fp-rate metric), so this measures overreach directly on already-correct text including a heading line."
   }
 ]

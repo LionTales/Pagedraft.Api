@@ -35,6 +35,15 @@ public class AnalysisResult
     /// <summary>Set by UnifiedAnalysisService for Proofread when result is nearly identical to input (possible truncation or model failure).</summary>
     public bool ProofreadNoChangesHint { get; set; }
 
+    /// <summary>
+    /// True when a Proofread result must NOT be trusted as a clean pass: the model returned empty/blank
+    /// output, or content unrelated to the input (so it was discarded and the input echoed back). Distinct
+    /// from <see cref="ProofreadNoChangesHint"/>, which is true for a genuinely-clean no-change result too.
+    /// Now PERSISTED (mapped column, default false) so the History tab reflects whether a reloaded run was
+    /// unreliable, consistent with the live run.
+    /// </summary>
+    public bool ProofreadResultUnreliable { get; set; }
+
     // ── Navigation ──
     public Chapter Chapter { get; set; } = null!;
     public PromptTemplate? Template { get; set; }
