@@ -110,7 +110,7 @@ justify changing the local default.
 | Task | Recommendation | Why |
 |---|---|---|
 | **Proofread (he)** | **KEEP local Dicta-3.0 active; document `OpenRouter/google/gemma-4-31b-it` as the cloud max-quality target** (the GPU-server ceiling). | Cloud is clearly better AND passes the gate (overreach 0/2, precision 88% vs 26%). But the active default stays local/free/offline — exactly the Linguistic precedent. Flip to cloud when GPU-server hosting exists. |
-| **Proofread_en** | **KEEP `gemma4:12b`; do NOT switch.** | **Still UNMEASURED** — there is no English proofread gold, so the (Hebrew) bake-off cannot score English. No evidence to switch. The cloud big model is the prime English upgrade candidate, but only *after* an English gold validates it (building one was out of scope here). |
+| **Proofread_en** | **KEEP `gemma4:12b`; now VALIDATED by an English gold (2026-06-21).** | **MEASURED** by `proofread-gold-en.json` (30 cases) - gemma4:12b vs qwen3.5:9b: precision **82% vs 31%**, recall **69% vs 69%** (tied), overreach **0/3 vs 1/3**, F0.5 **0.789 vs 0.349**. Passes the same precision gate as the Hebrew flow: far higher precision and lower overreach at equal recall (cost ~2.2x latency, acceptable for proofread). The cloud big model (`gemma-4-31b-it`) stays the future-GPU upgrade candidate. |
 | **LineEdit** | **KEEP local Dicta-3.0; cloud validated as a safe future-hosting option (no regression).** | Cloud is on par with Dicta-3.0 on the rubric (minimal, meaning/voice-preserving), not a clear win. The gate is satisfied (no overreach), but parity ≠ switch. |
 
 ### Wiring done (config + test only, reversible)
