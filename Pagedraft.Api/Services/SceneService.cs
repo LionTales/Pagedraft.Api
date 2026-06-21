@@ -170,6 +170,24 @@ public class SceneService
         return created;
     }
 
+    public async Task<bool> ClearScenesForChapterAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
+    {
+        var chapter = await _db.Chapters
+            .Include(c => c.Scenes)
+            .FirstOrDefaultAsync(c => c.BookId == bookId && c.Id == chapterId, ct);
+        if (chapter == null) return false;
+
+        var clearedIds = chapter.Scenes.Select(s => s.Id).ToList();
+
+        _db.Scenes.RemoveRange(chapter.Scenes);
+        await _db.SaveChangesAsync(ct);
+
+        await _hubContext.Clients.Group($"book:{bookId}")
+            .SendAsync("ScenesCleared", new ScenesClearedEvent(bookId, chapterId, clearedIds), ct);
+
+        return true;
+    }
+
     private async Task EnsureChapterBelongsToBook(Guid bookId, Guid chapterId, CancellationToken ct)
     {
         var exists = await _db.Chapters.AnyAsync(c => c.BookId == bookId && c.Id == chapterId, ct);
