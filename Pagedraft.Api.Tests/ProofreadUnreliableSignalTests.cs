@@ -471,6 +471,81 @@ public class ProofreadUnreliableSignalTests
     }
 
     /// <summary>
+    /// A thinking-model Proofread that wraps its real correction AFTER a &lt;think&gt; block must be reliable.
+    /// StripThinkBlock keeps the post-&lt;/think&gt; answer, so the first sanitize already yields real text and
+    /// the result has valid suggestions. This is the realistic shape of the scenario the
+    /// snapshot-before-fallback bug warned about ("unreliable on a successful proofread with valid
+    /// suggestions"): it must NOT be flagged.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_Proofread_ThinkBlockThenRealCorrection_NotUnreliable_HasSuggestions()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new AppDbContext(options);
+
+        var inputText = "הילד הלך לגן עם חבריו הטובים. הם שיחקו בחצר עד שעת הערב.";
+        // Thinking model: reasoning inside <think>, the actual corrected text AFTER </think> (one word fixed).
+        var corrected = inputText.Replace("הטובים", "היקרים");
+        var llmOutput = "<think>אני בודק איות ופיסוק בקטע הזה.</think>" + corrected;
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var svc = BuildService(db, llmOutput, inputText, chapterId, bookId);
+
+        var result = await svc.RunAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            chapterId,
+            customPrompt: null,
+            language: "he",
+            jobId: null,
+            ct: CancellationToken.None);
+
+        // The <think> reasoning is stripped, the real correction is kept => reliable, with a suggestion.
+        Assert.False(result.ProofreadResultUnreliable);
+        Assert.DoesNotContain("<think>", result.ResultText);
+        Assert.True(result.Suggestions.Count >= 1,
+            $"expected at least one suggestion from the one-word correction, observed {result.Suggestions.Count}");
+    }
+
+    /// <summary>
+    /// Guard for the re-evaluated blank signal: when the recovery fallback runs but only salvages JUNK the
+    /// sanitizer still rejects (a &lt;think&gt; block whose inner text is CJK noise, nothing after), the run must
+    /// stay unreliable. The fix re-checks the recovered content by re-sanitizing it, so junk recovery is NOT
+    /// mistaken for a real proofread (the failure mode a naive "any non-blank recovery is fine" fix would add).
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_Proofread_FallbackRecoversOnlyJunk_IsUnreliable()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new AppDbContext(options);
+
+        var inputText = "שלום עולם. זהו טקסט לבדיקה שמכיל כמה מילים בעברית פשוטה.";
+        // <think> with CJK-only inner and nothing after </think>: the first sanitize blanks (CJK stripped),
+        // the fallback salvages the raw "<think>…</think>" which ALSO sanitizes to blank => no usable output.
+        var llmOutput = "<think>你好世界你好世界你好世界</think>";
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var svc = BuildService(db, llmOutput, inputText, chapterId, bookId);
+
+        var result = await svc.RunAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            chapterId,
+            customPrompt: null,
+            language: "he",
+            jobId: null,
+            ct: CancellationToken.None);
+
+        Assert.True(result.ProofreadResultUnreliable);
+    }
+
+    /// <summary>
     /// FIX A (chunked path): a genuinely-CLEAN long chapter that exceeds the chunk threshold
     /// (ProofreadChunkTargetWords) must NOT be flagged unreliable just because its merged output is nearly
     /// identical to the input. The chunked path is reachable from RunAsync by lowering

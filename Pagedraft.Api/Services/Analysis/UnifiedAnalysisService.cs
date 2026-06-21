@@ -376,11 +376,12 @@ public class UnifiedAnalysisService
 
         var cleanContent = SanitizeResponse(response.Content ?? "");
 
-        // Reliability signal captured BEFORE the fallback below mutates cleanContent (it may echo the input).
-        // A non-blank raw payload that SANITIZES to nothing - e.g. only a <think> block, or pure
-        // watermark/CJK noise - means the model produced no usable proofread output, even though
-        // response.Content itself is not whitespace. Keying the unreliable flag off the raw content (as it
-        // did) misses this: the pipeline falls back to echoing the input and the flag wrongly stays false.
+        // "No usable proofread output" reliability signal. A non-blank raw payload that SANITIZES to nothing
+        // - e.g. only a <think> block, or pure watermark/CJK noise - means the model produced no usable
+        // output, even though response.Content itself is not whitespace. But this MUST be re-evaluated after
+        // the recovery fallback below: that fallback can legitimately restore real corrected text the model
+        // placed after a <think> block, and a successful recovery must NOT read as unreliable. So we seed the
+        // signal from the sanitized result and overwrite it once the fallback decides the final content.
         var proofreadSanitizedBlank = analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent);
 
         // If Proofread ended up empty after stripping (e.g. model put answer only in <think> or hit a stop), use raw or input so we don't persist empty
@@ -390,7 +391,17 @@ public class UnifiedAnalysisService
             var afterThink = ExtractTextAfterThinkBlock(response.Content);
             cleanContent = !string.IsNullOrWhiteSpace(afterThink) ? afterThink : response.Content.Trim();
             if (string.IsNullOrWhiteSpace(cleanContent))
+            {
                 cleanContent = inputText;
+                proofreadSanitizedBlank = true; // nothing recoverable: echoed the input => no real proofread
+            }
+            else
+            {
+                // The fallback recovered text. It is real output only if it still has substance once
+                // sanitized; junk the sanitizer rejects (CJK/watermark/think noise) stays unreliable. This
+                // re-check is what stops a successful think-block recovery from being wrongly flagged.
+                proofreadSanitizedBlank = string.IsNullOrWhiteSpace(SanitizeResponse(cleanContent));
+            }
         }
 
         var structuredJson = TryParseStructured(analysisType, cleanContent);
@@ -649,10 +660,9 @@ public class UnifiedAnalysisService
 
         var cleanContent = SanitizeResponse(sb.ToString());
 
-        // Blank AFTER sanitization => no usable proofread output, even when the accumulated stream (sb) is
-        // non-blank (e.g. only a <think> block). This is the reliable failure signal for the flag below;
-        // keying off the raw accumulated text missed the strip-to-empty case and the fallback then echoed
-        // the input, wrongly leaving the result "reliable".
+        // "No usable proofread output" signal, seeded from the sanitized stream and re-evaluated after the
+        // recovery fallback below (see RunAsync for the rationale): a successful think-block recovery of real
+        // corrected text must NOT be flagged just because the FIRST sanitize pass came back blank.
         var proofreadSanitizedBlank = analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent);
 
         if (analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent))
@@ -664,7 +674,15 @@ public class UnifiedAnalysisService
                 var afterThink = ExtractTextAfterThinkBlock(raw);
                 cleanContent = !string.IsNullOrWhiteSpace(afterThink) ? afterThink : raw.Trim();
                 if (string.IsNullOrWhiteSpace(cleanContent))
+                {
                     cleanContent = inputText;
+                    proofreadSanitizedBlank = true; // nothing recoverable: echoed the input => no real proofread
+                }
+                else
+                {
+                    // Recovered text counts as real output only if it survives sanitization; junk does not.
+                    proofreadSanitizedBlank = string.IsNullOrWhiteSpace(SanitizeResponse(cleanContent));
+                }
             }
         }
 
