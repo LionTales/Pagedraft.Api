@@ -12,6 +12,7 @@ using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
+using Pagedraft.Api.Services.Analysis.Hebrew;
 using Xunit;
 
 namespace Pagedraft.Api.Tests;
@@ -67,7 +68,10 @@ public class ProofreadUnreliableSignalTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            // Ktiv-male enforcement OFF so the deterministic spelling sub-check never appends extra
+            // suggestions and these tests exercise ONLY the proofread-unreliable signal in isolation.
+            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }));
     }
 
     [Fact]
@@ -357,6 +361,116 @@ public class ProofreadUnreliableSignalTests
     }
 
     /// <summary>
+    /// BUG 2 (signal a): scattered single-word deletions whose cumulative shrink EXCEEDS 10% must still be
+    /// reliable. The old length backstop (output &lt; 90% of input) fired on this purely because the
+    /// deletions summed past the ratio - the exact false positive signal (b) was designed to avoid - even
+    /// though every removed word is a reviewable suggestion and no span was dropped. The fixed backstop fires
+    /// only when the shrink is UNACCOUNTED for by suggestions, so this heavy-but-legitimate cleanup is not
+    /// flagged. Short sentences make the doubled words a large fraction of the text, so the &gt;10% precondition
+    /// (asserted below) genuinely exercises signal (a)'s gate - unlike the control above, which stays &lt;10%.
+    /// </summary>
+    [Fact]
+    public async Task RunAsync_Proofread_ManyScatteredDeletions_OverTenPercentShrink_NotUnreliable()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new AppDbContext(options);
+
+        // SHORT distinct sentences, each with exactly one doubled word in/near the middle. Because the
+        // surrounding text is short, removing one copy per sentence shrinks the whole text by well over 10%,
+        // while the deletions sit far apart (one per sentence) so no contiguous run forms.
+        var inputText = string.Join(" ",
+            "הבית גדול מאוד מאוד.",
+            "הילד רץ ממש ממש.",
+            "הארוחה טעימה טעימה.",
+            "הספר מעניין מעניין.",
+            "הכלב נבח רם רם.",
+            "השמש זרחה בהיר בהיר.",
+            "הציפור צייצה יפה יפה.",
+            "הרוח נשבה קל קל.",
+            "הפרח מתוק מתוק.",
+            "הילד טוב טוב.");
+        var llmOutput = inputText
+            .Replace("מאוד מאוד", "מאוד")
+            .Replace("ממש ממש", "ממש")
+            .Replace("טעימה טעימה", "טעימה")
+            .Replace("מעניין מעניין", "מעניין")
+            .Replace("רם רם", "רם")
+            .Replace("בהיר בהיר", "בהיר")
+            .Replace("יפה יפה", "יפה")
+            .Replace("קל קל", "קל")
+            .Replace("מתוק מתוק", "מתוק")
+            .Replace("טוב טוב", "טוב");
+
+        // Precondition: the cumulative scattered deletions push the output BELOW 90% of the input, so the old
+        // length backstop WOULD have tripped. This is what makes the test a genuine regression guard.
+        Assert.True(llmOutput.Length < inputText.Length * 0.9,
+            $"output/input length ratio = {(double)llmOutput.Length / inputText.Length:F3} (expected < 0.9 so this exercises signal (a)'s gate)");
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var svc = BuildService(db, llmOutput, inputText, chapterId, bookId);
+
+        var result = await svc.RunAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            chapterId,
+            customPrompt: null,
+            language: "he",
+            jobId: null,
+            ct: CancellationToken.None);
+
+        // Scattered deletions account for the shrink (each is a reviewable suggestion) => signal (a) must NOT
+        // fire, and they are not contiguous => signal (b) must NOT fire => reliable.
+        var pureDeletions = result.Suggestions.Count(s => string.IsNullOrWhiteSpace(s.SuggestedText));
+        Assert.False(result.ProofreadResultUnreliable);
+        Assert.True(pureDeletions >= 8,
+            $"expected ~10 scattered pure deletions, observed {pureDeletions}");
+    }
+
+    /// <summary>
+    /// BUG 1: a NON-blank model payload that SanitizeResponse strips to nothing (here CJK-only noise) means no
+    /// real proofread output was produced, yet the old flag keyed off the RAW response being whitespace - which
+    /// it is not - so the failure slipped through as "reliable". The fix keys off the SANITIZED content being
+    /// blank. RunWithInputAsync has no echo-fallback, so the result is a genuinely empty ResultText that also
+    /// escapes the unrelated check (empty/short results are never judged unrelated) and the dropped-content
+    /// check (empty output is skipped) - so ONLY the sanitized-blank signal can catch it. The old code returned
+    /// false here; the fix returns true.
+    /// </summary>
+    [Fact]
+    public async Task RunWithInputAsync_Proofread_NonBlankPayloadThatSanitizesToBlank_IsUnreliable()
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        await using var db = new AppDbContext(options);
+
+        var inputText = "שלום עולם. זהו טקסט לבדיקה שמכיל כמה מילים בעברית פשוטה.";
+        // Non-blank raw payload (so the OLD raw-whitespace check is false) that sanitizes to nothing: the CJK
+        // stripper removes all of it, leaving no usable proofread text.
+        var llmOutput = "你好世界你好世界你好世界你好世界";
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var svc = BuildService(db, llmOutput, inputText, chapterId, bookId);
+
+        var result = await svc.RunWithInputAsync(
+            AnalysisScope.Chapter,
+            AnalysisType.Proofread,
+            bookId,
+            chapterId,
+            sceneId: null,
+            inputText,
+            language: "he",
+            ct: CancellationToken.None);
+
+        // Sanitization left no usable output, and nothing echoed the input back in on this path.
+        Assert.True(string.IsNullOrWhiteSpace(result.ResultText));
+        Assert.True(result.ProofreadResultUnreliable);
+    }
+
+    /// <summary>
     /// FIX A (chunked path): a genuinely-CLEAN long chapter that exceeds the chunk threshold
     /// (ProofreadChunkTargetWords) must NOT be flagged unreliable just because its merged output is nearly
     /// identical to the input. The chunked path is reachable from RunAsync by lowering
@@ -432,7 +546,8 @@ public class ProofreadUnreliableSignalTests
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService());
+            new SuggestionDiffService(),
+            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,

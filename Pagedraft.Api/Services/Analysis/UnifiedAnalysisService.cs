@@ -376,6 +376,13 @@ public class UnifiedAnalysisService
 
         var cleanContent = SanitizeResponse(response.Content ?? "");
 
+        // Reliability signal captured BEFORE the fallback below mutates cleanContent (it may echo the input).
+        // A non-blank raw payload that SANITIZES to nothing - e.g. only a <think> block, or pure
+        // watermark/CJK noise - means the model produced no usable proofread output, even though
+        // response.Content itself is not whitespace. Keying the unreliable flag off the raw content (as it
+        // did) misses this: the pipeline falls back to echoing the input and the flag wrongly stays false.
+        var proofreadSanitizedBlank = analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent);
+
         // If Proofread ended up empty after stripping (e.g. model put answer only in <think> or hit a stop), use raw or input so we don't persist empty
         if (analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent) && !string.IsNullOrEmpty(response.Content))
         {
@@ -434,11 +441,12 @@ public class UnifiedAnalysisService
             proofreadUnrelatedOverride: proofreadUnrelated,
             language: language);
 
-        // Additive, transient signal: a Proofread result is untrustworthy only when the model returned
-        // empty/blank output OR content unrelated to the input OR it dropped a span of the input (omission).
-        // Clean text (non-empty, near-identical) yields false even though ProofreadNoChangesHint is true.
+        // Additive, transient signal: a Proofread result is untrustworthy only when the model produced no
+        // usable output (blank AFTER sanitization) OR content unrelated to the input OR it dropped a span of
+        // the input (omission). Clean text (non-empty, near-identical) yields false even though
+        // ProofreadNoChangesHint is true.
         if (analysisType == AnalysisType.Proofread)
-            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(response.Content) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || proofreadSanitizedBlank || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -503,6 +511,9 @@ public class UnifiedAnalysisService
         llmSw.Stop();
 
         var cleanContent = SanitizeResponse(response.Content);
+        // Blank AFTER sanitization => no usable proofread output (see the RunAsync path for the rationale);
+        // this is the reliable failure signal, not whether the raw response.Content was whitespace.
+        var proofreadSanitizedBlank = analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent);
         var structuredJson = TryParseStructured(analysisType, cleanContent);
 
         await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, analysisType, ct);
@@ -550,10 +561,10 @@ public class UnifiedAnalysisService
             proofreadUnrelatedOverride: proofreadUnrelated,
             language: language);
 
-        // Additive, transient signal: untrustworthy only when the model returned empty/blank output
-        // OR content unrelated to the input OR it dropped a span of the input (omission).
+        // Additive, transient signal: untrustworthy only when the model produced no usable output (blank
+        // AFTER sanitization) OR content unrelated to the input OR it dropped a span of the input (omission).
         if (analysisType == AnalysisType.Proofread)
-            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(response.Content) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || proofreadSanitizedBlank || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -638,6 +649,12 @@ public class UnifiedAnalysisService
 
         var cleanContent = SanitizeResponse(sb.ToString());
 
+        // Blank AFTER sanitization => no usable proofread output, even when the accumulated stream (sb) is
+        // non-blank (e.g. only a <think> block). This is the reliable failure signal for the flag below;
+        // keying off the raw accumulated text missed the strip-to-empty case and the fallback then echoed
+        // the input, wrongly leaving the result "reliable".
+        var proofreadSanitizedBlank = analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent);
+
         if (analysisType == AnalysisType.Proofread && string.IsNullOrWhiteSpace(cleanContent))
         {
             var raw = sb.ToString();
@@ -699,12 +716,11 @@ public class UnifiedAnalysisService
             proofreadUnrelatedOverride: proofreadUnrelated,
             language: language);
 
-        // Additive, transient signal: untrustworthy only when the model produced empty/blank output
-        // OR content unrelated to the input OR it dropped a span of the input (omission). The raw model
-        // output for the streaming path is the accumulated streamed tokens (sb), so treat empty/blank
-        // accumulated text as unreliable.
+        // Additive, transient signal: untrustworthy only when the model produced no usable output (blank
+        // AFTER sanitization of the accumulated stream) OR content unrelated to the input OR it dropped a
+        // span of the input (omission).
         if (analysisType == AnalysisType.Proofread)
-            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(sb.ToString()) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || proofreadSanitizedBlank || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -2341,18 +2357,42 @@ public class UnifiedAnalysisService
     // offset-adjacent in the input. We therefore flag only the longest run of consecutive, offset-adjacent
     // pure deletions - scattered legit deletions never form such a run. Thresholds are conservative to avoid
     // flagging normal proofreads (which are mostly replacements, similar length).
-    private const double ProofreadShortOutputRatio = 0.9;        // output < 90% of input length => content vanished
+    private const double ProofreadShortOutputRatio = 0.9;        // output < 90% of input length => possible omission
     private const int    ProofreadMinContiguousDeletions = 6;    // a run of >= 6 adjacent pure deletions => a span was dropped
     private const int    ProofreadMinDroppedSpanChars = 60;      // or a run spanning >= 60 input chars => a span was dropped
     // Two pure deletions are "contiguous" when only a small gap (a space/comma) separates them in the input.
     private const int    ProofreadDeletionContiguityGap = 3;
+    // Signal (a) fires only when reviewable suggestions account for LESS than this fraction of the missing
+    // characters - i.e. the text vanished SILENTLY. Scattered legit deletions each surface as a suggestion
+    // that accounts for the chars it removed, so however many there are they never trip the length backstop.
+    private const double ProofreadAccountedShrinkRatio = 0.5;
 
     private static bool ProofreadDroppedContent(string input, string output, ICollection<AnalysisSuggestion> suggestions)
     {
         if (string.IsNullOrEmpty(input)) return false;
-        // (a) length backstop: output substantially shorter than input => content vanished.
+
+        // (a) length backstop: the output is substantially shorter than the input. A shorter output is only a
+        // RELIABILITY problem when the missing text vanished SILENTLY - i.e. it is NOT surfaced as reviewable
+        // suggestions the user can see and revert. Legitimate scattered single-word deletions (signal (b)'s
+        // allowed case) also shrink the output, but each is a suggestion that ACCOUNTS for the characters it
+        // removed, so they must not trip this backstop merely by summing past 10%. We therefore fire (a) only
+        // when the suggestions explain less than half of the missing characters - the signature of a dropped
+        // span the diff failed to surface (e.g. one oversized pure-deletion that SuggestionDiffService
+        // rejects, or a suggestion list that overflowed and was discarded). A real omission whose per-word
+        // deletions ARE surfaced still gets caught by the contiguity check (b) below.
         if (!string.IsNullOrEmpty(output) && output.Length < input.Length * ProofreadShortOutputRatio)
-            return true;
+        {
+            var missingChars = input.Length - output.Length;
+            var accountedShrink = suggestions == null ? 0 : suggestions.Sum(s =>
+            {
+                var origLen = (s.EndOffset ?? 0) - (s.StartOffset ?? 0);
+                var sugLen = s.SuggestedText?.Length ?? 0;
+                return Math.Max(0, origLen - sugLen);
+            });
+            if (accountedShrink < missingChars * ProofreadAccountedShrinkRatio)
+                return true;
+        }
+
         if (suggestions == null || suggestions.Count == 0) return false;
 
         // (b) contiguity check: order the pure-deletion suggestions (SuggestedText blank) by StartOffset and
