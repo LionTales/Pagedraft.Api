@@ -19,7 +19,9 @@ public record AnalysisResultDto(
     /// <summary>True when Proofread result was nearly identical to input (possible model length limit or failure).</summary>
     bool ProofreadNoChangesHint = false,
     /// <summary>Server-side suggestions for this analysis run (Proofread and Line Edit).</summary>
-    List<AnalysisSuggestionDto>? Suggestions = null);
+    List<AnalysisSuggestionDto>? Suggestions = null,
+    /// <summary>True when a Proofread result is untrustworthy: the model returned empty/blank output, content unrelated to the input, or dropped a span of the input (producing a flood of bogus deletions). Distinct from ProofreadNoChangesHint, which is also true for genuinely-clean text. Persisted, so History reflects it.</summary>
+    bool ProofreadResultUnreliable = false);
 
 /// <summary>Request body for POST .../analyze. Send AnalysisType for type picker; TemplateId for legacy.</summary>
 public record RunAnalysisRequest(

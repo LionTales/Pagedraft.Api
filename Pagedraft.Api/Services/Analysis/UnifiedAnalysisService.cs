@@ -430,6 +430,12 @@ public class UnifiedAnalysisService
             applyProofreadHeuristics: true,
             proofreadUnrelatedOverride: proofreadUnrelated);
 
+        // Additive, transient signal: a Proofread result is untrustworthy only when the model returned
+        // empty/blank output OR content unrelated to the input OR it dropped a span of the input (omission).
+        // Clean text (non-empty, near-identical) yields false even though ProofreadNoChangesHint is true.
+        if (analysisType == AnalysisType.Proofread)
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(response.Content) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
+
         _db.AnalysisResults.Add(result);
 
         // Persist an AnalysisRunLog for normal (non-chunked) proofread/line-edit too.
@@ -538,6 +544,11 @@ public class UnifiedAnalysisService
             isRunWithInput: true,
             applyProofreadHeuristics: true,
             proofreadUnrelatedOverride: proofreadUnrelated);
+
+        // Additive, transient signal: untrustworthy only when the model returned empty/blank output
+        // OR content unrelated to the input OR it dropped a span of the input (omission).
+        if (analysisType == AnalysisType.Proofread)
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(response.Content) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -681,6 +692,13 @@ public class UnifiedAnalysisService
             isRunWithInput: false,
             applyProofreadHeuristics: true,
             proofreadUnrelatedOverride: proofreadUnrelated);
+
+        // Additive, transient signal: untrustworthy only when the model produced empty/blank output
+        // OR content unrelated to the input OR it dropped a span of the input (omission). The raw model
+        // output for the streaming path is the accumulated streamed tokens (sb), so treat empty/blank
+        // accumulated text as unreliable.
+        if (analysisType == AnalysisType.Proofread)
+            result.ProofreadResultUnreliable = (proofreadUnrelated ?? false) || string.IsNullOrWhiteSpace(sb.ToString()) || ProofreadDroppedContent(inputText, result.ResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -1580,11 +1598,24 @@ public class UnifiedAnalysisService
             Language = language,
             ModelName = "chunked",
             ProofreadNoChangesHint = noChangesHint,
+            // ProofreadResultUnreliable is set below, AFTER AttachSuggestions populates result.Suggestions,
+            // from the only meaningful merged-level failure signal: dropped content. It is deliberately NOT
+            // driven by noChangesHint - a nearly-identical merged output is the EXPECTED shape of a genuinely
+            // clean long chapter, not a failure. (Per-chunk unrelated/empty chunks already fall back to the
+            // original chunk text, so they never surface as a merged-level anomaly; a repetition loop yields
+            // LONGER/garbled output, which is not nearly-identical, so noChangesHint would not catch it anyway.)
             JobId = jobId,
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
         AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
+
+        // Chunked-path unreliable signal: the model DROPPED a span of the input (an omission). Suggestions
+        // are now populated (AttachSuggestions ran), so the merged input/output/suggestions are all in scope.
+        // A nearly-identical / clean merged output is NOT unreliable (it is the normal shape of a clean long
+        // chapter); only dropped content is. Empty/unrelated chunks already fell back to original text per
+        // chunk, so the meaningful merged-level failure is dropped content.
+        result.ProofreadResultUnreliable = ProofreadDroppedContent(inputText, mergedResultText, result.Suggestions);
 
         _db.AnalysisResults.Add(result);
 
@@ -2220,6 +2251,75 @@ public class UnifiedAnalysisService
         }
 
         return true;
+    }
+
+    // Detects a proofread result where the model DROPPED a span of the input (an omission). Two signals:
+    //   (a) the output is substantially shorter than the input (content vanished outright), OR
+    //   (b) the diff produced a long CONTIGUOUS run of pure-deletion suggestions.
+    // Signal (b) replaces the old "deletions dominate the diff" ratio, which false-positived on a heavily
+    // edited but legitimate draft: many SCATTERED single-word deletions (e.g. doubled-word fixes spread
+    // across the text) could exceed a count/ratio threshold without any span actually being dropped. A real
+    // omission, by contrast, removes a CONTIGUOUS span, so its per-word deletion suggestions are
+    // offset-adjacent in the input. We therefore flag only the longest run of consecutive, offset-adjacent
+    // pure deletions - scattered legit deletions never form such a run. Thresholds are conservative to avoid
+    // flagging normal proofreads (which are mostly replacements, similar length).
+    private const double ProofreadShortOutputRatio = 0.9;        // output < 90% of input length => content vanished
+    private const int    ProofreadMinContiguousDeletions = 6;    // a run of >= 6 adjacent pure deletions => a span was dropped
+    private const int    ProofreadMinDroppedSpanChars = 60;      // or a run spanning >= 60 input chars => a span was dropped
+    // Two pure deletions are "contiguous" when only a small gap (a space/comma) separates them in the input.
+    private const int    ProofreadDeletionContiguityGap = 3;
+
+    private static bool ProofreadDroppedContent(string input, string output, ICollection<AnalysisSuggestion> suggestions)
+    {
+        if (string.IsNullOrEmpty(input)) return false;
+        // (a) length backstop: output substantially shorter than input => content vanished.
+        if (!string.IsNullOrEmpty(output) && output.Length < input.Length * ProofreadShortOutputRatio)
+            return true;
+        if (suggestions == null || suggestions.Count == 0) return false;
+
+        // (b) contiguity check: order the pure-deletion suggestions (SuggestedText blank) by StartOffset and
+        // walk them, accumulating a run while each deletion is offset-adjacent to the previous one. A null
+        // StartOffset/EndOffset cannot be placed on the input axis, so such a suggestion BREAKS the current
+        // run (it is skipped, and the next deletion starts a fresh run). Track the longest run's deletion
+        // COUNT and its covered character span (lastEnd - firstStart).
+        var deletions = suggestions
+            .Where(s => string.IsNullOrWhiteSpace(s.SuggestedText))
+            .Where(s => s.StartOffset.HasValue && s.EndOffset.HasValue)
+            .OrderBy(s => s.StartOffset!.Value)
+            .ToList();
+        if (deletions.Count == 0) return false;
+
+        var longestRunCount = 0;
+        var longestRunChars = 0;
+
+        var runCount = 0;
+        var runFirstStart = 0;
+        var prevEnd = int.MinValue;
+        foreach (var d in deletions)
+        {
+            var start = d.StartOffset!.Value;
+            var end = d.EndOffset!.Value;
+            if (runCount > 0 && start - prevEnd <= ProofreadDeletionContiguityGap)
+            {
+                // contiguous with the previous deletion => extend the current run.
+                runCount++;
+            }
+            else
+            {
+                // gap too large (or first deletion) => start a fresh run.
+                runCount = 1;
+                runFirstStart = start;
+            }
+
+            if (runCount > longestRunCount) longestRunCount = runCount;
+            var runChars = end - runFirstStart;
+            if (runChars > longestRunChars) longestRunChars = runChars;
+
+            prevEnd = end;
+        }
+
+        return longestRunCount >= ProofreadMinContiguousDeletions
+            || longestRunChars >= ProofreadMinDroppedSpanChars;
     }
 
     private static readonly char[] WordSplitSeparators =

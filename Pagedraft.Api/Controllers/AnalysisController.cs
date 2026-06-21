@@ -116,7 +116,8 @@ public class AnalysisController : ControllerBase
             Language: a.Language,
             Status: a.Status.ToString(),
             ProofreadNoChangesHint: a.ProofreadNoChangesHint,
-            Suggestions: suggestions);
+            Suggestions: suggestions,
+            ProofreadResultUnreliable: a.ProofreadResultUnreliable);
     }
 
     private async Task<(AnalysisType analysisType, string? customPrompt, string language)> ResolveAnalysisParamsAsync(Guid chapterId, RunAnalysisRequest req, Chapter? chapter, CancellationToken ct)
