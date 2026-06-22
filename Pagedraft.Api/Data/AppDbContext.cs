@@ -21,6 +21,7 @@ public class AppDbContext : DbContext
     public DbSet<SuggestionOutcomeRecord> SuggestionOutcomeRecords => Set<SuggestionOutcomeRecord>();
     public DbSet<AnalysisRunLog> AnalysisRunLogs => Set<AnalysisRunLog>();
     public DbSet<ChapterStyleProfile> ChapterStyleProfiles => Set<ChapterStyleProfile>();
+    public DbSet<BookStyleBaseline> BookStyleBaselines => Set<BookStyleBaseline>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -205,12 +206,27 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.Property(x => x.Language).HasMaxLength(10);
             e.Property(x => x.MetricsJson).HasColumnType("nvarchar(max)");
+            e.Property(x => x.BuiltWithModel).HasMaxLength(200);
             // Chapter FK = Cascade so deleting a chapter drops its cached style profile automatically.
             // Book FK = Restrict (deliberately, to avoid SQL Server's "multiple cascade paths" error);
             // BooksController.Delete removes ChapterStyleProfiles for the book explicitly before delete.
             e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.ChapterId, x.Language }).IsUnique();
+        });
+
+        modelBuilder.Entity<BookStyleBaseline>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.MetricsJson).HasColumnType("nvarchar(max)");
+            e.Property(x => x.BuiltWithModel).HasMaxLength(200);
+            // Book FK = Restrict (deliberately, to avoid SQL Server's "multiple cascade paths" error,
+            // mirroring ChapterStyleProfile); BooksController.Delete removes baselines for the book
+            // explicitly before deleting the book.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
+            // One cached average per (BookId, Language) - the cache key.
+            e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
         });
 
         modelBuilder.Entity<AnalysisRunLog>(e =>
@@ -300,6 +316,11 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) csp.CreatedAt = csp.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) csp.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookStyleBaseline bsb)
+            {
+                if (entry.State == EntityState.Added) bsb.CreatedAt = bsb.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) bsb.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);
