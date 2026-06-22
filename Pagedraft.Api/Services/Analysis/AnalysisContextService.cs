@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services;
@@ -40,6 +41,7 @@ public class AnalysisContextService : IAnalysisContextService
     private readonly SfdtConversionService _sfdtConversion;
     private readonly IAiRouter _router;
     private readonly PromptFactory _promptFactory;
+    private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<AnalysisContextService> _logger;
 
     public AnalysisContextService(
@@ -47,12 +49,14 @@ public class AnalysisContextService : IAnalysisContextService
         SfdtConversionService sfdtConversion,
         IAiRouter router,
         PromptFactory promptFactory,
+        IOptions<AiOptions> aiOptions,
         ILogger<AnalysisContextService> logger)
     {
         _db = db;
         _sfdtConversion = sfdtConversion;
         _router = router;
         _promptFactory = promptFactory;
+        _aiOptions = aiOptions;
         _logger = logger;
     }
 
@@ -106,19 +110,23 @@ public class AnalysisContextService : IAnalysisContextService
             styleProfile = await LoadStyleProfileAsync(bookId.Value, ct);
         }
 
-        // LinguisticAnalysis compares a SCENE's metrics against its chapter baseline, so the baseline
-        // is only meaningful at Scene scope. Skip it for Chapter scope: there the analysed text IS the
-        // whole chapter, so comparing the chapter against its own (separately, stochastically computed)
-        // metrics would surface spurious `deviations` even when nothing changed. Book scope has no
-        // single chapter. The chapter-vs-book reference is deferred to Plan 5.
-        // NOTE: BookStyleAverages is intentionally left null here. The previous wiring reused the
-        // qualitative book StyleProfileData (already injected as [STYLE_PROFILE]), which duplicated
-        // identical content under a [BOOK_STYLE_AVERAGES] marker that promised numeric metrics.
-        // Real numeric book-average style metrics (mean of per-chapter ChapterStyleProfile metrics)
-        // plus a book-comparison output field are deferred to Plan 5.
+        // LinguisticAnalysis compares the analysed unit against a [CHAPTER_STYLE_BASELINE] reference,
+        // but the reference DIFFERS by scope:
+        //   • Scene scope  → the unit's OWN chapter baseline. We compare the scene against the chapter
+        //     it lives in, so a register/length/density shift WITHIN the chapter surfaces as a deviation.
+        //   • Chapter scope → the BOOK-WIDE average (mean of every chapter's metrics). Comparing the
+        //     chapter against ITSELF would surface spurious `deviations` from stochastic recomputation,
+        //     so instead we hand the model the book average: a chapter that diverges from the book's
+        //     typical style is the meaningful signal. The book average is synthesised from the
+        //     already-built per-chapter ChapterStyleProfile rows (no extra LLM call here).
+        //   • Book scope   → no single chapter to compare; baseline stays null.
+        // Fallback at every scope: a null baseline omits [CHAPTER_STYLE_BASELINE] and the model returns
+        // `deviations: []`, which is the correct degraded behaviour.
+        // NOTE: BookStyleAverages (the separate StyleProfileData field) is intentionally left null. The
+        // numeric book reference is now delivered via ChapterStyleBaseline at Chapter scope; the
+        // StyleProfileData-shaped BookStyleAverages slot is unused.
         ChapterStyleProfile? chapterStyleBaseline = null;
-        if (scope == AnalysisScope.Scene && analysisType is AnalysisType.LinguisticAnalysis
-            && bookId.HasValue && chapterId.HasValue)
+        if (analysisType is AnalysisType.LinguisticAnalysis && bookId.HasValue)
         {
             // Use the SAME language the user-facing analysis runs with (request override or normalized
             // code) so the baseline cache key, its build prompt, and [CHAPTER_STYLE_BASELINE] all agree
@@ -126,8 +134,17 @@ public class AnalysisContextService : IAnalysisContextService
             var baselineLanguage = string.IsNullOrWhiteSpace(language)
                 ? await ResolveLanguageAsync(bookId.Value, ct)
                 : language;
-            chapterStyleBaseline = await LoadOrBuildChapterStyleProfileAsync(
-                bookId.Value, chapterId.Value, baselineLanguage, ct);
+
+            if (scope == AnalysisScope.Scene && chapterId.HasValue)
+            {
+                chapterStyleBaseline = await LoadOrBuildChapterStyleProfileAsync(
+                    bookId.Value, chapterId.Value, baselineLanguage, ct);
+            }
+            else if (scope == AnalysisScope.Chapter)
+            {
+                chapterStyleBaseline = await BuildBookStyleAverageProfileAsync(
+                    bookId.Value, baselineLanguage, ct);
+            }
         }
 
         return new AnalysisContext
@@ -170,6 +187,12 @@ public class AnalysisContextService : IAnalysisContextService
     {
         var lang = string.IsNullOrWhiteSpace(language) ? "he" : language;
 
+        // The active LinguisticAnalysis model the deviations would be compared against (config-resolved,
+        // same resolution AiRouter uses). A profile built under a DIFFERENT model must not be served as a
+        // baseline: comparing metrics across models is apples-to-oranges, so a model mismatch is treated
+        // exactly like timestamp staleness (rebuild, or null when a rebuild is impossible).
+        var activeModel = ActiveLinguisticModel;
+
         try
         {
             // 1. Cache read: existing profile for this chapter+language (may be STALE - see step 3).
@@ -189,30 +212,38 @@ public class AnalysisContextService : IAnalysisContextService
             {
                 // Chapter has no analysable content now (cleared or replaced with empty text). We cannot
                 // rebuild a baseline from empty text, and a profile built from the PREVIOUS content is
-                // outdated once the chapter changed. Apply the same freshness check as step 3: return the
-                // cached profile only when it is NOT older than the chapter's last edit; otherwise return
-                // null so scene analysis does not inject a stale [CHAPTER_STYLE_BASELINE] from the old
-                // full chapter.
-                if (existing != null && existing.UpdatedAt >= chapter.UpdatedAt)
+                // outdated once the chapter changed. Apply the same freshness check as step 3 (timestamp
+                // AND model): return the cached profile only when it is fresh; otherwise return null so
+                // scene analysis does not inject a stale [CHAPTER_STYLE_BASELINE]. For a MODEL mismatch a
+                // rebuild is impossible here (no text), so we return null rather than serve a cross-model
+                // profile - same safety rationale as the timestamp-stale empty branch.
+                if (existing != null && IsFresh(existing, chapter, activeModel))
                     return existing;
                 return null;
             }
 
-            // 3. Freshness check: there is NO cache invalidation on chapter edit, so compare
-            // timestamps. A profile built at/after the chapter's last edit is fresh; one built
-            // before it is STALE (the chapter changed since) and must be rebuilt - otherwise the
-            // deviations compare the current scene against an out-of-date snapshot of the chapter.
-            if (existing != null && existing.UpdatedAt >= chapter.UpdatedAt)
+            // 3. Freshness check: there is NO cache invalidation on chapter edit or model change, so
+            // compare BOTH the timestamp AND the model. A profile is fresh only when it was built at/after
+            // the chapter's last edit AND under the active LinguisticAnalysis model; otherwise it is STALE
+            // (the chapter changed, or the configured model changed) and must be rebuilt - otherwise the
+            // deviations compare the current scene against an out-of-date OR cross-model snapshot.
+            // NOTE: a pre-existing legacy row has BuiltWithModel == null, which never equals the active
+            // model, so it is treated as stale and rebuilt ONCE on next access (expected one-time
+            // self-heal that stamps the row with the active model).
+            if (existing != null && IsFresh(existing, chapter, activeModel))
                 return existing;
 
-            // 4. Cache miss OR stale: (re)compute chapter-level metrics from the CURRENT text.
-            var metrics = await ComputeChapterLinguisticMetricsAsync(chapterText, lang, ct);
-            if (metrics == null)
+            // 4. Cache miss OR stale (timestamp or model): (re)compute chapter-level metrics from the
+            // CURRENT text. The build also reports the model actually used, which we stamp below.
+            var built = await ComputeChapterLinguisticMetricsAsync(chapterText, lang, ct);
+            if (built == null)
                 // Rebuild failed. We only reach here on a cache miss (existing == null) or a STALE
                 // profile (step 3 already returned a fresh one), so `existing` is never current. Return
                 // null rather than the stale row: injecting an outdated [CHAPTER_STYLE_BASELINE] would
                 // produce spurious deviations. Mirrors the empty-content stale handling above.
                 return null;
+
+            var (metrics, builtModel) = built.Value;
 
             // 5. Serialize metrics honouring StructuredResults' [JsonPropertyName] conventions so
             // the FE/parse layer reads the same shape it expects from LinguisticAnalysisResult.
@@ -220,8 +251,10 @@ public class AnalysisContextService : IAnalysisContextService
 
             if (existing != null)
             {
-                // Refresh the stale row in place (UpdatedAt re-stamped by SaveChanges override).
+                // Refresh the stale row in place (UpdatedAt re-stamped by SaveChanges override) and
+                // restamp the model it was built with so the next freshness check passes.
                 existing.MetricsJson = metricsJson;
+                existing.BuiltWithModel = builtModel;
                 try
                 {
                     await _db.SaveChangesAsync(ct);
@@ -243,7 +276,8 @@ public class AnalysisContextService : IAnalysisContextService
                 BookId = bookId,
                 ChapterId = chapterId,
                 Language = lang,
-                MetricsJson = metricsJson
+                MetricsJson = metricsJson,
+                BuiltWithModel = builtModel
                 // CreatedAt/UpdatedAt are stamped by AppDbContext.SaveChanges override.
             };
 
@@ -281,12 +315,160 @@ public class AnalysisContextService : IAnalysisContextService
     }
 
     /// <summary>
+    /// Builds a SYNTHETIC, book-wide style baseline: the per-metric MEAN of the already-FRESH, same-model
+    /// <see cref="ChapterStyleProfile"/> rows for (bookId, language). Used as the [CHAPTER_STYLE_BASELINE]
+    /// reference at Chapter scope so a chapter is compared against the book's typical style, not itself.
+    ///
+    /// READ-ONLY, NO BUILD/REFRESH:
+    /// This is the cheap, inline path invoked during a single Chapter-scope analysis. It performs ONLY DB
+    /// reads and triggers NO LLM/rebuild work. It aggregates ONLY chapter profiles that are already FRESH
+    /// per the single source of truth <see cref="ChapterStyleProfileFreshness.IsFresh"/> (timestamp AND
+    /// active model). Timestamp-stale OR cross-model profiles (including legacy null-model rows) are
+    /// EXCLUDED from the mean - never rebuilt and never served - which keeps the average cross-model-safe.
+    /// The heavy work of (re)building chapter profiles belongs ONLY to the explicit Build/Refresh baseline
+    /// job (<see cref="StyleBaselineService"/>); doing it here would fan a single Chapter analysis out to N
+    /// sequential model calls (the regression this method was hardened against).
+    ///
+    /// Returns null when fewer than two FRESH same-model profiles are usable (a single chapter's "average"
+    /// is just that chapter, which is not a meaningful book reference; null omits the section -> deviations
+    /// []). After a model change or migration that leaves every profile model-stale, this returns null and
+    /// the user must run the explicit Build/Refresh baseline job to repopulate - the intended consented
+    /// degradation, not an inline rebuild storm.
+    /// </summary>
+    public async Task<ChapterStyleProfile?> BuildBookStyleAverageProfileAsync(
+        Guid bookId,
+        string language,
+        CancellationToken ct = default)
+    {
+        var lang = string.IsNullOrWhiteSpace(language) ? "he" : language;
+
+        try
+        {
+            // The active LinguisticAnalysis model the deviations are compared against. A profile built under
+            // a DIFFERENT model is excluded (cross-model metrics are apples-to-oranges); this is the same
+            // active-model resolution the (re)build gate uses.
+            var activeModel = ActiveLinguisticModel;
+
+            // 1. Read the persisted profile rows for (bookId, lang) WITH the fields needed to judge
+            // freshness. AsNoTracking: this is a pure read; we never mutate or persist anything here.
+            var profiles = await _db.ChapterStyleProfiles
+                .AsNoTracking()
+                .Where(p => p.BookId == bookId && p.Language == lang)
+                .Select(p => new { p.ChapterId, p.UpdatedAt, p.BuiltWithModel, p.MetricsJson })
+                .ToListAsync(ct);
+
+            if (profiles.Count == 0)
+                return null;
+
+            // 2. Load the corresponding chapters' UpdatedAt so we can apply the timestamp half of freshness.
+            // Joined in memory by ChapterId. AsNoTracking, projected to just the timestamp we need.
+            var chapterIds = profiles.Select(p => p.ChapterId).Distinct().ToList();
+            var chapterUpdatedAt = await _db.Chapters
+                .AsNoTracking()
+                .Where(c => chapterIds.Contains(c.Id))
+                .Select(c => new { c.Id, c.UpdatedAt })
+                .ToDictionaryAsync(c => c.Id, c => c.UpdatedAt, ct);
+
+            // 3. Include a profile in the average ONLY when it is FRESH (timestamp AND model) per the single
+            // shared definition. Excludes timestamp-stale AND cross-model (incl. legacy null-model) profiles
+            // instead of rebuilding them. A profile whose chapter row is missing cannot be timestamp-judged,
+            // so it is excluded as well.
+            var parsed = new List<LinguisticAnalysisResult>();
+            foreach (var profile in profiles)
+            {
+                if (string.IsNullOrWhiteSpace(profile.MetricsJson))
+                    continue;
+
+                if (!chapterUpdatedAt.TryGetValue(profile.ChapterId, out var chapterUpdated))
+                    continue; // chapter gone → cannot judge freshness → exclude
+
+                if (!ChapterStyleProfileFreshness.IsFresh(
+                        profile.UpdatedAt, profile.BuiltWithModel, chapterUpdated, activeModel))
+                    continue; // timestamp-stale OR cross-model → exclude (no rebuild)
+
+                LinguisticAnalysisResult? metrics;
+                try
+                {
+                    metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(profile.MetricsJson, JsonOpts);
+                }
+                catch (JsonException)
+                {
+                    metrics = null;
+                }
+
+                // A profile whose JSON carried an explicit "syntaxMetrics": null (or
+                // "morphologyMetrics": null) deserializes with that sub-object NULL, overriding the
+                // type's non-null default. The Average(...) lambdas below dereference both, so a single
+                // such profile would NRE and the outer catch would degrade the ENTIRE book average to
+                // null. Treat it like an unparseable profile: skip it and keep aggregating the rest.
+                if (metrics != null && metrics.SyntaxMetrics != null && metrics.MorphologyMetrics != null)
+                    parsed.Add(metrics);
+            }
+
+            // Fewer than two FRESH same-model profiles → the "average" is not a meaningful book reference.
+            if (parsed.Count < 2)
+                return null;
+
+            // 4. Per-metric MEAN of the numeric syntax + morphology fields only. Non-numeric/text fields
+            // (styleMetrics.formality, summary, deviations, ...) have no meaningful average and are left
+            // at their defaults on the synthetic result.
+            var averaged = new LinguisticAnalysisResult
+            {
+                SyntaxMetrics = new SyntaxMetrics
+                {
+                    SentenceCount = (int)Math.Round(parsed.Average(m => m.SyntaxMetrics.SentenceCount)),
+                    AverageSentenceLength = parsed.Average(m => m.SyntaxMetrics.AverageSentenceLength),
+                    ComplexSentences = (int)Math.Round(parsed.Average(m => m.SyntaxMetrics.ComplexSentences)),
+                    ShortestSentence = (int)Math.Round(parsed.Average(m => m.SyntaxMetrics.ShortestSentence)),
+                    LongestSentence = (int)Math.Round(parsed.Average(m => m.SyntaxMetrics.LongestSentence))
+                },
+                MorphologyMetrics = new MorphologyMetrics
+                {
+                    WordCount = (int)Math.Round(parsed.Average(m => m.MorphologyMetrics.WordCount)),
+                    UniqueWords = (int)Math.Round(parsed.Average(m => m.MorphologyMetrics.UniqueWords)),
+                    AverageWordLength = parsed.Average(m => m.MorphologyMetrics.AverageWordLength),
+                    LexicalDensity = parsed.Average(m => m.MorphologyMetrics.LexicalDensity)
+                },
+                // grammaticalityScore is numeric and meaningfully averageable across chapters.
+                GrammaticalityScore = parsed.Average(m => m.GrammaticalityScore)
+                // StyleMetrics (text) / Summary / Deviations / ConsistencyIssues: left at defaults.
+            };
+
+            // 5. Return a SYNTHETIC ChapterStyleProfile carrying only the averaged MetricsJson. It is NOT
+            // persisted (it is an aggregate, not a per-chapter cache row) and has no ChapterId; the prompt
+            // renderer (FormatChapterStyleBaseline) reads only MetricsJson, so this is sufficient.
+            return new ChapterStyleProfile
+            {
+                BookId = bookId,
+                Language = lang,
+                MetricsJson = JsonSerializer.Serialize(averaged, MetricsJsonOpts)
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Degrade gracefully: Chapter-scope analysis still runs without a book-average baseline.
+            _logger.LogWarning(ex, "Failed to build book-average style profile for book {BookId}", bookId);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Runs the same LLM-backed linguistic analysis that produces <see cref="LinguisticAnalysisResult"/>
     /// (the canonical prompt from <see cref="PromptFactory.GetAnalysisPrompt(AnalysisType,string)"/> driven
     /// through <see cref="IAiRouter"/>, exactly as LinguisticAnalysisEngine / UnifiedAnalysisService do),
     /// then parses the response into the typed metrics. Returns null on any LLM/parse failure.
+    /// <para>
+    /// Also surfaces <see cref="AiResponse.Model"/> (the model the request was ACTUALLY routed to) so the
+    /// caller can stamp <see cref="ChapterStyleProfile.BuiltWithModel"/> with the real model rather than
+    /// re-resolving it from config. Under normal config these agree (the provider sets Model from the
+    /// same resolved selection), but the router-reported value is the most accurate.
+    /// </para>
     /// </summary>
-    private async Task<LinguisticAnalysisResult?> ComputeChapterLinguisticMetricsAsync(
+    private async Task<(LinguisticAnalysisResult Metrics, string? Model)?> ComputeChapterLinguisticMetricsAsync(
         string text,
         string language,
         CancellationToken ct)
@@ -336,13 +518,34 @@ public class AnalysisContextService : IAnalysisContextService
 
         try
         {
-            return JsonSerializer.Deserialize<LinguisticAnalysisResult>(json, JsonOpts);
+            var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(json, JsonOpts);
+            if (metrics == null)
+                return null;
+            // Prefer the router-reported model (the model actually used); fall back to the config-resolved
+            // active model if a provider left it blank, so BuiltWithModel is never null when we DID build.
+            var model = string.IsNullOrWhiteSpace(response.Model) ? ActiveLinguisticModel : response.Model;
+            return (metrics, model);
         }
         catch (JsonException)
         {
             return null;
         }
     }
+
+    /// <summary>
+    /// The resolved active LinguisticAnalysis model id from config (same resolution AiRouter uses, via the
+    /// shared <see cref="LinguisticModelResolver"/>). Used as the cross-model staleness comparison target
+    /// and as a fallback stamp value. May be null only when DefaultModel itself is null/empty.
+    /// </summary>
+    private string? ActiveLinguisticModel => LinguisticModelResolver.ResolveModel(_aiOptions.Value);
+
+    /// <summary>
+    /// Freshness gate for a cached profile against the current chapter + active model. Delegates to the
+    /// shared <see cref="ChapterStyleProfileFreshness.IsFresh"/> so this gate and
+    /// <see cref="StyleBaselineService.GetStatusAsync"/> use ONE staleness definition (timestamp AND model).
+    /// </summary>
+    private static bool IsFresh(ChapterStyleProfile profile, Chapter chapter, string? activeModel) =>
+        ChapterStyleProfileFreshness.IsFresh(profile.UpdatedAt, profile.BuiltWithModel, chapter.UpdatedAt, activeModel);
 
     /// <summary>Resolves the analysis language for a book, defaulting to Hebrew.</summary>
     private async Task<string> ResolveLanguageAsync(Guid bookId, CancellationToken ct)
