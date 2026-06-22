@@ -1,8 +1,12 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
+using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
 
 namespace Pagedraft.Api.Controllers;
@@ -13,11 +17,28 @@ public class BooksController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly BookIntelligenceService _bookIntelligence;
+    private readonly StyleBaselineService _styleBaseline;
+    private readonly AnalysisProgressTracker _progress;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IHostApplicationLifetime _appLifetime;
+    private readonly ILogger<BooksController> _logger;
 
-    public BooksController(AppDbContext db, BookIntelligenceService bookIntelligence)
+    public BooksController(
+        AppDbContext db,
+        BookIntelligenceService bookIntelligence,
+        StyleBaselineService styleBaseline,
+        AnalysisProgressTracker progress,
+        IServiceScopeFactory scopeFactory,
+        IHostApplicationLifetime appLifetime,
+        ILogger<BooksController> logger)
     {
         _db = db;
         _bookIntelligence = bookIntelligence;
+        _styleBaseline = styleBaseline;
+        _progress = progress;
+        _scopeFactory = scopeFactory;
+        _appLifetime = appLifetime;
+        _logger = logger;
     }
 
     [HttpPost]
@@ -81,6 +102,162 @@ public class BooksController : ControllerBase
         return Ok(ToProfileDto(profile));
     }
 
+    /// <summary>
+    /// GET coverage + freshness of the cached book-wide style baseline for a language.
+    /// Mirrors the analysis status-poll contract so the FE can decide whether a (re)build is needed.
+    /// Status DTO (camelCase JSON): totalChapters, builtChapters, staleCount, hasBaseline, ready,
+    /// lastUpdatedAt, builtWithModel, activeModel, builtWithDifferentModel, activeBuildJobId,
+    /// chaptersToBuild, estimatedSeconds, estimatedUsd.
+    /// </summary>
+    [HttpGet("{bookId:guid}/style-baseline")]
+    public async Task<ActionResult<BookStyleBaselineStatusDto>> GetStyleBaselineStatus(
+        Guid bookId,
+        [FromQuery] string? language,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, language, ct);
+        var status = await _styleBaseline.GetStatusAsync(bookId, lang, ct);
+        return Ok(ToStatusDto(status));
+    }
+
+    /// <summary>
+    /// Start a book-wide style-baseline build. Mirrors AnalysisController.StartAnalysisJob's async-job
+    /// background-execution + AnalysisProgressTracker pattern so the FE reuses analysis-progress.service.
+    /// Returns a jobId pollable via GET style-baseline/progress/{jobId}. IDEMPOTENT: when everything is
+    /// already fresh the build runs synchronously as a no-op and returns ready with no jobId.
+    /// </summary>
+    [HttpPost("{bookId:guid}/style-baseline/build")]
+    public async Task<ActionResult<StartStyleBaselineBuildResponse>> BuildStyleBaseline(
+        Guid bookId,
+        [FromBody] BuildStyleBaselineRequest? req,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
+
+        // Idempotent fast path: nothing stale/missing AND a usable cached average already exists → no-op.
+        var status = await _styleBaseline.GetStatusAsync(bookId, lang, ct);
+        if (status.StaleCount == 0 && status.HasBaseline)
+        {
+            return Ok(new StartStyleBaselineBuildResponse(
+                JobId: null,
+                Language: lang,
+                NoOp: true,
+                Ready: true,
+                BuiltChapters: status.BuiltChapters,
+                TotalChapters: status.TotalChapters,
+                StaleCount: status.StaleCount));
+        }
+
+        // Dedup guard: a build for this (bookId, language) is already running. GetStatusAsync only
+        // surfaces ActiveBuildJobId for a job the progress tracker still reports as live (it self-heals a
+        // lingering/terminal registry entry to null), so handing back the existing jobId is safe — the FE
+        // reattaches to that live job instead of us minting a SECOND build that re-issues the same paid
+        // LinguisticAnalysis LLM calls. Checked AFTER the no-op fast path, BEFORE starting a new build.
+        if (status.ActiveBuildJobId is Guid activeJobId)
+        {
+            return Ok(new StartStyleBaselineBuildResponse(
+                JobId: activeJobId,
+                Language: lang,
+                NoOp: false,
+                Ready: false,
+                BuiltChapters: status.BuiltChapters,
+                TotalChapters: status.TotalChapters,
+                StaleCount: status.StaleCount));
+        }
+
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new build." });
+
+        var jobId = Guid.NewGuid();
+        // Pre-register the snapshot BEFORE returning jobId so an immediate FE poll does not 404.
+        // BuildBookStyleBaselineAsync will call StartJob again to refresh the message and set total
+        // chunks once the chapter count is known — that second call is intentional (see below).
+        _progress.StartJob(jobId, AnalysisScope.Book, Services.Ai.Contracts.AnalysisType.LinguisticAnalysis,
+            bookId, null, null, "Queued style baseline build…");
+
+        // Fire-and-forget background task on a fresh DI scope (mirrors AnalysisController.StartAnalysisJob).
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var serviceScope = _scopeFactory.CreateScope();
+                var services = serviceScope.ServiceProvider;
+                var baseline = services.GetRequiredService<StyleBaselineService>();
+                var progress = services.GetRequiredService<AnalysisProgressTracker>();
+                var logger = services.GetRequiredService<ILogger<BooksController>>();
+                try
+                {
+                    await baseline.BuildBookStyleBaselineAsync(bookId, lang, jobId, shutdownToken);
+                }
+                catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+                {
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Canceled, "Style baseline build canceled due to application shutdown.");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Style baseline build job {JobId} failed for book {BookId}", jobId, bookId);
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Failed, ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Style baseline build failed to start."); } catch { }
+                try { _logger.LogError(ex, "Failed to execute style baseline build job {JobId}", jobId); } catch { }
+            }
+        }, CancellationToken.None);
+
+        return Ok(new StartStyleBaselineBuildResponse(
+            JobId: jobId,
+            Language: lang,
+            NoOp: false,
+            Ready: false,
+            BuiltChapters: status.BuiltChapters,
+            TotalChapters: status.TotalChapters,
+            StaleCount: status.StaleCount));
+    }
+
+    /// <summary>
+    /// Poll progress of a book-wide style-baseline build job. Book-scoped sibling of
+    /// AnalysisController.GetAnalysisProgress (which requires a chapterId path segment); returns the SAME
+    /// AnalysisProgressDto shape so the FE reuses analysis-progress.service.
+    /// </summary>
+    [HttpGet("{bookId:guid}/style-baseline/progress/{jobId:guid}")]
+    public ActionResult<AnalysisProgressDto> GetStyleBaselineProgress(Guid bookId, Guid jobId)
+    {
+        if (!_progress.TryGet(jobId, out var snapshot) || snapshot == null)
+            return NotFound();
+
+        if (snapshot.BookId.HasValue && snapshot.BookId != bookId)
+            return NotFound();
+
+        // Guard: this endpoint serves ONLY book-wide style-baseline jobs.
+        // A chapter Proofread (or any other) job that happens to share the same bookId
+        // must not be leaked through the book-scoped progress route.
+        if (snapshot.Scope != AnalysisScope.Book || snapshot.AnalysisType != Services.Ai.Contracts.AnalysisType.LinguisticAnalysis)
+            return NotFound();
+
+        var dto = new AnalysisProgressDto(
+            snapshot.JobId,
+            snapshot.AnalysisType.ToString(),
+            snapshot.Scope.ToString(),
+            snapshot.BookId,
+            snapshot.ChapterId,
+            snapshot.SceneId,
+            snapshot.Status.ToString(),
+            snapshot.CurrentChunkIndex,
+            snapshot.TotalChunks,
+            snapshot.CompletedChunks,
+            snapshot.Message,
+            snapshot.EstimatedCompletionPercent);
+
+        return Ok(dto);
+    }
+
     [HttpPost("{bookId:guid}/ask")]
     public async Task<ActionResult<AnalysisResultDto>> Ask(Guid bookId, [FromBody] AskBookRequest req, CancellationToken ct)
     {
@@ -119,6 +296,11 @@ public class BooksController : ControllerBase
         if (styleProfiles.Count > 0)
             _db.ChapterStyleProfiles.RemoveRange(styleProfiles);
 
+        // Explicitly remove cached BookStyleBaselines to satisfy the Restrict FK on BookId.
+        var styleBaselines = await _db.BookStyleBaselines.Where(b => b.BookId == bookId).ToListAsync(ct);
+        if (styleBaselines.Count > 0)
+            _db.BookStyleBaselines.RemoveRange(styleBaselines);
+
         // Clean up document history snapshots for this book to avoid orphaned versions.
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);
         if (documentVersions.Count > 0)
@@ -128,6 +310,39 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
         return NoContent();
     }
+
+    /// <summary>
+    /// Resolves the style-baseline language: explicit request language if supplied, else the book's
+    /// normalized language ("he"/"en"), defaulting to "he". Keeps the cache key aligned with how
+    /// LinguisticAnalysis resolves language elsewhere.
+    /// </summary>
+    private async Task<string> ResolveBaselineLanguageAsync(Guid bookId, string? requestLanguage, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(requestLanguage)) return requestLanguage.Trim();
+        var book = await _db.Books.AsNoTracking().FirstOrDefaultAsync(b => b.Id == bookId, ct);
+        var lang = book?.Language?.Trim();
+        if (string.IsNullOrWhiteSpace(lang)) return "he";
+        if (lang.StartsWith("he", StringComparison.OrdinalIgnoreCase)) return "he";
+        if (lang.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return "en";
+        return lang.Length <= 5 ? lang : lang[..2];
+    }
+
+    private static BookStyleBaselineStatusDto ToStatusDto(BookStyleBaselineStatus s) => new(
+        s.BookId,
+        s.Language,
+        s.TotalChapters,
+        s.BuiltChapters,
+        s.StaleCount,
+        s.HasBaseline,
+        s.IsReady,
+        s.LastUpdatedAt,
+        s.BuiltWithModel,
+        s.ActiveModel,
+        s.BuiltWithDifferentModel,
+        s.ActiveBuildJobId,
+        s.ChaptersToBuild,
+        s.EstimatedSeconds,
+        s.EstimatedUsd);
 
     private static BookDto ToDto(Book b) => new(b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt);
 
