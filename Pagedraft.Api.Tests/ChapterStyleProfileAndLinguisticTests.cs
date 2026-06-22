@@ -1962,7 +1962,7 @@ public class ChapterStyleProfileAndLinguisticTests
     public async Task BuildContextAsync_SceneScope_UsesChapterProfileBaseline_NotBookAverage()
     {
         // Scene scope must keep using the chapter's OWN profile (averageSentenceLength = 14), even though
-        // sibling chapters with different metrics exist (which would pull a book average to ~18).
+        // sibling chapters with different metrics exist (which would pull a book average to 40).
         var metricsPayload = """
             {
               "syntaxMetrics": { "sentenceCount": 5, "averageSentenceLength": 14.0 },
@@ -1993,24 +1993,49 @@ public class ChapterStyleProfileAndLinguisticTests
             ContentText = "The full chapter text used to compute the scene's chapter baseline."
         });
 
-        // A sibling chapter WITH a profile of a very different averageSentenceLength (40), so that if the
-        // code wrongly used the book average at Scene scope the asserted value would differ.
-        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 1, Title = "Sibling", ContentText = "תוכן." });
-        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        // Two sibling chapters, each WITH a FRESH, same-model profile of a very different
+        // averageSentenceLength (40). For this to be a REAL regression guard the sibling profiles must be
+        // eligible to enter a book average, which requires BOTH halves of the freshness gate to pass:
+        //   • the profile must link to an ACTUAL chapter row (ChapterId = the sibling's real Id), because
+        //     BuildBookStyleAverageProfileAsync excludes any profile whose ChapterId has no matching
+        //     chapter ("chapter gone -> cannot judge freshness -> exclude"); an orphaned Guid.NewGuid()
+        //     here is silently dropped, AND
+        //   • the profile must carry BuiltWithModel = ActiveModel (a null/mismatched model is treated as
+        //     stale and excluded too).
+        // A profile that fails either check is excluded REGARDLESS of scope, which would make the value-40
+        // "trap" inert and this guard a no-op. We also seed TWO of them because the book average needs at
+        // least two fresh same-model profiles to be non-null. With both in place, a wrong-scope (book
+        // average) implementation would surface the book mean (40), failing the 14.0 assertion below.
+        var siblingOrder = 1;
+        foreach (var siblingTitle in new[] { "Sibling A", "Sibling B" })
         {
-            Id = Guid.NewGuid(),
-            BookId = bookId,
-            ChapterId = Guid.NewGuid(),
-            Language = language,
-            MetricsJson = JsonSerializer.Serialize(new
+            var siblingId = Guid.NewGuid();
+            db.Chapters.Add(new Chapter
             {
-                syntaxMetrics = new { sentenceCount = 5, averageSentenceLength = 40.0 },
-                morphologyMetrics = new { wordCount = 90, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = 0.55 },
-                grammaticalityScore = 0.85,
-                deviations = Array.Empty<object>(),
-                consistencyIssues = Array.Empty<object>()
-            })
-        });
+                Id = siblingId,
+                BookId = bookId,
+                Order = siblingOrder++,
+                Title = siblingTitle,
+                ContentText = "תוכן הפרק האחאי."
+            });
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = siblingId,
+                Language = language,
+                // Same active model so the cross-model half of the freshness gate passes (else excluded).
+                BuiltWithModel = ActiveModel,
+                MetricsJson = JsonSerializer.Serialize(new
+                {
+                    syntaxMetrics = new { sentenceCount = 5, averageSentenceLength = 40.0 },
+                    morphologyMetrics = new { wordCount = 90, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = 0.55 },
+                    grammaticalityScore = 0.85,
+                    deviations = Array.Empty<object>(),
+                    consistencyIssues = Array.Empty<object>()
+                })
+            });
+        }
 
         var sceneSfdt = new SfdtConversionService().ConvertToSfdt(
             new System.Collections.Generic.List<DocumentFormat.OpenXml.OpenXmlElement>
