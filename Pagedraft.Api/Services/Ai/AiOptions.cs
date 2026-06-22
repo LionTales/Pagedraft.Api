@@ -32,6 +32,14 @@ public class AiOptions
     public int EffectiveLineEditChunkTargetWords => LineEditChunkTargetWords > 0 ? LineEditChunkTargetWords : DefaultLineEditChunkTargetWords;
     /// <summary>Max concurrent LLM requests when running LineEdit in chunks.</summary>
     public int MaxParallelLineEditChunks { get; set; } = 2;
+
+    /// <summary>
+    /// Max concurrent chapter style-profile (re)builds when building a book-wide style baseline
+    /// (StyleBaselineService). Mirrors the proofread/line-edit chunk-parallelism cap idiom; kept small
+    /// (default 2) because each build is a full LinguisticAnalysis LLM call and the local model is the
+    /// bottleneck.
+    /// </summary>
+    public int MaxParallelStyleBaselineChapters { get; set; } = 2;
 }
 
 public class OllamaProviderOptions
