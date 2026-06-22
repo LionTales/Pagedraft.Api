@@ -46,6 +46,13 @@ public class ChapterStyleProfileAndLinguisticTests
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    // The active LinguisticAnalysis model the freshness gate resolves to under empty AiOptions in these
+    // tests: FeatureModels is unset, so it falls back to AiOptions.DefaultModel's initializer. Profiles
+    // seeded with THIS model are model-fresh (so cache-hit/fresh tests still exercise the timestamp path);
+    // profiles seeded with null/other are model-stale (cross-model self-heal). Kept in sync with
+    // AiOptions.DefaultModel so the DEF-1 freshness gate is exercised deterministically.
+    private const string ActiveModel = "qwen2.5:14b";
+
     // ─── 1. Cache HIT: seeded row returned, LLM never called ─────────────────────────────────
 
     [Fact]
@@ -73,7 +80,10 @@ public class ChapterStyleProfileAndLinguisticTests
             BookId = bookId,
             ChapterId = chapterId,
             Language = language,
-            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":5}}"
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":5}}",
+            // Model-fresh so this test isolates the timestamp cache-hit path (DEF-1 freshness now also
+            // gates on model; a null here would self-heal and call the LLM).
+            BuiltWithModel = ActiveModel
         };
         db.ChapterStyleProfiles.Add(seeded);
         await db.SaveChangesAsync();
@@ -865,7 +875,9 @@ public class ChapterStyleProfileAndLinguisticTests
             BookId = bookId,
             ChapterId = chapterId,
             Language = language,
-            MetricsJson = existingMetricsJson
+            MetricsJson = existingMetricsJson,
+            // Model-fresh so only the timestamp freshness path is exercised here.
+            BuiltWithModel = ActiveModel
         });
 
         await db.SaveChangesAsync();
@@ -1028,7 +1040,9 @@ public class ChapterStyleProfileAndLinguisticTests
             BookId = bookId,
             ChapterId = chapterId,
             Language = language,
-            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":7}}"
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":7}}",
+            // Model-fresh: the empty-content branch still applies the timestamp+model freshness gate.
+            BuiltWithModel = ActiveModel
         });
         await db.SaveChangesAsync();
 
@@ -1134,13 +1148,14 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Single(db.ChapterStyleProfiles.Where(p => p.BookId == otherBookId));
     }
 
-    // ─── 8. Bug 2: chapter-scope LinguisticAnalysis must NOT build a baseline (no self-comparison) ─
-    // For Chapter scope the analysed text IS the whole chapter, so a chapter-vs-itself baseline would
-    // surface stochastic `deviations`. The baseline (and its extra LLM call) is skipped; only Scene
-    // scope compares a scene against its chapter.
+    // ─── 8. Chapter-scope LinguisticAnalysis with NO per-chapter profiles → no baseline, no LLM ─────
+    // At Chapter scope the [CHAPTER_STYLE_BASELINE] reference is the BOOK AVERAGE (mean of the per-chapter
+    // ChapterStyleProfile rows), never the chapter compared against itself. When no profiles exist yet the
+    // book average degrades to null (the section is omitted → deviations []) and, crucially, the book-average
+    // build NEVER force-builds the missing chapters, so no LLM call is made.
 
     [Fact]
-    public async Task BuildContextAsync_ChapterScopeLinguistic_SkipsBaselineAndLlm()
+    public async Task BuildContextAsync_ChapterScopeLinguistic_NoProfiles_NullBaselineNoLlm()
     {
         using var provider = BuildServiceProvider(out var routerMock);
         var db = provider.GetRequiredService<AppDbContext>();
@@ -1167,14 +1182,15 @@ public class ChapterStyleProfileAndLinguisticTests
             "he",
             CancellationToken.None);
 
-        // No baseline at chapter scope (would be the chapter compared against itself).
+        // No book-average baseline when fewer than two chapters have a profile (here: zero).
         Assert.Null(context.ChapterStyleBaseline);
 
-        // The baseline build (a full-chapter LLM pass) is skipped entirely.
+        // The book-average build only AGGREGATES existing profiles; it must never force-build the
+        // missing chapter, so no LLM call is made.
         routerMock.Verify(
             r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
             Times.Never,
-            "Chapter-scope LinguisticAnalysis must not trigger the baseline LLM call");
+            "Chapter-scope LinguisticAnalysis must not force-build per-chapter profiles");
 
         // Nothing was cached.
         Assert.Equal(0, await db.ChapterStyleProfiles.CountAsync());
@@ -1316,6 +1332,7 @@ public class ChapterStyleProfileAndLinguisticTests
             new SfdtConversionService(),
             routerMock.Object,
             new PromptFactory(),
+            Microsoft.Extensions.Options.Options.Create(new AiOptions()),
             NullLogger<AnalysisContextService>.Instance);
 
         // Make the stale-refresh SaveChanges throw.
@@ -1334,6 +1351,921 @@ public class ChapterStyleProfileAndLinguisticTests
         db.ThrowOnSave = false;
         var ex = await Record.ExceptionAsync(() => db.SaveChangesAsync());
         Assert.Null(ex);
+    }
+
+    // ─── 9. BuildBookStyleAverageProfileAsync: mean math over multiple chapter profiles ───────────
+    // The book-average baseline is the per-metric MEAN of the numeric syntax + morphology fields across
+    // every chapter that ALREADY has a profile. Text fields (formality, summary, deviations) are ignored.
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_AveragesNumericMetricsAcrossProfiles()
+    {
+        // No LLM should be needed: all chapters already have a profile, and they are FRESH (chapter
+        // UpdatedAt pushed before the profile build), so the read-or-build method never recomputes.
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        db.Books.Add(new Book { Id = bookId, Title = "Average Book" });
+
+        // Three chapters with averageSentenceLength 10 / 20 / 30 → mean 20; lexicalDensity 0.4/0.6/0.8 → 0.6;
+        // sentenceCount 4/8/12 → 8; grammaticalityScore 0.6/0.8/1.0 → 0.8.
+        var chapterIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var sentenceLengths = new[] { 10.0, 20.0, 30.0 };
+        var sentenceCounts = new[] { 4, 8, 12 };
+        var lexicalDensities = new[] { 0.4, 0.6, 0.8 };
+        var grammaticalityScores = new[] { 0.6, 0.8, 1.0 };
+
+        for (var i = 0; i < chapterIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter
+            {
+                Id = chapterIds[i],
+                BookId = bookId,
+                Title = $"Chapter {i}",
+                ContentText = "תוכן הפרק."
+            });
+
+            var payload = new
+            {
+                syntaxMetrics = new { sentenceCount = sentenceCounts[i], averageSentenceLength = sentenceLengths[i] },
+                morphologyMetrics = new { wordCount = 100, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = lexicalDensities[i] },
+                styleMetrics = new { formality = "literary", readability = 0.7, voiceBalance = "active" },
+                grammaticalityScore = grammaticalityScores[i],
+                summary = "S",
+                deviations = Array.Empty<object>(),
+                consistencyIssues = Array.Empty<object>()
+            };
+
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = chapterIds[i],
+                Language = language,
+                MetricsJson = JsonSerializer.Serialize(payload),
+                // Model-fresh so aggregating these fresh profiles needs no rebuild (DEF-1).
+                BuiltWithModel = ActiveModel
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        // Make every chapter FRESH relative to its profile so no rebuild fires.
+        foreach (var c in db.Chapters.Local.ToList())
+        {
+            var entry = db.Entry(c);
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        Assert.NotNull(avg);
+        Assert.Equal(bookId, avg!.BookId);
+        Assert.Equal(language, avg.Language);
+
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(avg.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+
+        // Mean of the numeric metrics.
+        Assert.Equal(20.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+        Assert.Equal(8, metrics.SyntaxMetrics.SentenceCount);
+        Assert.Equal(0.6, metrics.MorphologyMetrics.LexicalDensity, precision: 5);
+        Assert.Equal(0.8, metrics.GrammaticalityScore, precision: 5);
+
+        // No LLM call: fresh profiles are only read, never rebuilt.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Aggregating fresh existing profiles must not call the LLM");
+    }
+
+    // ─── 9. BuildBookStyleAverageProfileAsync: a profile with null metric sub-objects is SKIPPED ───
+    // A fresh same-model profile whose JSON carried an explicit "syntaxMetrics": null deserializes with
+    // that sub-object NULL (overriding LinguisticAnalysisResult's non-null default). The Average(...)
+    // lambdas dereference SyntaxMetrics/MorphologyMetrics, so before the fix one such profile NRE'd and
+    // the outer catch degraded the ENTIRE book average to null. The fix excludes only the bad profile
+    // and aggregates the rest, so two good profiles still yield a non-null average.
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_ProfileWithNullSyntaxMetrics_SkippedNotWholeAverageNulled()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        db.Books.Add(new Book { Id = bookId, Title = "Null-Metrics Book" });
+
+        // Two GOOD profiles: averageSentenceLength 10 / 30 → mean 20; sentenceCount 4 / 12 → 8;
+        // wordCount 100 / 200 → 150. The THIRD profile is also fresh same-model but serializes with an
+        // explicit null syntaxMetrics, so it must be excluded (not crash the whole average).
+        var chapterIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+
+        // Good profile 0.
+        var good0 = new
+        {
+            syntaxMetrics = new { sentenceCount = 4, averageSentenceLength = 10.0 },
+            morphologyMetrics = new { wordCount = 100, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = 0.5 },
+            grammaticalityScore = 0.8,
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        };
+        // Good profile 1.
+        var good1 = new
+        {
+            syntaxMetrics = new { sentenceCount = 12, averageSentenceLength = 30.0 },
+            morphologyMetrics = new { wordCount = 200, uniqueWords = 140, averageWordLength = 4.0, lexicalDensity = 0.7 },
+            grammaticalityScore = 0.9,
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        };
+        // BAD profile 2: explicit null syntaxMetrics, valid morphologyMetrics. Deserializes with
+        // SyntaxMetrics == null, which would NRE the Average(...) lambda before the skip fix.
+        const string badProfileJson = """
+            {
+              "syntaxMetrics": null,
+              "morphologyMetrics": { "wordCount": 9999, "uniqueWords": 9999, "averageWordLength": 9.9, "lexicalDensity": 0.99 },
+              "grammaticalityScore": 0.1,
+              "deviations": [],
+              "consistencyIssues": []
+            }
+            """;
+
+        var profileJsons = new[]
+        {
+            JsonSerializer.Serialize(good0),
+            JsonSerializer.Serialize(good1),
+            badProfileJson
+        };
+
+        for (var i = 0; i < chapterIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter
+            {
+                Id = chapterIds[i],
+                BookId = bookId,
+                Title = $"Chapter {i}",
+                ContentText = "תוכן הפרק."
+            });
+
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = chapterIds[i],
+                Language = language,
+                MetricsJson = profileJsons[i],
+                // All three are model-fresh so the freshness gate admits them; the bad one is then
+                // excluded by the null-metrics skip, not by staleness.
+                BuiltWithModel = ActiveModel
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        // Make every chapter FRESH relative to its profile so no rebuild fires (pure read path).
+        foreach (var c in db.Chapters.Local.ToList())
+        {
+            var entry = db.Entry(c);
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        // No NRE, no all-or-nothing null: the average is computed from the two GOOD profiles only.
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        Assert.NotNull(avg);
+
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(avg!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+
+        // Mean of the TWO good profiles only (the bad profile's 9999 word count is NOT folded in).
+        Assert.Equal(20.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5); // (10 + 30) / 2
+        Assert.Equal(8, metrics.SyntaxMetrics.SentenceCount);                            // (4 + 12) / 2
+        Assert.Equal(150, metrics.MorphologyMetrics.WordCount);                          // (100 + 200) / 2
+
+        // Pure read of fresh profiles → no LLM rebuild.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Skipping a null-metrics profile must not trigger a rebuild");
+    }
+
+    // ─── 9. BuildBookStyleAverageProfileAsync: fewer than 2 profiles → null (degradation) ─────────
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_FewerThanTwoProfiles_ReturnsNull()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        var chapterId = Guid.NewGuid();
+
+        db.Books.Add(new Book { Id = bookId, Title = "Single Profile Book" });
+        // Two chapters exist, but only ONE has a profile → the book average is not meaningful.
+        db.Chapters.Add(new Chapter { Id = chapterId, BookId = bookId, Title = "Chapter 0", ContentText = "תוכן." });
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Title = "Chapter 1", ContentText = "תוכן." });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = Guid.NewGuid(),
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":5}}"
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        Assert.Null(avg);
+
+        // The single missing chapter is NOT force-built (no LLM call), and the lone existing profile is
+        // not even read because the <2 guard short-circuits first.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Fewer than two profiles must short-circuit without force-building missing chapters");
+    }
+
+    // ─── 9. BuildBookStyleAverageProfileAsync: never force-builds unprofiled chapters ──────────────
+    // The "existing-profile-only, no force-build" subtlety: a book with many unprofiled chapters and only
+    // two profiled chapters must aggregate ONLY the two, never firing an LLM build for the rest.
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_OnlyAggregatesProfiledChapters_NoForceBuild()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Mixed Book" });
+
+        // Two profiled chapters + three unprofiled chapters.
+        var profiledIds = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        for (var i = 0; i < profiledIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter { Id = profiledIds[i], BookId = bookId, Title = $"Profiled {i}", ContentText = "תוכן." });
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = profiledIds[i],
+                Language = language,
+                MetricsJson = JsonSerializer.Serialize(new
+                {
+                    syntaxMetrics = new { sentenceCount = 6 + i, averageSentenceLength = 12.0 + i },
+                    morphologyMetrics = new { wordCount = 80, uniqueWords = 60, averageWordLength = 4.0, lexicalDensity = 0.5 },
+                    grammaticalityScore = 0.8,
+                    deviations = Array.Empty<object>(),
+                    consistencyIssues = Array.Empty<object>()
+                }),
+                // Model-fresh so the read-or-build path only reads them (no rebuild → no LLM).
+                BuiltWithModel = ActiveModel
+            });
+        }
+
+        for (var i = 0; i < 3; i++)
+            db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Title = $"Unprofiled {i}", ContentText = "תוכן ללא פרופיל." });
+
+        await db.SaveChangesAsync();
+
+        // Make the profiled chapters FRESH so the read-or-build path only reads them.
+        foreach (var id in profiledIds)
+        {
+            var entry = db.Entry(db.Chapters.Local.Single(c => c.Id == id));
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        // Average built from the two profiled chapters only.
+        Assert.NotNull(avg);
+
+        // The three unprofiled chapters were NOT built → no LLM call at all.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Unprofiled chapters must never be force-built when aggregating the book average");
+
+        // No new ChapterStyleProfile rows were created for the unprofiled chapters.
+        Assert.Equal(2, await db.ChapterStyleProfiles.CountAsync());
+    }
+
+    // ─── DEF-1 REGRESSION: book-average aggregation is READ-ONLY (no inline rebuild storm) ─────────
+    // The severe perf regression: a single Chapter-scope analysis used to re-run the read-or-build method
+    // for EVERY profiled chapter, and after the model column was added every legacy (null-model) row was
+    // judged stale → rebuilt inline → N sequential gemma4:12b calls on one analysis. The fix makes the
+    // aggregation a pure DB read that EXCLUDES (never rebuilds) stale/cross-model profiles. These tests
+    // assert ZERO router calls.
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_AllLegacyNullModelProfiles_ZeroLlmCalls_ReturnsNull()
+    {
+        // Three profiled chapters whose BuiltWithModel is null (legacy rows after the migration). Every one
+        // is model-stale relative to the active model, so the read-only aggregation EXCLUDES all three and
+        // returns null - WITHOUT making a single rebuild/LLM call. This is the proof the storm is gone.
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        db.Books.Add(new Book { Id = bookId, Title = "Legacy Profiles Book" });
+
+        var chapterIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        for (var i = 0; i < chapterIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter { Id = chapterIds[i], BookId = bookId, Title = $"Chapter {i}", ContentText = "תוכן הפרק." });
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = chapterIds[i],
+                Language = language,
+                MetricsJson = JsonSerializer.Serialize(new
+                {
+                    syntaxMetrics = new { sentenceCount = 5, averageSentenceLength = 12.0 },
+                    morphologyMetrics = new { wordCount = 80, uniqueWords = 60, averageWordLength = 4.0, lexicalDensity = 0.5 },
+                    grammaticalityScore = 0.8,
+                    deviations = Array.Empty<object>(),
+                    consistencyIssues = Array.Empty<object>()
+                }),
+                BuiltWithModel = null // legacy row: model-stale vs the active model
+            });
+        }
+        await db.SaveChangesAsync();
+
+        // Even make every profile TIMESTAMP-fresh (chapters older than their profiles) so ONLY the
+        // null-model staleness is in play - proving the legacy rows are excluded, not rebuilt.
+        foreach (var c in db.Chapters.Local.ToList())
+        {
+            var entry = db.Entry(c);
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        // Every legacy profile is excluded as model-stale → fewer than 2 usable → null.
+        Assert.Null(avg);
+
+        // THE REGRESSION GUARD: not a single rebuild/LLM call was made.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Legacy/model-stale profiles must be EXCLUDED, never rebuilt inline (no LLM call)");
+
+        // Nothing was rebuilt/restamped: the rows stay exactly as seeded (3, still null-model).
+        Assert.Equal(3, await db.ChapterStyleProfiles.CountAsync());
+    }
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_ThreeFreshSameModel_ReturnsAverage_ZeroLlmCalls()
+    {
+        // Three FRESH, same-(active)-model profiles → the average is produced with ZERO LLM calls (pure read).
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        db.Books.Add(new Book { Id = bookId, Title = "Fresh Same-Model Book" });
+
+        var chapterIds = new[] { Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid() };
+        var lengths = new[] { 10.0, 20.0, 30.0 }; // mean = 20
+        for (var i = 0; i < chapterIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter { Id = chapterIds[i], BookId = bookId, Title = $"Chapter {i}", ContentText = "תוכן הפרק." });
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = chapterIds[i],
+                Language = language,
+                MetricsJson = JsonSerializer.Serialize(new
+                {
+                    syntaxMetrics = new { sentenceCount = 6, averageSentenceLength = lengths[i] },
+                    morphologyMetrics = new { wordCount = 80, uniqueWords = 60, averageWordLength = 4.0, lexicalDensity = 0.5 },
+                    grammaticalityScore = 0.8,
+                    deviations = Array.Empty<object>(),
+                    consistencyIssues = Array.Empty<object>()
+                }),
+                BuiltWithModel = ActiveModel // same as the active model → model-fresh
+            });
+        }
+        await db.SaveChangesAsync();
+
+        foreach (var c in db.Chapters.Local.ToList())
+        {
+            var entry = db.Entry(c);
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2); // timestamp-fresh
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        Assert.NotNull(avg);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(avg!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(20.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Aggregating fresh same-model profiles is a pure read (no LLM call)");
+    }
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_MixedFreshnessAndModel_AveragesOnlyFreshSameModel_ZeroLlmCalls()
+    {
+        // Mix: 2 fresh same-model + 1 cross-model (timestamp-fresh) + 1 timestamp-stale (same model). The
+        // average must include ONLY the 2 fresh same-model profiles (lengths 10 & 20 → mean 15). The
+        // excluded ones (length 100 each) would skew the mean if wrongly included, AND must NOT be rebuilt.
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        db.Books.Add(new Book { Id = bookId, Title = "Mixed Freshness Book" });
+
+        var freshA = Guid.NewGuid();
+        var freshB = Guid.NewGuid();
+        var crossModel = Guid.NewGuid();
+        var timestampStale = Guid.NewGuid();
+
+        string Payload(double len) => JsonSerializer.Serialize(new
+        {
+            syntaxMetrics = new { sentenceCount = 6, averageSentenceLength = len },
+            morphologyMetrics = new { wordCount = 80, uniqueWords = 60, averageWordLength = 4.0, lexicalDensity = 0.5 },
+            grammaticalityScore = 0.8,
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        });
+
+        // Use SAVE ORDERING (the SaveChanges override stamps UtcNow on each save) + tiny delays so the
+        // persisted timestamps are real and monotonically increasing. This is the reliable way to set up
+        // the timestamp-stale case for an AsNoTracking read (post-save Unchanged mutation is not flushed).
+
+        // 1. Seed the timestampStale chapter + its profile FIRST (so the profile is the OLDEST row).
+        db.Chapters.Add(new Chapter { Id = timestampStale, BookId = bookId, Title = "C-stale", ContentText = "תוכן הפרק." });
+        var staleProfileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = staleProfileId, BookId = bookId, ChapterId = timestampStale, Language = language, MetricsJson = Payload(100.0), BuiltWithModel = ActiveModel });
+        await db.SaveChangesAsync();
+
+        await Task.Delay(10);
+
+        // 2. The fresh + cross-model chapters next.
+        foreach (var id in new[] { freshA, freshB, crossModel })
+            db.Chapters.Add(new Chapter { Id = id, BookId = bookId, Title = "C", ContentText = "תוכן הפרק." });
+        await db.SaveChangesAsync();
+
+        await Task.Delay(10);
+
+        // 3. Touch the stale chapter so its UpdatedAt jumps AFTER its (step-1) profile → timestamp-stale.
+        var staleChapter = await db.Chapters.SingleAsync(c => c.Id == timestampStale);
+        staleChapter.Title = "C-stale (edited)";
+        await db.SaveChangesAsync();
+
+        await Task.Delay(10);
+
+        // 4. The fresh + cross-model profiles LAST so they are newer than their chapters (timestamp-fresh).
+        //    freshA/freshB are same-model (included); crossModel is a different model (excluded by model).
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = freshA, Language = language, MetricsJson = Payload(10.0), BuiltWithModel = ActiveModel });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = freshB, Language = language, MetricsJson = Payload(20.0), BuiltWithModel = ActiveModel });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = crossModel, Language = language, MetricsJson = Payload(100.0), BuiltWithModel = "different-model" });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var avg = await svc.BuildBookStyleAverageProfileAsync(bookId, language, CancellationToken.None);
+
+        // Only the two fresh same-model profiles contribute → mean of 10 & 20 = 15 (NOT pulled toward 100).
+        Assert.NotNull(avg);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(avg!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(15.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+
+        // The excluded (cross-model + timestamp-stale) profiles were NOT rebuilt: no LLM call.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Stale/cross-model profiles are excluded from the mean, never rebuilt");
+    }
+
+    // ─── 9. Scope selection: Scene → chapter profile, Chapter → book average ──────────────────────
+
+    [Fact]
+    public async Task BuildContextAsync_ChapterScope_UsesBookAverageBaseline_WhenProfilesExist()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Chapter-Scope Average Book", Language = language });
+
+        // Two OTHER chapters with profiles, plus the chapter under analysis (also profiled). Their
+        // averageSentenceLength values are 14 / 18 / 22 → mean 18.
+        var underAnalysisId = Guid.NewGuid();
+        var otherIds = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var allIds = new[] { underAnalysisId, otherIds[0], otherIds[1] };
+        var lengths = new[] { 14.0, 18.0, 22.0 };
+
+        for (var i = 0; i < allIds.Length; i++)
+        {
+            db.Chapters.Add(new Chapter
+            {
+                Id = allIds[i],
+                BookId = bookId,
+                Order = i,
+                Title = $"Chapter {i}",
+                ContentText = "תוכן הפרק לניתוח לשוני ברמת הפרק."
+            });
+            db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+            {
+                Id = Guid.NewGuid(),
+                BookId = bookId,
+                ChapterId = allIds[i],
+                Language = language,
+                MetricsJson = JsonSerializer.Serialize(new
+                {
+                    syntaxMetrics = new { sentenceCount = 5, averageSentenceLength = lengths[i] },
+                    morphologyMetrics = new { wordCount = 90, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = 0.55 },
+                    grammaticalityScore = 0.85,
+                    deviations = Array.Empty<object>(),
+                    consistencyIssues = Array.Empty<object>()
+                }),
+                // Model-fresh so the book-average aggregation reads profiles without rebuilding (no LLM).
+                BuiltWithModel = ActiveModel
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        // Make all chapters FRESH so no rebuild fires.
+        foreach (var c in db.Chapters.Local.ToList())
+        {
+            var entry = db.Entry(c);
+            entry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+            entry.State = EntityState.Unchanged;
+        }
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var context = await svc.BuildContextAsync(
+            AnalysisScope.Chapter,
+            underAnalysisId,
+            AnalysisType.LinguisticAnalysis,
+            language,
+            CancellationToken.None);
+
+        // Chapter scope → ChapterStyleBaseline is the BOOK AVERAGE (mean averageSentenceLength = 18),
+        // not the chapter's own profile (which had 14).
+        Assert.NotNull(context.ChapterStyleBaseline);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(
+            context.ChapterStyleBaseline!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(18.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+
+        // The synthetic book-average baseline has no ChapterId (it is an aggregate, not a chapter row).
+        Assert.Equal(Guid.Empty, context.ChapterStyleBaseline.ChapterId);
+
+        // BookStyleAverages (the StyleProfileData slot) stays null.
+        Assert.Null(context.BookStyleAverages);
+
+        // Aggregating fresh profiles needs no LLM call.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task BuildContextAsync_SceneScope_UsesChapterProfileBaseline_NotBookAverage()
+    {
+        // Scene scope must keep using the chapter's OWN profile (averageSentenceLength = 14), even though
+        // sibling chapters with different metrics exist (which would pull a book average to ~18).
+        var metricsPayload = """
+            {
+              "syntaxMetrics": { "sentenceCount": 5, "averageSentenceLength": 14.0 },
+              "morphologyMetrics": { "wordCount": 90, "uniqueWords": 70, "averageWordLength": 4.0, "lexicalDensity": 0.55 },
+              "styleMetrics": { "formality": "literary", "readability": 0.75, "voiceBalance": "active" },
+              "grammaticalityScore": 0.85,
+              "summary": "Own chapter baseline.",
+              "deviations": [],
+              "consistencyIssues": []
+            }
+            """;
+
+        using var provider = BuildServiceProvider(out _, llmResponse: metricsPayload);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        const string language = "he";
+        var chapterId = Guid.NewGuid();
+        var sceneId = Guid.NewGuid();
+
+        db.Books.Add(new Book { Id = bookId, Title = "Scene-Scope Book", Language = language });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Order = 0,
+            Title = "Chapter Under Analysis",
+            ContentText = "The full chapter text used to compute the scene's chapter baseline."
+        });
+
+        // A sibling chapter WITH a profile of a very different averageSentenceLength (40), so that if the
+        // code wrongly used the book average at Scene scope the asserted value would differ.
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 1, Title = "Sibling", ContentText = "תוכן." });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = Guid.NewGuid(),
+            BookId = bookId,
+            ChapterId = Guid.NewGuid(),
+            Language = language,
+            MetricsJson = JsonSerializer.Serialize(new
+            {
+                syntaxMetrics = new { sentenceCount = 5, averageSentenceLength = 40.0 },
+                morphologyMetrics = new { wordCount = 90, uniqueWords = 70, averageWordLength = 4.0, lexicalDensity = 0.55 },
+                grammaticalityScore = 0.85,
+                deviations = Array.Empty<object>(),
+                consistencyIssues = Array.Empty<object>()
+            })
+        });
+
+        var sceneSfdt = new SfdtConversionService().ConvertToSfdt(
+            new System.Collections.Generic.List<DocumentFormat.OpenXml.OpenXmlElement>
+            {
+                new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                    new DocumentFormat.OpenXml.Wordprocessing.Run(
+                        new DocumentFormat.OpenXml.Wordprocessing.Text("The scene under analysis with several words here.")))
+            }).SfdtJson;
+        db.Scenes.Add(new Scene { Id = sceneId, ChapterId = chapterId, Order = 0, Title = "Scene", ContentSfdt = sceneSfdt });
+
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var context = await svc.BuildContextAsync(
+            AnalysisScope.Scene,
+            sceneId,
+            AnalysisType.LinguisticAnalysis,
+            language,
+            CancellationToken.None);
+
+        // Scene scope → the chapter's OWN baseline (built via LLM here = 14.0), NOT the book average.
+        Assert.NotNull(context.ChapterStyleBaseline);
+        Assert.Equal(chapterId, context.ChapterStyleBaseline!.ChapterId);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(
+            context.ChapterStyleBaseline.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(14.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+    }
+
+    // ─── DEF-1: cross-model cache safety ──────────────────────────────────────────────────────────
+    // A cached profile built under a DIFFERENT model than the active LinguisticAnalysis model must be
+    // treated as STALE and rebuilt (never served as a cross-model baseline). Under the empty AiOptions in
+    // this helper the active (config-resolved) model is AiOptions.DefaultModel = "qwen2.5:14b" (= the
+    // ActiveModel constant), while the mock router reports "test-model" on a rebuild.
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_ModelMismatch_RebuildsAndRestampsRow()
+    {
+        var newMetricsJson = JsonSerializer.Serialize(new
+        {
+            syntaxMetrics = new { sentenceCount = 11, averageSentenceLength = 13.0 },
+            morphologyMetrics = new { wordCount = 130, uniqueWords = 95, averageWordLength = 4.4, lexicalDensity = 0.66 },
+            grammaticalityScore = 0.93,
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        });
+
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: newMetricsJson);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+        const string oldMetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":3}}";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Model Mismatch Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "פרק עם תוכן לבדיקת אי-התאמת מודל."
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = oldMetricsJson,
+            // Built under a model that is NOT the active model → cross-model stale even though timestamps
+            // make it timestamp-fresh.
+            BuiltWithModel = "some-old-model"
+        });
+        await db.SaveChangesAsync();
+
+        // Make the profile TIMESTAMP-fresh (newer than the chapter) so ONLY the model mismatch can make it
+        // stale - this isolates the DEF-1 model gate from the timestamp gate.
+        var chapterEntry = db.Entry(db.Chapters.Local.Single(c => c.Id == chapterId));
+        chapterEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        chapterEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // The model mismatch alone forced a rebuild (LLM called once).
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Once,
+            "A model-mismatched profile must be rebuilt even when timestamp-fresh");
+
+        // Same row, restamped with the model actually used (the router-reported "test-model") and new metrics.
+        Assert.NotNull(result);
+        Assert.Equal(profileId, result!.Id);
+        Assert.NotEqual(oldMetricsJson, result.MetricsJson);
+        Assert.Equal("test-model", result.BuiltWithModel);
+        Assert.Equal(1, await db.ChapterStyleProfiles.CountAsync());
+    }
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_NullBuiltWithModel_LegacyRow_TreatedAsStaleAndRebuilt()
+    {
+        var newMetricsJson = JsonSerializer.Serialize(new
+        {
+            syntaxMetrics = new { sentenceCount = 7 },
+            deviations = Array.Empty<object>(),
+            consistencyIssues = Array.Empty<object>()
+        });
+
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: newMetricsJson);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Legacy Row Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "פרק ישן עם פרופיל ללא מודל."
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":99}}",
+            BuiltWithModel = null // legacy row created before the column existed
+        });
+        await db.SaveChangesAsync();
+
+        // Timestamp-fresh so only the null-model can make it stale (the one-time self-heal).
+        var chapterEntry = db.Entry(db.Chapters.Local.Single(c => c.Id == chapterId));
+        chapterEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        chapterEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        // A null-model legacy row is stale → rebuilt once and stamped with the active/used model.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Once,
+            "A legacy null-BuiltWithModel row must self-heal (rebuild) on next access");
+        Assert.NotNull(result);
+        Assert.Equal("test-model", result!.BuiltWithModel);
+    }
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_MatchingModelAndFreshTimestamp_NoRebuild()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+        const string existingMetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":7}}";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Matching Model Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "פרק שלא השתנה ובנוי במודל הפעיל."
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = existingMetricsJson,
+            // Built under the ACTIVE model AND timestamp-fresh → a true cache hit, no rebuild.
+            BuiltWithModel = ActiveModel
+        });
+        await db.SaveChangesAsync();
+
+        var chapterEntry = db.Entry(db.Chapters.Local.Single(c => c.Id == chapterId));
+        chapterEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        chapterEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        Assert.NotNull(result);
+        Assert.Equal(profileId, result!.Id);
+        Assert.Equal(existingMetricsJson, result.MetricsJson);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "A model-matching, timestamp-fresh profile is a cache hit (no rebuild)");
+    }
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_EmptyContent_ModelMismatch_ReturnsNullNoCrossModelServe()
+    {
+        using var provider = BuildServiceProvider(out var routerMock);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        const string language = "he";
+
+        db.Books.Add(new Book { Id = bookId, Title = "Empty + Mismatch Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "" // no analysable text → a rebuild is impossible
+        });
+
+        var profileId = Guid.NewGuid();
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile
+        {
+            Id = profileId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = language,
+            MetricsJson = "{\"syntaxMetrics\":{\"sentenceCount\":12}}",
+            BuiltWithModel = "some-old-model" // cross-model
+        });
+        await db.SaveChangesAsync();
+
+        // TIMESTAMP-fresh so ONLY the model mismatch is in play; with empty content a rebuild cannot run,
+        // so the safe behaviour is to return null rather than serve the cross-model profile.
+        var chapterEntry = db.Entry(db.Chapters.Local.Single(c => c.Id == chapterId));
+        chapterEntry.Entity.UpdatedAt = DateTimeOffset.UtcNow.AddHours(-2);
+        chapterEntry.State = EntityState.Unchanged;
+
+        var svc = provider.GetRequiredService<IAnalysisContextService>();
+
+        var result = await svc.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, language);
+
+        Assert.Null(result);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "Empty content cannot rebuild; a cross-model profile must not be served");
     }
 
     /// <summary>AppDbContext whose SaveChangesAsync can be made to throw, to simulate a save failure.</summary>
