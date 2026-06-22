@@ -325,6 +325,170 @@ public class StyleBaselineServiceTests
         Assert.False(status.BuiltWithDifferentModel);
     }
 
+    // ─── Bug 1: a cross-model cached baseline is NOT "up to date", even when every chapter is fresh ───
+    // StaleCount measures only chapter-profile freshness; the persisted BookStyleBaseline carries its OWN
+    // model. When every chapter profile matches the active model but the cached average was built under a
+    // different model (BuiltWithDifferentModel), a build must NOT no-op - it must recompute + restamp the
+    // average under the active model, else the cross-model average persists forever.
+
+    [Fact]
+    public async Task BuildBookStyleBaselineAsync_ChaptersFresh_BaselineCrossModel_RebuildsAndRestamps()
+    {
+        using var provider = BuildServiceProvider(out var routerMock, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var svc = provider.GetRequiredService<StyleBaselineService>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Cross-Model Rebuild Book", Language = Lang });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "תוכן א." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "תוכן ב." });
+        await db.SaveChangesAsync();
+
+        await Task.Delay(10); // profiles saved AFTER chapters → timestamp-fresh
+
+        // Both chapter profiles are timestamp-fresh AND built under the ACTIVE model ("test-model").
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chA, Language = Lang, MetricsJson = MetricsJson(10.0), BuiltWithModel = "test-model" });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chB, Language = Lang, MetricsJson = MetricsJson(20.0), BuiltWithModel = "test-model" });
+        // The cached average was built under a DIFFERENT model → out of date despite the fresh chapters.
+        db.BookStyleBaselines.Add(new BookStyleBaseline { Id = Guid.NewGuid(), BookId = bookId, Language = Lang, MetricsJson = MetricsJson(99.0), BuiltChapterCount = 2, BuiltWithModel = "different-model" });
+        await db.SaveChangesAsync();
+
+        // Pre-condition: chapters all fresh (StaleCount 0) but the baseline is flagged cross-model.
+        var pre = await svc.GetStatusAsync(bookId, Lang);
+        Assert.Equal(0, pre.StaleCount);
+        Assert.True(pre.HasBaseline);
+        Assert.True(pre.BuiltWithDifferentModel);
+
+        var callsBefore = routerMock.Invocations.Count(i => i.Method.Name == nameof(IAiRouter.CompleteAsync));
+
+        var result = await svc.BuildBookStyleBaselineAsync(bookId, Lang);
+
+        // NOT a no-op: the cross-model baseline is recomputed even though no chapter needed a rebuild.
+        Assert.False(result.NoOp);
+        Assert.True(result.Ready);
+
+        // The fresh same-model profiles were aggregated WITHOUT any LLM call (idempotent chapter step).
+        var callsAfter = routerMock.Invocations.Count(i => i.Method.Name == nameof(IAiRouter.CompleteAsync));
+        Assert.Equal(callsBefore, callsAfter);
+
+        // The persisted average is recomputed (mean of 10 & 20 = 15, NOT the stale 99) and restamped
+        // under the active model, clearing the cross-model signal.
+        var baseline = await db.BookStyleBaselines.AsNoTracking().SingleAsync(b => b.BookId == bookId && b.Language == Lang);
+        Assert.Equal("test-model", baseline.BuiltWithModel);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(baseline.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(15.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+
+        var post = await svc.GetStatusAsync(bookId, Lang);
+        Assert.False(post.BuiltWithDifferentModel);
+    }
+
+    // Bug 1 (controller surface): the POST build fast path must also honour the cross-model signal, or it
+    // returns NoOp:true with no jobId and the stale cross-model average is never recomputed.
+
+    [Fact]
+    public async Task BuildStyleBaseline_ChaptersFresh_BaselineCrossModel_DoesNotNoOp()
+    {
+        using var provider = BuildServiceProvider(out _, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var svc = provider.GetRequiredService<StyleBaselineService>();
+        var registry = provider.GetRequiredService<StyleBaselineBuildRegistry>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Controller Cross-Model Book", Language = Lang });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "תוכן א." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "תוכן ב." });
+        await db.SaveChangesAsync();
+        await Task.Delay(10);
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chA, Language = Lang, MetricsJson = MetricsJson(10.0), BuiltWithModel = "test-model" });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chB, Language = Lang, MetricsJson = MetricsJson(20.0), BuiltWithModel = "test-model" });
+        db.BookStyleBaselines.Add(new BookStyleBaseline { Id = Guid.NewGuid(), BookId = bookId, Language = Lang, MetricsJson = MetricsJson(99.0), BuiltChapterCount = 2, BuiltWithModel = "different-model" });
+        await db.SaveChangesAsync();
+
+        // Cross-model + every chapter fresh: the BUGGY gate (StaleCount==0 && HasBaseline) would no-op here.
+        var pre = await svc.GetStatusAsync(bookId, Lang);
+        Assert.Equal(0, pre.StaleCount);
+        Assert.True(pre.BuiltWithDifferentModel);
+
+        // Register an already-running build so the controller, once PAST the no-op gate, takes the
+        // DETERMINISTIC dedup branch (returns the existing jobId, no background Task.Run) instead of
+        // spawning a real build. With the bug the no-op gate fires FIRST and returns NoOp:true / null jobId.
+        var existingJobId = Guid.NewGuid();
+        Assert.True(registry.TryStart(bookId, Lang, existingJobId));
+        progress.StartJob(existingJobId, AnalysisScope.Book, AnalysisType.LinguisticAnalysis, bookId, null, null);
+        progress.SetStatus(existingJobId, AnalysisProgressStatus.Running, "running");
+
+        var controller = new BooksController(
+            db: db,
+            bookIntelligence: null!,
+            styleBaseline: svc,
+            progress: progress,
+            scopeFactory: scopeFactory,
+            appLifetime: new TestApplicationLifetime(),
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
+
+        var action = await controller.BuildStyleBaseline(bookId, new BuildStyleBaselineRequest(Lang), CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var response = Assert.IsType<StartStyleBaselineBuildResponse>(ok.Value);
+
+        // The no-op fast path did NOT fire: the request proceeded to the build path (here, dedup).
+        Assert.False(response.NoOp);
+        Assert.Equal(existingJobId, response.JobId);
+    }
+
+    // ─── Bug 2: an explicit locale request language is normalized to the SAME cache key as the book ───
+    // Profiles/baselines are persisted under the normalized key ("en"). A request that passes an explicit
+    // locale ("en-US") must resolve to "en" too, or it queries an empty "en-US" slot and understates
+    // coverage (and a build would target the wrong slot).
+
+    [Fact]
+    public async Task GetStyleBaselineStatus_ExplicitLocaleLanguage_NormalizedToCacheKey()
+    {
+        using var provider = BuildServiceProvider(out _, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var svc = provider.GetRequiredService<StyleBaselineService>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        // Book language is the locale form; chapter profiles are keyed under the normalized "en".
+        db.Books.Add(new Book { Id = bookId, Title = "Locale Book", Language = "en-US" });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "English chapter content one." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "English chapter content two." });
+        await db.SaveChangesAsync();
+        await Task.Delay(10);
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chA, Language = "en", MetricsJson = MetricsJson(10.0), BuiltWithModel = "test-model" });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chB, Language = "en", MetricsJson = MetricsJson(20.0), BuiltWithModel = "test-model" });
+        await db.SaveChangesAsync();
+
+        var controller = new BooksController(
+            db: db,
+            bookIntelligence: null!,
+            styleBaseline: svc,
+            progress: progress,
+            scopeFactory: scopeFactory,
+            appLifetime: new TestApplicationLifetime(),
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
+
+        // Explicit locale query language: must normalize to "en" so coverage reflects the "en" profiles.
+        var action = await controller.GetStyleBaselineStatus(bookId, language: "en-US", ct: CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var dto = Assert.IsType<BookStyleBaselineStatusDto>(ok.Value);
+
+        Assert.Equal("en", dto.Language);
+        Assert.Equal(2, dto.TotalChapters);
+        Assert.Equal(2, dto.BuiltChapters); // would be 0 if "en-US" missed the "en"-keyed profiles
+        Assert.Equal(0, dto.StaleCount);
+    }
+
     // ─── DEF-2: GetStatusAsync surfaces the active build jobId while one is registered ──────────────
 
     [Fact]

@@ -305,8 +305,14 @@ public class StyleBaselineService
             _progress.SetTotalChunks(jobId.Value, chapters.Count, $"Building style baseline for {chapters.Count} chapters");
         }
 
-        // IDEMPOTENT no-op: every chapter already fresh AND a usable cached average exists. No LLM call.
-        if (preStatus.StaleCount == 0 && preStatus.HasBaseline)
+        // IDEMPOTENT no-op: every chapter already fresh, a usable cached average exists, AND that cached
+        // average was itself built under the ACTIVE model. The chapter freshness count (StaleCount)
+        // does NOT cover the persisted BookStyleBaseline row's own model: a baseline built under a
+        // DIFFERENT model is out of date even when every chapter profile matches the active model
+        // (GetStatusAsync flags this via BuiltWithDifferentModel). Skipping the rebuild there would leave
+        // the cross-model average persisted forever, so we fall through to recompute + restamp it under
+        // the active model. No LLM call only when all three conditions hold.
+        if (preStatus.StaleCount == 0 && preStatus.HasBaseline && !preStatus.BuiltWithDifferentModel)
         {
             if (jobId.HasValue)
                 _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded,

@@ -138,9 +138,12 @@ public class BooksController : ControllerBase
 
         var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
 
-        // Idempotent fast path: nothing stale/missing AND a usable cached average already exists → no-op.
+        // Idempotent fast path: nothing stale/missing, a usable cached average already exists, AND that
+        // average was built under the ACTIVE model → no-op. When the cached baseline was built under a
+        // different model (BuiltWithDifferentModel), it is NOT up to date even if every chapter profile
+        // is fresh, so we fall through and start a build to recompute + restamp it under the active model.
         var status = await _styleBaseline.GetStatusAsync(bookId, lang, ct);
-        if (status.StaleCount == 0 && status.HasBaseline)
+        if (status.StaleCount == 0 && status.HasBaseline && !status.BuiltWithDifferentModel)
         {
             return Ok(new StartStyleBaselineBuildResponse(
                 JobId: null,
@@ -318,9 +321,25 @@ public class BooksController : ControllerBase
     /// </summary>
     private async Task<string> ResolveBaselineLanguageAsync(Guid bookId, string? requestLanguage, CancellationToken ct)
     {
-        if (!string.IsNullOrWhiteSpace(requestLanguage)) return requestLanguage.Trim();
+        // An explicit request language must be normalized with the SAME rules as the book language, or
+        // the two entry points (GET status, POST build) key the cache differently. A request for
+        // "en-US" would otherwise target the "en-US" slot while profiles/baselines are persisted under
+        // the normalized "en" - so status would understate coverage and a build would write the wrong
+        // cache slot.
+        if (!string.IsNullOrWhiteSpace(requestLanguage)) return NormalizeBaselineLanguage(requestLanguage);
         var book = await _db.Books.AsNoTracking().FirstOrDefaultAsync(b => b.Id == bookId, ct);
-        var lang = book?.Language?.Trim();
+        return NormalizeBaselineLanguage(book?.Language);
+    }
+
+    /// <summary>
+    /// Normalizes a raw language/locale string to the style-baseline cache key: "he"/"en" for Hebrew/
+    /// English (including locale forms like "he-IL"/"en-US"), "he" when blank, and a trimmed (and, if
+    /// over five chars, two-letter) fallback for anything else. Shared by BOTH branches of
+    /// <see cref="ResolveBaselineLanguageAsync"/> so a request value and the book value map to the SAME key.
+    /// </summary>
+    private static string NormalizeBaselineLanguage(string? language)
+    {
+        var lang = language?.Trim();
         if (string.IsNullOrWhiteSpace(lang)) return "he";
         if (lang.StartsWith("he", StringComparison.OrdinalIgnoreCase)) return "he";
         if (lang.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return "en";
