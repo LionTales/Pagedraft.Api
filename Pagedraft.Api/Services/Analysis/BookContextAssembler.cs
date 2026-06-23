@@ -169,10 +169,13 @@ public class BookContextAssembler
     }
 
     /// <summary>
-    /// Assembles the budgeted whole-book context for (bookId, language). Always tries the dense structured
-    /// brief path first (BookBrief + ordered ChapterBriefs); degrades to a budget-guarded flat-summary (and
-    /// finally raw-text) concat when no structured briefs exist. Never overflows the resolved budget beyond
-    /// the unavoidable BookBrief-alone case, which is logged.
+    /// Assembles the budgeted whole-book context for (bookId, language). Uses the dense structured brief path
+    /// whenever ANY chapter has a fresh structured brief (BookBrief + ordered ChapterBriefs); chapters that
+    /// lack a fresh brief are NOT silently omitted — they are filled PER CHAPTER from their flat summary, then
+    /// raw text, so a partially-built book still carries every chapter's content (dense where available,
+    /// degraded elsewhere). Degrades to the whole-book flat-summary (then raw-text) fallback only when NO
+    /// structured briefs exist at all. Anything that does not fit the budget is recorded in DroppedUnits and
+    /// logged. Never overflows the resolved budget beyond the unavoidable BookBrief-alone case, which is logged.
     /// </summary>
     public async Task<BookContextAssembly> AssembleAsync(
         Guid bookId,
@@ -182,12 +185,14 @@ public class BookContextAssembler
     {
         var budget = ResolveBudgetTokens(consumingTasks);
 
-        // Prefer the dense structured path: L2 BookBrief + ordered L1 ChapterBriefs.
+        // Prefer the dense structured path: L2 BookBrief + ordered L1 ChapterBriefs. Chapters without a fresh
+        // brief are back-filled from their flat summary / raw text inside the structured assembly (no silent
+        // truncation under partial coverage).
         var chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
         if (chapterBriefs.Count > 0)
         {
             var bookBrief = await _bookSummary.ComposeBookBriefAsync(bookId, chapterBriefs, ct);
-            return AssembleFromBriefs(bookId, bookBrief, chapterBriefs, budget);
+            return await AssembleStructuredWithFallbackAsync(bookId, language, bookBrief, chapterBriefs, budget, ct);
         }
 
         // No usable structured briefs yet → degrade to the flat-summary fallback, still budget-guarded.
@@ -197,14 +202,49 @@ public class BookContextAssembler
         return await AssembleFlatFallbackAsync(bookId, language, budget, ct);
     }
 
-    // ─── Structured path ────────────────────────────────────────────────────────────────────────────
+    // ─── Structured path (dense briefs + per-chapter flat/raw back-fill for uncovered chapters) ────────
 
-    private BookContextAssembly AssembleFromBriefs(
+    /// <summary>
+    /// Assembles the structured whole-book context: the L2 BookBrief first, then EVERY chapter in narrative
+    /// order. A chapter with a fresh L1 brief contributes its dense structured block; a chapter WITHOUT one
+    /// is back-filled from its flat summary, then its raw text, so partial structured coverage never silently
+    /// omits a chapter (the prior behaviour iterated only the fresh briefs, dropping uncovered chapters from
+    /// both the context AND DroppedUnits). Anything that does not fit the budget — structured or flat — is
+    /// recorded in DroppedUnits exactly like a token-budget drop. A genuinely empty chapter (no brief, no
+    /// summary, no text) has nothing to contribute and is not recorded (it is not a truncation).
+    /// </summary>
+    private async Task<BookContextAssembly> AssembleStructuredWithFallbackAsync(
         Guid bookId,
+        string language,
         BookBrief bookBrief,
         IReadOnlyList<ChapterBrief> chapterBriefs,
-        int budget)
+        int budget,
+        CancellationToken ct)
     {
+        var lang = BaselineLanguageResolver.Normalize(language);
+
+        // The FULL chapter set in narrative order, so chapters without a fresh structured brief can be
+        // back-filled rather than silently omitted. Carries raw ContentText for the last-resort fill.
+        var chapters = await _db.Chapters
+            .AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .OrderBy(c => c.Order)
+            .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
+            .ToListAsync(ct);
+
+        // Flat summaries for (book, language), keyed by ChapterId — the degraded fill for an uncovered chapter
+        // (preferred over raw text). Same language filter as the flat fallback so no foreign-language leak.
+        var flatByChapterId = (await _db.ChunkSummaries
+                .AsNoTracking()
+                .Where(cs => cs.BookId == bookId && cs.Language == lang)
+                .Select(cs => new { cs.ChapterId, cs.SummaryText })
+                .ToListAsync(ct))
+            .Where(x => !string.IsNullOrWhiteSpace(x.SummaryText))
+            .ToDictionary(x => x.ChapterId, x => x.SummaryText!);
+
+        // Fresh structured briefs keyed by chapter Order (ChapterBrief carries Order, not ChapterId).
+        var freshBriefByOrder = chapterBriefs.ToDictionary(b => b.Order);
+
         var sb = new StringBuilder();
         var bookBriefText = FormatBookBrief(bookBrief);
 
@@ -224,48 +264,71 @@ public class BookContextAssembler
             // single most valuable block and must always be present), but log it so the overflow is visible.
             _logger.LogWarning(
                 "BookContextAssembler: BookBrief for book {BookId} ({Tokens} tokens) alone exceeds the " +
-                "context budget ({Budget} tokens); including it anyway. ALL {Count} chapter briefs dropped.",
-                bookId, used, budget, chapterBriefs.Count);
+                "context budget ({Budget} tokens); including it anyway. ALL {Count} chapters dropped.",
+                bookId, used, budget, chapters.Count);
         }
 
-        // 2. Add ChapterBriefs in narrative order until the budget is hit. A brief that does not fit is
-        //    dropped (and every later one too, since order matters) and recorded.
+        // 2. Walk EVERY chapter in narrative order. Each contributes its dense brief if fresh, else a flat/raw
+        //    block. Once the budget is hit we drop the rest to keep a contiguous narrative prefix; every drop
+        //    is recorded (no silent truncation).
         var included = new List<ChapterBrief>();
         var dropped = new List<DroppedBookUnit>();
-        // Narrative order: project assumes Order ascending; sort defensively in case the caller's list is not.
-        var ordered = chapterBriefs.OrderBy(b => b.Order).ToList();
+        var flatFilledCount = 0;
         var budgetExhausted = used > budget;
 
-        foreach (var brief in ordered)
+        foreach (var chapter in chapters)
         {
-            var briefText = FormatChapterBrief(brief);
-            // Estimate the block WITH its separator (the same string that is appended), so the running total
-            // charges the "\n\n" that goes into Text. Charging it for the last block too (TrimEnd later drops
-            // that one separator) only biases the estimate slightly high, which is the safe direction.
-            var block = briefText + BlockSeparator;
-            var briefTokens = EstimateTokens(block);
+            var title = chapter.Title ?? string.Empty;
 
-            if (budgetExhausted || used + briefTokens > budget)
+            // Best available representation for this chapter: fresh structured brief > flat summary > raw text.
+            string block;
+            ChapterBrief? structuredBrief = null;
+            if (freshBriefByOrder.TryGetValue(chapter.Order, out var brief))
+            {
+                structuredBrief = brief;
+                block = FormatChapterBrief(brief) + BlockSeparator;
+            }
+            else
+            {
+                var body = flatByChapterId.TryGetValue(chapter.Id, out var summary) && !string.IsNullOrWhiteSpace(summary)
+                    ? summary
+                    : SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+                if (string.IsNullOrWhiteSpace(body))
+                    continue; // genuinely empty chapter: nothing to include and nothing to truncate
+                block = FormatFlatChapterBlock(title, body);
+            }
+
+            var blockTokens = EstimateTokens(block);
+            if (budgetExhausted || used + blockTokens > budget)
             {
                 budgetExhausted = true; // once we drop one, drop the rest to keep a contiguous prefix
-                dropped.Add(new DroppedBookUnit { Order = brief.Order, Title = brief.Title, EstimatedTokens = briefTokens });
+                dropped.Add(new DroppedBookUnit { Order = chapter.Order, Title = title, EstimatedTokens = blockTokens });
                 continue;
             }
 
             sb.Append(block);
-            used += briefTokens;
-            included.Add(brief);
+            used += blockTokens;
+            if (structuredBrief != null)
+                included.Add(structuredBrief);
+            else
+                flatFilledCount++;
         }
 
+        // Partial coverage is a degraded (but complete) assembly: surface it so it is never silent.
+        if (flatFilledCount > 0)
+            _logger.LogInformation(
+                "BookContextAssembler: book {BookId} has partial structured coverage — {Structured} chapter(s) " +
+                "from structured briefs + {Flat} chapter(s) back-filled from flat/raw text.",
+                bookId, included.Count, flatFilledCount);
+
         if (dropped.Count > 0)
-        {
             // No silent truncation: log which units and how many did not fit.
             _logger.LogWarning(
                 "BookContextAssembler: book {BookId} context budget ({Budget} tokens) reached. Included " +
-                "{IncludedCount}/{TotalCount} chapter briefs; DROPPED {DroppedCount}: {DroppedTitles}.",
-                bookId, budget, included.Count, ordered.Count, dropped.Count,
-                string.Join(", ", dropped.Select(d => $"#{d.Order} '{d.Title}'")));
-        }
+                "{IncludedCount}/{TotalCount} chapters ({Structured} structured, {Flat} flat); DROPPED " +
+                "{DroppedCount}: {DroppedTitles}.",
+                bookId, budget, included.Count + flatFilledCount, chapters.Count, included.Count, flatFilledCount,
+                dropped.Count, string.Join(", ", dropped.Select(d => $"#{d.Order} '{d.Title}'")));
 
         return new BookContextAssembly
         {
@@ -334,8 +397,7 @@ public class BookContextAssembler
 
         foreach (var (order, title, body) in units)
         {
-            var header = $"## פרק / Chapter: {title}";
-            var block = $"{header}\n{body}\n\n";
+            var block = FormatFlatChapterBlock(title, body);
             var blockTokens = EstimateTokens(block);
 
             if (budgetExhausted || used + blockTokens > budget)
@@ -372,6 +434,14 @@ public class BookContextAssembler
     }
 
     // ─── Rendering (mirrors PromptFactory's brief formatting so the model reads a familiar shape) ──────
+
+    /// <summary>
+    /// Flat (degraded) per-chapter block: the "## פרק / Chapter: {title}\n{body}\n\n" framing used by the
+    /// flat fallback, shared so a chapter back-filled from its summary/raw text in the structured path reads
+    /// identically. The trailing separator is part of the block (and is charged like every other block).
+    /// </summary>
+    private static string FormatFlatChapterBlock(string title, string body) =>
+        $"## פרק / Chapter: {title}\n{body}{BlockSeparator}";
 
     private static string FormatBookBrief(BookBrief b)
     {

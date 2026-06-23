@@ -116,6 +116,113 @@ public class BookContextAssemblerTests
         Assert.True(BookContextAssembler.EstimateTokens(result.Text) <= result.BudgetTokens);
     }
 
+    // ─── (a2) Partial structured coverage: uncovered chapters back-filled, never silently omitted ────
+
+    [Fact]
+    public async Task AssembleAsync_PartialStructuredCoverage_FillsUncoveredChaptersFromFlatFallback()
+    {
+        // Regression: when SOME chapters have a fresh structured brief the assembler takes the structured
+        // path; chapters WITHOUT one must still reach the context (filled from their flat summary), not be
+        // silently omitted. Generous budget so everything fits.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Coverage", Language = "he" });
+
+        // Chapter 0: FRESH structured brief → dense structured block.
+        SeedChapterWithBrief(db, bookId, order: 0, title: "Covered", briefJson: BriefJson(0));
+
+        // Chapter 1: NO structured brief, only a flat summary → must be back-filled, not omitted.
+        var uncoveredId = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = uncoveredId, BookId = bookId, Order = 1, Title = "Uncovered", ContentText = "raw body" });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = uncoveredId, Language = "he",
+            SummaryText = "Flat summary for the uncovered chapter that must still reach the book context.",
+            StructuredJson = null
+        });
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "he");
+
+        Assert.True(result.UsedStructuredBriefs);
+        // The covered chapter contributes its structured brief...
+        Assert.Single(result.IncludedChapterBriefs);
+        Assert.Equal(0, result.IncludedChapterBriefs[0].Order);
+        // ...and the uncovered chapter is NOT silently omitted: its flat summary is in the assembled context.
+        Assert.Contains("Flat summary for the uncovered chapter", result.Text);
+        // It fit the budget, so it is not recorded as dropped.
+        Assert.Empty(result.DroppedUnits);
+    }
+
+    [Fact]
+    public async Task AssembleAsync_PartialStructuredCoverage_NoFlatSummary_BackFillsFromRawText()
+    {
+        // An uncovered chapter with no flat summary falls back to its raw chapter text (last resort), so it
+        // is still represented rather than dropped from the context.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Raw", Language = "he" });
+        SeedChapterWithBrief(db, bookId, order: 0, title: "Covered", briefJson: BriefJson(0));
+        // Uncovered chapter: no ChunkSummary row at all → only raw text exists.
+        db.Chapters.Add(new Chapter
+        {
+            Id = Guid.NewGuid(), BookId = bookId, Order = 1, Title = "RawOnly",
+            ContentText = "Distinctive raw chapter body that should back-fill the uncovered chapter."
+        });
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "he");
+
+        Assert.True(result.UsedStructuredBriefs);
+        Assert.Single(result.IncludedChapterBriefs);
+        Assert.Contains("Distinctive raw chapter body", result.Text);
+        Assert.Empty(result.DroppedUnits);
+    }
+
+    [Fact]
+    public async Task AssembleAsync_PartialCoverage_UncoveredChapterOverBudget_RecordedInDroppedUnits()
+    {
+        // The uncovered chapter's flat block is too large for the remaining budget: it must be RECORDED in
+        // DroppedUnits (no silent omission), exactly like a chapter dropped for token budget.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 600);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Tight", Language = "he" });
+
+        // Covered chapter first (small structured brief that fits the budget).
+        SeedChapterWithBrief(db, bookId, order: 0, title: "Covered", briefJson: BriefJson(0));
+
+        // Uncovered chapter with a LARGE flat summary that cannot fit the remaining budget.
+        var uncoveredId = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = uncoveredId, BookId = bookId, Order = 1, Title = "Uncovered", ContentText = "raw" });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = uncoveredId, Language = "he",
+            SummaryText = string.Concat(Enumerable.Repeat("flat overflow body. ", 400)), // ~8000 chars ≫ budget
+            StructuredJson = null
+        });
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "he");
+
+        Assert.True(result.UsedStructuredBriefs);
+        Assert.Single(result.IncludedChapterBriefs); // the covered chapter fit
+        // The uncovered chapter did not fit → recorded as dropped (no silent omission), like a budget drop.
+        Assert.Contains(result.DroppedUnits, d => d.Order == 1 && d.Title == "Uncovered");
+        Assert.True(BookContextAssembler.EstimateTokens(result.Text) <= result.BudgetTokens);
+    }
+
     // ─── (b) Dropped-units reported: overflow is recorded, not silently cut ──────────────────────────
 
     [Fact]
