@@ -819,6 +819,57 @@ public class PromptFactory
         "Summarize the text in up to three short paragraphs, without adding information not in the source. " +
         "Preserve the main points and overall tone of the original text.";
 
+    // ── Structured Chapter Brief (wb1-c01) ──────────────────────────
+    // Parallels the flat Summarization prompt but asks for a machine-readable structured brief that
+    // deserializes into StructuredChunkSummaryData (camelCase keys; no [JsonPropertyName] on that record,
+    // so the property names must be the camelCase of its fields). Used by ChapterBriefService to populate
+    // ChunkSummary.StructuredJson; the flat SummaryText prompt is kept for back-compat.
+
+    /// <summary>
+    /// Instruction asking the model to emit a STRUCTURED chapter brief as JSON matching
+    /// <see cref="Pagedraft.Api.Models.StructuredChunkSummaryData"/>. Keep the flat
+    /// <see cref="AiTaskType.Summarization"/> prompt for the natural-language summary; this is the
+    /// parallel structured surface.
+    /// </summary>
+    public string GetStructuredChapterBriefPrompt(string language)
+    {
+        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+            ? StructuredChapterBriefHe
+            : StructuredChapterBriefEn;
+    }
+
+    private const string StructuredChapterBriefHe =
+        """
+        נתח את הפרק הבא והפק תקציר מובנה שלו. החזר אך ורק JSON תקין במבנה הבא, בלי טקסט נוסף לפני או אחרי:
+        {
+          "plotEvents": ["אירוע עלילתי מרכזי 1", "אירוע 2"],
+          "characterStates": [
+            { "name": "שם הדמות", "state": "מצבה בפרק", "emotionalArc": "הקשת הרגשית בפרק" }
+          ],
+          "thematicMarkers": ["מוטיב או נושא שמופיע בפרק"],
+          "toneNotes": "תיאור קצר של הטון והאווירה של הפרק",
+          "openThreads": ["שאלה או חוט עלילתי שנותר פתוח בסוף הפרק"]
+        }
+
+        השתמש אך ורק במידע שמופיע בפרק עצמו, אל תמציא פרטים. אם שדה אינו רלוונטי, החזר רשימה ריקה או מחרוזת ריקה. השב בעברית.
+        """;
+
+    private const string StructuredChapterBriefEn =
+        """
+        Analyze the following chapter and produce a structured brief of it. Return ONLY valid JSON in the exact shape below, with no text before or after:
+        {
+          "plotEvents": ["key plot event 1", "event 2"],
+          "characterStates": [
+            { "name": "character name", "state": "their situation in this chapter", "emotionalArc": "their emotional arc in this chapter" }
+          ],
+          "thematicMarkers": ["a motif or theme present in this chapter"],
+          "toneNotes": "a short description of the chapter's tone and mood",
+          "openThreads": ["a question or plot thread left open at the end of the chapter"]
+        }
+
+        Use only information present in the chapter itself; do not invent details. If a field is not applicable, return an empty list or empty string. Respond in English.
+        """;
+
     // ── Book Overview ───────────────────────────────────────────────
 
     private const string BookOverviewHe =
