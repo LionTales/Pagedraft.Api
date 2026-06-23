@@ -4,11 +4,14 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
+using Pagedraft.Api.Controllers;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
+using Pagedraft.Api.Models.Dtos;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
@@ -445,6 +448,89 @@ public class BookSummaryServiceTests
         // And once rebuilt to full coverage, a subsequent build IS a no-op again.
         var third = await svc.BuildBookSummaryAsync(bookId, "he");
         Assert.True(third.NoOp);
+    }
+
+    // ─── 3d. Controller surface: POST summary/build fast path must honour rollup coverage ─────────
+
+    [Fact]
+    public async Task BuildBookSummary_ControllerFastPath_PartialRollup_DoesNotNoOp()
+    {
+        // Controller surface of the coverage bug: POST summary/build re-derived the no-op gate WITHOUT
+        // SummaryCoversBuiltChapters, so a partial cached rollup (a chapter gained a brief outside a full
+        // build) returned NoOp/Ready with no jobId and never refreshed BookBriefJson — even though GET summary
+        // already reported not-ready via IsReady. The fast path must use status.IsReady (single source of truth).
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildPerChapterProvider(dbName, out _, briefByContent: new());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var svc = provider.GetRequiredService<BookSummaryService>();
+        var registry = provider.GetRequiredService<BookSummaryBuildRegistry>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Controller Coverage Book", Language = "he" });
+        // Three chapters, each with a FRESH L0 brief (StructuredBuiltAt after the chapter's UpdatedAt, active model).
+        for (var i = 0; i < 3; i++)
+        {
+            var chId = Guid.NewGuid();
+            db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = i, Title = $"Ch{i}", ContentText = $"תוכן {i}." });
+            db.ChunkSummaries.Add(new ChunkSummary
+            {
+                BookId = bookId, ChapterId = chId, Language = "he",
+                StructuredJson = BriefAJson, BuiltWithModel = ActiveModel,
+                StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+            });
+        }
+        // Cached rollup covers only 2 of the 3 fresh chapters (partial), under the active model.
+        db.BookSummaryBaselines.Add(new BookSummaryBaseline
+        {
+            BookId = bookId, Language = "he",
+            BookBriefJson = """{ "genre": "Old partial" }""",
+            BuiltChapterCount = 2, BuiltWithModel = ActiveModel
+        });
+        await db.SaveChangesAsync();
+
+        // Pre-status: everything fresh + same model, but the rollup does NOT cover all built chapters.
+        var pre = await svc.GetStatusAsync(bookId, "he");
+        Assert.Equal(0, pre.StaleCount);
+        Assert.True(pre.HasSummary);
+        Assert.False(pre.BuiltWithDifferentModel);
+        Assert.False(pre.SummaryCoversBuiltChapters);
+        Assert.False(pre.IsReady);
+
+        // Register an already-running build so that, once PAST the no-op gate, the controller takes the
+        // DETERMINISTIC dedup branch (returns the existing jobId, NoOp:false) instead of spawning a real
+        // build. With the bug the no-op gate fires FIRST and returns NoOp:true / null jobId.
+        var existingJobId = Guid.NewGuid();
+        Assert.True(registry.TryStart(bookId, "he", existingJobId));
+        progress.StartJob(existingJobId, AnalysisScope.Book, AnalysisType.Summarization, bookId, null, null);
+        progress.SetStatus(existingJobId, AnalysisProgressStatus.Running, "running");
+
+        var controller = new BooksController(
+            db: db,
+            bookIntelligence: null!,
+            styleBaseline: null!,
+            bookSummary: svc,
+            progress: progress,
+            scopeFactory: scopeFactory,
+            appLifetime: new TestApplicationLifetime(),
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
+
+        var action = await controller.BuildBookSummary(bookId, new BuildBookSummaryRequest("he"), CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var response = Assert.IsType<StartBookSummaryBuildResponse>(ok.Value);
+
+        // The no-op fast path did NOT fire: the request proceeded to the build path (here, dedup).
+        Assert.False(response.NoOp);
+        Assert.Equal(existingJobId, response.JobId);
+    }
+
+    private sealed class TestApplicationLifetime : Microsoft.Extensions.Hosting.IHostApplicationLifetime
+    {
+        public CancellationToken ApplicationStarted => CancellationToken.None;
+        public CancellationToken ApplicationStopping => CancellationToken.None;
+        public CancellationToken ApplicationStopped => CancellationToken.None;
+        public void StopApplication() { }
     }
 
     // ─── 4. Per-chapter failure isolation: one bad chapter does not abort the job ─────────────────

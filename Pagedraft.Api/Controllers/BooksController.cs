@@ -299,10 +299,14 @@ public class BooksController : ControllerBase
 
         var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
 
-        // Idempotent fast path: nothing stale/missing, a usable cached rollup exists, AND it was built under
-        // the ACTIVE model → no-op. A cross-model rollup (BuiltWithDifferentModel) falls through to rebuild.
+        // Idempotent fast path: nothing stale/missing, a usable cached rollup exists, it was built under the
+        // ACTIVE model, AND that rollup still covers every built chapter → no-op. Use status.IsReady so this
+        // endpoint applies the SAME gate as GET summary and BuildBookSummaryAsync (single source of truth):
+        // re-deriving a subset here let a partial rollup (a chapter that gained a brief outside a full build —
+        // !SummaryCoversBuiltChapters) return NoOp/Ready and never refresh the stale BookBriefJson, even though
+        // GET summary already reported not-ready. A cross-model rollup likewise falls through to rebuild.
         var status = await _bookSummary.GetStatusAsync(bookId, lang, ct);
-        if (status.StaleCount == 0 && status.HasSummary && !status.BuiltWithDifferentModel)
+        if (status.IsReady)
         {
             return Ok(new StartBookSummaryBuildResponse(
                 JobId: null,
