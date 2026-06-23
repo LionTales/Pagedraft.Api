@@ -489,6 +489,101 @@ public class StyleBaselineServiceTests
         Assert.Equal(0, dto.StaleCount);
     }
 
+    // ─── Bug 1: inline LinguisticAnalysis and the builder/status endpoints key the baseline cache under
+    // the SAME normalized language. A book/request language of "en-US" must resolve to the "en" slot, or
+    // an inline-built profile is invisible to status and coverage looks missing.
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_LocaleLanguage_PersistsUnderNormalizedKey_VisibleToStatus()
+    {
+        using var provider = BuildServiceProvider(out _, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var contextService = provider.GetRequiredService<IAnalysisContextService>();
+        var svc = provider.GetRequiredService<StyleBaselineService>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Locale Book", Language = "en-US" });
+        db.Chapters.Add(new Chapter { Id = chapterId, BookId = bookId, Order = 0, Title = "A", ContentText = "English chapter content for analysis." });
+        await db.SaveChangesAsync();
+
+        // The inline LinguisticAnalysis path builds the profile from the RAW locale "en-US"...
+        var profile = await contextService.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, "en-US");
+        Assert.NotNull(profile);
+        // ...but it must persist under the canonical "en" cache key.
+        Assert.Equal("en", profile!.Language);
+
+        // And the status endpoint (which the controller calls with the normalized "en") must see that exact
+        // profile as built coverage, not a missing "en-US" slot.
+        var status = await svc.GetStatusAsync(bookId, "en");
+        Assert.Equal(1, status.TotalChapters);
+        Assert.Equal(1, status.BuiltChapters);
+        Assert.Equal(0, status.StaleCount);
+    }
+
+    [Fact]
+    public async Task BuildBookStyleAverageProfileAsync_LocaleLanguage_AggregatesNormalizedKeyProfiles()
+    {
+        using var provider = BuildServiceProvider(out _, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var contextService = provider.GetRequiredService<IAnalysisContextService>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Locale Average Book", Language = "en-US" });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "English content A." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "English content B." });
+        await db.SaveChangesAsync();
+        await Task.Delay(10);
+        // Profiles persisted under the canonical "en" key (as the builder would write them).
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chA, Language = "en", MetricsJson = MetricsJson(10.0), BuiltWithModel = "test-model" });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chB, Language = "en", MetricsJson = MetricsJson(20.0), BuiltWithModel = "test-model" });
+        await db.SaveChangesAsync();
+
+        // The inline Chapter-scope path asks for the average with the RAW locale "en-US"; it must aggregate
+        // the "en"-keyed profiles (mean of 10 & 20 = 15), not return null for an empty "en-US" slot.
+        var avg = await contextService.BuildBookStyleAverageProfileAsync(bookId, "en-US");
+        Assert.NotNull(avg);
+        var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(avg!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(metrics);
+        Assert.Equal(15.0, metrics!.SyntaxMetrics.AverageSentenceLength, precision: 5);
+    }
+
+    // ─── Bug 2: IsReady requires a usable cached average built under the active model, not just
+    // StaleCount == 0. A fresh-chapters book whose cached average is cross-model must report NOT ready.
+
+    [Fact]
+    public async Task GetStatusAsync_ChaptersFresh_BaselineCrossModel_IsReadyFalse()
+    {
+        using var provider = BuildServiceProvider(out _, defaultMetrics: MetricsJson(12.0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var svc = provider.GetRequiredService<StyleBaselineService>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Cross-Model Ready Book", Language = Lang });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "תוכן א." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "תוכן ב." });
+        await db.SaveChangesAsync();
+        await Task.Delay(10);
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chA, Language = Lang, MetricsJson = MetricsJson(10.0), BuiltWithModel = "test-model" });
+        db.ChapterStyleProfiles.Add(new ChapterStyleProfile { Id = Guid.NewGuid(), BookId = bookId, ChapterId = chB, Language = Lang, MetricsJson = MetricsJson(20.0), BuiltWithModel = "test-model" });
+        // Cached average built under a DIFFERENT model than the active "test-model".
+        db.BookStyleBaselines.Add(new BookStyleBaseline { Id = Guid.NewGuid(), BookId = bookId, Language = Lang, MetricsJson = MetricsJson(99.0), BuiltChapterCount = 2, BuiltWithModel = "different-model" });
+        await db.SaveChangesAsync();
+
+        var status = await svc.GetStatusAsync(bookId, Lang);
+
+        // Every chapter profile is fresh (StaleCount 0) and a baseline exists, but it is cross-model, so a
+        // rebuild is still required → IsReady must be FALSE (it was wrongly true when keyed only off StaleCount).
+        Assert.Equal(0, status.StaleCount);
+        Assert.True(status.HasBaseline);
+        Assert.True(status.BuiltWithDifferentModel);
+        Assert.False(status.IsReady);
+    }
+
     // ─── DEF-2: GetStatusAsync surfaces the active build jobId while one is registered ──────────────
 
     [Fact]

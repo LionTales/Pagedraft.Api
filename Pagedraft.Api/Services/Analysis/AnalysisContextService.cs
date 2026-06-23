@@ -131,9 +131,13 @@ public class AnalysisContextService : IAnalysisContextService
             // Use the SAME language the user-facing analysis runs with (request override or normalized
             // code) so the baseline cache key, its build prompt, and [CHAPTER_STYLE_BASELINE] all agree
             // with the analysis language. Fall back to the book language only when none was supplied.
-            var baselineLanguage = string.IsNullOrWhiteSpace(language)
-                ? await ResolveLanguageAsync(bookId.Value, ct)
-                : language;
+            // Normalize through the shared resolver (e.g. "en-US" → "en") so the inline profile/book-average
+            // cache slot matches the one the background StyleBaselineService builder and status endpoints use;
+            // otherwise a built baseline would look missing and chapter analyses would omit it.
+            var baselineLanguage = BaselineLanguageResolver.Normalize(
+                string.IsNullOrWhiteSpace(language)
+                    ? await ResolveLanguageAsync(bookId.Value, ct)
+                    : language);
 
             if (scope == AnalysisScope.Scene && chapterId.HasValue)
             {
@@ -185,7 +189,9 @@ public class AnalysisContextService : IAnalysisContextService
         string language,
         CancellationToken ct = default)
     {
-        var lang = string.IsNullOrWhiteSpace(language) ? "he" : language;
+        // Normalize to the canonical cache key (e.g. "en-US" → "en") so this row lands in the SAME slot
+        // whether built inline here or by the background StyleBaselineService.
+        var lang = BaselineLanguageResolver.Normalize(language);
 
         // The active LinguisticAnalysis model the deviations would be compared against (config-resolved,
         // same resolution AiRouter uses). A profile built under a DIFFERENT model must not be served as a
@@ -340,7 +346,9 @@ public class AnalysisContextService : IAnalysisContextService
         string language,
         CancellationToken ct = default)
     {
-        var lang = string.IsNullOrWhiteSpace(language) ? "he" : language;
+        // Normalize to the canonical cache key (e.g. "en-US" → "en") so the rows aggregated here are the
+        // SAME ones the builder and status endpoints key, keeping inline and background paths in one slot.
+        var lang = BaselineLanguageResolver.Normalize(language);
 
         try
         {

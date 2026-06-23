@@ -55,8 +55,14 @@ public sealed class BookStyleBaselineStatus
     /// </summary>
     public Guid? ActiveBuildJobId { get; init; }
 
-    /// <summary>True when nothing is missing/stale: a build would be a no-op (already ready).</summary>
-    public bool IsReady => StaleCount == 0;
+    /// <summary>
+    /// True when a build would be a genuine no-op: nothing missing/stale AND a usable cached average
+    /// exists that was built under the ACTIVE LinguisticAnalysis model. Mirrors the no-op gate in
+    /// <see cref="StyleBaselineService.BuildBookStyleBaselineAsync"/> and BooksController exactly - so a
+    /// fresh-chapters book whose cached average is cross-model (<see cref="BuiltWithDifferentModel"/>)
+    /// correctly reports NOT ready, because a rebuild is still required to restamp the average.
+    /// </summary>
+    public bool IsReady => StaleCount == 0 && HasBaseline && !BuiltWithDifferentModel;
 
     // ─── Build estimate (a4) ───────────────────────────────────────────────────────────────────────
 
@@ -622,6 +628,9 @@ public class StyleBaselineService
         return (seconds, usd);
     }
 
+    // Canonical cache-key normalization, shared with the inline LinguisticAnalysis path and the controller
+    // so status/build/profile all key the baseline identically (e.g. "en-US" → "en"). Callers already pass
+    // a normalized value today; delegating keeps that guarantee defensively in one place.
     private static string NormalizeLanguage(string language) =>
-        string.IsNullOrWhiteSpace(language) ? "he" : language;
+        BaselineLanguageResolver.Normalize(language);
 }
