@@ -77,7 +77,7 @@ public class AnalysisContextService : IAnalysisContextService
         {
             AnalysisScope.Chapter => await ResolveChapterAsync(targetId, ct),
             AnalysisScope.Scene   => await ResolveSceneAsync(targetId, ct),
-            AnalysisScope.Book    => await ResolveBookAsync(targetId, ct),
+            AnalysisScope.Book    => await ResolveBookAsync(targetId, analysisType, ct),
             _ => throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unsupported analysis scope")
         };
 
@@ -1059,6 +1059,7 @@ public class AnalysisContextService : IAnalysisContextService
 
     private async Task<(string Text, Guid? BookId, Guid? ChapterId, Guid? SceneId)> ResolveBookAsync(
         Guid bookId,
+        AnalysisType analysisType,
         CancellationToken ct)
     {
         var hasChapters = await _db.Chapters.AnyAsync(c => c.BookId == bookId, ct);
@@ -1072,7 +1073,12 @@ public class AnalysisContextService : IAnalysisContextService
         // concat when no briefs are built yet. Anything dropped is logged inside the assembler (no silent
         // truncation).
         var language = await ResolveLanguageAsync(bookId, ct);
-        var assembly = await _bookContextAssembler.AssembleAsync(bookId, language, ct);
+        // Budget the assembled context to the window of the task this analysis actually routes to (Bug 3):
+        // a book-scope LinguisticAnalysis/GenericChat consumer can have a smaller num_ctx than Summarization,
+        // and sizing against Summarization alone would let the context overflow that consumer's window.
+        var consumingTask = AnalysisTaskMapping.ToAiTaskType(analysisType);
+        var assembly = await _bookContextAssembler.AssembleAsync(
+            bookId, language, new[] { consumingTask }, ct);
 
         if (string.IsNullOrWhiteSpace(assembly.Text))
             throw new InvalidOperationException("No book text to analyze. Save the chapters first so the analysis has content.");

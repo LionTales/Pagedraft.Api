@@ -119,15 +119,27 @@ public class BookContextAssembler
 
     /// <summary>
     /// Resolves the effective token budget for the whole-book context. Honours an explicit
-    /// <see cref="AiOptions.BookContextTokenBudget"/>, otherwise derives it from the active Summarization
-    /// model's NumCtx (the task whose model the book rollup/briefs were built under). The NumCtx lookup
-    /// mirrors <see cref="OllamaProvider"/>'s tuning precedence: provider+task key, then provider key,
-    /// then the ProviderTuningOptions default.
+    /// <see cref="AiOptions.BookContextTokenBudget"/>, otherwise derives it from the NumCtx of the task(s)
+    /// that will actually CONSUME the assembled text.
+    ///
+    /// WHY the consuming task and not always Summarization: the assembled text is fed to BookOverview /
+    /// CharacterAnalysis / StoryAnalysis (<see cref="AiTaskType.LinguisticAnalysis"/>), Synopsis
+    /// (<see cref="AiTaskType.Summarization"/>) and QA (<see cref="AiTaskType.GenericChat"/>), each of which
+    /// can have a SMALLER per-task num_ctx than Summarization. Budgeting against Summarization alone would
+    /// let the context overflow the consumer's window, where Ollama silently truncates. When several tasks
+    /// share one assembly (BookIntelligenceService reuses the same text across routes) we budget to the
+    /// SMALLEST window so the context fits the tightest consumer. With no task supplied we fall back to
+    /// Summarization (the task the briefs were built under). The NumCtx lookup mirrors
+    /// <see cref="OllamaProvider"/>'s tuning precedence: provider+task key, then provider key, then the
+    /// ProviderTuningOptions default.
     /// </summary>
-    public int ResolveBudgetTokens()
+    public int ResolveBudgetTokens(IReadOnlyCollection<AiTaskType>? consumingTasks = null)
     {
         var opt = _aiOptions.Value;
-        var numCtx = ResolveNumCtxForTask(opt, AiTaskType.Summarization);
+        var tasks = consumingTasks is { Count: > 0 }
+            ? consumingTasks
+            : new[] { AiTaskType.Summarization };
+        var numCtx = tasks.Min(t => ResolveNumCtxForTask(opt, t));
         return opt.EffectiveBookContextTokenBudget(numCtx);
     }
 
@@ -159,9 +171,10 @@ public class BookContextAssembler
     public async Task<BookContextAssembly> AssembleAsync(
         Guid bookId,
         string language,
+        IReadOnlyCollection<AiTaskType>? consumingTasks = null,
         CancellationToken ct = default)
     {
-        var budget = ResolveBudgetTokens();
+        var budget = ResolveBudgetTokens(consumingTasks);
 
         // Prefer the dense structured path: L2 BookBrief + ordered L1 ChapterBriefs.
         var chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
@@ -263,10 +276,13 @@ public class BookContextAssembler
         CancellationToken ct)
     {
         // Flat per-chapter summaries (the legacy GetConcatenatedSummaries source), in narrative order.
+        // Filter by the requested language exactly as the structured path does (ComposeChapterBriefsAsync):
+        // a ChunkSummary row for ANOTHER language must NOT be concatenated into this locale's book context,
+        // or a book with summaries only in a different language would inject foreign-language prose here.
         var lang = BaselineLanguageResolver.Normalize(language);
         var summaries = await _db.ChunkSummaries
             .AsNoTracking()
-            .Where(cs => cs.BookId == bookId)
+            .Where(cs => cs.BookId == bookId && cs.Language == lang)
             .Join(_db.Chapters, cs => cs.ChapterId, c => c.Id,
                 (cs, c) => new { c.Order, c.Title, cs.SummaryText })
             .OrderBy(x => x.Order)

@@ -521,10 +521,13 @@ public class BookSummaryService
     // ─── L1 composition: L0 + chapter metadata → ChapterBrief ───────────────────────────────────────
 
     /// <summary>
-    /// Composes the L1 <see cref="ChapterBrief"/> for every chapter that has a usable L0 structured brief,
+    /// Composes the L1 <see cref="ChapterBrief"/> for every chapter that has a FRESH L0 structured brief,
     /// ordered by chapter Order. Pure projection from the cached L0 (<see cref="ChunkSummary.StructuredJson"/>)
-    /// plus the chapter's Title/Order; a chapter without an L0 brief (failed/empty) is simply omitted.
-    /// Public so the FE-facing read path and tests can compose L1 without forcing a (re)build.
+    /// plus the chapter's Title/Order; a chapter whose L0 brief is missing, failed/empty, in a different
+    /// language, or STALE (built before the chapter's last edit or under a different Summarization model) is
+    /// omitted — the same freshness gate <see cref="GetStatusAsync"/> applies, so coverage and the assembled
+    /// context never drift. Public so the FE-facing read path and tests can compose L1 without forcing a
+    /// (re)build.
     /// </summary>
     public async Task<IReadOnlyList<ChapterBrief>> ComposeChapterBriefsAsync(
         Guid bookId,
@@ -537,26 +540,39 @@ public class BookSummaryService
             .AsNoTracking()
             .Where(c => c.BookId == bookId)
             .OrderBy(c => c.Order)
-            .Select(c => new { c.Id, c.Title, c.Order })
+            .Select(c => new { c.Id, c.Title, c.Order, c.UpdatedAt })
             .ToListAsync(ct);
 
+        // Gate each L0 brief by the SAME freshness definition GetStatusAsync (and ChapterBriefService.IsFresh)
+        // use — StructuredJson present AND requested language AND a structured build stamp AND timestamp/model
+        // fresh via the shared predicate — NOT merely "has StructuredJson for this language". A brief built
+        // before the chapter's last edit (or under a different Summarization model) is STALE: projecting it
+        // into L1 here would let BookContextAssembler take the dense structured path with briefs that no longer
+        // match the edited chapter text, the exact drift StructuredBuiltAt exists to prevent. Status and
+        // assembly must agree on what counts as a usable brief, or coverage ("X built") and the context the
+        // analysis actually reads diverge. wb1-r02: read StructuredBuiltAt (not the shared CreatedAt the flat
+        // re-summary path bumps).
         var briefs = await _db.ChunkSummaries
             .AsNoTracking()
-            .Where(cs => cs.BookId == bookId && cs.Language == lang)
-            .Select(cs => new { cs.ChapterId, cs.StructuredJson })
+            .Where(cs => cs.BookId == bookId)
+            .Select(cs => new { cs.ChapterId, cs.StructuredJson, cs.StructuredBuiltAt, cs.BuiltWithModel, cs.Language })
             .ToListAsync(ct);
 
-        var jsonByChapter = briefs
-            .Where(b => !string.IsNullOrWhiteSpace(b.StructuredJson))
-            .ToDictionary(b => b.ChapterId, b => b.StructuredJson!);
+        var briefByChapter = briefs.ToDictionary(b => b.ChapterId);
+        var activeModel = ActiveSummarizationModel;
 
         var result = new List<ChapterBrief>();
         foreach (var chapter in chapters)
         {
-            if (!jsonByChapter.TryGetValue(chapter.Id, out var json))
+            if (!briefByChapter.TryGetValue(chapter.Id, out var brief)
+                || string.IsNullOrWhiteSpace(brief.StructuredJson)
+                || !string.Equals(brief.Language, lang, StringComparison.Ordinal)
+                || brief.StructuredBuiltAt is not { } structuredBuiltAt
+                || !ChapterStyleProfileFreshness.IsFresh(
+                    structuredBuiltAt, brief.BuiltWithModel, chapter.UpdatedAt, activeModel))
                 continue;
 
-            var l0 = ParseL0(json);
+            var l0 = ParseL0(brief.StructuredJson);
             if (l0 == null)
                 continue;
 

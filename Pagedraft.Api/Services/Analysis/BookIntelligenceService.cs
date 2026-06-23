@@ -113,7 +113,13 @@ public class BookIntelligenceService
         // the model context on a large book). The assembler prefers the dense structured BookBrief +
         // ChapterBriefs and degrades to a budget-guarded flat-summary concat when no briefs are built yet;
         // either way it stays within the NumCtx-derived budget and logs anything it drops.
-        var assembly = await _bookContextAssembler.AssembleAsync(bookId, language, ct);
+        // Budget the assembly to the SMALLEST window across the tasks that consume this SAME text below:
+        // BookOverview / CharacterAnalysis / StoryAnalysis route to LinguisticAnalysis and Synopsis to
+        // Summarization, so the context must fit whichever has the tighter num_ctx (Bug 3: budgeting against
+        // Summarization alone could overflow the LinguisticAnalysis window when it is configured smaller).
+        var assembly = await _bookContextAssembler.AssembleAsync(
+            bookId, language,
+            new[] { AiTaskType.LinguisticAnalysis, AiTaskType.Summarization }, ct);
         var concatenated = assembly.Text;
         if (string.IsNullOrWhiteSpace(concatenated))
             throw new InvalidOperationException("No chapter summaries found. Run SummarizeChaptersAsync first.");
@@ -168,7 +174,10 @@ public class BookIntelligenceService
         // wb1-c03: budget-aware assembly (shared path) instead of the unguarded summary concat. The question
         // is appended AFTER the budgeted context, so the context can never push total input past the model
         // window on its own (the assembler already capped it). Anything dropped is logged in the assembler.
-        var assembly = await _bookContextAssembler.AssembleAsync(bookId, language, ct);
+        // Budget to the QA route's task (GenericChat), whose window can be smaller than Summarization's
+        // (Bug 3) — and the appended question + the generated answer must still fit alongside the context.
+        var assembly = await _bookContextAssembler.AssembleAsync(
+            bookId, language, new[] { AiTaskType.GenericChat }, ct);
         var summaries = assembly.Text;
         if (string.IsNullOrWhiteSpace(summaries))
             throw new InvalidOperationException("No chapter summaries found. Run SummarizeChaptersAsync first.");

@@ -314,6 +314,73 @@ public class BookSummaryServiceTests
         Assert.False(status.IsReady); // cross-model rollup is out of date
     }
 
+    // ─── 3b. ComposeChapterBriefsAsync applies the SAME freshness gate as GetStatusAsync ──────────
+
+    [Fact]
+    public async Task ComposeChapterBriefsAsync_ExcludesStaleAndCrossModelBriefs_MatchingStatus()
+    {
+        // Bug: ComposeChapterBriefsAsync included ANY row that had StructuredJson for the language, skipping
+        // the timestamp/model freshness gate GetStatusAsync uses. Once any chapter had structured data the
+        // assembler took the dense structured path and could inject briefs that no longer matched the edited
+        // chapter text. The compose must omit stale (built before the chapter's last edit) and cross-model
+        // briefs, leaving exactly the briefs GetStatusAsync counts as "built".
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildPerChapterProvider(dbName, out _, briefByContent: new());
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var freshCh = Guid.NewGuid();       // fresh by both timestamp and model → composed
+        var staleCh = Guid.NewGuid();       // brief built BEFORE the chapter's last edit → timestamp-stale
+        var crossModelCh = Guid.NewGuid();  // brief built under a DIFFERENT model → model-stale
+
+        db.Books.Add(new Book { Id = bookId, Title = "Compose Freshness", Language = "he" });
+
+        // staleCh first: brief stamped now, then the chapter is edited AFTER so its UpdatedAt jumps past
+        // the brief's StructuredBuiltAt → timestamp-stale.
+        db.Chapters.Add(new Chapter { Id = staleCh, BookId = bookId, Order = 0, Title = "Stale", ContentText = "ישן." });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = staleCh, Language = "he",
+            StructuredJson = BriefAJson, BuiltWithModel = ActiveModel, StructuredBuiltAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+        await Task.Delay(10);
+
+        var staleChapter = await db.Chapters.SingleAsync(c => c.Id == staleCh);
+        staleChapter.Title = "Stale (edited)";
+        await db.SaveChangesAsync();
+
+        // crossModelCh: fresh by timestamp but built under a different Summarization model → model-stale.
+        db.Chapters.Add(new Chapter { Id = crossModelCh, BookId = bookId, Order = 1, Title = "CrossModel", ContentText = "תוכן." });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = crossModelCh, Language = "he",
+            StructuredJson = BriefBJson, BuiltWithModel = "some-other-model",
+            StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+        });
+        // freshCh: fresh by both timestamp and model → the only composed brief.
+        db.Chapters.Add(new Chapter { Id = freshCh, BookId = bookId, Order = 2, Title = "Fresh", ContentText = "תוכן טרי." });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = freshCh, Language = "he",
+            StructuredJson = BriefAJson, BuiltWithModel = ActiveModel,
+            StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<BookSummaryService>();
+
+        var l1 = await svc.ComposeChapterBriefsAsync(bookId, "he");
+        Assert.Single(l1);
+        Assert.Equal("Fresh", l1[0].Title);
+        Assert.Equal(2, l1[0].Order);
+
+        // Coverage and the composed L1 set agree (the drift the freshness gate exists to prevent).
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.Equal(1, status.BuiltChapters);
+        Assert.Equal(2, status.StaleCount);
+    }
+
     // ─── 4. Per-chapter failure isolation: one bad chapter does not abort the job ─────────────────
 
     [Fact]

@@ -255,6 +255,101 @@ public class BookContextAssemblerTests
         Assert.Equal(4096, asm.ResolveBudgetTokens()); // 16384 * 0.25
     }
 
+    // ─── (e) Flat fallback honours the requested language (no cross-language leak) ───────────────────
+
+    [Fact]
+    public async Task AssembleAsync_FlatFallback_DoesNotLeakOtherLanguageSummaries()
+    {
+        // Bug: the flat-summary fallback loaded ChunkSummaries by BookId ONLY, ignoring the requested
+        // language. A book whose flat summaries exist solely in another language would have that foreign
+        // prose concatenated into THIS locale's book context. The structured path already filters by
+        // language, so the fallback must too.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 4000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Lang Book", Language = "he" });
+        // Flat summaries ONLY in English; chapters carry NO raw body so the raw-text fallback yields nothing
+        // either — isolating the language filter as the only thing that can surface text.
+        for (var i = 0; i < 3; i++)
+        {
+            var chId = Guid.NewGuid();
+            db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = i, Title = $"Ch{i}", ContentText = "" });
+            db.ChunkSummaries.Add(new ChunkSummary
+            {
+                BookId = bookId, ChapterId = chId, Language = "en",
+                SummaryText = $"English summary for chapter {i} that must not leak into the Hebrew context."
+            });
+        }
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+
+        // Requesting Hebrew: no he summaries, no raw bodies → the en summaries must NOT be concatenated.
+        var he = await asm.AssembleAsync(bookId, "he");
+        Assert.False(he.UsedStructuredBriefs);
+        Assert.DoesNotContain("English summary", he.Text);
+        Assert.True(string.IsNullOrWhiteSpace(he.Text), $"expected empty he context, got: '{he.Text}'");
+
+        // Control: requesting English DOES surface them — proving the rows are present and only the
+        // language filter (not their absence) kept them out of the Hebrew context.
+        var en = await asm.AssembleAsync(bookId, "en");
+        Assert.Contains("English summary", en.Text);
+    }
+
+    // ─── (f) Budget follows the CONSUMING task's context window, not always Summarization ────────────
+
+    [Fact]
+    public void ResolveBudgetTokens_DerivesFromConsumingTaskWindow_NotAlwaysSummarization()
+    {
+        // Bug: the budget was always derived from Summarization's NumCtx, but the assembled text is fed to
+        // LinguisticAnalysis / GenericChat consumers whose per-task window can be SMALLER. Budgeting against
+        // Summarization alone overflows the consumer's window (Ollama then silently truncates).
+        var dbName = Guid.NewGuid().ToString();
+        // Summarization window large (16384); the generic Ollama window — which GenericChat/QA falls back to
+        // when there is no Ollama_GenericChat key — is small (4096). Fraction 0.5.
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 0,
+            ollamaSummarizationNumCtx: 16384, budgetFraction: 0.5);
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+
+        // Default (no task) and explicit Summarization both use the Summarization window: 16384 * 0.5.
+        Assert.Equal(8192, asm.ResolveBudgetTokens());
+        Assert.Equal(8192, asm.ResolveBudgetTokens(new[] { AiTaskType.Summarization }));
+
+        // GenericChat (the QA route) has no Ollama_GenericChat key → falls back to the Ollama window (4096),
+        // so the budget must follow that tighter window: 4096 * 0.5 = 2048.
+        Assert.Equal(2048, asm.ResolveBudgetTokens(new[] { AiTaskType.GenericChat }));
+
+        // When several tasks share ONE assembly, budget to the SMALLEST window so it fits the tightest one.
+        Assert.Equal(2048, asm.ResolveBudgetTokens(new[] { AiTaskType.Summarization, AiTaskType.GenericChat }));
+    }
+
+    [Fact]
+    public async Task AssembleAsync_BudgetsToConsumingTaskWindow()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 0,
+            ollamaSummarizationNumCtx: 16384, budgetFraction: 0.5);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Consumer Budget", Language = "he" });
+        for (var i = 0; i < 4; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+
+        // The consuming-task window flows through AssembleAsync to the assembly's BudgetTokens.
+        var summarization = await asm.AssembleAsync(bookId, "he", new[] { AiTaskType.Summarization });
+        Assert.Equal(8192, summarization.BudgetTokens); // 16384 * 0.5
+
+        var genericChat = await asm.AssembleAsync(bookId, "he", new[] { AiTaskType.GenericChat });
+        Assert.Equal(2048, genericChat.BudgetTokens); // tighter Ollama fallback window 4096 * 0.5
+        Assert.True(genericChat.EstimatedTokens <= genericChat.BudgetTokens);
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────────────────────────────
 
     private static string BigBriefJson(int n)
@@ -285,7 +380,13 @@ public class BookContextAssemblerTests
         db.ChunkSummaries.Add(new ChunkSummary
         {
             BookId = bookId, ChapterId = chId, Language = "he",
-            StructuredJson = briefJson, BuiltWithModel = "qwen2.5:14b"
+            // The structured path only consumes FRESH briefs (ComposeChapterBriefsAsync now gates on the same
+            // predicate as GetStatusAsync): BuiltWithModel must equal the active Summarization model (= the
+            // AiOptions.DefaultModel "qwen2.5:14b" here, since FeatureModels is unset) AND StructuredBuiltAt
+            // must be at/after the chapter's UpdatedAt. UpdatedAt is stamped to "now" at SaveChanges, so stamp
+            // the structured build a minute ahead to guarantee timestamp-freshness regardless of save timing.
+            StructuredJson = briefJson, BuiltWithModel = "qwen2.5:14b",
+            StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
         });
     }
 
