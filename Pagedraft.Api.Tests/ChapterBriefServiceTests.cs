@@ -227,6 +227,49 @@ public class ChapterBriefServiceTests
         Assert.Equal(1, await db.ChunkSummaries.CountAsync());
     }
 
+    // ─── 2d. Cross-language refresh clears the stale flat summary from the other locale ────────
+
+    [Fact]
+    public async Task LoadOrBuildChapterBriefAsync_CrossLanguageRefresh_ClearsStaleFlatSummary()
+    {
+        // A row built flat in 'en' (Language="en", English SummaryText). A structured (re)build for 'he'
+        // flips the row's Language to "he"; the English SummaryText must NOT be left behind, or
+        // BookContextAssembler — which selects flat fallbacks by Language only — would assemble English prose
+        // into the Hebrew book context.
+        using var provider = BuildServiceProvider(out var routerMock, llmResponse: ValidBriefJson);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Cross-Lang Book" });
+        db.Chapters.Add(new Chapter { Id = chapterId, BookId = bookId, Title = "Ch1", ContentText = "תוכן עברי." });
+        var rowId = Guid.NewGuid();
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            Id = rowId,
+            BookId = bookId,
+            ChapterId = chapterId,
+            Language = "en",
+            SummaryText = "English prose summary that must not leak into the Hebrew context.",
+            StructuredJson = null
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<ChapterBriefService>();
+        var brief = await svc.LoadOrBuildChapterBriefAsync(bookId, chapterId, "he");
+
+        Assert.NotNull(brief);
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        var row = await db.ChunkSummaries.SingleAsync(cs => cs.ChapterId == chapterId);
+        Assert.Equal(rowId, row.Id); // same row refreshed in place
+        Assert.Equal("he", row.Language);
+        Assert.False(string.IsNullOrWhiteSpace(row.StructuredJson));
+        // The stale English flat summary is cleared so it cannot be served as Hebrew prose by the assembler.
+        Assert.True(string.IsNullOrEmpty(row.SummaryText),
+            $"expected the cross-language flat summary to be cleared, got: '{row.SummaryText}'");
+    }
+
     // ─── 3. Timestamp-stale brief is rebuilt in place ─────────────────────────────────────────
 
     [Fact]

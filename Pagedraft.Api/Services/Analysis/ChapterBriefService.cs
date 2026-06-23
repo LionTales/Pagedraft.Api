@@ -149,6 +149,19 @@ public class ChapterBriefService
                 // structured brief). Stamp StructuredBuiltAt to NOW so this freshly built brief reads fresh.
                 // We do NOT touch CreatedAt here: this row may already carry a flat SummaryText whose
                 // CreatedAt is its own (flat) freshness stamp, owned by BookIntelligenceService.
+                //
+                // The row's Language is the SINGLE identity for BOTH surfaces (StructuredJson AND the flat
+                // SummaryText). If this structured (re)build switches the row to a DIFFERENT language than it
+                // currently holds, the existing flat SummaryText is in the OLD language; once Language flips to
+                // `lang` it would masquerade as the new locale's prose. BookContextAssembler selects flat
+                // fallbacks by Language only, so it would assemble that mismatched-language prose into the
+                // requested book context. Clear the now-stale flat summary so it cannot leak; the flat path
+                // (SummarizeChaptersAsync) rebuilds it for the new locale when needed.
+                if (!string.Equals(existing.Language, lang, StringComparison.Ordinal)
+                    && !string.IsNullOrWhiteSpace(existing.SummaryText))
+                {
+                    existing.SummaryText = string.Empty;
+                }
                 existing.StructuredJson = structuredJson;
                 existing.BuiltWithModel = builtModel;
                 existing.Language = lang;
