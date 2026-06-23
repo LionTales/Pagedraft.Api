@@ -130,13 +130,9 @@ public class BookSummaryService
     private readonly BookSummaryBuildRegistry _buildRegistry;
     private readonly ILogger<BookSummaryService> _logger;
 
-    // Deserialize cached L0 StructuredJson (camelCase, no [JsonPropertyName] on the record) and the
-    // BookBible ThemesJson array. Same opts ChapterBriefService uses for the structured round-trip.
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+    // Deserialization of the cached L0 StructuredJson lives in the shared StructuredChunkSummaryParser so the
+    // status count (GetStatusAsync) and the L1 composition (ComposeChapterBriefsAsync) parse identically and
+    // agree on which chapters have a usable brief.
 
     // Serialize the L2 BookBrief to BookBriefJson with the SAME camelCase policy so the round-trip
     // (build → persist → read → deserialize) is stable.
@@ -215,14 +211,18 @@ public class BookSummaryService
         {
             // wb1-r02: a null StructuredBuiltAt (legacy structured row built before the column existed) is
             // treated as stale → rebuild once (self-heal), mirroring ChapterBriefService.IsFresh.
+            // The "has a structured brief" test PARSES the JSON (StructuredChunkSummaryParser.IsUsable), not
+            // merely a non-empty check: a non-empty but UNPARSEABLE brief is NOT usable. Counting it built
+            // here while ComposeChapterBriefsAsync skips it (it parses) left BuiltChapterCount < built, so
+            // SummaryCoversBuiltChapters could never match and the summary stayed not-ready across rebuilds.
             if (briefByChapter.TryGetValue(chapter.Id, out var brief)
-                && !string.IsNullOrWhiteSpace(brief.StructuredJson)
+                && StructuredChunkSummaryParser.IsUsable(brief.StructuredJson)
                 && string.Equals(brief.Language, lang, StringComparison.Ordinal)
                 && brief.StructuredBuiltAt is { } structuredBuiltAt
                 && ChapterStyleProfileFreshness.IsFresh(structuredBuiltAt, brief.BuiltWithModel, chapter.UpdatedAt, activeModel))
                 built++;
             else
-                stale++; // missing OR no StructuredJson OR wrong language OR no structured stamp OR timestamp/model-stale
+                stale++; // missing OR no/unparseable StructuredJson OR wrong language OR no stamp OR timestamp/model-stale
         }
 
         var summary = await _db.BookSummaryBaselines
@@ -671,17 +671,9 @@ public class BookSummaryService
 
     // ─── Parse helpers ──────────────────────────────────────────────────────────────────────────────
 
-    private static StructuredChunkSummaryData? ParseL0(string json)
-    {
-        try
-        {
-            return JsonSerializer.Deserialize<StructuredChunkSummaryData>(json, JsonOpts);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
+    // Delegates to the shared StructuredChunkSummaryParser so composition parses the L0 exactly as the
+    // freshness gate and status count test usability (no drift → no built/composed disagreement).
+    private static StructuredChunkSummaryData? ParseL0(string json) => StructuredChunkSummaryParser.Parse(json);
 
     /// <summary>
     /// Parses the curated theme NAMES out of <see cref="BookBible.ThemesJson"/>. Tolerates both the

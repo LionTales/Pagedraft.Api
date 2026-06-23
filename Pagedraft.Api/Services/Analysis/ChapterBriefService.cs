@@ -38,14 +38,9 @@ public class ChapterBriefService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ChapterBriefService> _logger;
 
-    // Deserialize the LLM JSON: case-insensitive + camelCase policy (StructuredChunkSummaryData carries no
-    // [JsonPropertyName], so the camelCase policy maps its PlotEvents/CharacterStates/... fields). Same opts
-    // BookIntelligenceService uses for its structured results.
-    private static readonly JsonSerializerOptions JsonOpts = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+    // Deserialization of the persisted StructuredJson lives in the shared StructuredChunkSummaryParser
+    // (case-insensitive + camelCase), so the freshness gate, status count, and composition all parse
+    // identically. This service only serializes the brief it builds.
 
     // Serialize the brief to StructuredJson with the SAME camelCase policy so the round-trip
     // (build → persist → read → deserialize) is stable and ChapterBrief assembly reads the same shape.
@@ -364,20 +359,10 @@ public class ChapterBriefService
         return (brief, model);
     }
 
-    /// <summary>Defensive parse of a StructuredJson blob into the typed brief; null on null/blank/invalid.</summary>
-    private static StructuredChunkSummaryData? Parse(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-            return null;
-        try
-        {
-            return JsonSerializer.Deserialize<StructuredChunkSummaryData>(json, JsonOpts);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
+    /// <summary>Defensive parse of a StructuredJson blob into the typed brief; null on null/blank/invalid.
+    /// Delegates to the shared <see cref="StructuredChunkSummaryParser"/> so this and the freshness/status/
+    /// composition paths cannot drift into different parse semantics.</summary>
+    private static StructuredChunkSummaryData? Parse(string? json) => StructuredChunkSummaryParser.Parse(json);
 
     /// <summary>
     /// Freshness gate for a cached structured brief against the current chapter + active model. A brief is
@@ -396,8 +381,12 @@ public class ChapterBriefService
     /// </summary>
     private static bool IsFresh(ChunkSummary summary, Chapter chapter, string lang, string? activeModel)
     {
-        if (string.IsNullOrWhiteSpace(summary.StructuredJson))
-            return false; // never built (flat-only legacy row) → must build
+        if (!StructuredChunkSummaryParser.IsUsable(summary.StructuredJson))
+            // Never built (flat-only legacy row) OR a non-empty but UNPARSEABLE brief → not usable, must
+            // (re)build. Testing only for non-empty here let an unparseable brief read fresh forever (returned
+            // as null without rebuilding) while status counted it built and composition skipped it, so the
+            // rollup could never cover it. IsUsable parses, exactly as ComposeChapterBriefsAsync does.
+            return false;
         if (!string.Equals(summary.Language, lang, StringComparison.Ordinal))
             return false; // cached in a different language → rebuild for the requested one
         if (summary.StructuredBuiltAt is not { } structuredBuiltAt)

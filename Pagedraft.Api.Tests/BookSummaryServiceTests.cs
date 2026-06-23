@@ -533,6 +533,88 @@ public class BookSummaryServiceTests
         public void StopApplication() { }
     }
 
+    // ─── 3e. Unparseable StructuredJson: status agrees with composition, and a build recovers ────
+
+    [Fact]
+    public async Task GetStatusAsync_UnparseableStructuredJson_CountsChapterStaleNotBuilt()
+    {
+        // Bug: a non-empty but UNPARSEABLE StructuredJson passed the freshness/status "has a brief" test
+        // (non-empty only) while ComposeChapterBriefsAsync skipped it (it parses). Status counted it built
+        // yet composition omitted it, so BuiltChapterCount < built and the summary could never read ready.
+        // Status must now PARSE (StructuredChunkSummaryParser.IsUsable) and count it stale, agreeing with
+        // composition.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildPerChapterProvider(dbName, out _, briefByContent: new());
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Corrupt Brief Book", Language = "he" });
+        db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = 0, Title = "Ch0", ContentText = "תוכן." });
+        // Fresh by timestamp + model + language, but the StructuredJson is non-empty and UNPARSEABLE.
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = chId, Language = "he",
+            StructuredJson = "{ this is not valid json",
+            BuiltWithModel = ActiveModel, StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<BookSummaryService>();
+        var status = await svc.GetStatusAsync(bookId, "he");
+
+        // The unparseable brief is NOT usable → counted stale, matching ComposeChapterBriefsAsync.
+        Assert.Equal(0, status.BuiltChapters);
+        Assert.Equal(1, status.StaleCount);
+
+        var l1 = await svc.ComposeChapterBriefsAsync(bookId, "he");
+        Assert.Empty(l1); // composition also skips it → status and composition agree
+    }
+
+    [Fact]
+    public async Task BuildBookSummaryAsync_UnparseableBrief_RebuildsToReady()
+    {
+        // End-to-end recovery: a fresh-but-unparseable cached brief must be treated as stale so the build
+        // REBUILDS it (the freshness gate no longer serves it as fresh-null without rebuilding), the rollup
+        // composes, and the summary reaches ready. Pre-fix the gate returned the corrupt brief as fresh →
+        // no rebuild, zero composed briefs, never ready.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildPerChapterProvider(dbName, out var routerMock, briefByContent: new()
+        {
+            ["CH_A"] = BriefAJson
+        });
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Recovery Book", Language = "he" });
+        db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = 0, Title = "A", ContentText = "CH_A תוכן." });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = chId, Language = "he",
+            StructuredJson = "{ corrupt", // non-empty but unparseable
+            BuiltWithModel = ActiveModel, StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<BookSummaryService>();
+        var result = await svc.BuildBookSummaryAsync(bookId, "he");
+
+        // The corrupt brief was rebuilt (one LLM call), composed, and the rollup is ready.
+        Assert.True(result.Ready);
+        Assert.Equal(1, result.BuiltChapters);
+        Assert.Equal(0, result.FailedChapters);
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(status.IsReady);
+        Assert.Equal(1, status.BuiltChapters);
+
+        // The persisted StructuredJson is now a usable (parseable) brief, not the corrupt blob.
+        var row = await db.ChunkSummaries.AsNoTracking().SingleAsync(cs => cs.ChapterId == chId);
+        Assert.True(StructuredChunkSummaryParser.IsUsable(row.StructuredJson));
+    }
+
     // ─── 4. Per-chapter failure isolation: one bad chapter does not abort the job ─────────────────
 
     [Fact]
