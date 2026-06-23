@@ -11,6 +11,14 @@ public class ChapterStyleProfile
     /// <summary>Serialised <see cref="Pagedraft.Api.Services.Analysis.LinguisticAnalysisResult"/> JSON emitted by linguistic analysis.</summary>
     public string MetricsJson { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The resolved LinguisticAnalysis model id that built this profile (the model the request was
+    /// actually routed to). Null on legacy rows created before this column existed. When it does not
+    /// match the active LinguisticAnalysis model the profile is treated as STALE and rebuilt, so the
+    /// system never compares metrics computed under different models (cross-model cache safety).
+    /// </summary>
+    public string? BuiltWithModel { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 

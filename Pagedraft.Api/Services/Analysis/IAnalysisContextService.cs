@@ -48,4 +48,20 @@ public interface IAnalysisContextService
         Guid chapterId,
         string language,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Builds a synthetic book-wide style baseline: the per-metric mean of the numeric syntax/morphology
+    /// fields across every chapter of (bookId, language) that ALREADY has a persisted
+    /// <see cref="Models.ChapterStyleProfile"/>. Never triggers an LLM build for an unprofiled chapter
+    /// (existing rows benefit from staleness self-refresh only). Used as the [CHAPTER_STYLE_BASELINE]
+    /// reference at Chapter scope so a chapter is compared against the book average rather than itself.
+    /// </summary>
+    /// <returns>
+    /// A synthetic (unpersisted) profile whose MetricsJson holds the averaged metrics, or null when fewer
+    /// than two chapters have a usable profile (a single-chapter "average" is not a meaningful reference).
+    /// </returns>
+    Task<Models.ChapterStyleProfile?> BuildBookStyleAverageProfileAsync(
+        Guid bookId,
+        string language,
+        CancellationToken ct = default);
 }

@@ -249,7 +249,7 @@ public class PromptFactory
         // the qualitative book StyleProfile (already rendered as [STYLE_PROFILE]) under this marker,
         // duplicating content, so it has been removed rather than left misleading.
         if (fields.HasFlag(ContextField.ChapterStyleBaseline) && ctx.ChapterStyleBaseline is { } chapterBaseline)
-            AppendSection(sb, "CHAPTER_STYLE_BASELINE", FormatChapterStyleBaseline(chapterBaseline));
+            AppendSection(sb, "CHAPTER_STYLE_BASELINE", FormatChapterStyleBaseline(chapterBaseline, ctx.Scope));
 
         if (fields.HasFlag(ContextField.Characters) && ctx.Characters is { Characters.Count: > 0 } chars)
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(chars));
@@ -333,12 +333,18 @@ public class PromptFactory
     };
 
     /// <summary>
-    /// Renders a chapter's cached style baseline (LinguisticAnalysisResult-shaped MetricsJson)
-    /// as plain "metric: value" lines so the model can numerically compare the current scene's
-    /// metrics against the chapter baseline and emit `deviations`. Returns empty (so the section
-    /// is omitted) when MetricsJson is missing or cannot be parsed.
+    /// Renders the cached style baseline (LinguisticAnalysisResult-shaped MetricsJson) as plain
+    /// "metric: value" lines so the model can numerically compare the analyzed unit's metrics against
+    /// the reference and emit `deviations`. The header is scope-aware so the model frames its free-text
+    /// notes correctly: at Scene scope the reference is the CHAPTER and the analyzed unit is the scene;
+    /// at Chapter (or Book) scope the analyzed unit is the WHOLE CHAPTER and the injected baseline is the
+    /// BOOK AVERAGE (per the Style Baseline feature), so the note must talk about the book, not the chapter.
+    /// This mirrors the FE reference logic (Scene -> chapter, Chapter/Book -> book). The section header is
+    /// English (like every other context marker/section here — the model reads English context fine and
+    /// emits notes in the request language). Returns empty (so the section is omitted) when MetricsJson is
+    /// missing or cannot be parsed.
     /// </summary>
-    private static string FormatChapterStyleBaseline(ChapterStyleProfile profile)
+    private static string FormatChapterStyleBaseline(ChapterStyleProfile profile, AnalysisScope scope)
     {
         if (string.IsNullOrWhiteSpace(profile.MetricsJson))
             return string.Empty;
@@ -358,7 +364,11 @@ public class PromptFactory
             return string.Empty;
 
         var sb = new StringBuilder();
-        sb.AppendLine("Chapter-wide baseline metrics (compare the current scene against these numbers):");
+        // Scene scope: the analyzed unit is the SCENE, the reference is the CHAPTER.
+        // Chapter (or Book) scope: the analyzed unit is the WHOLE CHAPTER, the reference is the BOOK AVERAGE.
+        sb.AppendLine(scope == AnalysisScope.Scene
+            ? "Chapter-wide baseline metrics. Compare the current SCENE against these CHAPTER numbers; in each deviation note describe the divergence from the CHAPTER's usual style."
+            : "Book-wide AVERAGE style metrics. Compare the WHOLE CHAPTER below against these BOOK-average numbers; in each deviation note describe the divergence from the BOOK's typical style. Do NOT call the analyzed unit a 'scene' or the reference 'the chapter'.");
 
         var syntax = metrics.SyntaxMetrics;
         sb.AppendLine($"- sentenceCount: {syntax.SentenceCount}");
@@ -614,7 +624,7 @@ public class PromptFactory
         אתה מומחה לניתוח לשוני. נתח את הטקסט הבא ברמה לשונית מעמיקה.
 
         ייתכן שיסופק לך הקשר נוסף בתוך סימונים:
-        - [CHAPTER_STYLE_BASELINE] — מדדי הסגנון הבסיסיים של הפרק כולו (קו ייחוס של הפרק עצמו). השווה את מדדי הסצנה שלפניך אל הקו הזה.
+        - [CHAPTER_STYLE_BASELINE] — מדדי סגנון של קו ייחוס. השווה את מדדי הטקסט הנתון אל קו הייחוס הזה; הסעיף [CHAPTER_STYLE_BASELINE] עצמו מציין מה קו הייחוס מייצג וכיצד להתייחס אליו בהערה שלך.
         - [PRECEDING_CONTEXT] / [FOLLOWING_CONTEXT] — הפסקאות שלפני ושאחרי הקטע הנתון, לקריאה בלבד. נתח רק את הטקסט הנתון; השתמש בהקשר הזה כדי לזהות סתירות שחוצות פסקאות (מעברי רישום, מעברי זמן, הפרות נקודת-מבט) בין הסצנה לסביבתה.
         אם סימון כלשהו אינו מופיע — התעלם ממנו והחזר מערך ריק בשדות התלויים בו.
 
@@ -641,7 +651,7 @@ public class PromptFactory
           "grammaticalityScore": 0.9,
           "summary": "סיכום לשוני תמציתי: רמת השפה, עקביות הסגנון, ונקודות בולטות.",
           "deviations": [
-            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "הסבר קצר על משמעות החריגה מהקו הבסיסי של הפרק." }
+            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "הסבר קצר על משמעות החריגה מקו הייחוס." }
           ],
           "paragraphAnnotations": [
             { "paragraph": 1, "tense": "past|present", "povHolder": "שם הדמות שדרך תודעתה מסופרת הקריינות (זו שמחשבותיה ורגשותיה הפנימיים מדווחים), או 'first-person' אם הסיפור בגוף ראשון (אני/אנחנו), או 'none' אם אין תודעה פנימית", "register": "plain|formal|literary|colloquial" }
@@ -655,7 +665,7 @@ public class PromptFactory
 
         paragraphAnnotations — שדה עזר פנימי למחשבה (הוא אינו מוצג למשתמש, לכן השקע בו מאמץ). לפני שתחליט על consistencyIssues, סמן כל פסקה בטקסט הנתון לפי הסדר: "paragraph" = המספר הסידורי שלה (החל מ-1), "tense" = הזמן הדקדוקי הדומיננטי של הקריינות באותה פסקה (past או present), "povHolder" = הדמות שבתודעתה מעוגנת הקריינות (הדמות הנקובה בשם שמחשבותיה ורגשותיה הפרטיים מדווחים, או "first-person" כשהסיפור בגוף ראשון אני/אנחנו, או "none" כשהפסקה מתארת רק פעולה גלויה ללא תודעה פנימית של איש), "register" = הטון של הקריינות. סמן רק את הטקסט הנתון, לא את [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT]. לאחר מכן גזור את consistencyIssues מתוך השינויים לאורך הרשימה הזו: בעיית "tense" כאשר הזמן הדומיננטי מתהפך בין פסקאות סמוכות; בעיית "pov" כאשר ה-povHolder עובר לדמות נקובה אחרת ("קפיצה בין ראשים") או בין גוף ראשון לגוף שלישי; בעיית "register" כאשר רישום הקריינות משתנה. פסקה שה-povHolder שלה "none" אינה יוצרת בעצמה בעיית pov. אם כל הפסקאות חולקות אותו tense, povHolder ו-register — החזר מערך consistencyIssues ריק [].
 
-        deviations — מערך שבו כל פריט משווה מדד אחד של הסצנה אל הקו הבסיסי של הפרק ([CHAPTER_STYLE_BASELINE]): "metric" = שם המדד (כפי שהוא מופיע במדדים שלמעלה, למשל "averageSentenceLength" או "lexicalDensity"), "sceneValue" = ערך המדד בסצנה הנוכחית, "chapterBaseline" = ערך אותו מדד בקו הבסיסי של הפרק, "note" = משפט אחד קצר וברור בשפה ידידותית לכותב (ללא מונחים טכניים), שמסביר מה המשמעות המעשית של הפער עבור הסצנה (למשל קצב, קריאוּת או חיוּת) ולא רק חוזר על המספרים. כלול רק חריגות בעלות משמעות. אם אין קו בסיסי או אין חריגות — החזר מערך ריק [].
+        deviations — מערך שבו כל פריט משווה מדד אחד של הטקסט הנתון אל קו הייחוס ([CHAPTER_STYLE_BASELINE]): "metric" = שם המדד (כפי שהוא מופיע במדדים שלמעלה, למשל "averageSentenceLength" או "lexicalDensity"), "sceneValue" = ערך המדד בטקסט הנתון, "chapterBaseline" = ערך אותו מדד בקו הייחוס, "note" = משפט אחד קצר וברור בשפה ידידותית לכותב (ללא מונחים טכניים), שמסביר מה המשמעות המעשית של הפער (למשל קצב, קריאוּת או חיוּת) ולא רק חוזר על המספרים, בהתאם למה שקו הייחוס מייצג כפי שמצוין בסעיף [CHAPTER_STYLE_BASELINE]. העדף לדווח על מדדים מנורמלים (יחס/קצב) כחריגות (averageSentenceLength, lexicalDensity, averageWordLength), כיוון שהם משקפים סגנון ללא תלות באורך הטקסט. דווח על מדד ספירה מוחלט (sentenceCount, wordCount, uniqueWords) רק כאשר הוא נושא משמעות סגנונית מעבר לגודל הטקסט הנתון לניתוח. כלול רק חריגות בעלות משמעות. אם אין קו ייחוס או אין חריגות — החזר מערך ריק [].
 
         consistencyIssues — דווח כאן אך ורק על שינויים שחוצים פסקאות בין חלקים שונים של הטקסט. שגיאות דקדוק, כתיב או תחביר אינן שייכות לכאן - הן משפיעות על grammaticalityScore בלבד ואסור לדווח עליהן כאן. בחר את "type" במדויק:
         - "register" — שינוי ברמת הפורמליות/הטון של הקריינות בין חלקים (למשל: קריינות יומיומית ופשוטה שהופכת לרשמית או ספרותית-מליצית, או להפך).
@@ -685,7 +695,7 @@ public class PromptFactory
         You are a linguistic analysis expert. Perform a deep linguistic analysis of the following text.
 
         You may be given additional context inside markers:
-        - [CHAPTER_STYLE_BASELINE] — the baseline style metrics of the whole chapter (the chapter's own reference line). Compare the metrics of the scene in front of you against this baseline.
+        - [CHAPTER_STYLE_BASELINE] — reference baseline style metrics. Compare the analyzed text's metrics against this reference; the [CHAPTER_STYLE_BASELINE] section itself states what the reference represents and what to call it in your note.
         - [PRECEDING_CONTEXT] / [FOLLOWING_CONTEXT] — the paragraphs before and after the given passage, read-only. Analyze only the given text; use this surrounding context to detect cross-paragraph issues (register shifts, tense shifts, POV violations) between the scene and its surroundings.
         If any marker is absent — ignore it and return an empty array for the fields that depend on it.
 
@@ -712,7 +722,7 @@ public class PromptFactory
           "grammaticalityScore": 0.9,
           "summary": "Concise linguistic summary: language level, style consistency, and notable features.",
           "deviations": [
-            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "Short explanation of what the divergence from the chapter baseline means." }
+            { "metric": "averageSentenceLength", "sceneValue": 0.0, "chapterBaseline": 0.0, "note": "Short explanation of what the divergence from the reference baseline means." }
           ],
           "paragraphAnnotations": [
             { "paragraph": 1, "tense": "past|present", "povHolder": "name of the viewpoint character whose thoughts/feelings the narration reports, or 'first-person' if narrated as I/we, or 'none' if no interiority", "register": "plain|formal|literary|colloquial" }
@@ -726,7 +736,7 @@ public class PromptFactory
 
         paragraphAnnotations — an INTERNAL reasoning aid (it is not shown to the user, so spend effort here). Before you decide on consistencyIssues, annotate EACH paragraph of the analyzed text in order: "paragraph" = its 1-based index, "tense" = the dominant narrative tense of that paragraph's NARRATION (past or present), "povHolder" = whose interiority the narration is anchored in (the named character whose private thoughts/feelings are reported, or "first-person" when narrated as I/we, or "none" when the paragraph reports only observable action and no one's inner state), "register" = the narration's tone. Annotate only the given analyzed text, not [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT]. Then DERIVE consistencyIssues from the CHANGES across this list: a "tense" issue where the dominant tense flips between adjacent paragraphs; a "pov" issue where the povHolder changes to a DIFFERENT named character (head-hopping) or between first-person and third-person; a "register" issue where the narration's register shifts. A paragraph whose povHolder is "none" does not by itself create a pov issue. If every paragraph shares the same tense, povHolder, and register, return an empty consistencyIssues array [].
 
-        deviations — an array where each item compares ONE scene metric against the chapter baseline ([CHAPTER_STYLE_BASELINE]): "metric" = the metric name (as it appears in the metrics above, e.g. "averageSentenceLength" or "lexicalDensity"), "sceneValue" = the metric's value in the current scene, "chapterBaseline" = the same metric's value in the chapter baseline, "note" = one short, clear sentence in writer-friendly language (no technical jargon) explaining the practical effect of the difference on the scene (e.g. pace, readability, or vividness), not just restating the numbers. Include only meaningful divergences. If there is no baseline or no divergences, return an empty array [].
+        deviations — an array where each item compares ONE metric of the analyzed text against the reference baseline ([CHAPTER_STYLE_BASELINE]): "metric" = the metric name (as it appears in the metrics above, e.g. "averageSentenceLength" or "lexicalDensity"), "sceneValue" = the metric's value in the analyzed text, "chapterBaseline" = the same metric's value in the reference baseline, "note" = one short, clear sentence in writer-friendly language (no technical jargon) explaining the practical effect of the difference (e.g. pace, readability, or vividness), not just restating the numbers, framed according to what the reference represents as stated in the [CHAPTER_STYLE_BASELINE] section. Prefer reporting NORMALIZED/rate metrics (averageSentenceLength, lexicalDensity, averageWordLength) as deviations, since they reflect style independent of length. Report a raw absolute count (sentenceCount, wordCount, uniqueWords) ONLY when it carries a stylistic signal beyond the size of the text being analyzed. Include only meaningful divergences. If there is no baseline or no divergences, return an empty array [].
 
         consistencyIssues — report ONLY cross-paragraph shifts between different parts of the text. Grammar, spelling, and syntax errors do NOT belong here - they affect grammaticalityScore only and must NOT be reported here. Choose "type" precisely:
         - "register" — a formality/tone shift in the NARRATION between parts (e.g. plain, casual narration shifting to formal or ornate prose, or vice versa).

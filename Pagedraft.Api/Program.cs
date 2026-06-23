@@ -47,6 +47,11 @@ builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
 builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
+builder.Services.AddScoped<StyleBaselineService>();
+// In-progress style-baseline build registry (DEF-2). MUST be singleton: the build runs on a background
+// DI scope while later status requests run on their own scopes, and both must share the same map so a
+// build started in one tab/session is visible (as BUILDING) after a reload or in a second tab.
+builder.Services.AddSingleton<StyleBaselineBuildRegistry>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
