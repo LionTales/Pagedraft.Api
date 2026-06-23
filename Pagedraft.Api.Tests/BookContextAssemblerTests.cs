@@ -372,6 +372,37 @@ public class BookContextAssemblerTests
         Assert.Empty(result.DroppedUnits);
     }
 
+    [Fact]
+    public async Task AssembleAsync_FlatFallback_LegacyUnnormalizedLanguage_UsesSummaryNotRawText()
+    {
+        // Regression: a legacy flat summary persisted by SummarizeChaptersAsync under the RAW request locale
+        // ("en-US"), while the assembler keys on the normalized locale ("en"). The prior exact-match selection
+        // skipped the row and degraded to raw chapter text; the summary must instead be matched by NORMALIZED
+        // locale and used.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Locale Book", Language = "en-US" });
+        var chId = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = 0, Title = "Ch0",
+            ContentText = "Raw chapter body that should NOT be used when a summary exists." });
+        // Stored under the RAW locale "en-US" (as the legacy flat path did), not the normalized "en".
+        db.ChunkSummaries.Add(new ChunkSummary { BookId = bookId, ChapterId = chId, Language = "en-US",
+            SummaryText = "Flat summary stored under the raw locale.", StructuredJson = null });
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "en"); // request the normalized locale
+
+        Assert.False(result.UsedStructuredBriefs);
+        // The legacy summary (stored "en-US") is matched for the normalized "en" locale and used...
+        Assert.Contains("Flat summary stored under the raw locale.", result.Text);
+        // ...instead of degrading to the raw chapter text.
+        Assert.DoesNotContain("Raw chapter body", result.Text);
+    }
+
     // ─── (d) Big-book no-overflow: a book whose FULL content would overflow stays within budget ──────
 
     [Fact]

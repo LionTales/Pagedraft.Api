@@ -721,6 +721,33 @@ public class ChapterBriefServiceTests
     }
 
     /// <summary>
+    /// Regression: the legacy flat path persisted the RAW request locale ("en-US"), which the assembler and
+    /// the structured path — both keyed on the NORMALIZED locale ("en") — then skipped. SummarizeChaptersAsync
+    /// must store the flat summary under the normalized locale so it shares ONE language key with the rest of
+    /// the system.
+    /// </summary>
+    [Fact]
+    public async Task SummarizeChaptersAsync_StoresNormalizedLanguage_NotRawLocale()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildFlatAndStructuredProvider(dbName, out _);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Locale Book" });
+        db.Chapters.Add(new Chapter { Id = chapterId, BookId = bookId, Order = 0, Title = "Ch1", ContentText = "English chapter body." });
+        await db.SaveChangesAsync();
+
+        var intelligence = provider.GetRequiredService<BookIntelligenceService>();
+        await intelligence.SummarizeChaptersAsync(bookId, "en-US"); // RAW locale request
+
+        var row = await db.ChunkSummaries.AsNoTracking().SingleAsync(cs => cs.ChapterId == chapterId);
+        Assert.False(string.IsNullOrWhiteSpace(row.SummaryText)); // the flat summary was written
+        Assert.Equal("en", row.Language); // normalized, NOT the raw "en-US"
+    }
+
+    /// <summary>
     /// DI provider wiring BOTH the structured builder (<see cref="ChapterBriefService"/> /
     /// <see cref="BookSummaryService"/>) AND the real flat path (<see cref="BookIntelligenceService"/> and
     /// its full analysis graph), so the wb1-r02 regression exercises the genuine flat writer rather than a

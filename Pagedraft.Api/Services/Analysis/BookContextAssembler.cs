@@ -202,6 +202,35 @@ public class BookContextAssembler
         return await AssembleFlatFallbackAsync(bookId, language, budget, ct);
     }
 
+    // ─── Shared read helper ───────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads the flat per-chapter summaries for the book whose stored <see cref="ChunkSummary.Language"/>
+    /// NORMALIZES to <paramref name="lang"/> (already normalized), keyed by ChapterId, excluding blanks.
+    ///
+    /// Matches on the NORMALIZED locale rather than an exact string because the legacy flat path
+    /// (<see cref="BookIntelligenceService.SummarizeChaptersAsync"/>) can persist the RAW request value
+    /// (e.g. "en-US") while the assembler keys on the normalized locale (e.g. "en"); an exact match would
+    /// SKIP those rows and degrade to raw chapter text despite a usable summary existing. A genuinely
+    /// different language (e.g. "he") still normalizes differently and is excluded, so this does not
+    /// reintroduce a cross-language leak. Normalization runs in memory (it does not translate to SQL); there
+    /// is at most one ChunkSummary per chapter, so the scan is bounded by the chapter count.
+    /// </summary>
+    private async Task<Dictionary<Guid, string>> LoadFlatSummariesByNormalizedLanguageAsync(
+        Guid bookId, string lang, CancellationToken ct)
+    {
+        var rows = await _db.ChunkSummaries
+            .AsNoTracking()
+            .Where(cs => cs.BookId == bookId)
+            .Select(cs => new { cs.ChapterId, cs.SummaryText, cs.Language })
+            .ToListAsync(ct);
+
+        return rows
+            .Where(x => !string.IsNullOrWhiteSpace(x.SummaryText)
+                && BaselineLanguageResolver.Normalize(x.Language) == lang)
+            .ToDictionary(x => x.ChapterId, x => x.SummaryText!);
+    }
+
     // ─── Structured path (dense briefs + per-chapter flat/raw back-fill for uncovered chapters) ────────
 
     /// <summary>
@@ -233,14 +262,9 @@ public class BookContextAssembler
             .ToListAsync(ct);
 
         // Flat summaries for (book, language), keyed by ChapterId — the degraded fill for an uncovered chapter
-        // (preferred over raw text). Same language filter as the flat fallback so no foreign-language leak.
-        var flatByChapterId = (await _db.ChunkSummaries
-                .AsNoTracking()
-                .Where(cs => cs.BookId == bookId && cs.Language == lang)
-                .Select(cs => new { cs.ChapterId, cs.SummaryText })
-                .ToListAsync(ct))
-            .Where(x => !string.IsNullOrWhiteSpace(x.SummaryText))
-            .ToDictionary(x => x.ChapterId, x => x.SummaryText!);
+        // (preferred over raw text). Matched by NORMALIZED locale so a legacy summary stored under the raw
+        // request value (e.g. "en-US") is still found, while a different language is excluded (no leak).
+        var flatByChapterId = await LoadFlatSummariesByNormalizedLanguageAsync(bookId, lang, ct);
 
         // Fresh structured briefs keyed by chapter Order (ChapterBrief carries Order, not ChapterId).
         var freshBriefByOrder = chapterBriefs.ToDictionary(b => b.Order);
@@ -366,16 +390,10 @@ public class BookContextAssembler
             .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
             .ToListAsync(ct);
 
-        // Flat summaries for (book, language), keyed by ChapterId. Same language filter as the structured
-        // path (ComposeChapterBriefsAsync) so a ChunkSummary row for ANOTHER language is never concatenated
-        // into this locale's book context.
-        var flatByChapterId = (await _db.ChunkSummaries
-                .AsNoTracking()
-                .Where(cs => cs.BookId == bookId && cs.Language == lang)
-                .Select(cs => new { cs.ChapterId, cs.SummaryText })
-                .ToListAsync(ct))
-            .Where(x => !string.IsNullOrWhiteSpace(x.SummaryText))
-            .ToDictionary(x => x.ChapterId, x => x.SummaryText!);
+        // Flat summaries for (book, language), keyed by ChapterId. Matched by NORMALIZED locale so a legacy
+        // summary stored under the raw request value (e.g. "en-US") is still found, while a genuinely
+        // different language (normalizing differently) is excluded — no cross-language leak into this context.
+        var flatByChapterId = await LoadFlatSummariesByNormalizedLanguageAsync(bookId, lang, ct);
 
         var sb = new StringBuilder();
         var included = new List<ChapterBrief>(); // flat path carries no structured briefs

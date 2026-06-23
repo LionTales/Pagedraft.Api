@@ -50,6 +50,12 @@ public class BookIntelligenceService
     /// </summary>
     public async Task SummarizeChaptersAsync(Guid bookId, string language, CancellationToken ct = default)
     {
+        // Persist the flat summary under the NORMALIZED locale (e.g. "en-US" → "en"), the SAME key the
+        // structured path (ChapterBriefService) and the BookContextAssembler read by. Storing the raw request
+        // value here is what let the assembler's exact-match selection skip the summary and degrade to raw
+        // chapter text. Normalize is idempotent for already-normalized values (e.g. "he" → "he").
+        var lang = BaselineLanguageResolver.Normalize(language);
+
         var chapters = await _db.Chapters
             .Where(c => c.BookId == bookId)
             .OrderBy(c => c.Order)
@@ -81,7 +87,7 @@ public class BookIntelligenceService
             if (existing != null)
             {
                 existing.SummaryText = summaryText;
-                existing.Language = language;
+                existing.Language = lang;
                 existing.CreatedAt = DateTimeOffset.UtcNow;
             }
             else
@@ -91,7 +97,7 @@ public class BookIntelligenceService
                     BookId = bookId,
                     ChapterId = chapter.Id,
                     SummaryText = summaryText,
-                    Language = language
+                    Language = lang
                 });
             }
 
