@@ -22,6 +22,7 @@ public class AppDbContext : DbContext
     public DbSet<AnalysisRunLog> AnalysisRunLogs => Set<AnalysisRunLog>();
     public DbSet<ChapterStyleProfile> ChapterStyleProfiles => Set<ChapterStyleProfile>();
     public DbSet<BookStyleBaseline> BookStyleBaselines => Set<BookStyleBaseline>();
+    public DbSet<BookSummaryBaseline> BookSummaryBaselines => Set<BookSummaryBaseline>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -67,6 +68,10 @@ public class AppDbContext : DbContext
             e.HasKey(x => x.Id);
             e.Property(x => x.Language).HasMaxLength(10);
             e.Property(x => x.StructuredJson).IsRequired(false);
+            // wb1-r02: structured-brief build timestamp, separate from the shared CreatedAt the flat
+            // re-summary path also bumps. Nullable so legacy rows self-heal (null = stale = rebuild).
+            e.Property(x => x.StructuredBuiltAt).IsRequired(false);
+            e.Property(x => x.BuiltWithModel).HasMaxLength(200);
             e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);
             e.HasIndex(x => new { x.BookId, x.ChapterId }).IsUnique();
@@ -229,6 +234,20 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
         });
 
+        modelBuilder.Entity<BookSummaryBaseline>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.BookBriefJson).HasColumnType("nvarchar(max)");
+            e.Property(x => x.BuiltWithModel).HasMaxLength(200);
+            // Book FK = Restrict (deliberately, to avoid SQL Server's "multiple cascade paths" error,
+            // mirroring BookStyleBaseline); BooksController.Delete removes summaries for the book
+            // explicitly before deleting the book.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
+            // One cached rollup per (BookId, Language) - the cache key.
+            e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -321,6 +340,11 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) bsb.CreatedAt = bsb.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) bsb.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookSummaryBaseline bsum)
+            {
+                if (entry.State == EntityState.Added) bsum.CreatedAt = bsum.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) bsum.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);

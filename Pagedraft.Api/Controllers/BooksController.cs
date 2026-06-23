@@ -18,6 +18,7 @@ public class BooksController : ControllerBase
     private readonly AppDbContext _db;
     private readonly BookIntelligenceService _bookIntelligence;
     private readonly StyleBaselineService _styleBaseline;
+    private readonly BookSummaryService _bookSummary;
     private readonly AnalysisProgressTracker _progress;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
@@ -27,6 +28,7 @@ public class BooksController : ControllerBase
         AppDbContext db,
         BookIntelligenceService bookIntelligence,
         StyleBaselineService styleBaseline,
+        BookSummaryService bookSummary,
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
@@ -35,6 +37,7 @@ public class BooksController : ControllerBase
         _db = db;
         _bookIntelligence = bookIntelligence;
         _styleBaseline = styleBaseline;
+        _bookSummary = bookSummary;
         _progress = progress;
         _scopeFactory = scopeFactory;
         _appLifetime = appLifetime;
@@ -261,6 +264,162 @@ public class BooksController : ControllerBase
         return Ok(dto);
     }
 
+    /// <summary>
+    /// GET coverage + freshness of the cached L2 book summary (BookBrief rollup) for a language. Mirrors
+    /// GET style-baseline so the FE reuses the same status/progress UI. Status DTO (camelCase JSON):
+    /// totalChapters, builtChapters, staleCount, hasSummary, ready, lastUpdatedAt, builtWithModel,
+    /// activeModel, builtWithDifferentModel, activeBuildJobId, chaptersToBuild, estimatedSeconds, estimatedUsd.
+    /// </summary>
+    [HttpGet("{bookId:guid}/summary")]
+    public async Task<ActionResult<BookSummaryStatusDto>> GetBookSummaryStatus(
+        Guid bookId,
+        [FromQuery] string? language,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, language, ct);
+        var status = await _bookSummary.GetStatusAsync(bookId, lang, ct);
+        return Ok(ToSummaryStatusDto(status));
+    }
+
+    /// <summary>
+    /// Start a book-wide L2 summary build (L0 → L1 → L2 rollup). MIRRORS BuildStyleBaseline's async-job
+    /// background-execution + AnalysisProgressTracker pattern so the FE reuses analysis-progress.service.
+    /// Returns a jobId pollable via GET summary/progress/{jobId}. IDEMPOTENT: when everything is already
+    /// fresh the build runs synchronously as a no-op and returns ready with no jobId.
+    /// </summary>
+    [HttpPost("{bookId:guid}/summary/build")]
+    public async Task<ActionResult<StartBookSummaryBuildResponse>> BuildBookSummary(
+        Guid bookId,
+        [FromBody] BuildBookSummaryRequest? req,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
+
+        // Idempotent fast path: nothing stale/missing, a usable cached rollup exists, it was built under the
+        // ACTIVE model, AND that rollup still covers every built chapter → no-op. Use status.IsReady so this
+        // endpoint applies the SAME gate as GET summary and BuildBookSummaryAsync (single source of truth):
+        // re-deriving a subset here let a partial rollup (a chapter that gained a brief outside a full build —
+        // !SummaryCoversBuiltChapters) return NoOp/Ready and never refresh the stale BookBriefJson, even though
+        // GET summary already reported not-ready. A cross-model rollup likewise falls through to rebuild.
+        var status = await _bookSummary.GetStatusAsync(bookId, lang, ct);
+        if (status.IsReady)
+        {
+            return Ok(new StartBookSummaryBuildResponse(
+                JobId: null,
+                Language: lang,
+                NoOp: true,
+                Ready: true,
+                BuiltChapters: status.BuiltChapters,
+                TotalChapters: status.TotalChapters,
+                StaleCount: status.StaleCount));
+        }
+
+        // Dedup guard: a build for this (bookId, language) is already running. GetStatusAsync only surfaces
+        // ActiveBuildJobId for a job the progress tracker still reports as live, so handing back the existing
+        // jobId is safe — the FE reattaches instead of minting a SECOND build. Checked AFTER the no-op fast
+        // path, BEFORE starting a new build.
+        if (status.ActiveBuildJobId is Guid activeJobId)
+        {
+            return Ok(new StartBookSummaryBuildResponse(
+                JobId: activeJobId,
+                Language: lang,
+                NoOp: false,
+                Ready: false,
+                BuiltChapters: status.BuiltChapters,
+                TotalChapters: status.TotalChapters,
+                StaleCount: status.StaleCount));
+        }
+
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new build." });
+
+        var jobId = Guid.NewGuid();
+        // Pre-register the snapshot BEFORE returning jobId so an immediate FE poll does not 404.
+        // BuildBookSummaryAsync calls StartJob again to refresh the message + set total chunks.
+        _progress.StartJob(jobId, AnalysisScope.Book, Services.Ai.Contracts.AnalysisType.Summarization,
+            bookId, null, null, "Queued book summary build…");
+
+        // Fire-and-forget background task on a fresh DI scope (mirrors BuildStyleBaseline).
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var serviceScope = _scopeFactory.CreateScope();
+                var services = serviceScope.ServiceProvider;
+                var summary = services.GetRequiredService<BookSummaryService>();
+                var progress = services.GetRequiredService<AnalysisProgressTracker>();
+                var logger = services.GetRequiredService<ILogger<BooksController>>();
+                try
+                {
+                    await summary.BuildBookSummaryAsync(bookId, lang, jobId, shutdownToken);
+                }
+                catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+                {
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Canceled, "Book summary build canceled due to application shutdown.");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Book summary build job {JobId} failed for book {BookId}", jobId, bookId);
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Failed, ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Book summary build failed to start."); } catch { }
+                try { _logger.LogError(ex, "Failed to execute book summary build job {JobId}", jobId); } catch { }
+            }
+        }, CancellationToken.None);
+
+        return Ok(new StartBookSummaryBuildResponse(
+            JobId: jobId,
+            Language: lang,
+            NoOp: false,
+            Ready: false,
+            BuiltChapters: status.BuiltChapters,
+            TotalChapters: status.TotalChapters,
+            StaleCount: status.StaleCount));
+    }
+
+    /// <summary>
+    /// Poll progress of a book-wide summary build job. Book-scoped sibling of GetStyleBaselineProgress;
+    /// returns the SAME AnalysisProgressDto shape so the FE reuses analysis-progress.service. Guarded to
+    /// serve ONLY book-wide Summarization jobs (distinct AnalysisType from the LinguisticAnalysis style
+    /// baseline, so the two book-scoped progress routes never cross-serve).
+    /// </summary>
+    [HttpGet("{bookId:guid}/summary/progress/{jobId:guid}")]
+    public ActionResult<AnalysisProgressDto> GetBookSummaryProgress(Guid bookId, Guid jobId)
+    {
+        if (!_progress.TryGet(jobId, out var snapshot) || snapshot == null)
+            return NotFound();
+
+        if (snapshot.BookId.HasValue && snapshot.BookId != bookId)
+            return NotFound();
+
+        if (snapshot.Scope != AnalysisScope.Book || snapshot.AnalysisType != Services.Ai.Contracts.AnalysisType.Summarization)
+            return NotFound();
+
+        var dto = new AnalysisProgressDto(
+            snapshot.JobId,
+            snapshot.AnalysisType.ToString(),
+            snapshot.Scope.ToString(),
+            snapshot.BookId,
+            snapshot.ChapterId,
+            snapshot.SceneId,
+            snapshot.Status.ToString(),
+            snapshot.CurrentChunkIndex,
+            snapshot.TotalChunks,
+            snapshot.CompletedChunks,
+            snapshot.Message,
+            snapshot.EstimatedCompletionPercent);
+
+        return Ok(dto);
+    }
+
     [HttpPost("{bookId:guid}/ask")]
     public async Task<ActionResult<AnalysisResultDto>> Ask(Guid bookId, [FromBody] AskBookRequest req, CancellationToken ct)
     {
@@ -304,6 +463,11 @@ public class BooksController : ControllerBase
         if (styleBaselines.Count > 0)
             _db.BookStyleBaselines.RemoveRange(styleBaselines);
 
+        // Explicitly remove cached BookSummaryBaselines to satisfy the Restrict FK on BookId.
+        var summaryBaselines = await _db.BookSummaryBaselines.Where(b => b.BookId == bookId).ToListAsync(ct);
+        if (summaryBaselines.Count > 0)
+            _db.BookSummaryBaselines.RemoveRange(summaryBaselines);
+
         // Clean up document history snapshots for this book to avoid orphaned versions.
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);
         if (documentVersions.Count > 0)
@@ -341,6 +505,23 @@ public class BooksController : ControllerBase
         s.BuiltChapters,
         s.StaleCount,
         s.HasBaseline,
+        s.IsReady,
+        s.LastUpdatedAt,
+        s.BuiltWithModel,
+        s.ActiveModel,
+        s.BuiltWithDifferentModel,
+        s.ActiveBuildJobId,
+        s.ChaptersToBuild,
+        s.EstimatedSeconds,
+        s.EstimatedUsd);
+
+    private static BookSummaryStatusDto ToSummaryStatusDto(BookSummaryStatus s) => new(
+        s.BookId,
+        s.Language,
+        s.TotalChapters,
+        s.BuiltChapters,
+        s.StaleCount,
+        s.HasSummary,
         s.IsReady,
         s.LastUpdatedAt,
         s.BuiltWithModel,

@@ -702,6 +702,13 @@ public class TextNormalizationAndContextTests
 
         services.Configure<AiOptions>(_ => { });
 
+        // AnalysisContextService now depends on the whole-book context assembler graph (wb1-c03); register
+        // it so IAnalysisContextService resolves.
+        services.AddScoped<ChapterBriefService>();
+        services.AddScoped<BookSummaryService>();
+        services.AddScoped<BookContextAssembler>();
+        services.AddSingleton<AnalysisProgressTracker>();
+        services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 
         return services.BuildServiceProvider();

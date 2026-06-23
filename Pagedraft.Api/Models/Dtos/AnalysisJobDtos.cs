@@ -53,3 +53,44 @@ public record BookStyleBaselineStatusDto(
 /// <summary>POST .../style-baseline/build request body.</summary>
 public record BuildStyleBaselineRequest(string? Language = "he");
 
+/// <summary>
+/// Response for POST .../summary/build. Mirrors <see cref="StartStyleBaselineBuildResponse"/> so the FE
+/// reuses the same async-job handling. The jobId is pollable via GET summary/progress/{jobId}; NoOp is
+/// true when the summary was already up to date (nothing rebuilt).
+/// </summary>
+public record StartBookSummaryBuildResponse(
+    Guid? JobId,
+    string Language,
+    bool NoOp,
+    bool Ready,
+    int BuiltChapters,
+    int TotalChapters,
+    int StaleCount);
+
+/// <summary>
+/// Response for GET .../summary — coverage + freshness of the cached L2 book summary (BookBrief) rollup.
+/// JSON casing follows the System.Text.Json default (camelCase), mirroring
+/// <see cref="BookStyleBaselineStatusDto"/>: totalChapters, builtChapters, staleCount, hasSummary, ready,
+/// lastUpdatedAt, builtWithModel, activeModel, builtWithDifferentModel, activeBuildJobId, chaptersToBuild,
+/// estimatedSeconds, estimatedUsd.
+/// </summary>
+public record BookSummaryStatusDto(
+    Guid BookId,
+    string Language,
+    int TotalChapters,
+    int BuiltChapters,
+    int StaleCount,
+    bool HasSummary,
+    bool Ready,
+    DateTimeOffset? LastUpdatedAt,
+    string? BuiltWithModel,
+    string? ActiveModel,
+    bool BuiltWithDifferentModel,
+    Guid? ActiveBuildJobId,
+    int ChaptersToBuild,
+    int EstimatedSeconds,
+    decimal? EstimatedUsd);
+
+/// <summary>POST .../summary/build request body.</summary>
+public record BuildBookSummaryRequest(string? Language = "he");
+

@@ -40,6 +40,46 @@ public class AiOptions
     /// bottleneck.
     /// </summary>
     public int MaxParallelStyleBaselineChapters { get; set; } = 2;
+
+    /// <summary>
+    /// Hard token budget for the assembled WHOLE-BOOK analysis context (BookContextAssembler): the L2
+    /// BookBrief plus as many L1 ChapterBriefs (or, in the degraded path, flat chapter summaries) as fit.
+    /// When &lt;= 0 the budget is DERIVED from the active task model's <see cref="ProviderTuningOptions.NumCtx"/>
+    /// context window via <see cref="EffectiveBookContextTokenBudget"/> rather than hardcoded, so raising
+    /// NumCtx automatically widens the book budget. Set a positive value to override the derivation.
+    /// Exists to stop the previously unguarded book-level concat from silently overflowing the model
+    /// context (Ollama TRUNCATES anything past num_ctx, yielding broken/empty output).
+    /// </summary>
+    public int BookContextTokenBudget { get; set; } = 0;
+
+    /// <summary>
+    /// Fraction of the model context window (NumCtx) the assembled book context may occupy when the budget
+    /// is derived (i.e. <see cref="BookContextTokenBudget"/> &lt;= 0). The remaining headroom is reserved for
+    /// the prompt instruction, system message, and the model's generated output. Default 0.5 (half the
+    /// window for input context). Clamped to (0, 1].
+    /// </summary>
+    public double BookContextBudgetFraction { get; set; } = 0.5;
+
+    /// <summary>
+    /// Resolves the effective token budget for the whole-book context. When
+    /// <see cref="BookContextTokenBudget"/> is positive it wins verbatim; otherwise it is derived as
+    /// <c>numCtx * <see cref="BookContextBudgetFraction"/></c> (fraction clamped to (0,1], result floored at
+    /// a small positive minimum so the BookBrief alone can always be attempted).
+    /// </summary>
+    /// <param name="numCtx">The active task model's context window (Ollama num_ctx) in tokens.</param>
+    public int EffectiveBookContextTokenBudget(int numCtx)
+    {
+        if (BookContextTokenBudget > 0)
+            return BookContextTokenBudget;
+
+        var fraction = BookContextBudgetFraction;
+        if (fraction <= 0 || double.IsNaN(fraction)) fraction = 0.5;
+        if (fraction > 1) fraction = 1;
+
+        var ctx = numCtx > 0 ? numCtx : 4096; // mirror ProviderTuningOptions.NumCtx default
+        var derived = (int)Math.Floor(ctx * fraction);
+        return Math.Max(256, derived); // never below a floor so the BookBrief can always be attempted
+    }
 }
 
 public class OllamaProviderOptions

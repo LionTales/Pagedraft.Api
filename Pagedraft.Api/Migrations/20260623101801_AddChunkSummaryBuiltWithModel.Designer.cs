@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pagedraft.Api.Data;
 
@@ -11,9 +12,11 @@ using Pagedraft.Api.Data;
 namespace Pagedraft.Api.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260623101801_AddChunkSummaryBuiltWithModel")]
+    partial class AddChunkSummaryBuiltWithModel
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -412,45 +415,6 @@ namespace Pagedraft.Api.Migrations
                     b.ToTable("BookStyleBaselines");
                 });
 
-            modelBuilder.Entity("Pagedraft.Api.Models.BookSummaryBaseline", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("BookBriefJson")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<Guid>("BookId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("BuiltChapterCount")
-                        .HasColumnType("int");
-
-                    b.Property<string>("BuiltWithModel")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("datetimeoffset");
-
-                    b.Property<string>("Language")
-                        .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("nvarchar(10)");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("datetimeoffset");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("BookId", "Language")
-                        .IsUnique();
-
-                    b.ToTable("BookSummaryBaselines");
-                });
-
             modelBuilder.Entity("Pagedraft.Api.Models.Chapter", b =>
                 {
                     b.Property<Guid>("Id")
@@ -561,9 +525,6 @@ namespace Pagedraft.Api.Migrations
                         .IsRequired()
                         .HasMaxLength(10)
                         .HasColumnType("nvarchar(10)");
-
-                    b.Property<DateTimeOffset?>("StructuredBuiltAt")
-                        .HasColumnType("datetimeoffset");
 
                     b.Property<string>("StructuredJson")
                         .HasColumnType("nvarchar(max)");
@@ -877,17 +838,6 @@ namespace Pagedraft.Api.Migrations
                 });
 
             modelBuilder.Entity("Pagedraft.Api.Models.BookStyleBaseline", b =>
-                {
-                    b.HasOne("Pagedraft.Api.Models.Book", "Book")
-                        .WithMany()
-                        .HasForeignKey("BookId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("Book");
-                });
-
-            modelBuilder.Entity("Pagedraft.Api.Models.BookSummaryBaseline", b =>
                 {
                     b.HasOne("Pagedraft.Api.Models.Book", "Book")
                         .WithMany()

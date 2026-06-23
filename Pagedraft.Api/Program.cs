@@ -48,10 +48,25 @@ builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
 builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 builder.Services.AddScoped<StyleBaselineService>();
+// Structured per-chapter brief builder (wb1-c01). Scoped like StyleBaselineService; the book-wide build
+// resolves a fresh instance per chapter from the scope factory so concurrent builds never share a
+// non-thread-safe DbContext.
+builder.Services.AddScoped<ChapterBriefService>();
+// Book-wide L2 summary builder (wb1-c02). Scoped like StyleBaselineService; the book-wide build resolves a
+// fresh ChapterBriefService per chapter from the scope factory so concurrent L0 builds never share a
+// non-thread-safe DbContext. Aggregates L0 → L1 ChapterBrief → L2 BookBrief and caches the rollup.
+builder.Services.AddScoped<BookSummaryService>();
+// Whole-book context assembler (wb1-c03). The SINGLE budget-aware path that both the book-scope analysis
+// context (AnalysisContextService.ResolveBookAsync) and the book-level analyses (BookIntelligenceService)
+// route through, so a large book can no longer silently overflow the model context window. Scoped: it
+// reads through the scoped DbContext + BookSummaryService.
+builder.Services.AddScoped<BookContextAssembler>();
 // In-progress style-baseline build registry (DEF-2). MUST be singleton: the build runs on a background
 // DI scope while later status requests run on their own scopes, and both must share the same map so a
 // build started in one tab/session is visible (as BUILDING) after a reload or in a second tab.
 builder.Services.AddSingleton<StyleBaselineBuildRegistry>();
+// In-progress book-summary build registry — singleton for the SAME reason as StyleBaselineBuildRegistry.
+builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".

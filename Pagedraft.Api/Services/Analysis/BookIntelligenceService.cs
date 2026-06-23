@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -22,6 +21,7 @@ public class BookIntelligenceService
 {
     private readonly AppDbContext _db;
     private readonly UnifiedAnalysisService _analysis;
+    private readonly BookContextAssembler _bookContextAssembler;
     private readonly ILogger<BookIntelligenceService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -33,10 +33,12 @@ public class BookIntelligenceService
     public BookIntelligenceService(
         AppDbContext db,
         UnifiedAnalysisService analysis,
+        BookContextAssembler bookContextAssembler,
         ILogger<BookIntelligenceService> logger)
     {
         _db = db;
         _analysis = analysis;
+        _bookContextAssembler = bookContextAssembler;
         _logger = logger;
     }
 
@@ -48,6 +50,12 @@ public class BookIntelligenceService
     /// </summary>
     public async Task SummarizeChaptersAsync(Guid bookId, string language, CancellationToken ct = default)
     {
+        // Persist the flat summary under the NORMALIZED locale (e.g. "en-US" → "en"), the SAME key the
+        // structured path (ChapterBriefService) and the BookContextAssembler read by. Storing the raw request
+        // value here is what let the assembler's exact-match selection skip the summary and degrade to raw
+        // chapter text. Normalize is idempotent for already-normalized values (e.g. "he" → "he").
+        var lang = BaselineLanguageResolver.Normalize(language);
+
         var chapters = await _db.Chapters
             .Where(c => c.BookId == bookId)
             .OrderBy(c => c.Order)
@@ -79,7 +87,7 @@ public class BookIntelligenceService
             if (existing != null)
             {
                 existing.SummaryText = summaryText;
-                existing.Language = language;
+                existing.Language = lang;
                 existing.CreatedAt = DateTimeOffset.UtcNow;
             }
             else
@@ -89,7 +97,7 @@ public class BookIntelligenceService
                     BookId = bookId,
                     ChapterId = chapter.Id,
                     SummaryText = summaryText,
-                    Language = language
+                    Language = lang
                 });
             }
 
@@ -106,11 +114,25 @@ public class BookIntelligenceService
     /// </summary>
     public async Task<BookProfile> BuildBookProfileAsync(Guid bookId, string language, CancellationToken ct = default)
     {
-        var concatenated = await GetConcatenatedSummaries(bookId, ct);
+        // wb1-c03: route through the SHARED budget-aware assembler instead of the unguarded flat-summary
+        // concat (GetConcatenatedSummaries appended every chapter summary with no size guard, overflowing
+        // the model context on a large book). The assembler prefers the dense structured BookBrief +
+        // ChapterBriefs and degrades to a budget-guarded flat-summary concat when no briefs are built yet;
+        // either way it stays within the NumCtx-derived budget and logs anything it drops.
+        // Budget the assembly to the SMALLEST window across the tasks that consume this SAME text below:
+        // BookOverview / CharacterAnalysis / StoryAnalysis route to LinguisticAnalysis and Synopsis to
+        // Summarization, so the context must fit whichever has the tighter num_ctx (Bug 3: budgeting against
+        // Summarization alone could overflow the LinguisticAnalysis window when it is configured smaller).
+        var assembly = await _bookContextAssembler.AssembleAsync(
+            bookId, language,
+            new[] { AiTaskType.LinguisticAnalysis, AiTaskType.Summarization }, ct);
+        var concatenated = assembly.Text;
         if (string.IsNullOrWhiteSpace(concatenated))
             throw new InvalidOperationException("No chapter summaries found. Run SummarizeChaptersAsync first.");
 
-        _logger.LogInformation("Building book profile for {BookId}", bookId);
+        _logger.LogInformation(
+            "Building book profile for {BookId} (structuredBriefs={Used}, dropped={Dropped}/{Budget}t)",
+            bookId, assembly.UsedStructuredBriefs, assembly.DroppedCount, assembly.BudgetTokens);
 
         var overviewTask = _analysis.RunRawAsync(concatenated, AnalysisType.BookOverview, null, language, ct);
         var synopsisTask = _analysis.RunRawAsync(concatenated, AnalysisType.Synopsis, null, language, ct);
@@ -155,7 +177,14 @@ public class BookIntelligenceService
     /// </summary>
     public async Task<AnalysisResult> AskAsync(Guid bookId, string question, string language, CancellationToken ct = default)
     {
-        var summaries = await GetConcatenatedSummaries(bookId, ct);
+        // wb1-c03: budget-aware assembly (shared path) instead of the unguarded summary concat. The question
+        // is appended AFTER the budgeted context, so the context can never push total input past the model
+        // window on its own (the assembler already capped it). Anything dropped is logged in the assembler.
+        // Budget to the QA route's task (GenericChat), whose window can be smaller than Summarization's
+        // (Bug 3) — and the appended question + the generated answer must still fit alongside the context.
+        var assembly = await _bookContextAssembler.AssembleAsync(
+            bookId, language, new[] { AiTaskType.GenericChat }, ct);
+        var summaries = assembly.Text;
         if (string.IsNullOrWhiteSpace(summaries))
             throw new InvalidOperationException("No chapter summaries found. Run SummarizeChaptersAsync first.");
 
@@ -174,25 +203,10 @@ public class BookIntelligenceService
 
     // ─── Helpers ────────────────────────────────────────────────────
 
-    private async Task<string> GetConcatenatedSummaries(Guid bookId, CancellationToken ct)
-    {
-        var summaries = await _db.Set<ChunkSummary>()
-            .Where(cs => cs.BookId == bookId)
-            .Join(_db.Chapters, cs => cs.ChapterId, c => c.Id, (cs, c) => new { c.Order, c.Title, cs.SummaryText })
-            .OrderBy(x => x.Order)
-            .ToListAsync(ct);
-
-        if (summaries.Count == 0) return string.Empty;
-
-        var sb = new StringBuilder();
-        foreach (var s in summaries)
-        {
-            sb.AppendLine($"## פרק / Chapter: {s.Title}");
-            sb.AppendLine(s.SummaryText);
-            sb.AppendLine();
-        }
-        return sb.ToString();
-    }
+    // NOTE: the former GetConcatenatedSummaries helper (unguarded flat-summary concat) was removed in
+    // wb1-c03. Its flat-summary fallback now lives in BookContextAssembler.AssembleFlatFallbackAsync, which
+    // applies the same per-chapter "## פרק / Chapter: {Title}" framing but caps the result at the NumCtx
+    // budget, so the book-level analyses can no longer overflow the model context.
 
     private async Task<BookProfile> GetOrCreateProfile(Guid bookId, CancellationToken ct)
     {

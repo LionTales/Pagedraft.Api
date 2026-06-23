@@ -1327,12 +1327,29 @@ public class ChapterStyleProfileAndLinguisticTests
             .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new AiResponse { Content = newMetricsJson, Model = "m", Provider = "p" });
 
+        // The book context assembler + summary service are required ctor deps but are NEVER exercised by
+        // LoadOrBuildChapterStyleProfileAsync; build them over the SAME ThrowOnSave db so nothing here can
+        // diverge. A throwaway empty provider satisfies BookSummaryService's IServiceScopeFactory dep.
+        var aiOptions = Microsoft.Extensions.Options.Options.Create(new AiOptions());
+        var scopeFactory = new ServiceCollection().BuildServiceProvider()
+            .GetRequiredService<IServiceScopeFactory>();
+        var chapterBriefService = new ChapterBriefService(
+            db, routerMock.Object, new PromptFactory(), aiOptions, scopeFactory,
+            NullLogger<ChapterBriefService>.Instance);
+        var bookSummaryService = new BookSummaryService(
+            db, chapterBriefService, new AnalysisProgressTracker(), scopeFactory, aiOptions,
+            new BookSummaryBuildRegistry(), NullLogger<BookSummaryService>.Instance);
+        var bookContextAssembler = new BookContextAssembler(
+            db, bookSummaryService, aiOptions, NullLogger<BookContextAssembler>.Instance);
+
         var svc = new AnalysisContextService(
             db,
             new SfdtConversionService(),
             routerMock.Object,
             new PromptFactory(),
-            Microsoft.Extensions.Options.Options.Create(new AiOptions()),
+            aiOptions,
+            bookContextAssembler,
+            bookSummaryService,
             NullLogger<AnalysisContextService>.Instance);
 
         // Make the stale-refresh SaveChanges throw.
@@ -2345,6 +2362,14 @@ public class ChapterStyleProfileAndLinguisticTests
 
         services.AddSingleton(routerMock.Object);
         services.Configure<AiOptions>(_ => { });
+        // AnalysisContextService now depends on the whole-book context assembler + summary service (wb1-c03).
+        // Register the small graph they need so the existing tests resolving IAnalysisContextService keep
+        // working; these are never exercised by the ChapterStyleProfile tests but must be constructible.
+        services.AddScoped<ChapterBriefService>();
+        services.AddScoped<BookSummaryService>();
+        services.AddScoped<BookContextAssembler>();
+        services.AddSingleton<AnalysisProgressTracker>();
+        services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
 
         return services.BuildServiceProvider();

@@ -2081,21 +2081,10 @@ public class UnifiedAnalysisService
 
     // ─── Mapping helpers ────────────────────────────────────────────
 
-    private static AiTaskType MapToTaskType(AnalysisType analysisType) => analysisType switch
-    {
-        AnalysisType.Proofread => AiTaskType.Proofread,
-        AnalysisType.LineEdit => AiTaskType.LineEdit,
-        AnalysisType.LinguisticAnalysis => AiTaskType.LinguisticAnalysis,
-        AnalysisType.LiteraryAnalysis => AiTaskType.LinguisticAnalysis,
-        AnalysisType.Summarization => AiTaskType.Summarization,
-        AnalysisType.BookOverview => AiTaskType.LinguisticAnalysis,
-        AnalysisType.Synopsis => AiTaskType.Summarization,
-        AnalysisType.CharacterAnalysis => AiTaskType.LinguisticAnalysis,
-        AnalysisType.StoryAnalysis => AiTaskType.LinguisticAnalysis,
-        AnalysisType.QA => AiTaskType.GenericChat,
-        AnalysisType.Custom => AiTaskType.GenericChat,
-        _ => AiTaskType.GenericChat
-    };
+    // Delegates to the shared AnalysisTaskMapping so this and the budget-aware BookContextAssembler resolve
+    // the same AnalysisType → AiTaskType routing (single source of truth).
+    private static AiTaskType MapToTaskType(AnalysisType analysisType) =>
+        AnalysisTaskMapping.ToAiTaskType(analysisType);
 
     /// <summary>
     /// For LineEdit, replace resultText with overallFeedback from the structured parse
