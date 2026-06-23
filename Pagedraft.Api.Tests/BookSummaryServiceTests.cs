@@ -381,6 +381,72 @@ public class BookSummaryServiceTests
         Assert.Equal(2, status.StaleCount);
     }
 
+    // ─── 3c. Rollup coverage: a partial cached rollup is not "ready" and forces a rebuild ─────────
+
+    [Fact]
+    public async Task BuildBookSummaryAsync_RollupMissingNewlyBuiltChapter_IsNotReadyAndRebuilds()
+    {
+        // Bug: the no-op gate (and IsReady) checked only StaleCount/HasSummary/model, NOT whether the cached
+        // rollup still covers every built chapter. After a chapter gains a fresh brief outside a full book
+        // build, every chapter is individually fresh yet the persisted BookBriefJson is an older partial
+        // rollup — status must report NOT ready and a build must NOT be a no-op.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildPerChapterProvider(dbName, out _, briefByContent: new()
+        {
+            ["CH_A"] = BriefAJson,
+            ["CH_B"] = BriefBJson,
+            ["CH_C"] = BriefAJson
+        });
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chA = Guid.NewGuid();
+        var chB = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Coverage Book", Language = "he" });
+        db.Chapters.Add(new Chapter { Id = chA, BookId = bookId, Order = 0, Title = "A", ContentText = "CH_A תוכן." });
+        db.Chapters.Add(new Chapter { Id = chB, BookId = bookId, Order = 1, Title = "B", ContentText = "CH_B תוכן." });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<BookSummaryService>();
+
+        // Full build over 2 chapters → cached rollup covers 2.
+        var first = await svc.BuildBookSummaryAsync(bookId, "he");
+        Assert.True(first.Ready);
+        var row = await db.BookSummaryBaselines.SingleAsync(b => b.BookId == bookId);
+        Assert.Equal(2, row.BuiltChapterCount);
+
+        // A 3rd chapter is added and gains a FRESH L0 brief OUTSIDE a full book build (single-chapter/L0-only
+        // path): all 3 chapters are now individually fresh, but the cached rollup still covers only 2.
+        var chC = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = chC, BookId = bookId, Order = 2, Title = "C", ContentText = "CH_C תוכן." });
+        await db.SaveChangesAsync();
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = chC, Language = "he",
+            StructuredJson = BriefAJson, BuiltWithModel = ActiveModel,
+            StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1)
+        });
+        await db.SaveChangesAsync();
+
+        // Status must NOT report ready: every chapter is fresh, but the rollup is a partial (2/3) snapshot.
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.Equal(0, status.StaleCount);
+        Assert.True(status.HasSummary);
+        Assert.Equal(3, status.BuiltChapters);
+        Assert.False(status.SummaryCoversBuiltChapters);
+        Assert.False(status.IsReady);
+
+        // A build is therefore NOT a no-op: it recomposes the rollup to cover all 3 chapters.
+        var second = await svc.BuildBookSummaryAsync(bookId, "he");
+        Assert.False(second.NoOp);
+        var rebuilt = await db.BookSummaryBaselines.SingleAsync(b => b.BookId == bookId);
+        Assert.Equal(3, rebuilt.BuiltChapterCount);
+
+        // And once rebuilt to full coverage, a subsequent build IS a no-op again.
+        var third = await svc.BuildBookSummaryAsync(bookId, "he");
+        Assert.True(third.NoOp);
+    }
+
     // ─── 4. Per-chapter failure isolation: one bad chapter does not abort the job ─────────────────
 
     [Fact]

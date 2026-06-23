@@ -325,6 +325,53 @@ public class BookContextAssemblerTests
         Assert.True(result.DroppedCount > 0);
     }
 
+    [Fact]
+    public async Task AssembleAsync_FlatFallback_PartialCoverage_BackFillsUncoveredChaptersFromRawText()
+    {
+        // Regression: with NO fresh structured briefs the assembler takes the flat fallback. When only SOME
+        // chapters have a flat summary, the uncovered ones (no summary row, or a blank one) must still reach
+        // the context from their raw text — the prior code built its unit list only from non-blank summaries
+        // and walked raw text for the whole book ONLY when there were zero summaries, so under partial flat
+        // coverage the uncovered chapters were silently omitted (absent from Text AND DroppedUnits).
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Flat", Language = "he" });
+
+        // Chapter 0: has a flat summary (and a raw body); the flat summary wins.
+        var ch0 = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = ch0, BookId = bookId, Order = 0, Title = "HasSummary", ContentText = "raw zero body" });
+        db.ChunkSummaries.Add(new ChunkSummary { BookId = bookId, ChapterId = ch0, Language = "he",
+            SummaryText = "Flat summary for chapter zero.", StructuredJson = null });
+
+        // Chapter 1: NO ChunkSummary row at all → only raw text.
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 1, Title = "NoRow",
+            ContentText = "Distinctive raw body for chapter one." });
+
+        // Chapter 2: ChunkSummary with a BLANK SummaryText → falls back to raw text.
+        var ch2 = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = ch2, BookId = bookId, Order = 2, Title = "BlankSummary",
+            ContentText = "Distinctive raw body for chapter two." });
+        db.ChunkSummaries.Add(new ChunkSummary { BookId = bookId, ChapterId = ch2, Language = "he",
+            SummaryText = "   ", StructuredJson = null });
+
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "he");
+
+        Assert.False(result.UsedStructuredBriefs);
+        // The chapter with a flat summary contributes it (flat wins over its own raw body)...
+        Assert.Contains("Flat summary for chapter zero.", result.Text);
+        Assert.DoesNotContain("raw zero body", result.Text);
+        // ...and the uncovered chapters are NOT silently omitted: their raw text is included.
+        Assert.Contains("Distinctive raw body for chapter one.", result.Text);
+        Assert.Contains("Distinctive raw body for chapter two.", result.Text);
+        Assert.Empty(result.DroppedUnits);
+    }
+
     // ─── (d) Big-book no-overflow: a book whose FULL content would overflow stays within budget ──────
 
     [Fact]

@@ -49,11 +49,23 @@ public sealed class BookSummaryStatus
     public Guid? ActiveBuildJobId { get; init; }
 
     /// <summary>
-    /// True when a build would be a genuine no-op: nothing missing/stale AND a usable cached rollup exists
-    /// that was built under the ACTIVE model. Mirrors the no-op gate in
+    /// True when the cached rollup's <see cref="BookSummaryBaseline.BuiltChapterCount"/> matches the number of
+    /// chapters that currently have a fresh L0 brief (<see cref="BuiltChapters"/>) — i.e. the cached
+    /// BookBriefJson was rolled up over the SAME set of chapters that are fresh now. False when the rollup is
+    /// an OLDER PARTIAL snapshot: e.g. a chapter gained a fresh brief AFTER the last full build (via a single-
+    /// chapter or L0-only build), so every chapter is individually fresh yet the persisted rollup is missing
+    /// that chapter's contribution. Only meaningful alongside <see cref="HasSummary"/>; false when no rollup.
+    /// </summary>
+    public bool SummaryCoversBuiltChapters { get; init; }
+
+    /// <summary>
+    /// True when a build would be a genuine no-op: nothing missing/stale, a usable cached rollup exists that
+    /// was built under the ACTIVE model, AND that rollup still covers every currently-built chapter (so a
+    /// chapter that gained a brief after the last full build forces a rebuild rather than reading ready off a
+    /// stale partial rollup). Mirrors the no-op gate in
     /// <see cref="BookSummaryService.BuildBookSummaryAsync"/> exactly.
     /// </summary>
-    public bool IsReady => StaleCount == 0 && HasSummary && !BuiltWithDifferentModel;
+    public bool IsReady => StaleCount == 0 && HasSummary && !BuiltWithDifferentModel && SummaryCoversBuiltChapters;
 
     /// <summary>Chapters a build would (re)process: missing + stale. Same as StaleCount; surfaced
     /// explicitly so the FE consent prompt does not need to alias it.</summary>
@@ -219,6 +231,13 @@ public class BookSummaryService
 
         var hasSummary = summary != null && !string.IsNullOrWhiteSpace(summary.BookBriefJson);
 
+        // Coverage: the cached rollup is current only when it rolled up the SAME number of chapters that are
+        // fresh now. A rollup built when fewer chapters had briefs (or before a chapter was added/given a
+        // brief outside a full build) is a partial snapshot — every chapter can be individually fresh while
+        // the persisted BookBriefJson still omits the newest one. Combined with StaleCount == 0 (which forces
+        // BuiltChapters == TotalChapters), this catches both a too-small and a too-large cached count.
+        var summaryCoversBuiltChapters = hasSummary && summary!.BuiltChapterCount == built;
+
         var maxParallel = Math.Max(1, _aiOptions.Value.MaxParallelStyleBaselineChapters);
         var (estimatedSeconds, estimatedUsd) = StyleBaselineService.ComputeEstimate(stale, provider, maxParallel);
 
@@ -235,6 +254,7 @@ public class BookSummaryService
             ActiveModel = activeModel,
             BuiltWithDifferentModel = hasSummary
                 && !string.Equals(summary!.BuiltWithModel, activeModel, StringComparison.Ordinal),
+            SummaryCoversBuiltChapters = summaryCoversBuiltChapters,
             ActiveBuildJobId = ResolveActiveBuildJobId(bookId, lang),
             ChaptersToBuild = stale,
             EstimatedSeconds = estimatedSeconds,
@@ -308,11 +328,13 @@ public class BookSummaryService
             _progress.SetTotalChunks(jobId.Value, chapters.Count, $"Building book summary for {chapters.Count} chapters");
         }
 
-        // IDEMPOTENT no-op: every chapter L0 brief fresh, a usable cached rollup exists, AND that rollup was
-        // itself built under the ACTIVE model. A rollup built under a DIFFERENT model is out of date even
-        // when every chapter brief matches (BuiltWithDifferentModel), so we fall through to recompute +
-        // restamp it. No LLM call only when all three hold.
-        if (preStatus.StaleCount == 0 && preStatus.HasSummary && !preStatus.BuiltWithDifferentModel)
+        // IDEMPOTENT no-op: every chapter L0 brief fresh, a usable cached rollup exists, that rollup was built
+        // under the ACTIVE model, AND it still covers every currently-built chapter. A rollup built under a
+        // DIFFERENT model (BuiltWithDifferentModel) or that PRE-DATES a chapter gaining a brief
+        // (!SummaryCoversBuiltChapters) is out of date even when every chapter brief matches, so we fall
+        // through to recompute + restamp it. preStatus.IsReady is the single source of truth for all four
+        // conditions (kept in lockstep with the FE-facing readiness gate).
+        if (preStatus.IsReady)
         {
             if (jobId.HasValue)
                 _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded,

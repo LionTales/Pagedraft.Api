@@ -350,74 +350,83 @@ public class BookContextAssembler
         int budget,
         CancellationToken ct)
     {
-        // Flat per-chapter summaries (the legacy GetConcatenatedSummaries source), in narrative order.
-        // Filter by the requested language exactly as the structured path does (ComposeChapterBriefsAsync):
-        // a ChunkSummary row for ANOTHER language must NOT be concatenated into this locale's book context,
-        // or a book with summaries only in a different language would inject foreign-language prose here.
         var lang = BaselineLanguageResolver.Normalize(language);
-        var summaries = await _db.ChunkSummaries
+
+        // Walk the FULL chapter set in narrative order so NO chapter is silently omitted: each chapter is
+        // represented by its flat summary if present, else its raw text. The prior version built the unit
+        // list ONLY from chapters that already had a non-blank flat summary, and fell back to raw text for
+        // the WHOLE book only when there were ZERO summaries — so under PARTIAL flat coverage (some chapters
+        // with a summary, others with a blank/empty summary, only a stale structured brief, or no row at all)
+        // the uncovered chapters were dropped from the context AND from DroppedUnits. Carry raw ContentText
+        // for the per-chapter last-resort fill.
+        var chapters = await _db.Chapters
             .AsNoTracking()
-            .Where(cs => cs.BookId == bookId && cs.Language == lang)
-            .Join(_db.Chapters, cs => cs.ChapterId, c => c.Id,
-                (cs, c) => new { c.Order, c.Title, cs.SummaryText })
-            .OrderBy(x => x.Order)
+            .Where(c => c.BookId == bookId)
+            .OrderBy(c => c.Order)
+            .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
             .ToListAsync(ct);
 
-        var units = summaries
-            .Where(s => !string.IsNullOrWhiteSpace(s.SummaryText))
-            .Select(s => (s.Order, Title: s.Title ?? string.Empty, Body: s.SummaryText))
-            .ToList();
-
-        var usedRawText = false;
-        if (units.Count == 0)
-        {
-            // No flat summaries either → last-resort raw chapter text, still budget-trimmed so the book
-            // analysis has SOMETHING rather than nothing (and still cannot overflow).
-            usedRawText = true;
-            var chapters = await _db.Chapters
+        // Flat summaries for (book, language), keyed by ChapterId. Same language filter as the structured
+        // path (ComposeChapterBriefsAsync) so a ChunkSummary row for ANOTHER language is never concatenated
+        // into this locale's book context.
+        var flatByChapterId = (await _db.ChunkSummaries
                 .AsNoTracking()
-                .Where(c => c.BookId == bookId)
-                .OrderBy(c => c.Order)
-                .Select(c => new { c.Order, c.Title, c.ContentText })
-                .ToListAsync(ct);
-
-            units = chapters
-                .Select(c => (c.Order, Title: c.Title ?? string.Empty,
-                    Body: SyncfusionWatermarkStripper.StripSyncfusionWatermark(c.ContentText ?? "")))
-                .Where(c => !string.IsNullOrWhiteSpace(c.Body))
-                .ToList();
-        }
+                .Where(cs => cs.BookId == bookId && cs.Language == lang)
+                .Select(cs => new { cs.ChapterId, cs.SummaryText })
+                .ToListAsync(ct))
+            .Where(x => !string.IsNullOrWhiteSpace(x.SummaryText))
+            .ToDictionary(x => x.ChapterId, x => x.SummaryText!);
 
         var sb = new StringBuilder();
         var included = new List<ChapterBrief>(); // flat path carries no structured briefs
         var dropped = new List<DroppedBookUnit>();
         var used = 0;
         var budgetExhausted = false;
-        var includedCount = 0;
+        var flatCount = 0;
+        var rawCount = 0;
 
-        foreach (var (order, title, body) in units)
+        foreach (var chapter in chapters)
         {
+            var title = chapter.Title ?? string.Empty;
+
+            // Best available representation for this chapter: flat summary > raw text.
+            bool fromFlat;
+            string body;
+            if (flatByChapterId.TryGetValue(chapter.Id, out var summary) && !string.IsNullOrWhiteSpace(summary))
+            {
+                body = summary;
+                fromFlat = true;
+            }
+            else
+            {
+                body = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+                fromFlat = false;
+            }
+
+            if (string.IsNullOrWhiteSpace(body))
+                continue; // genuinely empty chapter: nothing to include and nothing to truncate
+
             var block = FormatFlatChapterBlock(title, body);
             var blockTokens = EstimateTokens(block);
 
             if (budgetExhausted || used + blockTokens > budget)
             {
                 budgetExhausted = true;
-                dropped.Add(new DroppedBookUnit { Order = order, Title = title, EstimatedTokens = blockTokens });
+                dropped.Add(new DroppedBookUnit { Order = chapter.Order, Title = title, EstimatedTokens = blockTokens });
                 continue;
             }
 
             sb.Append(block);
             used += blockTokens;
-            includedCount++;
+            if (fromFlat) flatCount++; else rawCount++;
         }
 
         if (dropped.Count > 0)
         {
             _logger.LogWarning(
-                "BookContextAssembler (flat fallback): book {BookId} context budget ({Budget} tokens) " +
-                "reached. Included {IncludedCount}/{TotalCount} {UnitKind}; DROPPED {DroppedCount}: {DroppedTitles}.",
-                bookId, budget, includedCount, units.Count, usedRawText ? "raw chapter texts" : "flat summaries",
+                "BookContextAssembler (flat fallback): book {BookId} context budget ({Budget} tokens) reached. " +
+                "Included {IncludedCount}/{TotalCount} chapters ({Flat} flat, {Raw} raw); DROPPED {DroppedCount}: {DroppedTitles}.",
+                bookId, budget, flatCount + rawCount, chapters.Count, flatCount, rawCount,
                 dropped.Count, string.Join(", ", dropped.Select(d => $"#{d.Order} '{d.Title}'")));
         }
 
