@@ -42,6 +42,8 @@ public class AnalysisContextService : IAnalysisContextService
     private readonly IAiRouter _router;
     private readonly PromptFactory _promptFactory;
     private readonly IOptions<AiOptions> _aiOptions;
+    private readonly BookContextAssembler _bookContextAssembler;
+    private readonly BookSummaryService _bookSummary;
     private readonly ILogger<AnalysisContextService> _logger;
 
     public AnalysisContextService(
@@ -50,6 +52,8 @@ public class AnalysisContextService : IAnalysisContextService
         IAiRouter router,
         PromptFactory promptFactory,
         IOptions<AiOptions> aiOptions,
+        BookContextAssembler bookContextAssembler,
+        BookSummaryService bookSummary,
         ILogger<AnalysisContextService> logger)
     {
         _db = db;
@@ -57,6 +61,8 @@ public class AnalysisContextService : IAnalysisContextService
         _router = router;
         _promptFactory = promptFactory;
         _aiOptions = aiOptions;
+        _bookContextAssembler = bookContextAssembler;
+        _bookSummary = bookSummary;
         _logger = logger;
     }
 
@@ -151,6 +157,23 @@ public class AnalysisContextService : IAnalysisContextService
             }
         }
 
+        // wb1-c03: populate the structured narrative briefs (wb1-c02 made these read-able). These feed the
+        // [BOOK_CONTEXT]/[CHAPTER_CONTEXT] prompt sections (PromptFactory.GetRelevantFields) for the
+        // analysis types that consume them. Both are READ-ONLY projections from already-built L0/rollup data
+        // (no LLM call here) and degrade to null when the book summary has not been built yet.
+        ChapterBrief? chapterBrief = null;
+        BookBrief? bookBrief = null;
+        if (bookId.HasValue)
+        {
+            var briefLanguage = BaselineLanguageResolver.Normalize(
+                string.IsNullOrWhiteSpace(language)
+                    ? await ResolveLanguageAsync(bookId.Value, ct)
+                    : language);
+
+            (chapterBrief, bookBrief) = await LoadNarrativeBriefsAsync(
+                bookId.Value, chapterId, analysisType, briefLanguage, ct);
+        }
+
         return new AnalysisContext
         {
             TargetText = text,
@@ -160,8 +183,8 @@ public class AnalysisContextService : IAnalysisContextService
             FollowingContext = followingContext,
             Characters = characters,
             StyleProfile = styleProfile,
-            ChapterBrief = null,
-            BookBrief = null,
+            ChapterBrief = chapterBrief,
+            BookBrief = bookBrief,
             ChapterStyleBaseline = chapterStyleBaseline,
             // Deferred to Plan 5: real numeric book-average style metrics + book-comparison output.
             BookStyleAverages = null,
@@ -554,6 +577,65 @@ public class AnalysisContextService : IAnalysisContextService
     /// </summary>
     private static bool IsFresh(ChapterStyleProfile profile, Chapter chapter, string? activeModel) =>
         ChapterStyleProfileFreshness.IsFresh(profile.UpdatedAt, profile.BuiltWithModel, chapter.UpdatedAt, activeModel);
+
+    /// <summary>
+    /// Loads the structured narrative briefs (wb1-c02 read path) for the analysis context: the single
+    /// <see cref="ChapterBrief"/> for the chapter under analysis (Chapter/Scene scope) and the L2
+    /// <see cref="BookBrief"/> rollup. Only the briefs the analysis type actually consumes are fetched
+    /// (PromptFactory.GetRelevantFields decides what is rendered, so loading the rest is wasted work).
+    /// Read-only projections from already-built data — no LLM call — and degrade to null on any failure or
+    /// when the book summary has not been built yet.
+    /// </summary>
+    private async Task<(ChapterBrief? Chapter, BookBrief? Book)> LoadNarrativeBriefsAsync(
+        Guid bookId,
+        Guid? chapterId,
+        AnalysisType analysisType,
+        string language,
+        CancellationToken ct)
+    {
+        // Which structured briefs are relevant for this analysis type. Mirrors PromptFactory.GetRelevantFields
+        // so we never load a brief the prompt would not render.
+        var wantsChapterBrief = analysisType is AnalysisType.LiteraryAnalysis or AnalysisType.Summarization;
+        var wantsBookBrief = analysisType is AnalysisType.LiteraryAnalysis
+            or AnalysisType.QA or AnalysisType.StoryAnalysis;
+
+        if (!wantsChapterBrief && !wantsBookBrief)
+            return (null, null);
+
+        try
+        {
+            // Compose the L1 briefs once; both the per-chapter pick and the L2 rollup project from them.
+            IReadOnlyList<ChapterBrief> chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
+
+            ChapterBrief? chapterBrief = null;
+            if (wantsChapterBrief && chapterId.HasValue)
+            {
+                var target = await _db.Chapters
+                    .AsNoTracking()
+                    .Where(c => c.Id == chapterId.Value)
+                    .Select(c => new { c.Order })
+                    .FirstOrDefaultAsync(ct);
+                if (target != null)
+                    chapterBrief = chapterBriefs.FirstOrDefault(b => b.Order == target.Order);
+            }
+
+            BookBrief? bookBrief = null;
+            if (wantsBookBrief)
+                bookBrief = await _bookSummary.ComposeBookBriefAsync(bookId, chapterBriefs, ct);
+
+            return (chapterBrief, bookBrief);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Narrative briefs are supporting context; degrade gracefully so analysis still runs without them.
+            _logger.LogWarning(ex, "Failed to load narrative briefs for book {BookId}", bookId);
+            return (null, null);
+        }
+    }
 
     /// <summary>Resolves the analysis language for a book, defaulting to Hebrew.</summary>
     private async Task<string> ResolveLanguageAsync(Guid bookId, CancellationToken ct)
@@ -979,27 +1061,23 @@ public class AnalysisContextService : IAnalysisContextService
         Guid bookId,
         CancellationToken ct)
     {
-        var chapters = await _db.Chapters
-            .Where(c => c.BookId == bookId)
-            .OrderBy(c => c.Order)
-            .ToListAsync(ct);
-
-        if (chapters.Count == 0)
+        var hasChapters = await _db.Chapters.AnyAsync(c => c.BookId == bookId, ct);
+        if (!hasChapters)
             throw new InvalidOperationException("Book has no chapters to analyze.");
 
-        var sb = new StringBuilder();
-        foreach (var ch in chapters)
-        {
-            var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(ch.ContentText ?? "");
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                sb.AppendLine($"## {ch.Title}");
-                sb.AppendLine(text);
-                sb.AppendLine();
-            }
-        }
+        // Budget-aware whole-book context: the shared BookContextAssembler caps assembly at a token budget
+        // derived from the active model's NumCtx so a large book can no longer silently overflow the model
+        // context (the previous unguarded concat of every chapter's full text). It prefers the dense
+        // structured BookBrief + ChapterBriefs and degrades to a budget-guarded flat-summary/raw-text
+        // concat when no briefs are built yet. Anything dropped is logged inside the assembler (no silent
+        // truncation).
+        var language = await ResolveLanguageAsync(bookId, ct);
+        var assembly = await _bookContextAssembler.AssembleAsync(bookId, language, ct);
 
-        return (sb.ToString(), bookId, null, null);
+        if (string.IsNullOrWhiteSpace(assembly.Text))
+            throw new InvalidOperationException("No book text to analyze. Save the chapters first so the analysis has content.");
+
+        return (assembly.Text, bookId, null, null);
     }
 
 }

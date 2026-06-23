@@ -428,6 +428,7 @@ public class StyleBaselineServiceTests
             db: db,
             bookIntelligence: null!,
             styleBaseline: svc,
+            bookSummary: null!,
             progress: progress,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
@@ -473,6 +474,7 @@ public class StyleBaselineServiceTests
             db: db,
             bookIntelligence: null!,
             styleBaseline: svc,
+            bookSummary: null!,
             progress: progress,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
@@ -713,6 +715,7 @@ public class StyleBaselineServiceTests
             db: db,
             bookIntelligence: null!,
             styleBaseline: svc,
+            bookSummary: null!,
             progress: progress,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
@@ -879,6 +882,12 @@ public class StyleBaselineServiceTests
                 ["LinguisticAnalysis"] = new FeatureModelOptions { Provider = "test-provider", Model = "test-model" }
             };
         });
+        // AnalysisContextService now depends on the whole-book context assembler graph (wb1-c03); register
+        // it so IAnalysisContextService resolves. Not exercised by the StyleBaseline tests.
+        services.AddScoped<ChapterBriefService>();
+        services.AddScoped<BookSummaryService>();
+        services.AddScoped<BookContextAssembler>();
+        services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
         services.AddScoped<StyleBaselineService>();
         services.AddSingleton<AnalysisProgressTracker>();
@@ -1029,6 +1038,11 @@ public class StyleBaselineResolveLinguisticTests
             o.DefaultModel = aiOpt.DefaultModel;
             o.FeatureModels = aiOpt.FeatureModels;
         });
+        // AnalysisContextService now depends on the whole-book context assembler graph (wb1-c03).
+        services.AddScoped<ChapterBriefService>();
+        services.AddScoped<BookSummaryService>();
+        services.AddScoped<BookContextAssembler>();
+        services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
         services.AddScoped<StyleBaselineService>();
         services.AddSingleton<AnalysisProgressTracker>();
@@ -1225,6 +1239,7 @@ public class StyleBaselineProgressJobTypeGuardTests
             db: null!,
             bookIntelligence: null!,
             styleBaseline: null!,
+            bookSummary: null!,
             progress: tracker,
             scopeFactory: null!,
             appLifetime: null!,
