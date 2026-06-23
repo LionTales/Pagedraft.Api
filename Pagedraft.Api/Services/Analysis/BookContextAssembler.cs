@@ -96,6 +96,12 @@ public class BookContextAssembler
     // hard num_ctx wall where Ollama truncates. Centralized so the estimate is identical everywhere.
     private const double CharsPerToken = 4.0;
 
+    // Separator written between the BookBrief and every ChapterBrief in the assembled Text. It is part of the
+    // emitted string, so it MUST be charged against the budget: fold it into each block before estimating
+    // (exactly as the flat-fallback path does with its "{header}\n{body}\n\n" block) rather than appending it
+    // uncounted, or the separators inflate Text beyond what the running total accounts for.
+    private const string BlockSeparator = "\n\n";
+
     private readonly AppDbContext _db;
     private readonly BookSummaryService _bookSummary;
     private readonly IOptions<AiOptions> _aiOptions;
@@ -202,12 +208,14 @@ public class BookContextAssembler
         var sb = new StringBuilder();
         var bookBriefText = FormatBookBrief(bookBrief);
 
-        // 1. BookBrief ALWAYS first.
+        // 1. BookBrief ALWAYS first. Charge the trailing separator too (it is part of the emitted Text):
+        //    estimate the block WITH its separator, mirroring the flat path, so `used` never under-counts.
         var used = 0;
         if (!string.IsNullOrWhiteSpace(bookBriefText))
         {
-            sb.Append(bookBriefText).Append("\n\n");
-            used += EstimateTokens(bookBriefText);
+            var block = bookBriefText + BlockSeparator;
+            sb.Append(block);
+            used += EstimateTokens(block);
         }
 
         if (used > budget)
@@ -231,7 +239,11 @@ public class BookContextAssembler
         foreach (var brief in ordered)
         {
             var briefText = FormatChapterBrief(brief);
-            var briefTokens = EstimateTokens(briefText);
+            // Estimate the block WITH its separator (the same string that is appended), so the running total
+            // charges the "\n\n" that goes into Text. Charging it for the last block too (TrimEnd later drops
+            // that one separator) only biases the estimate slightly high, which is the safe direction.
+            var block = briefText + BlockSeparator;
+            var briefTokens = EstimateTokens(block);
 
             if (budgetExhausted || used + briefTokens > budget)
             {
@@ -240,7 +252,7 @@ public class BookContextAssembler
                 continue;
             }
 
-            sb.Append(briefText).Append("\n\n");
+            sb.Append(block);
             used += briefTokens;
             included.Add(brief);
         }

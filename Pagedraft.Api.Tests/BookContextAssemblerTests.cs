@@ -78,6 +78,44 @@ public class BookContextAssemblerTests
         Assert.True(result.DroppedCount > 0);
     }
 
+    [Fact]
+    public async Task AssembleAsync_StructuredBriefs_ChargesInterBlockSeparatorsAgainstBudget()
+    {
+        // Regression: the running budget total must charge the "\n\n" separators inserted between the
+        // BookBrief and every ChapterBrief. Those separators are part of the emitted Text; if they are not
+        // counted, EstimatedTokens reads <= budget while the real Text is larger (EstimateTokens(Text) >
+        // EstimatedTokens) and can exceed the configured window. Use a generous budget so ALL briefs are
+        // included (every inter-block separator present) and many, varied briefs so the separators accumulate
+        // beyond what per-block rounding could incidentally absorb.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 1_000_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Separator Book", Language = "he" });
+        const int chapterCount = 100;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var result = await asm.AssembleAsync(bookId, "he");
+
+        // All briefs fit at this budget, so every inter-block separator is present in Text.
+        Assert.True(result.UsedStructuredBriefs);
+        Assert.Equal(chapterCount, result.IncludedChapterBriefs.Count);
+        Assert.Equal(0, result.DroppedCount);
+
+        // The reported EstimatedTokens must be a valid UPPER BOUND on the actual assembled Text's token
+        // estimate. Pre-fix this fails: the uncounted separators push EstimateTokens(Text) above EstimatedTokens.
+        Assert.True(
+            BookContextAssembler.EstimateTokens(result.Text) <= result.EstimatedTokens,
+            $"EstimateTokens(Text)={BookContextAssembler.EstimateTokens(result.Text)} must be <= " +
+            $"EstimatedTokens={result.EstimatedTokens}: the inter-block separators must be charged.");
+        // And the budget contract still holds against the real Text.
+        Assert.True(BookContextAssembler.EstimateTokens(result.Text) <= result.BudgetTokens);
+    }
+
     // ─── (b) Dropped-units reported: overflow is recorded, not silently cut ──────────────────────────
 
     [Fact]
