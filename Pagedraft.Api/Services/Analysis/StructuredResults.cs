@@ -297,6 +297,111 @@ public class ConflictEntry
     public string Status { get; set; } = "ongoing";
 }
 
+// ---------------------------------------------------------------------------
+// Whole-book review -- wb2-f01
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// Top-level model output from the whole-book review pass.
+/// DimensionScore.Score uses string labels ("weak" | "mixed" | "strong") rather than a
+/// numeric scale so the value is self-documenting and does not imply false precision; v1
+/// precedent: QAResult.Confidence and StyleMetrics.Formality both use string labels.
+/// </summary>
+public class BookReviewResult
+{
+    /// <summary>List of individual editorial findings, each covering one dimension/issue.</summary>
+    [JsonPropertyName("findings")]
+    public List<BookFindingItem> Findings { get; set; } = new();
+
+    /// <summary>Per-dimension rollup scores summarising all findings in that dimension.</summary>
+    [JsonPropertyName("scores")]
+    public List<DimensionScore> Scores { get; set; } = new();
+}
+
+/// <summary>One editorial finding from the book review, as produced by the model.</summary>
+public class BookFindingItem
+{
+    /// <summary>Editorial dimension: plot | character | pacing | tone | theme | continuity</summary>
+    [JsonPropertyName("dimension")]
+    public string Dimension { get; set; } = string.Empty;
+
+    /// <summary>Overall verdict: keep | improve | cut</summary>
+    [JsonPropertyName("verdict")]
+    public string Verdict { get; set; } = string.Empty;
+
+    /// <summary>Severity 1 (minor) / 2 (moderate) / 3 (major).</summary>
+    [JsonPropertyName("severity")]
+    public int Severity { get; set; }
+
+    [JsonPropertyName("rationale")]
+    public string Rationale { get; set; } = string.Empty;
+
+    /// <summary>Specific passages or moments that support this finding.</summary>
+    [JsonPropertyName("evidence")]
+    public List<FindingEvidence> Evidence { get; set; } = new();
+
+    /// <summary>Chapters the finding touches (used for navigation and dedup key derivation).</summary>
+    [JsonPropertyName("chapterAnchors")]
+    public List<FindingChapterAnchor> ChapterAnchors { get; set; } = new();
+
+    /// <summary>Optional concrete editorial action the model suggests.</summary>
+    [JsonPropertyName("suggestedAction")]
+    public string? SuggestedAction { get; set; }
+}
+
+/// <summary>A single piece of textual evidence supporting a <see cref="BookFindingItem"/>.</summary>
+public class FindingEvidence
+{
+    /// <summary>Chapter id if the evidence can be pinned to a chapter; null for book-wide evidence.</summary>
+    [JsonPropertyName("chapterId")]
+    public Guid? ChapterId { get; set; }
+
+    [JsonPropertyName("chapterOrder")]
+    public int ChapterOrder { get; set; }
+
+    /// <summary>Short excerpt or paraphrase from the chapter text.</summary>
+    [JsonPropertyName("excerpt")]
+    public string Excerpt { get; set; } = string.Empty;
+}
+
+/// <summary>Chapter reference used to anchor a finding for navigation.</summary>
+public class FindingChapterAnchor
+{
+    [JsonPropertyName("chapterId")]
+    public Guid ChapterId { get; set; }
+
+    [JsonPropertyName("order")]
+    public int Order { get; set; }
+
+    [JsonPropertyName("title")]
+    public string Title { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Per-dimension rollup of all findings in a <see cref="BookReviewResult"/>.
+/// Score is a string label ("weak" | "mixed" | "strong") -- matches the label-over-int
+/// convention used by QAResult.Confidence and StyleMetrics.Formality in this file.
+/// </summary>
+public class DimensionScore
+{
+    /// <summary>Dimension key: plot | character | pacing | tone | theme | continuity</summary>
+    [JsonPropertyName("dimension")]
+    public string Dimension { get; set; } = string.Empty;
+
+    /// <summary>Holistic quality label for this dimension: "weak" | "mixed" | "strong"</summary>
+    [JsonPropertyName("score")]
+    public string Score { get; set; } = "mixed";
+
+    [JsonPropertyName("keepCount")]
+    public int KeepCount { get; set; }
+
+    [JsonPropertyName("improveCount")]
+    public int ImproveCount { get; set; }
+
+    [JsonPropertyName("cutCount")]
+    public int CutCount { get; set; }
+}
+
 /// <summary>Q&A answer with chapter citations.</summary>
 public class QAResult
 {

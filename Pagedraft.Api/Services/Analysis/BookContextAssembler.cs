@@ -58,6 +58,18 @@ public sealed record BookContextAssembly
 
     /// <summary>Convenience: how many units were dropped.</summary>
     public int DroppedCount => DroppedUnits.Count;
+
+    /// <summary>
+    /// SINGLE source of truth for "does this assembly carry usable structured briefs?" — the dense path the
+    /// whole-book review reads. True only when the structured-brief path was taken AND there is at least one
+    /// usable brief (a BookBrief OR at least one included chapter brief). Defined once and called from both:
+    ///   • <see cref="BookReviewService"/>'s briefs-absent build gate (as the negation), and
+    ///   • <see cref="BookReviewService"/>'s status probe (HasUsableBriefsAsync),
+    /// so the build gate and the surfaced status cannot drift into opposite truth values.
+    /// </summary>
+    public static bool HasUsableBriefs(BookContextAssembly assembly) =>
+        assembly.UsedStructuredBriefs
+        && (assembly.BookBrief != null || assembly.IncludedChapterBriefs.Count > 0);
 }
 
 /// <summary>
