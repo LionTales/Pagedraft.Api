@@ -17,6 +17,8 @@ public enum AnalysisType
     Synopsis,
     CharacterAnalysis,
     StoryAnalysis,
+    /// <summary>Whole-book developmental review (wb2). Routes to <see cref="AiTaskType.BookReview"/>.</summary>
+    BookReview,
 
     // ── Cross-level ──
     Summarization,
