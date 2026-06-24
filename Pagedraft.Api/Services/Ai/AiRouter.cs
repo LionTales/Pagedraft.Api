@@ -115,9 +115,9 @@ public class AiRouter : IAiRouter
     }
 
     /// <summary>
-    /// For unified analysis flows (LineEdit, LinguisticAnalysis), avoid appending the legacy pipeline
-    /// instruction when the caller already provided a complete, task-specific instruction. Both have
-    /// dedicated AiTaskTypes and run with structured JSON output (format=json), so the legacy
+    /// For unified analysis flows (LineEdit, LinguisticAnalysis, BookReview), avoid appending the legacy
+    /// pipeline instruction when the caller already provided a complete, task-specific instruction. These
+    /// have dedicated AiTaskTypes and run with structured JSON output (format=json), so the legacy
     /// heading/numbered-list pipeline prompt must NOT be appended (it would contradict the JSON schema
     /// and hurt quality/parsing). Also kept: heuristic detection for any prompt containing the
     /// sentence-level line edit marker text.
@@ -127,7 +127,7 @@ public class AiRouter : IAiRouter
         if (request == null || string.IsNullOrWhiteSpace(request.Instruction))
             return false;
 
-        if (request.TaskType is AiTaskType.LineEdit or AiTaskType.LinguisticAnalysis)
+        if (request.TaskType is AiTaskType.LineEdit or AiTaskType.LinguisticAnalysis or AiTaskType.BookReview)
             return true;
 
         var instruction = request.Instruction;
