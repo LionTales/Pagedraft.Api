@@ -95,4 +95,52 @@ public class AiRouterTests
         Assert.StartsWith(instruction, provider.Captured!.Instruction);
         Assert.NotEqual(instruction, provider.Captured.Instruction);
     }
+
+    [Fact]
+    public async Task BookReview_SendsStructuredInstructionVerbatim_WithoutLegacyPipelineText()
+    {
+        var (router, provider) = BuildRouter();
+        // A representative BookReview instruction: [BOOK_CONTEXT] + a JSON-schema dimension prompt.
+        const string instruction =
+            "[BOOK_CONTEXT]\nGenre: drama\n[/BOOK_CONTEXT]\nReview the whole book and return ONLY a JSON object with a findings array.";
+
+        // Hebrew language: without the verbatim allowlist add, the default GetPrompt fallthrough would
+        // append "השב בעברית בלבד." to this structured JSON prompt. It must NOT be appended.
+        await router.CompleteAsync(new AiRequest
+        {
+            TaskType = AiTaskType.BookReview,
+            Instruction = instruction,
+            Language = "he",
+            InputText = string.Empty,
+            JsonMode = true
+        });
+
+        Assert.NotNull(provider.Captured);
+        // Verbatim: the structured instruction is the whole instruction, with no pipeline text appended.
+        Assert.Equal(instruction, provider.Captured!.Instruction);
+        // The Hebrew default pipeline instruction ("respond in Hebrew only") must not leak in.
+        Assert.DoesNotContain("השב בעברית בלבד", provider.Captured.Instruction);
+        Assert.True(provider.Captured.JsonMode);
+    }
+
+    [Fact]
+    public void GetPrompt_BookReview_UsesLanguageAppropriateSystemMessage()
+    {
+        var factory = new PromptFactory();
+
+        var (enSystem, enInstruction) = factory.GetPrompt(AiTaskType.BookReview, "en");
+        var (heSystem, _) = factory.GetPrompt(AiTaskType.BookReview, "he");
+
+        // English request: must NOT receive the Hebrew default system message, and the system message
+        // must contain no Hebrew letters (i.e. it is the English analysis constant).
+        Assert.NotEqual(heSystem, enSystem);
+        Assert.DoesNotContain(enSystem, c => c >= '֐' && c <= '׿');
+        Assert.Contains("literary", enSystem, System.StringComparison.OrdinalIgnoreCase);
+
+        // The router supplies the real instruction verbatim, so GetPrompt returns an empty pipeline one.
+        Assert.Equal(string.Empty, enInstruction);
+
+        // Hebrew request: the system message must be Hebrew (the Hebrew analysis constant).
+        Assert.Contains(heSystem, c => c >= '֐' && c <= '׿');
+    }
 }

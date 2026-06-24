@@ -1,0 +1,930 @@
+[
+  {
+    "_README": "WHOLE-BOOK REVIEW GOLD (wb2-c04). Small synthetic mini-books for the precision-gated developmental-review eval. Each mini-book is rendered into a [BOOK_CONTEXT] block (BookBrief + ChapterBriefs, mirroring PromptFactory.FormatBookBrief/FormatChapterBrief) and fed through the REAL per-dimension review pipeline (PromptFactory.BuildBookReviewPrompt + IAiRouter[AiTaskType.BookReview] + UnifiedAnalysisService.ExtractJson -> BookReviewResult), exactly as BookReviewService.RunDimensionAsync drives it. Each PLANTED defect records its expected {dimension, verdict, chapterOrder} so the scorer can check planted-recall + dimension/verdict accuracy. CLEAN mini-books expect FEW/NO findings and are the PRECISION CONTROL (over-flagging a clean book is the failure mode this gate catches). HEBREW VALIDATION REQUIRED: every Hebrew brief/title below is an AI-authored DRAFT flagged 'HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION' and MUST be reviewed by a native Hebrew speaker before the Hebrew numbers are trusted. The dimension set is the SIX real BookReviewService.Dimensions: plot | character | pacing | tone | theme | continuity (there is no separate 'voice' dimension - voice lives under 'tone'). Verdicts: keep | improve | cut.",
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION"
+  },
+  {
+    "id": "pacing-sag-en",
+    "language": "en",
+    "expectClean": false,
+    "bookBrief": {
+      "genre": "Literary thriller",
+      "subGenre": "slow-burn mystery",
+      "targetAudience": "adult",
+      "literatureLevel": 7,
+      "themes": [
+        "guilt",
+        "small-town secrets"
+      ],
+      "synopsis": "A returning detective unravels a decades-old disappearance in the town she fled."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "Homecoming",
+        "summary": "Detective Mara returns to Aldreth after twenty years; she is assigned the cold case of a girl who vanished in 1998. Tense, propulsive opening: a body part surfaces in the reservoir."
+      },
+      {
+        "order": 2,
+        "title": "The Old House",
+        "summary": "Mara spends the entire chapter cataloguing the contents of her late aunt's house, room by room, listing furniture and old photographs. No new case information emerges and no character makes a decision."
+      },
+      {
+        "order": 3,
+        "title": "The Reservoir",
+        "summary": "A long, static chapter: Mara watches divers search the reservoir for hours; the narration dwells at length on the weather, the colour of the water, and her coffee going cold. The plot does not advance."
+      },
+      {
+        "order": 4,
+        "title": "The Confession",
+        "summary": "Sudden acceleration: a suspect confesses, a second body is found, and Mara is attacked, all in a few pages. The case breaks open."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "pacing",
+        "verdict": "improve",
+        "chapterOrder": 2,
+        "note": "Chapters 2 and 3 are a clear mid-book pacing sag: two consecutive static chapters (house inventory, watching divers) that do not advance the plot, between a propulsive opening (ch1) and a rushed climax (ch4). The model should flag a pacing problem anchored in chapter 2 or 3 with verdict improve (tighten/cut the sag)."
+      }
+    ],
+    "notes": "Single dominant planted defect: a pacing sag in the middle. The synopsis/other dimensions are deliberately coherent so a precise reviewer surfaces pacing and little else."
+  },
+  {
+    "id": "pacing-sag-he",
+    "language": "he",
+    "expectClean": false,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "bookBrief": {
+      "genre": "מותחן ספרותי",
+      "subGenre": "תעלומה איטית",
+      "targetAudience": "מבוגרים",
+      "literatureLevel": 7,
+      "themes": [
+        "אשמה",
+        "סודות של עיירה קטנה"
+      ],
+      "synopsis": "בלשית שחוזרת לעיירה שברחה ממנה מפענחת היעלמות בת עשורים."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "שיבה הביתה",
+        "summary": "הבלשית מאיה חוזרת לאלדרת אחרי עשרים שנה ומקבלת את תיק ההיעלמות של נערה שנעלמה ב-1998. פתיחה מתוחה ודוחפת: איבר גוף צף במאגר המים."
+      },
+      {
+        "order": 2,
+        "title": "הבית הישן",
+        "summary": "מאיה מבלה את כל הפרק בקטלוג תכולת ביתה של דודתה המנוחה, חדר אחר חדר, ומפרטת רהיטים ותמונות ישנות. שום מידע חדש על התיק אינו עולה ואף דמות אינה מקבלת החלטה."
+      },
+      {
+        "order": 3,
+        "title": "המאגר",
+        "summary": "פרק ארוך וסטטי: מאיה צופה בצוללנים מחפשים במאגר במשך שעות; הקריינות מתעכבת באריכות על מזג האוויר, על צבע המים ועל הקפה שמתקרר. העלילה אינה מתקדמת."
+      },
+      {
+        "order": 4,
+        "title": "הווידוי",
+        "summary": "האצה פתאומית: חשוד מתוודה, גופה שנייה מתגלה, ומאיה מותקפת, הכול בעמודים ספורים. התיק נפתח לרווחה."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "pacing",
+        "verdict": "improve",
+        "chapterOrder": 2,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. שקיעת קצב באמצע הספר: שני פרקים סטטיים רצופים (קטלוג בית, צפייה בצוללנים) בין פתיחה דוחפת לשיא נדחס. הציפייה: ממצא pacing המעוגן בפרק 2 או 3, verdict improve."
+      }
+    ],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. תרגום-מראה של pacing-sag-en."
+  },
+  {
+    "id": "timeline-contradiction-en",
+    "language": "en",
+    "expectClean": false,
+    "bookBrief": {
+      "genre": "Family saga",
+      "subGenre": "multi-generational drama",
+      "targetAudience": "adult",
+      "literatureLevel": 6,
+      "themes": [
+        "inheritance",
+        "memory"
+      ],
+      "synopsis": "Three siblings reckon with their father's death and the farm he left behind."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "The Funeral",
+        "summary": "The father, Caleb, is buried in winter. The narration states plainly that Caleb died in DECEMBER, with snow on the graves and the siblings shivering in coats."
+      },
+      {
+        "order": 2,
+        "title": "The Will",
+        "summary": "The siblings gather to read the will. Eldest sister Ruth recalls the funeral and the lawyer notes that probate began the week after the burial."
+      },
+      {
+        "order": 3,
+        "title": "The Harvest",
+        "summary": "Flashback-free present-day chapter: Ruth reflects that their father died in JUNE, 'just as the wheat was coming in,' and that they buried him in the summer heat. This directly contradicts chapter 1's winter/December funeral. No in-story reason (no dual timeline, no unreliable narrator) is established."
+      },
+      {
+        "order": 4,
+        "title": "The Sale",
+        "summary": "The siblings decide whether to sell the farm. The decision is reached and the book closes on Ruth signing the deed."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "continuity",
+        "verdict": "improve",
+        "chapterOrder": 3,
+        "note": "A hard timeline contradiction: chapter 1 says the father died/was buried in December (winter, snow); chapter 3 says he died in June (summer harvest). No dual-timeline or unreliable-narrator device justifies it. The model should flag a continuity finding anchored in chapter 3 (or spanning ch1+ch3), verdict improve (or cut the contradictory detail)."
+      }
+    ],
+    "notes": "Single dominant planted defect: a factual timeline contradiction across chapters. Allowed verdicts on scoring: improve OR cut (either is a correct fix for a contradiction)."
+  },
+  {
+    "id": "timeline-contradiction-he",
+    "language": "he",
+    "expectClean": false,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "bookBrief": {
+      "genre": "סאגה משפחתית",
+      "subGenre": "דרמה רב-דורית",
+      "targetAudience": "מבוגרים",
+      "literatureLevel": 6,
+      "themes": [
+        "ירושה",
+        "זיכרון"
+      ],
+      "synopsis": "שלושה אחים מתמודדים עם מות אביהם והחווה שהשאיר אחריו."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "ההלוויה",
+        "summary": "האב, כלב, נקבר בחורף. הקריינות אומרת במפורש שכלב מת בדצמבר, שלג מכסה את הקברים והאחים רועדים במעיליהם."
+      },
+      {
+        "order": 2,
+        "title": "הצוואה",
+        "summary": "האחים מתכנסים לקריאת הצוואה. רות, האחות הבכורה, נזכרת בהלוויה, והעורך-דין מציין שהליך הירושה החל בשבוע שאחרי הקבורה."
+      },
+      {
+        "order": 3,
+        "title": "הקציר",
+        "summary": "פרק בהווה ללא הבזקי עבר: רות מהרהרת שאביהם מת ביוני, 'בדיוק כשהחיטה הבשילה', ושקברו אותו בחום הקיץ. הדבר סותר ישירות את ההלוויה החורפית של פרק 1. שום סיבה עלילתית (אין ציר זמן כפול, אין מספר לא-אמין) אינה מבוססת."
+      },
+      {
+        "order": 4,
+        "title": "המכירה",
+        "summary": "האחים מחליטים אם למכור את החווה. ההחלטה מתקבלת והספר נחתם ברות חותמת על השטר."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "continuity",
+        "verdict": "improve",
+        "chapterOrder": 3,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. סתירת ציר זמן: פרק 1 אומר שהאב מת/נקבר בדצמבר (חורף, שלג); פרק 3 אומר שמת ביוני (קציר קיץ). אין מנגנון ציר-זמן-כפול או מספר לא-אמין. הציפייה: ממצא continuity המעוגן בפרק 3, verdict improve או cut."
+      }
+    ],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. תרגום-מראה של timeline-contradiction-en."
+  },
+  {
+    "id": "dropped-thread-tone-break-en",
+    "language": "en",
+    "expectClean": false,
+    "bookBrief": {
+      "genre": "Coming-of-age",
+      "subGenre": "literary fiction",
+      "targetAudience": "young adult / adult",
+      "literatureLevel": 7,
+      "themes": [
+        "belonging",
+        "first love"
+      ],
+      "synopsis": "Over one summer, sixteen-year-old Eli falls in love and learns his family is leaving town."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "June",
+        "summary": "Warm, lyrical, tender narration. Eli meets Noa at the lake. A SECONDARY THREAD is opened with weight: Eli's older brother Sam hints at a serious gambling debt that threatens the family, and asks Eli to keep it secret. The brother-debt thread is set up as important."
+      },
+      {
+        "order": 2,
+        "title": "July",
+        "summary": "The lyrical, tender tone continues. Eli and Noa grow closer. The narration is gentle and warm throughout, consistent with chapter 1."
+      },
+      {
+        "order": 3,
+        "title": "August",
+        "summary": "ABRUPT TONE BREAK: the gentle lyrical voice gives way to a harsh, cynical, sardonic narrator who mocks the characters, with no in-story trigger for the shift. The brother Sam and his gambling debt are NEVER mentioned again, the thread simply vanishes (a dropped plot thread)."
+      },
+      {
+        "order": 4,
+        "title": "September",
+        "summary": "Eli's family leaves town and he says goodbye to Noa. The romance resolves. Sam's debt is never resolved or referenced."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "tone",
+        "verdict": "improve",
+        "chapterOrder": 3,
+        "note": "An unmotivated tone break: chapters 1-2 are gentle/lyrical, chapter 3 lurches into a harsh cynical narrator with no in-story trigger. The model should flag a tone finding anchored in chapter 3, verdict improve."
+      },
+      {
+        "dimension": "plot",
+        "acceptDimensions": [
+          "plot",
+          "continuity"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 1,
+        "note": "A dropped plot thread: the brother Sam's gambling-debt thread is set up with weight in chapter 1 and never paid off or referenced again. The model should flag a plot (or continuity) finding about the unresolved/abandoned thread, anchored at chapter 1 (where it is opened) or 4 (where it should have paid off), verdict improve. SCORING NOTE: this defect accepts dimension plot OR continuity (an abandoned thread reads as either)."
+      }
+    ],
+    "notes": "TWO planted defects in one mini-book (tone break + dropped thread) to test multi-dimension recall in a single book. The dropped-thread defect accepts plot OR continuity as the correct dimension."
+  },
+  {
+    "id": "dropped-thread-tone-break-he",
+    "language": "he",
+    "expectClean": false,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "bookBrief": {
+      "genre": "התבגרות",
+      "subGenre": "ספרות יפה",
+      "targetAudience": "נוער / מבוגרים",
+      "literatureLevel": 7,
+      "themes": [
+        "שייכות",
+        "אהבה ראשונה"
+      ],
+      "synopsis": "במהלך קיץ אחד, אלי בן השש-עשרה מתאהב ומגלה שמשפחתו עוזבת את העיר."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "יוני",
+        "summary": "קריינות חמה, לירית ועדינה. אלי פוגש את נועה ליד האגם. נפתח חוט-עלילה משני בעל משקל: אחיו הבכור של אלי, סם, רומז על חוב הימורים כבד שמאיים על המשפחה, ומבקש מאלי לשמור זאת בסוד. חוט החוב מוצב כחשוב."
+      },
+      {
+        "order": 2,
+        "title": "יולי",
+        "summary": "הטון הלירי והעדין נמשך. אלי ונועה מתקרבים. הקריינות עדינה וחמה לכל אורך הפרק, בעקביות עם פרק 1."
+      },
+      {
+        "order": 3,
+        "title": "אוגוסט",
+        "summary": "שבירת טון פתאומית: הקול הלירי העדין מפנה מקום למספר קשוח, ציני וסרקסטי שלועג לדמויות, ללא שום טריגר עלילתי לשינוי. סם ואחיו וחוב ההימורים שלו לעולם אינם מוזכרים שוב, החוט פשוט נעלם (חוט עלילה נטוש)."
+      },
+      {
+        "order": 4,
+        "title": "ספטמבר",
+        "summary": "משפחתו של אלי עוזבת את העיר והוא נפרד מנועה. הרומן מגיע לפתרון. חוב ההימורים של סם לעולם אינו נפתר או מוזכר."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "tone",
+        "verdict": "improve",
+        "chapterOrder": 3,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. שבירת טון בלתי-מנומקת: פרקים 1-2 עדינים/ליריים, פרק 3 קופץ למספר ציני וקשוח ללא טריגר. הציפייה: ממצא tone המעוגן בפרק 3, verdict improve."
+      },
+      {
+        "dimension": "plot",
+        "acceptDimensions": [
+          "plot",
+          "continuity"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 1,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. חוט עלילה נטוש: חוט חוב ההימורים של סם מוצב במשקל בפרק 1 ולעולם אינו נפרע או מוזכר שוב. הציפייה: ממצא plot (או continuity) על החוט הנטוש, מעוגן בפרק 1 או 4, verdict improve. הערת ניקוד: הממד המקובל הוא plot או continuity."
+      }
+    ],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. תרגום-מראה של dropped-thread-tone-break-en. שני ממצאים מתוכננים."
+  },
+  {
+    "id": "strength-to-keep-en",
+    "language": "en",
+    "expectClean": false,
+    "bookBrief": {
+      "genre": "Historical fiction",
+      "subGenre": "wartime drama",
+      "targetAudience": "adult",
+      "literatureLevel": 8,
+      "themes": [
+        "resilience",
+        "moral courage"
+      ],
+      "synopsis": "A village schoolteacher quietly resists an occupying army by keeping her school open."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "The First Winter",
+        "summary": "Strong, distinctive narrative voice: spare, unsentimental, with dry wit. Teacher Agnes is introduced; the voice is established as the book's signature strength and is praised as consistent and assured."
+      },
+      {
+        "order": 2,
+        "title": "The Order",
+        "summary": "The same assured, spare voice carries forward. The occupiers post a closure order. Agnes's quiet defiance deepens. The voice remains a clear strength, consistent in register and wit."
+      },
+      {
+        "order": 3,
+        "title": "The Lesson",
+        "summary": "The signature voice holds steady and strong: spare, wry, morally clear. A tense classroom scene. The narrative voice is the standout craft strength of the book and is fully consistent across all three chapters."
+      },
+      {
+        "order": 4,
+        "title": "Spring",
+        "summary": "The book closes; the spare assured voice carries the resolution. Agnes endures. The voice remains the book's defining strength end to end."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "tone",
+        "verdict": "keep",
+        "chapterOrder": 1,
+        "note": "A GENUINE STRENGTH to preserve, not a defect: the spare, assured, wry narrative VOICE (which lives under the 'tone' dimension) is consistent and excellent across all four chapters. The model should ideally surface a tone finding with verdict KEEP (a strength worth preserving), anchored anywhere (chapter 1 is where the voice is established). This tests whether the reviewer can recognise and PRESERVE a strength rather than only flagging weaknesses. SCORING: a missed keep does NOT count as a clean-control false positive; it is a separate keep-recall signal."
+      }
+    ],
+    "notes": "The 'keep' control: a book whose dominant signal is a strength. Tests keep-verdict recall under the tone dimension. This book is otherwise coherent; non-keep findings on other dimensions are low-value noise (tracked as over-flagging, but the book is NOT in the clean-control denominator since it carries a planted keep)."
+  },
+  {
+    "id": "strength-to-keep-he",
+    "language": "he",
+    "expectClean": false,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "bookBrief": {
+      "genre": "סיפורת היסטורית",
+      "subGenre": "דרמה בימי מלחמה",
+      "targetAudience": "מבוגרים",
+      "literatureLevel": 8,
+      "themes": [
+        "חוסן",
+        "אומץ מוסרי"
+      ],
+      "synopsis": "מורה בכפר מתנגדת בשקט לצבא כובש בכך שהיא משאירה את בית הספר שלה פתוח."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "החורף הראשון",
+        "summary": "קול נרטיבי חזק וייחודי: צנוע, נטול רגשנות, עם הומור יבש. המורה אגנס מוצגת; הקול מבוסס כחוזק החתימה של הספר ומשובח כעקבי ובטוח."
+      },
+      {
+        "order": 2,
+        "title": "הצו",
+        "summary": "אותו קול בטוח וצנוע נמשך. הכובשים תולים צו סגירה. ההתרסה השקטה של אגנס מעמיקה. הקול נשאר חוזק ברור, עקבי ברישום ובהומור."
+      },
+      {
+        "order": 3,
+        "title": "השיעור",
+        "summary": "קול החתימה יציב וחזק: צנוע, שנון, בהיר מוסרית. סצנת כיתה מתוחה. הקול הנרטיבי הוא חוזק המלאכה הבולט של הספר ועקבי לחלוטין בשלושת הפרקים."
+      },
+      {
+        "order": 4,
+        "title": "אביב",
+        "summary": "הספר נחתם; הקול הצנוע והבטוח נושא את ההתרה. אגנס שורדת. הקול נשאר החוזק המכונן של הספר מתחילתו ועד סופו."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "tone",
+        "verdict": "keep",
+        "chapterOrder": 1,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. חוזק אמיתי לשימור, לא פגם: הקול הנרטיבי הצנוע והשנון (תחת ממד 'tone') עקבי ומצוין בכל ארבעת הפרקים. הציפייה: ממצא tone עם verdict KEEP, מעוגן בכל מקום (פרק 1 הוא מקום ביסוס הקול). בודק זיהוי ושימור חוזק. ניקוד: keep שהוחמץ אינו נספר כ-false positive של בקרת הניקיון."
+      }
+    ],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. תרגום-מראה של strength-to-keep-en. בקרת keep."
+  },
+  {
+    "id": "clean-control-en",
+    "language": "en",
+    "expectClean": true,
+    "maxFindings": 2,
+    "bookBrief": {
+      "genre": "Cozy mystery",
+      "subGenre": "amateur sleuth",
+      "targetAudience": "adult",
+      "literatureLevel": 6,
+      "themes": [
+        "community",
+        "trust"
+      ],
+      "synopsis": "A retired baker solves a small theft at the village fair, mending a rift between two old friends."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "The Fair",
+        "summary": "Warm, even-paced opening. Baker Tom sets up his stall at the village fair; the prize jam goes missing. Characters and stakes are introduced cleanly. Consistent gentle-cozy tone."
+      },
+      {
+        "order": 2,
+        "title": "Suspects",
+        "summary": "Tom questions the stallholders. Each suspect gets a fair, well-paced scene. The timeline is consistent (the same afternoon). Tone holds steady; the plot advances logically."
+      },
+      {
+        "order": 3,
+        "title": "The Clue",
+        "summary": "Tom notices a smear of jam on a glove. The clue follows causally from chapter 2. Pacing is balanced, characters behave consistently, tone is unchanged."
+      },
+      {
+        "order": 4,
+        "title": "The Mending",
+        "summary": "Tom reveals the culprit (a child who meant no harm), the two old friends reconcile, and the fair ends. All threads opened in chapters 1-3 are resolved. Tone, timeline, and characters are fully consistent end to end."
+      }
+    ],
+    "plantedDefects": [],
+    "notes": "PRECISION CONTROL: a competent, coherent short book with NO planted developmental defect. A precise reviewer should return FEW or NO findings (<= maxFindings across all six dimensions). Any flood of improve/cut findings here is the FALSE-POSITIVE failure mode this gate is designed to catch. A 'keep' finding on this book is fine (it is a real strength, not a false positive)."
+  },
+  {
+    "id": "clean-control-he",
+    "language": "he",
+    "expectClean": true,
+    "maxFindings": 2,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "bookBrief": {
+      "genre": "תעלומה נעימה",
+      "subGenre": "בלש חובב",
+      "targetAudience": "מבוגרים",
+      "literatureLevel": 6,
+      "themes": [
+        "קהילה",
+        "אמון"
+      ],
+      "synopsis": "אופה בגמלאות פותר גנבה קטנה ביריד הכפר ומאחה קרע בין שני חברים ותיקים."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "היריד",
+        "summary": "פתיחה חמה ומאוזנת בקצב. האופה תום מקים את הדוכן שלו ביריד הכפר; ריבת הפרס נעלמת. הדמויות וההימור מוצגים בבהירות. טון נעים ועקבי."
+      },
+      {
+        "order": 2,
+        "title": "חשודים",
+        "summary": "תום חוקר את בעלי הדוכנים. כל חשוד מקבל סצנה הוגנת ומקוצבת היטב. ציר הזמן עקבי (אותו אחר צהריים). הטון יציב; העלילה מתקדמת בהיגיון."
+      },
+      {
+        "order": 3,
+        "title": "הרמז",
+        "summary": "תום מבחין במריחת ריבה על כפפה. הרמז נובע סיבתית מפרק 2. הקצב מאוזן, הדמויות עקביות, הטון ללא שינוי."
+      },
+      {
+        "order": 4,
+        "title": "האיחוי",
+        "summary": "תום חושף את האשם (ילד שלא התכוון לרע), שני החברים הוותיקים מתפייסים, והיריד מסתיים. כל החוטים שנפתחו בפרקים 1-3 נסגרים. הטון, ציר הזמן והדמויות עקביים לחלוטין מתחילה ועד סוף."
+      }
+    ],
+    "plantedDefects": [],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. בקרת דיוק: ספר קצר, קוהרנטי וכשיר ללא פגם מתוכנן. סוקר מדויק יחזיר מעט או אפס ממצאים (<= maxFindings). הצפה של ממצאים כאן היא כשל ה-false-positive שהשער נועד לתפוס. ממצא keep כאן תקין."
+  },
+  {
+    "id": "bigbook-dropped-thread-pacing-en",
+    "language": "en",
+    "expectClean": false,
+    "_note": "BIG BOOK (wb2-c06): 20 chapters with rich briefs so the rendered [BOOK_CONTEXT] EXCEEDS the ~8192-token production budget (assembler would DROP late chapters in prod; the harness sends the whole thing under real output pressure). Plants a CROSS-CHAPTER dropped thread (the sister's prophecy subplot, opened ch3, never resolved) and a SUBTLE pacing sag across the middle third (ch9-12).",
+    "bookBrief": {
+      "genre": "Epic fantasy",
+      "subGenre": "political fantasy",
+      "targetAudience": "adult",
+      "literatureLevel": 7,
+      "themes": [
+        "loyalty",
+        "the cost of power",
+        "prophecy"
+      ],
+      "synopsis": "When the old king dies without a clear heir, the bastard scholar Corwin is dragged into a succession war between three claimant houses, while his estranged sister Yara is named in a temple prophecy that no one will explain."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "The King Is Dead",
+        "summary": "King Aldous dies in the opening pages and the capital, Vael, erupts into factional manoeuvring. Corwin, an illegitimate son of the dead king raised in the temple archive and known to the court only as a quiet scholar, is summoned because he alone can read the old dynastic ledgers in the dead tongue. We meet the three claimant houses and the shape of the succession crisis is laid out with dense, assured intelligence. Corwin's outsider position, inside the palace yet owning nothing, is established as the lens for the whole book, and the prose has a dry, watchful poise that will be the book's signature.\nPlot events: Aldous dies without naming a clear heir; the three houses begin to position for the throne; Corwin is summoned to court to read the dynastic ledgers; Corwin is publicly acknowledged for the first time as the king's bastard.\nCharacters: Corwin: scholar-archivist, illegitimate, watchful and self-effacing, terrified of being used | Duke Tomas of House Renar: the dead king's brother, cold and ambitious, sees Corwin as a tool | Queen Iselle of House Sable: widowed regent for her infant son, pragmatic and dangerous | General Garran of House Voss: frontier commander with the army's loyalty, blunt and honourable.\nThemes: the vacuum left by power, legitimacy and blood, the outsider as witness.\nOpen threads: who will take the throne; why Corwin specifically was summoned.\nTone: dry, watchful, assured; controlled court intelligence.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 2,
+        "title": "The Archive",
+        "summary": "Corwin returns to the temple archive to pull the succession records and discovers two ledger pages have been razored out at the binding. He realises someone is editing the dynastic record itself, which means the succession crisis is not merely political but documentary, a war fought over what the record is permitted to say. He recruits the archive's blind keeper, Mother Esa, who memorised the missing pages decades ago and can recite what was struck out, though she will not yet say it aloud. The central mystery crystallises and Corwin commits himself to it, knowing it makes him a target.\nPlot events: Corwin finds two ledger pages cut from the succession record; he deduces the record is being deliberately altered; he recruits Mother Esa, who remembers the missing content; Esa hints the razed lines name a hidden heir but refuses to say more yet.\nCharacters: Corwin: shifts from reluctant tool to committed investigator; intellectual courage emerges | Mother Esa: blind keeper, custodian of the true record, cautious, withholding for Corwin's safety.\nThemes: history as a contested document, memory versus the official record, the danger of knowing.\nOpen threads: who razed the pages and why; what the missing lines actually said; the hidden heir Esa half-names.\nTone: taut, conspiratorial; the dry register sharpens into suspense.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 3,
+        "title": "The Prophecy",
+        "summary": "A MAJOR SECONDARY THREAD opens here with enormous weight. The temple oracle, before the assembled court, publicly names Corwin's estranged sister Yara, a common soldier in Garran's frontier army whom Corwin has not spoken to in ten years, declaring that 'the razed name shall crown the city.' The temple treats this as world-shaking; Duke Tomas immediately dispatches riders to seize Yara; the queen's agents move too. Corwin is seized by terror for a sister he abandoned and resolves to reach her before any house does. The prophecy and Yara are framed, by the oracle, by Tomas, by the narration itself, as the very spine of the book, and the chapter ends on Corwin riding hard for the frontier.\nPlot events: the oracle publicly names Yara in the prophecy 'the razed name shall crown the city'; every house sends agents to find Yara; Corwin's decade-old estrangement from his sister is revealed; Corwin abandons the court and rides north to reach Yara first.\nCharacters: Corwin: guilt and fear for Yara crack his detachment; the sister-bond becomes his driving wound | Yara (offstage): named as prophetically central, a soldier, estranged, the object of a kingdom's hunt | Duke Tomas: treats the prophecy as a threat to seize and control | the oracle: invests the prophecy with absolute, world-ordering significance.\nThemes: prophecy and fate, the abandoned sibling, names as power.\nOpen threads: the Yara prophecy (opened with maximal weight; the reader is set up to expect it as the spine); whether Corwin can reach Yara first; what 'the razed name shall crown the city' means.\nTone: urgent, fated; the book promises Yara's prophecy as its central question.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 4,
+        "title": "Riders on the North Road",
+        "summary": "Corwin's flight north. He is pursued by House Renar agents who also want Yara, and the chapter is a well-paced road-chase culminating in a set piece at a flooded river crossing where Corwin, no fighter, escapes by reading his pursuers rather than fighting them, tricking them onto the failing ford. His resourcefulness as a scholar who wins by understanding people is dramatised cleanly. The Yara/prophecy thread is kept fully alive: every faction is racing for her and the stakes of reaching her first keep rising.\nPlot events: Corwin is pursued north by House Renar riders; a tense set piece at the flooded ford; Corwin outwits the riders by manipulation, not force; he presses on toward Garran's frontier camp, still chasing Yara.\nCharacters: Corwin: competence under pressure; defined as the man who wins by reading people | Renar agents: relentless, also hunting Yara, raising the prophecy stakes.\nThemes: wits over force, the hunt for the prophesied sister.\nOpen threads: the Yara prophecy (still central and racing); Corwin's race against the houses.\nTone: propulsive, kinetic; suspense sustained.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 5,
+        "title": "The Frontier Camp",
+        "summary": "Corwin reaches General Garran's frontier camp only to learn that Yara was transferred days earlier to an unnamed garrison; he has just missed her. Frustrated and frightened for her, he falls instead into Garran's orbit and discovers the general's claim to the throne is stronger and better-supported than the court believes. The prophecy thread is referenced a final prominent time: Garran himself has heard the oracle's words and is wary of the sister he cannot locate. Strong character work between the wary general and the scholar.\nPlot events: Corwin arrives but Yara has already been moved to an unknown garrison; Corwin is drawn into Garran's confidence; Garran's claim to the throne proves stronger than the court assumed; Garran admits he has heard the Yara prophecy and is uneasy about it.\nCharacters: Corwin: thwarted in the sister-hunt, redirected into the war plot | Garran: honourable, blunt, a genuine claimant; wary of the prophecy.\nThemes: the near-miss, the gravitational pull of the war away from the sister.\nOpen threads: the Yara prophecy (referenced here for the LAST prominent time); Yara's unknown garrison; Garran's claim.\nTone: tense, grounded; the camp is vivid and real.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 6,
+        "title": "Garran's Gambit",
+        "summary": "Garran reveals he intends to march on Vael and force the succession. Corwin, who still means to find Yara, is swept fully into the general's confidence as a reader of the court's intentions and a translator of its documents. The chapter is taut and advances the war plot decisively; the army's preparation has momentum and clear stakes. Yara is not named in this chapter, but because the prophecy was framed as the spine, the reader still actively expects it to return and pay off.\nPlot events: Garran resolves to march on the capital; Corwin becomes Garran's adviser on the court; the war machine begins to assemble; the march on Vael is set.\nCharacters: Garran: decisive, the war's prime mover | Corwin: increasingly enmeshed in a cause not his own.\nThemes: ambition and its machinery, the war eclipsing the personal quest.\nOpen threads: the war on Vael (now primary); the Yara prophecy (dormant but expected to return).\nTone: driving, martial; full forward momentum.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 7,
+        "title": "The Queen's Letter",
+        "summary": "Back-channel intrigue tightens the war into a real chess game. Queen Iselle, having learned Corwin is with Garran, secretly writes to him and offers him a place at her side, and protection, if he will turn spy on the general. The three-way contest becomes intimate and personal. The chapter is dense with political maneuvering and the moral pressure on Corwin is acute: Garran has trusted him, Iselle can destroy him. Crucially, the struck-out heir whose name was razed from the ledger is seeded here in a minor figure at Iselle's court whom the reader barely notices.\nPlot events: Iselle secretly contacts Corwin and offers him a place if he spies on Garran; the war becomes a three-way personal contest; the razed-heir's identity is quietly seeded in a minor courtier; Corwin is left with an impossible choice.\nCharacters: Iselle: subtle, ruthless, offers safety as a leash | Corwin: caught between loyalty to Garran and survival | a minor courtier: the seeded razed-heir (planted, easy to miss).\nThemes: loyalty as a trap, survival versus honour.\nOpen threads: Corwin's spy dilemma; the razed-heir mystery (seeded); the Yara prophecy (still dormant).\nTone: intimate, knife-edged political intrigue.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 8,
+        "title": "The Spy's Choice",
+        "summary": "Corwin agrees to feed Iselle information while remaining at Garran's side, becoming a double agent. The moral weight, that he is now betraying a man who trusted him with his cause and his life, is dramatised with real and earned tension. The book is at full power: the spy mechanism is set, the stakes are personal and political at once, and Corwin's self-justifications (he tells himself he does it to find Yara, to survive, to do least harm) deepen his character. The chapter ends with the first message dispatched to Iselle.\nPlot events: Corwin accepts the role of double agent; he dispatches his first secret message to Iselle; the betrayal of Garran begins; Corwin justifies it to himself in the name of finding Yara.\nCharacters: Corwin: morally compromised, fully dimensional now | Garran: trusting, unaware, sympathetic | Iselle: pulling the strings from Vael.\nThemes: betrayal, the corrosion of compromise.\nOpen threads: the double game; the razed-heir mystery; the Yara prophecy.\nTone: morally tense, fully powered; the book's high-water mark of drive.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 9,
+        "title": "The Long March",
+        "summary": "Garran's army begins the march south toward Vael, and the chapter narrates the logistics of the march in extended, lingering detail: the order of the columns, the rationing of grain, the daily rotation of the watch, the mending of a broken bridge over the Aldermere, the mud that swallows boots, the slow grind of weather across six days on the road. The texture is well-observed and the march is genuinely necessary to the plot, but little of consequence happens, no major decision is made, and the chapter dwells where a tighter book would compress. This is the FIRST of four chapters where the middle of the book begins to lose forward drive, the loss diffuse rather than concentrated.\nPlot events: the army sets out toward Vael; extended logistics of the march (columns, rations, the watch, a broken bridge, the weather); no decision of consequence is made; the army advances only a little.\nCharacters: Corwin: observes the march, reflects, takes no plot-changing action | Garran: managing the column, not advancing the conflict here.\nThemes: the grind of campaign, time and distance.\nOpen threads: the march (texture-heavy); the double game (idle here); the Yara prophecy (absent).\nTone: atmospheric, slow; necessary but dwelling. Mid-book drive begins to ebb.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 10,
+        "title": "Camp at Mirefield",
+        "summary": "The army halts at Mirefield for resupply, and the chapter follows Corwin through a long sequence of camp life: a protracted dice game among the soldiers, a quartermaster's inventory dispute over spoiled grain, a lengthy shared meal, a conversation about distant home that does not bear on the plot, and Corwin re-reading Iselle's letter without acting on it. The political situation is essentially static across the whole chapter; it begins and ends in the same place. It is competently written and humane, but it is the second consecutive chapter in which the plot does not move, and the mid-book sag deepens.\nPlot events: the army halts at Mirefield to resupply; camp life: a dice game, an inventory dispute, a long meal, talk of home; Corwin re-reads Iselle's letter but takes no action; the political situation is unchanged from chapter's start to end.\nCharacters: Corwin: passive, ruminating, makes no move | the soldiers: humanised texture, no plot function.\nThemes: the lull of campaign, stasis.\nOpen threads: the double game (deferred again); resupply at Mirefield.\nTone: warm, static; the second still chapter. The lull is now noticeable.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 11,
+        "title": "The Crossing of the Saltmarsh",
+        "summary": "The army crosses the saltmarsh below Mirefield, and the chapter is another atmospheric, slow movement: the difficulty of the boggy terrain, a supply wagon lost to the mire, the smell of salt rot and the clouds of insects, a minor marsh fever spreading through the ranks. Corwin observes and reflects on the campaign and on Yara, but takes no action that changes the war, and the plot advances only by moving the army a little further south. By this third consecutive low-movement chapter the middle of the book is plainly losing forward drive, the sag spread thin across the marsh, the camp, and the road rather than dramatised in one obviously static scene.\nPlot events: the army crosses the saltmarsh; a supply wagon is lost to the bog; a marsh fever begins spreading; the army advances only a little further south.\nCharacters: Corwin: reflective, passive, still no decisive action | the ranks: afflicted by fever, atmospheric.\nThemes: attrition, the slow south road.\nOpen threads: the march (third low-drive chapter); the double game (still idle).\nTone: dank, atmospheric, slow; the mid-book lull is now sustained across three chapters.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 12,
+        "title": "A Quiet Council",
+        "summary": "Garran holds a war council that largely restates positions the reader already knows from chapters 6 through 8: the plan to invest Vael, the disposition of the houses, the loyalties in play. Corwin attends, passes a small piece of intelligence to Iselle's courier, and the council disperses without reaching any new decision. The chapter is competent but treads water, and by its end the middle third has spent four chapters with limited plot movement. The war finally feels close again only in the final paragraph, when scouts ride in to report that Vael's gates are barred and the siege is at hand, snapping the book back toward momentum.\nPlot events: Garran's council restates known positions without a new decision; Corwin passes intelligence to Iselle's courier; the council disperses inconclusively; scouts report Vael's gates barred (momentum returns in the last paragraph).\nCharacters: Garran: holding council, not advancing | Corwin: a small espionage beat amid the stasis.\nThemes: deliberation without progress, the threshold of action.\nOpen threads: the double game (a small beat); the siege (about to begin).\nTone: talky, treading water, then a final jolt of momentum. End of the four-chapter mid-book sag.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 13,
+        "title": "The Walls of Vael",
+        "summary": "The army reaches Vael and the siege begins, and the plot snaps back to full intensity after the mid-book lull. The first assault on the walls is dramatised with force; Corwin's double game is nearly exposed when a courier is intercepted; and Mother Esa, still inside the city, smuggles out a message about the razed ledger pages that reignites the documentary mystery from chapters 1 and 2. Momentum returns hard and the threads begin to converge.\nPlot events: the siege of Vael begins with a first assault; Corwin's double game is nearly exposed; Mother Esa smuggles out a message about the razed pages; the succession mystery reignites.\nCharacters: Corwin: back in active danger; the spy plot tightens | Mother Esa: re-enters, advancing the razed-pages mystery | Garran: pressing the assault.\nThemes: convergence, the return of the documentary mystery.\nOpen threads: the siege; the razed-heir mystery (reignited); Corwin's exposure risk.\nTone: intense, kinetic; full drive restored.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 14,
+        "title": "The Razed Pages",
+        "summary": "Corwin finally learns, through Esa's smuggled message and his own reading of the recovered binding, what the missing ledger pages said: the dead king secretly legitimised an heir whose name was then struck out of the record, and the struck-out name is NOT Yara but the minor courtier seeded at Iselle's court in chapter 7. The succession mystery opened in chapters 1 and 2 pays off with a genuine, well-prepared reversal that recontextualises the whole war. Tense and satisfying; the documentary spine of the book lands.\nPlot events: Corwin reads the true content of the razed pages; the dead king had secretly legitimised a now-struck-out heir; the heir is revealed to be the minor courtier seeded in ch7, not Yara; the succession crisis is recontextualised.\nCharacters: Corwin: the investigator's payoff arrives | the seeded courier: revealed as the true heir.\nThemes: the truth of the record, the reversal earned.\nOpen threads: the razed-heir mystery (paid off); Note: the Yara prophecy is conspicuously NOT addressed by this payoff.\nTone: revelatory, tight; a strong structural payoff.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 15,
+        "title": "Betrayal at the Gate",
+        "summary": "Corwin's double agency is finally exposed to Garran when Iselle's courier is taken and talks. A wrenching confrontation follows at the river gate: Garran, betrayed by the one man he trusted, spares Corwin's life out of a soldier's contempt rather than mercy and casts him out, and Corwin flees into the besieged city. The spy thread pays off with full emotional force and real cost; Garran's restraint deepens both men. Strong character payoff.\nPlot events: Corwin's double agency is exposed to Garran; a confrontation at the river gate; Garran spares but banishes Corwin; Corwin flees into besieged Vael.\nCharacters: Garran: betrayed, contemptuous, but restrained; ennobled by sparing Corwin | Corwin: his compromise costs him the one man who trusted him.\nThemes: betrayal's price, mercy as contempt.\nOpen threads: the spy plot (paid off); Corwin inside the city now.\nTone: wrenching, charged; the spy thread's emotional climax.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 16,
+        "title": "The Queen's Court",
+        "summary": "Inside Vael, Corwin reaches Queen Iselle and delivers the truth about the secretly legitimised heir. The revelation threatens her regency, since a legitimate adult heir supersedes her infant son, and Iselle must decide whether to suppress the truth or wield it. The Iselle thread pays off in sharp, satisfying political drama, and Corwin, now trusted by no faction, becomes the sole keeper of a truth every house would kill for. The chapter is dense and well-built.\nPlot events: Corwin reaches Iselle and reveals the legitimised heir; the revelation threatens Iselle's regency; Iselle must choose to suppress or wield the truth; Corwin becomes the lone keeper of a dangerous truth.\nCharacters: Iselle: her regency endangered; pragmatic calculation under pressure | Corwin: isolated, indispensable, hunted by his own knowledge.\nThemes: truth as a weapon, power threatened by legitimacy.\nOpen threads: the razed-heir crisis (escalating); Corwin's total isolation.\nTone: sharp, political, satisfying.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 17,
+        "title": "The Third Claimant",
+        "summary": "The struck-out heir, the minor courtier seeded in chapters 1 and 7, is revealed in full and produced before the factions, and the three-house war becomes a four-way crisis. The reveal is earned by the earlier seeding and lands with weight, reordering every alliance. The war and succession plots fully fuse. The prophecy about Yara is still not addressed in any way, and a careful reader now feels its absence.\nPlot events: the struck-out heir is revealed and produced before the factions; the three-house war becomes a four-way crisis; alliances reorder around the legitimate heir; the war and succession plots fuse.\nCharacters: the third claimant: the seeded courier, now central | the houses: realigning around the new claimant.\nThemes: the reordering of power, seeds paying off.\nOpen threads: the four-way succession crisis; Note: the Yara prophecy remains unaddressed.\nTone: escalating, structural; strong convergence.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 18,
+        "title": "The Breaking of the Siege",
+        "summary": "The siege breaks in a large, well-choreographed battle. Garran's army is defeated at the walls; Iselle's regency survives but is gravely weakened; the legitimate heir's faction holds the field. The war plot reaches its climax with clarity and force, every army-scale thread converging into one decisive engagement. Corwin survives at the margins, a witness to the ruin he helped shape.\nPlot events: the siege breaks in a decisive battle; Garran is defeated; Iselle's regency survives but is weakened; the legitimate heir's faction prevails.\nCharacters: Garran: defeated, his gambit ended | Iselle: weakened but surviving | Corwin: a marginal survivor and witness.\nThemes: the cost of power, the climax of the war.\nOpen threads: the war (climax); the succession (resolving toward settlement).\nTone: climactic, martial, clear.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 19,
+        "title": "Ashes",
+        "summary": "The aftermath. Corwin, now trusted by no faction and owing allegiance to none, takes stock of the ruin. The legitimised-heir crisis is resolved into an uneasy negotiated settlement among the surviving houses. The chapter is a strong, sombre denouement that gathers the war's human cost. But the prophecy about Yara, and Yara herself, are simply never mentioned again here where the book is settling its accounts: the thread opened with such enormous weight in chapter 3 has silently evaporated, unresolved, unsubverted, unacknowledged.\nPlot events: the war's aftermath is surveyed; the succession resolves into an uneasy settlement; Corwin takes stock, belonging to no faction; the human cost is gathered.\nCharacters: Corwin: a survivor without a side | the houses: settling into an uneasy peace.\nThemes: the cost of power, the ash after ambition.\nOpen threads: the settlement; DROPPED: the Yara prophecy is not addressed even as the book settles accounts.\nTone: sombre, elegiac; a strong denouement, but a conspicuous silence on Yara.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 20,
+        "title": "The Razed Name",
+        "summary": "The closing chapter. Corwin returns to the temple archive, restores the ledger, and the book ends on his quiet resolve to record the true history of the succession so the record can no longer be razed. The ending is tonally consistent with the watchful opening and well-written. But Yara never reappears, and the prophecy that 'the razed name shall crown the city,' framed in chapter 3 as the very spine of the book, is neither fulfilled nor subverted nor even acknowledged: it is a fully abandoned thread, and the title's resonance points only back to the ledger, never to the sister it was made to evoke.\nPlot events: Corwin returns to the archive and restores the ledger; he resolves to record the true history; the book closes on the keeper of the record; Yara and her prophecy are never mentioned again.\nCharacters: Corwin: returned to his origin, now the deliberate keeper of truth.\nThemes: history reclaimed, the record restored.\nOpen threads: DROPPED AND ABANDONED: the Yara prophecy is never fulfilled, subverted, or acknowledged; Yara never reappears.\nTone: quiet, resolved, consistent with the opening; the dropped thread is total.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "plot",
+        "acceptDimensions": [
+          "plot",
+          "continuity"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 3,
+        "note": "DROPPED CROSS-CHAPTER THREAD: the Yara prophecy subplot ('the razed name shall crown the city') is opened with enormous weight in chapter 3 - the oracle names her, every faction races for her (ch4-5), and the reader is set up to expect it as the book's spine - then it is NEVER resolved, subverted, or even mentioned after chapter 5; Yara never reappears and the prophecy is silently abandoned by the ending (ch19-20). The model should flag a plot (or continuity) finding about the unresolved/abandoned prophecy+sister thread, anchored at chapter 3 (where it opens) or 19/20 (where it should pay off). Accepts dimension plot OR continuity. The chapter anchor is lenient (+/-1) so 3, 4, 19, or 20 all count."
+      },
+      {
+        "dimension": "pacing",
+        "verdict": "improve",
+        "chapterOrder": 10,
+        "note": "MIDDLE-THIRD PACING SAG (subtler than the tiny pacing-sag book - it is spread across FOUR chapters, 9-12, each individually plausible as 'texture' but cumulatively a loss of forward drive: the long march logistics (ch9), static camp life (ch10), the slow saltmarsh crossing (ch11), and a council that restates known positions (ch12). The model should flag a pacing finding anchored somewhere in chapters 9-12 (anchor leniency +/-1 means 9,10,11,12,13 all count), verdict improve (tighten/compress the mid-book lull). This is the SUBTLE defect: a perfect-scoring reviewer on the tiny books may miss a sag that is diffused across several chapters rather than concentrated in one obviously-static chapter."
+      }
+    ],
+    "notes": "BIG BOOK over the 8192-token budget. TWO planted defects: a hard dropped-thread (prophecy/sister) and a SUBTLE diffuse pacing sag across the middle third. Tests whether the reviewer catches cross-chapter developmental defects when the context is large enough that the production assembler would drop late chapters."
+  },
+  {
+    "id": "bigbook-timeline-motivation-en",
+    "language": "en",
+    "expectClean": false,
+    "_note": "BIG BOOK (wb2-c06): 18 chapters, rich briefs exceeding the ~8192-token budget. Plants a CONTINUITY/TIMELINE contradiction between DISTANT chapters (ch2 establishes the fire was 12 years ago; ch14 says it was 6 years ago) and a SUBTLE character-motivation inconsistency (the matriarch's stated reason for selling the mill flips with no development).",
+    "bookBrief": {
+      "genre": "Literary family saga",
+      "subGenre": "multi-generational drama",
+      "targetAudience": "adult",
+      "literatureLevel": 8,
+      "themes": [
+        "inheritance",
+        "memory",
+        "the weight of the past"
+      ],
+      "synopsis": "Across one decade, the Harlan family circles the slow ruin of the textile mill their grandfather built, and the fire that took the eldest son."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "The Mill at Dawn",
+        "summary": "An assured, elegiac opening. We meet the Harlans: the matriarch Edith, her surviving children Ruth, Daniel, and Pearl, and the family textile mill in the river town of Coldbrook that their grandfather built. The prose is patient and image-rich and the mill is established as the family's wound and its pride at once. The eldest son, Thomas, is referenced only as 'the one we lost in the fire,' a grief the whole family circles. The distinctive, controlled narrative voice that will carry the book is set in this chapter.\nPlot events: the Harlan family and the Coldbrook mill are introduced; the mill is established as both pride and wound; Thomas, the dead eldest son, is invoked as the family's loss; the elegiac voice is established.\nCharacters: Edith: the matriarch, grief-bound to the mill and to Thomas's memory | Ruth: the second child, the book's centre of gravity, watchful and dutiful | Daniel: the financially-minded son | Pearl: the youngest, long absent.\nThemes: inheritance, memory, the weight of the past.\nOpen threads: the failing mill; the unspoken grief over Thomas; Pearl's long absence.\nTone: elegiac, patient, image-rich; a strong distinctive voice.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 2,
+        "title": "Twelve Years",
+        "summary": "A key expository chapter that sets the book's fixed temporal spine. Ruth reflects at length on the fire that killed her brother Thomas, and the narration states PLAINLY AND REPEATEDLY that the fire happened TWELVE YEARS AGO. The twelve-year gap is anchored with concrete, redundant detail: Ruth was nineteen the night of the fire and is thirty-one now; her own daughter, born the spring after the fire, is 'eleven going on twelve'; 'a dozen winters have come and gone since the smoke.' The redundancy is deliberate, the reader is meant to trust this as the book's settled chronology, and every later reference to the fire should sit twelve years downstream of it.\nPlot events: Ruth reflects in depth on the fire that killed Thomas; the narration fixes the fire at TWELVE years ago; concrete anchors: Ruth nineteen-then / thirty-one-now; daughter nearly twelve; a dozen winters; the twelve-year chronology is established as the book's temporal spine.\nCharacters: Ruth: nineteen at the fire, thirty-one now; her grief and her daughter anchor the timeline | Thomas (dead): the fire's victim, twelve years gone.\nThemes: memory, time's distance from the wound.\nOpen threads: the fixed twelve-year chronology (planted spine); Ruth's grief.\nTone: reflective, exact, redundant by design; the chronology is meant to be trusted.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 3,
+        "title": "Ledgers",
+        "summary": "Daniel opens the mill's books and finds it failing; the family's economic stakes are laid out in hard numbers. Edith, the matriarch, declares the mill will NEVER be sold because it is Thomas's monument, and her motivation is stated plainly and for the first time: she keeps the mill out of grief, to honour her dead son, and to sell it would be to bury him a second time. This is the bedrock of her character, the refusal to sell, grounded in grief, and the chapter is dense with the family tension it creates between sentiment and solvency.\nPlot events: Daniel finds the mill is failing financially; the family's economic stakes are laid bare; Edith declares the mill will never be sold; Edith's motivation is fixed: she keeps the mill out of grief, to honour Thomas.\nCharacters: Daniel: pragmatic, wants to face the numbers | Edith: refuses to sell BECAUSE of grief for Thomas (planted motivation, stated for the first time).\nThemes: sentiment versus solvency, grief as inheritance.\nOpen threads: the keep-or-sell conflict; Edith's grief-driven refusal (planted).\nTone: tense, grounded; the family fault line opens.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 4,
+        "title": "Pearl Returns",
+        "summary": "The youngest, Pearl, comes home from the city after years away, and her arrival reopens old wounds and old alliances. The three siblings' dynamics are sharply drawn: Ruth's dutiful endurance, Daniel's cool pragmatism, Pearl's restless need. The fire is referenced again in passing, consistent with chapter 2's chronology (Pearl was a young child when it happened twelve years ago). The elegiac, watchful tone holds steady and the character work is the chapter's strength.\nPlot events: Pearl returns to Coldbrook after years away; old wounds and sibling alliances reopen; the fire is referenced consistently with the twelve-year chronology; the sibling dynamics are sharply established.\nCharacters: Pearl: restless, needy, the catalyst of buried tensions | Ruth: dutiful, the family's hinge | Daniel: cool, practical.\nThemes: the returning prodigal, old wounds.\nOpen threads: Pearl's reasons for returning (withheld); the keep-or-sell conflict deepening.\nTone: elegiac, sharp character work; tone consistent.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 5,
+        "title": "The River",
+        "summary": "A quieter chapter following Ruth and Pearl along the river that powers the mill, recalling their childhood and the brother they lost. The fire is invoked once more, again consistent with chapter 2: Pearl was small, Ruth nearly grown, the loss twelve years settled. The prose is lovely and controlled and the past presses steadily on the present without melodrama. The chapter deepens the sisters' bond and the book's central preoccupation with how the past is carried.\nPlot events: Ruth and Pearl walk the river and recall childhood; they speak of Thomas and the fire, consistent with the chronology; the sisters' bond deepens; the past's weight on the present is dramatised.\nCharacters: Ruth and Pearl: their bond and shared grief deepen | Thomas (dead): remembered, twelve years gone.\nThemes: memory, the river as time.\nOpen threads: the sisters' bond; the carried past.\nTone: quiet, lyrical, controlled; consistent.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 6,
+        "title": "Daniel's Plan",
+        "summary": "Daniel proposes modernising the mill, new looms, new contracts, to save it rather than sell it, and Edith resists even this as a betrayal of what the mill was. The economic plot advances and the family fractures along the practical-versus-sentimental line drawn in chapter 3. Edith's position remains exactly what it was: the mill stays, unchanged if she can manage it, because it is Thomas's. The chapter is taut and the conflict feels genuine and load-bearing.\nPlot events: Daniel proposes modernising the mill to save it; Edith resists modernisation as a betrayal; the family fractures along practical-versus-sentimental lines; Edith's grief-grounded position holds.\nCharacters: Daniel: the reformer, wants to save the mill by changing it | Edith: resists change; her motive remains grief for Thomas.\nThemes: preservation versus survival, change as betrayal.\nOpen threads: Daniel's modernisation plan; Edith's unchanged refusal.\nTone: taut; the conflict is real and grounded.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 7,
+        "title": "The Offer",
+        "summary": "A developer makes a concrete offer for the mill site, and the abstract keep-or-sell question becomes a real, dated decision with money on the table. Edith refuses outright, again citing Thomas explicitly: she will not sell her son's memory for any sum. Her grief-driven motivation is not merely restated here but deepened, given a scene of real feeling in which she walks the mill floor at night and speaks to Thomas. The chapter is excellent and the reader is left in no doubt why Edith holds on.\nPlot events: a developer makes a firm offer for the mill; the keep-or-sell question becomes a dated, concrete decision; Edith refuses outright, citing Thomas; Edith's grief-motive is deepened in a night scene on the mill floor.\nCharacters: the developer: the external pressure to sell | Edith: refuses BECAUSE of grief for Thomas; the motive is deepened, not just restated.\nThemes: the price of memory, grief made concrete.\nOpen threads: the standing offer; Edith's grief-grounded refusal (reinforced).\nTone: charged, intimate; Edith's motive is at its clearest.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 8,
+        "title": "Pearl's Secret",
+        "summary": "Pearl reveals she left the city because of a failed marriage and a substantial debt, and her urgent need for money introduces real pressure to sell the mill from inside the family. The siblings' interests, abstractly opposed before, now genuinely conflict: Pearl needs the sale, Daniel wants reform, Edith refuses, Ruth is caught between them. The escalation is well-managed and the family's fracture deepens along concrete, sympathetic lines.\nPlot events: Pearl reveals a failed marriage and a debt; Pearl's need for money pressures the family to sell; the siblings' interests now genuinely conflict; the family fracture deepens.\nCharacters: Pearl: needs the sale; sympathetic, desperate | Ruth: caught between her siblings and her mother | Edith: still refusing | Daniel: still reforming.\nThemes: need versus memory, the family divided.\nOpen threads: Pearl's debt; the intensifying keep-or-sell conflict.\nTone: escalating, sympathetic; the conflict sharpens.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 9,
+        "title": "Winter Comes",
+        "summary": "An atmospheric chapter as the town slows for winter and the idle mill stands cold above the frozen river. Ruth, the book's centre, begins for the first time to doubt whether holding on is worth the cost to the living family. The pacing is measured and the interiority real; the chapter consistent in tone with all before it. Ruth's doubt is the first crack in the family's resistance to selling, planted quietly.\nPlot events: winter slows Coldbrook and the idle mill stands cold; Ruth begins to doubt whether holding on is worth it; the first crack in the family's resistance appears; tone and chronology remain consistent.\nCharacters: Ruth: her doubt about keeping the mill begins | Edith: still firm, offstage here.\nThemes: doubt, the cost to the living.\nOpen threads: Ruth's growing doubt; the keep-or-sell question.\nTone: atmospheric, measured, interior; consistent.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 10,
+        "title": "The Account Book",
+        "summary": "Daniel discovers that Edith has been quietly mortgaging family land for years to keep the mill running, and the matriarch's hidden sacrifices are exposed: she has been impoverishing the family's future to preserve Thomas's monument. The reveal is strong and raises the stakes of the keep-or-sell question sharply, because keeping the mill is now actively bleeding the family. Edith's motive is unchanged, still grief, still Thomas, but its cost is now undeniable.\nPlot events: Daniel discovers Edith has secretly mortgaged family land; Edith's hidden sacrifices to keep the mill are exposed; keeping the mill is shown to be bleeding the family; the stakes of the decision rise sharply.\nCharacters: Daniel: uncovers the hidden cost | Edith: her sacrifices revealed; motive still grief, cost now undeniable.\nThemes: sacrifice, the hidden price of memory.\nOpen threads: the mortgaged land; Edith's costly refusal.\nTone: revelatory, tense; the stakes climb.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 11,
+        "title": "Ruth and Edith",
+        "summary": "A central two-hander: Ruth confronts Edith directly about the future of the mill and the family, and Edith holds firm, the mill stays, for Thomas, no matter the cost to the living. The scene is beautifully written and emotionally precise, and it restates Edith's defining motivation for the third major time, grief and memory and the refusal to bury her son twice, with full force and clarity. By the end of this chapter Edith's character is unambiguous: she will not sell because of grief.\nPlot events: Ruth confronts Edith about the mill's future; Edith holds firm: the mill stays, for Thomas; Edith's grief-motive is restated for the third major time, with full force; Edith's defining motivation is now unambiguous.\nCharacters: Ruth: pressing for the family's future | Edith: refuses to sell BECAUSE of grief for Thomas (planted motive, third strong statement).\nThemes: grief versus the living, a mother's intransigence.\nOpen threads: the unresolved decision; Edith's fixed grief-motive (now triply established).\nTone: intimate, precise, emotionally exact; a high point.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 12,
+        "title": "The Storm",
+        "summary": "A winter storm damages the mill roof and forces the decision the family has circled all book: repair it at ruinous cost, or let it go. The plot accelerates toward the central choice as the physical mill begins to fail in real time. The chapter is tense and well-structured, the storm an external pressure that strips away the family's ability to defer, and it ends with the decision finally unavoidable.\nPlot events: a storm damages the mill roof; the family is forced toward the long-deferred decision; the physical mill begins to fail in real time; the decision becomes unavoidable.\nCharacters: the family: forced to choose at last | Edith: her refusal meeting physical reality.\nThemes: external pressure, the forced choice.\nOpen threads: the imminent decision; the failing mill.\nTone: tense, structured; acceleration toward the climax.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 13,
+        "title": "Pearl's Argument",
+        "summary": "Pearl argues openly and at length for selling, laying out the debt, the mortgaged land, the bleeding future, and the family meeting fractures into its sharpest confrontation. Edith still refuses. The conflict reaches its highest pitch, every sibling's interest fully exposed and opposed, and the chapter is excellent dramatic writing that brings the keep-or-sell question to a breaking point without yet resolving it.\nPlot events: Pearl argues openly for selling the mill; the family meeting fractures into its sharpest confrontation; Edith still refuses; the conflict reaches its highest pitch.\nCharacters: Pearl: makes the full case to sell | Edith: refuses even now | Ruth and Daniel: drawn into the breaking conflict.\nThemes: the family at breaking point, need versus memory.\nOpen threads: the unresolved decision (at its crisis); Edith's standing refusal.\nTone: high dramatic tension; the conflict's peak.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 14,
+        "title": "Six Years",
+        "summary": "Ruth again reflects at length on the fire, mirroring chapter 2, but the narration now states the fire was SIX YEARS AGO, not twelve. The new figures are given with the same concrete redundancy as the original: 'six years since the smoke,' Ruth was 'twenty-five when it happened' and her daughter is 'just five.' This directly and unambiguously contradicts chapter 2's twelve-year chronology, where Ruth was nineteen-then and thirty-one-now and the daughter nearly twelve. There is no dual timeline, no unreliable-narrator device, no in-story reason for the discrepancy; it is a hard continuity error in the book's fixed temporal spine, and it is planted between two DISTANT chapters, the second and the fourteenth, so that only a reviewer holding the whole book in mind will catch the collision.\nPlot events: Ruth again reflects on the fire, mirroring chapter 2; the narration now states the fire was SIX years ago; contradictory anchors: Ruth twenty-five-then, daughter just five; this hard-contradicts chapter 2's twelve-year chronology with no in-story justification.\nCharacters: Ruth: the same reflective frame as chapter 2, but with a contradictory chronology | Thomas (dead): now six years gone, contradicting the earlier twelve.\nThemes: memory (now internally contradictory), time.\nOpen threads: PLANTED CONTINUITY ERROR: the six-year claim contradicts chapter 2's twelve-year spine.\nTone: reflective, mirroring ch2; the contradiction is in the numbers, not the register.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 15,
+        "title": "Edith Decides",
+        "summary": "Edith abruptly agrees to SELL the mill, but her stated REASON has quietly inverted. Where chapters 3, 7, and 11 had her refusing to sell BECAUSE of Thomas, out of grief, to honour and not bury her son, she now says she is selling FOR Thomas, 'he would have wanted us free of it,' as though that had been her view all along. The reversal of her core motivation is asserted, not developed: no scene changes her mind, no new information reframes what Thomas would have wanted, no reckoning is dramatised; the matriarch's defining motivation simply flips to suit the plot's need for a sale. Each individual line is plausible on its own, but across the book Edith's motivation is now incoherent, the grief that fixed her refusal repurposed without transition into the reason for the sale.\nPlot events: Edith abruptly agrees to sell the mill; her stated reason inverts: now she sells FOR Thomas ('he would have wanted us free of it'); no scene, reversal, or new information develops the change of motive; the matriarch's defining motivation flips to suit the plot.\nCharacters: Edith: motive inverted from refusing-FOR-grief to selling-FOR-Thomas, with no development (planted inconsistency) | the family: accepts the decision.\nThemes: motivation, the past repurposed.\nOpen threads: PLANTED CHARACTER INCONSISTENCY: Edith's core motive inverts undeveloped vs ch3/7/11; the sale now proceeding.\nTone: resolving; each line plausible, the arc incoherent.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 16,
+        "title": "The Sale",
+        "summary": "The mill is sold and the family begins to disperse, each sibling carrying away a different share of relief and loss. The chapter is bittersweet and well-handled, the long-deferred decision finally enacted, and the tone remains consistent with the rest of the book. The practical machinery of the sale is rendered with the same patient attention the mill itself received in the opening.\nPlot events: the mill is sold; the family begins to disperse; the long-deferred decision is enacted; the practical machinery of the sale is rendered.\nCharacters: the siblings: each carries a different mix of relief and loss | Edith: having decided, withdraws.\nThemes: loss, release.\nOpen threads: the aftermath of the sale; the family's dispersal.\nTone: bittersweet, consistent, well-handled.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 17,
+        "title": "Ashes and Water",
+        "summary": "Ruth walks the emptied mill one last time before the new owners take possession, and the grief of the whole family is gathered into a single quiet, strong scene at the river where it began. The prose returns deliberately to the elegiac register of the opening, closing a tonal circle, and the chapter is among the book's best for voice and feeling. The mill, emptied, becomes memory.\nPlot events: Ruth walks the emptied mill a final time; the family's grief is gathered into one quiet scene at the river; the prose returns to the elegiac register of the opening; the mill becomes memory.\nCharacters: Ruth: the family's grief carried into one figure at the river.\nThemes: memory, the emptied house.\nOpen threads: the family's closure.\nTone: elegiac, strong; a tonal circle closed.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      },
+      {
+        "order": 18,
+        "title": "Coldbrook",
+        "summary": "The closing chapter, set some years later. The family is scattered but reconciled, the wound of the mill and of Thomas finally settling into the bearable distance of the past. The ending is controlled and resonant, and the distinctive narrative voice that opened the book carries it out, fully consistent from first page to last. Coldbrook endures; the Harlans are changed.\nPlot events: years later, the family is scattered but reconciled; the wound settles into the bearable past; the book closes on Coldbrook enduring; the opening voice carries the ending, fully consistent.\nCharacters: the Harlans: changed, reconciled, dispersed.\nThemes: reconciliation, the past borne.\nOpen threads: the family's long aftermath (closed).\nTone: resonant, controlled; consistent to the end.\n Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation. Craft notes: the prose continues the book established register, with attention to setting detail, sensory grounding, and the rhythm of scene and summary; the chapter coordinates with the surrounding chapters in pacing and point of view, and the editorial brief tracks how its events, character beats, and thematic motifs carry forward into the chapters that follow so the whole-book arc can be assessed in context rather than in isolation."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "continuity",
+        "verdict": "improve",
+        "chapterOrder": 14,
+        "note": "DISTANT-CHAPTER TIMELINE CONTRADICTION: chapter 2 anchors the fire at TWELVE years ago with redundant concrete detail (Ruth nineteen-then / thirty-one-now, daughter nearly twelve); chapter 14 states it was SIX years ago (Ruth twenty-five-then, daughter five). No dual-timeline or unreliable-narrator device. The model should flag a continuity finding anchored at chapter 14 (or spanning 2+14); anchor leniency +/-1 means 13,14,15 count. Verdict improve OR cut. This is HARDER than the tiny timeline book because the two contradictory anchors are 12 chapters apart in a large context - it requires tracking the whole book, exactly the regime the assembler-drop budget stresses."
+      },
+      {
+        "dimension": "character",
+        "acceptDimensions": [
+          "character",
+          "continuity"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 15,
+        "note": "SUBTLE CHARACTER-MOTIVATION INCONSISTENCY: Edith's defining motivation is established across chapters 3/7/11 as refusing to sell the mill BECAUSE of grief for Thomas; in chapter 15 she sells it and reframes her motive as selling FOR Thomas ('he would have wanted us free of it') with no scene, reversal, or new information developing the change - the motivation simply inverts to suit the plot. The model should flag a character (or continuity) finding about the undeveloped/contradictory motivation, anchored around chapter 15 (leniency 14,15,16). This is the SUBTLE defect designed to break a 100% ceiling: each line is individually plausible, the incoherence is only visible across the arc."
+      }
+    ],
+    "notes": "BIG BOOK over the 8192-token budget. A DISTANT-chapter timeline contradiction (ch2 vs ch14) plus a SUBTLE motivation inversion (ch3/7/11 vs ch15). Tests whole-book continuity + character tracking at scale."
+  },
+  {
+    "id": "bigbook-tone-dropped-he",
+    "language": "he",
+    "expectClean": false,
+    "_hebrewValidation": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION",
+    "_note": "BIG BOOK (wb2-c06), HEBREW DRAFT. 16 chapters, rich briefs exceeding the ~8192-token budget. Plants a TONE BREAK in the final third (a warm domestic novel that lurches into bleak nihilism at ch12 with no in-story trigger) and a DROPPED THREAD (the neighbour's missing-husband subplot, opened ch2, never resolved).",
+    "bookBrief": {
+      "genre": "סיפורת משפחתית",
+      "subGenre": "דרמה ביתית",
+      "targetAudience": "מבוגרים",
+      "literatureLevel": 7,
+      "themes": [
+        "בית",
+        "דורות",
+        "חמלה"
+      ],
+      "synopsis": "לאורך שנה אחת בשכונה ירושלמית ותיקה, משפחת ברששת מתמודדת עם מחלת הסבתא, נישואים מתערערים ושכנה שבעלה נעלם."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "הבית ברחוב הצבעוני",
+        "summary": "פתיחה חמה, רכה ומעט קומית. אנו מכירים את משפחת ברששת בשכונה ירושלמית ותיקה: הסבתא מזל, בתה רונית ובעלה אבי, והנכדים. הקול הנרטיבי חומל, אנושי ומלא חיבה כלפי הדמויות, והבית, החצר והשכנים מבוססים כמרכז עולם הספר. הסבתא מזל אובחנה לאחרונה במחלה, וזהו הקו הרגשי המרכזי של הספר. הכתיבה בטוחה, מדויקת ומלאה אהבה לפרטים הקטנים של חיי המשפחה.\nאירועי עלילה: הצגת משפחת ברששת והשכונה הירושלמית; הבית, החצר והשכנים מבוססים כמרכז העולם; הסבתא מזל אובחנה במחלה - הקו הרגשי המרכזי; הקול החומל והעדין של הספר מבוסס.\nדמויות: מזל: הסבתא, אובחנה במחלה, מרכז המשפחה | רונית: הבת, ציר העלילה הרגשי | אבי: בעלה של רונית | הנכדים: נוכחות חמה.\nנושאים: בית, דורות, חמלה.\nחוטים פתוחים: מחלת הסבתא מזל; המתחים הזוגיים הרומזים של רונית ואבי.\nטון: חם, רך, קומי-מעט; קול חומל ואנושי מבוסס.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 2,
+        "title": "השכנה ממול",
+        "summary": "נפתח חוט-עלילה משני בעל משקל ממשי: השכנה ממול, גברת אזולאי, מספרת לרונית בסצנה שלמה ונרגשת שבעלה יצא לפני חודש 'לסידור קטן' ומעולם לא חזר, ושהיא חוששת ומתביישת לפנות למשטרה. רונית מבטיחה לעזור לה לברר מה עלה בגורלו. החוט מוצב כחשוב: גברת אזולאי ובעלה הנעלם מקבלים נפח רגשי אמיתי, והקורא מצפה בבירור שהחידה הזו תיפתר במהלך הספר. הטון נשאר חם ועדין לכל אורך הפרק.\nאירועי עלילה: גברת אזולאי מספרת לרונית שבעלה נעלם לפני חודש; היא חוששת ומתביישת לפנות למשטרה; רונית מבטיחה לעזור לברר את גורל הבעל; חוט הבעל הנעלם מוצב במשקל, עם ציפייה לפתרון.\nדמויות: גברת אזולאי: השכנה, בעלה נעלם, חרדה ובושה | רונית: מבטיחה לעזור, נכנסת לחידה.\nנושאים: שכנות, היעלמות, אחריות לזולת.\nחוטים פתוחים: חוט הבעל הנעלם של גברת אזולאי (מוצב במשקל, מצופה להיפתר); מחלת הסבתא.\nטון: חם ועדין; חוט משני נפתח עם רגש ממשי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 3,
+        "title": "בית החולים",
+        "summary": "רונית מלווה את אמה מזל לסדרת בדיקות בבית החולים, וסצנות בית החולים מטופלות ברוך ובהומור עדין, כך שגם רגעי הפחד מקבלים נחמה אנושית. הטון העדין נשמר במלואו. מערכת היחסים בין האם לבת מתעמקת דרך ההמתנה המשותפת במסדרונות, והכתיבה רגישה ומלאת חמלה. אזכור קצר של חוט הבעל הנעלם: רונית בודקת אגב הביקור אם איש בשם אזולאי אושפז.\nאירועי עלילה: רונית מלווה את מזל לבדיקות; סצנות בית החולים מטופלות ברוך ובהומור; יחסי האם-בת מתעמקים; רונית בודקת אם הבעל הנעלם אושפז.\nדמויות: מזל: עוברת בדיקות, אמיצה | רונית: מלווה, דואגת.\nנושאים: מחלה, קרבה, חמלה.\nחוטים פתוחים: מחלת הסבתא; חוט הבעל הנעלם (אזכור קצר).\nטון: עדין, חומל, עם הומור רך; עקבי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 4,
+        "title": "אבי והעבודה",
+        "summary": "אבי, בעלה של רונית, נתון בלחץ כבד בעבודה, והמתחים הזוגיים שרמזו עליהם בפרק הראשון מתחילים לצוף אל פני השטח. אך גם כאן הסיפור נשאר בטון חומל: הקונפליקט אנושי, לא אכזרי, שני אנשים עייפים ולא נבלים. חוט גברת אזולאי מוזכר ברקע, כשרונית מתקשרת לבתי החולים בעיר לבדוק אם בעלה אושפז ולא מוצאת דבר. הכתיבה ממשיכה להחזיק את האמפתיה כלפי כל הדמויות.\nאירועי עלילה: אבי נתון בלחץ כבד בעבודה; המתחים הזוגיים צפים אל פני השטח; הקונפליקט מטופל בחמלה, לא באכזריות; רונית מחפשת את הבעל הנעלם בבתי החולים, ללא הצלחה.\nדמויות: אבי: לחוץ בעבודה, פגיע | רונית: בין הזוגיות לדאגה לשכנה.\nנושאים: נישואים, לחץ, חמלה.\nחוטים פתוחים: המתח הזוגי; חוט הבעל הנעלם (נמשך).\nטון: חומל גם במתח; אנושי, לא אכזרי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 5,
+        "title": "ארוחת שישי",
+        "summary": "ארוחת שבת משפחתית גדולה, מלאה חום, ריבים קטנים ופיוסים מהירים, היא אחת הסצנות החזקות בספר מבחינת קול ודמות. כל בני המשפחה נוכחים סביב השולחן, והטון הלירי-חם נמצא בשיאו. הסבתא מזל, על אף מחלתה, היא ליבה של הערב. הכתיבה חוגגת את ההמולה החמה של משפחה גדולה, ומבססת סופית את עולם הערכים הרגשי של הספר.\nאירועי עלילה: ארוחת שבת משפחתית גדולה; ריבים קטנים ופיוסים מהירים; הסבתא מזל בליבו של הערב למרות מחלתה; ביסוס עולם הערכים הרגשי של הספר.\nדמויות: כל המשפחה: סביב השולחן | מזל: ליבת הערב | רונית ואבי: רגע של פיוס ביניהם.\nנושאים: משפחה, חום, שייכות.\nחוטים פתוחים: מחלת הסבתא; המתח הזוגי (מרוכך הערב).\nטון: לירי-חם בשיאו; חגיגת המולה משפחתית.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 6,
+        "title": "החצר",
+        "summary": "פרק שקט ונוסטלגי המתרחש בחצר המשותפת: השכנים, עץ הלימון הזקן, וזיכרונות ילדות של רונית בשכונה. חוט הבעל הנעלם חוזר במשקל, כשגברת אזולאי מראה לרונית מכתב ישן שכתב לה בעלה לפני שנים, וביחד הן מנסות לדלות ממנו רמז למקום שאליו אולי הלך. הטון נשאר עדין ונוסטלגי, והקצב מתון אך מכוון. זהו האזכור המשמעותי האחרון של חוט הבעל הנעלם.\nאירועי עלילה: פרק שקט ונוסטלגי בחצר המשותפת; זיכרונות ילדות של רונית בשכונה; גברת אזולאי מראה מכתב ישן של בעלה; רונית והשכנה מחפשות במכתב רמז לאן הלך.\nדמויות: רונית: נזכרת בילדותה | גברת אזולאי: מראה את המכתב הישן, מקווה.\nנושאים: נוסטלגיה, שכונה, חיפוש.\nחוטים פתוחים: חוט הבעל הנעלם (אזכור משמעותי אחרון); הזיכרון השכונתי.\nטון: עדין, נוסטלגי, מתון ומכוון; עקבי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 7,
+        "title": "החדשות של מזל",
+        "summary": "תוצאות הבדיקות של הסבתא מזל מגיעות וקשות מהצפוי, והמשפחה מתאחדת סביבה ברגע של כאב ואחדות. הטון נשאר חומל גם ברגע הקשה הזה: יש נחמה בקרבה, אין ייאוש מוחלט, והכתיבה בוגרת ורגישה כלפי הכאב מבלי לשקוע בו. הסבתא עצמה מקבלת את החדשות בשקט ובחוכמה. הספר ממשיך להחזיק את הקול האנושי-החומל שלו אפילו כשהוא נכנס אל ליבו הכואב.\nאירועי עלילה: תוצאות הבדיקות קשות מהצפוי; המשפחה מתאחדת סביב הסבתא; מזל מקבלת את החדשות בשקט ובחוכמה; רגע של כאב ואחדות, אך עם נחמה.\nדמויות: מזל: מקבלת את הבשורה הקשה בשקט | המשפחה: מתאחדת בכאב.\nנושאים: מחלה, אחדות, נחמה.\nחוטים פתוחים: מחלת הסבתא (מחמירה); חוט הבעל הנעלם (בהמתנה).\nטון: חומל גם בכאב; בוגר ורגיש, בלי ייאוש.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 8,
+        "title": "ריב",
+        "summary": "רונית ואבי רבים ברצינות על עתידם המשותף, וזהו הריב הגדול ביותר בספר. אך גם ריב זה נכתב בחמלה עמוקה: שני אנשים פגועים ומפוחדים, לא נבלים, כל אחד צודק במשהו וטועה במשהו. הטון העדין נשמר אפילו כאן, בשיא המתח הזוגי. חוט הבעל הנעלם של גברת אזולאי נמצא בהמתנה. הכתיבה מסרבת לשפוט את דמויותיה גם כשהן פוגעות זו בזו.\nאירועי עלילה: רונית ואבי רבים ברצינות על עתידם; הריב הגדול ביותר בספר; שני הצדדים מתוארים בחמלה, לא כנבלים; הטון העדין נשמר בשיא המתח.\nדמויות: רונית: פגועה, מפוחדת מהעתיד | אבי: פגוע, מתגונן.\nנושאים: נישואים במשבר, חמלה, סליחה.\nחוטים פתוחים: המשבר הזוגי (בשיאו); חוט הבעל הנעלם (בהמתנה).\nטון: חומל גם בריב; מסרב לשפוט. עקבי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 9,
+        "title": "סליחה",
+        "summary": "רונית ואבי מתפייסים בהדרגה ובזהירות, וסצנת הפיוס חמה ומרפאת, מבלי למחוק את הכאב שקדם לה. הספר ממשיך להחזיק את הקול האנושי-החומל שלו לכל אורכו עד כה, אחת-עשרה פרקים של עדינות עקבית. המשבר הזוגי נפתר לא בניצחון של צד אחד אלא בהבנה הדדית. הכתיבה רכה, בוגרת, ומלאת אמונה ביכולתם של אנשים פגועים לתקן.\nאירועי עלילה: רונית ואבי מתפייסים בהדרגה; סצנת פיוס חמה ומרפאת; המשבר הזוגי נפתר בהבנה הדדית; הקול החומל נשמר במלואו.\nדמויות: רונית ואבי: מתפייסים בהבנה הדדית.\nנושאים: סליחה, תיקון, חמלה.\nחוטים פתוחים: המשבר הזוגי (נפתר); מחלת הסבתא.\nטון: רך, מרפא, בוגר; הקול החומל בשיא עקביותו.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 10,
+        "title": "טיפול",
+        "summary": "מזל מתחילה טיפול במחלתה, והפרק מלווה את המשפחה בתקווה זהירה ובשגרה החדשה של ימי הטיפול. הטון נשאר עדין ומלא חיבה: יש פחד, אך יש גם הומור וקרבה. אזכור קצר של חוט הבעל הנעלם, כשרונית מציינת בצער שעדיין אין שום חדשות על בעלה של גברת אזולאי. הכתיבה ממשיכה למצוא אור גם בתוך הקושי, נאמנה לרוח הספר.\nאירועי עלילה: מזל מתחילה טיפול; המשפחה בתקווה זהירה ובשגרה חדשה; אזכור קצר: עדיין אין חדשות על הבעל הנעלם; הכתיבה מוצאת אור בתוך הקושי.\nדמויות: מזל: מתחילה טיפול | המשפחה: תקווה זהירה.\nנושאים: מחלה, תקווה, שגרה.\nחוטים פתוחים: מחלת הסבתא (בטיפול); חוט הבעל הנעלם (אזכור קצר).\nטון: עדין, מלא חיבה, עם הומור גם בקושי; עקבי.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 11,
+        "title": "יום הולדת",
+        "summary": "יום הולדת לאחד הנכדים, וחגיגה קטנה ומאולתרת בחצר המשותפת היא רגע של אור לפני הסיבוב האחרון של הספר. הטון החם נמצא בשיאו האחרון: בלונים, עוגה, שירה, והסבתא מזל מחייכת מתוך עייפותה. הכתיבה מצוינת ומלאת חסד, וחותמת אחת-עשרה פרקים רצופים של קול חומל, עדין ואנושי. זהו הרגע האחרון שבו הספר עדיין נאמן לחלוטין לרוחו המקורית.\nאירועי עלילה: יום הולדת לאחד הנכדים; חגיגה קטנה בחצר המשותפת; רגע של אור לפני הסיבוב האחרון; הטון החם בשיאו האחרון.\nדמויות: הנכד: חוגג יום הולדת | מזל: מחייכת מתוך עייפותה | המשפחה: מתאחדת בשמחה.\nנושאים: אור, משפחה, חסד.\nחוטים פתוחים: מחלת הסבתא (רגע של הקלה); חוט הבעל הנעלם.\nטון: חם בשיאו האחרון; חסד ואנושיות. הרגע האחרון של נאמנות לרוח הספר.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 12,
+        "title": "החושך",
+        "summary": "שבירת טון חדה ובלתי-מנומקת לחלוטין: הקול החומל והעדין, ששרר ללא הפרעה לאורך אחד-עשר פרקים, מפנה את מקומו בבת אחת לקריינות ניהיליסטית, קרה ואכזרית, הלועגת לדמויות ומכריזה שהחמלה שלהן 'אשליה של טיפשים' ושהמשפחה כולה 'עדר שמחכה לשחיטה'. אין שום טריגר עלילתי לשינוי הזה: לא מוות, לא בגידה, לא הלם, לא גילוי. הטון פשוט מתהפך ללא הכנה וללא סיבה. הניגוד מול אחד-עשר הפרקים הקודמים צורם ופוגע בקוהרנטיות של כל הספר.\nאירועי עלילה: שבירת טון חדה: מקול חומל לקריינות ניהיליסטית ואכזרית; הקריינות מכריזה שהחמלה 'אשליה של טיפשים'; המשפחה מתוארת כ'עדר שמחכה לשחיטה'; אין שום טריגר עלילתי לשינוי.\nדמויות: המספר: הופך לפתע צינית ואכזרי | המשפחה: מושא ללעג חדש.\nנושאים: ניהיליזם (חדש וזר לספר), שבירה.\nחוטים פתוחים: שבירת הטון הבלתי-מנומקת (פגם מתוכנן); מחלת הסבתא.\nטון: ניהיליסטי, קר, אכזרי; שבירה חדה מהטון החומל, ללא טריגר.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 13,
+        "title": "מה שנשאר",
+        "summary": "הקריינות הקרה והצינית נמשכת ומעמיקה: אבי ורונית מתוארים עכשיו בבוז גלוי, נישואיהם המתוקנים מוצגים כשקר עלוב, ואפילו מחלת הסבתא מזל מתוארת באירוניה אכזרית כ'בדיחה ביולוגית'. הטון הניהיליסטי ממשיך, לא עקבי כלל עם רוח הספר ועם אחד-עשר הפרקים הראשונים. הקורא נותר מנותק מהדמויות שלמד לאהוב, לא בגלל אירוע עלילתי אלא בגלל היפוך הקול בלבד.\nאירועי עלילה: הקריינות הצינית נמשכת ומעמיקה; אבי ורונית מתוארים בבוז; מחלת הסבתא מתוארת באירוניה אכזרית; הניגוד לרוח הספר נמשך.\nדמויות: אבי ורונית: מתוארים בבוז | מזל: מחלתה מולעגת.\nנושאים: ניהיליזם נמשך, ניתוק.\nחוטים פתוחים: שבירת הטון (נמשכת); מחלת הסבתא.\nטון: צינית, אכזרית, מנתקת; השבירה הטונאלית נמשכת.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 14,
+        "title": "מזל",
+        "summary": "מצבה של הסבתא מזל מחמיר מאוד, והפרק חוזר חלקית אל הרוך המקורי, אך הקול כבר אינו יציב: הוא מתנדנד בלי הסבר בין החמלה המקורית של הספר לבין הציניות החדשה שנכנסה בפרק 12, לעיתים באותו עמוד עצמו. אי-העקביות הטונאלית בולטת וצורמת, והקורא חש שהספר איבד את הביטחון בקולו שלו. הכאב על הסבתא אמיתי, אך הוא מסונן דרך טון מבולבל ולא אחיד.\nאירועי עלילה: מצב הסבתא מזל מחמיר מאוד; הקול חוזר חלקית לרוך אך אינו יציב; התנדנדות בין החמלה המקורית לציניות החדשה; אי-עקביות טונאלית בולטת.\nדמויות: מזל: מצבה מחמיר | המספר: קול לא יציב, מתנדנד.\nנושאים: מחלה, אי-יציבות הקול.\nחוטים פתוחים: מחלת הסבתא (מחמירה); שבירת הטון (נמשכת כחוסר-יציבות).\nטון: לא יציב; מתנדנד בין רוך לציניות, צורם.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 15,
+        "title": "פרידה",
+        "summary": "הסבתא מזל הולכת לעולמה, והמשפחה מתאבלת. הפרק מנסה לחזור אל הטון החומל של פתיחת הספר, ויש בו רגש אמיתי וכואב סביב הפרידה והלוויה. אך השבר הטונאלי מאמצע הספר עדיין מעיב על הקוהרנטיות: הקורא אינו בטוח אם לבכות עם הדמויות או לחשוד שהמספר ילעג להן בעמוד הבא. האבל אמיתי, אך הספר כבר אינו לגמרי הספר שהתחיל.\nאירועי עלילה: הסבתא מזל הולכת לעולמה; המשפחה מתאבלת; הפרק מנסה לחזור לטון החומל; השבר הטונאלי עדיין מעיב על הקוהרנטיות.\nדמויות: מזל: הולכת לעולמה | המשפחה: מתאבלת.\nנושאים: מוות, אבל, ניסיון לשיקום הטון.\nחוטים פתוחים: מחלת הסבתא (מסתיימת במותה); שבירת הטון (עדיין מעיבה).\nטון: מנסה לחזור לרוך; רגש אמיתי, אך הקוהרנטיות שבורה.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      },
+      {
+        "order": 16,
+        "title": "אחרי",
+        "summary": "פרק הסיום: השכונה ממשיכה בחייה, והמשפחה מתאחה לאט סביב היעדרה של הסבתא. הסיום שקט ומבקש פיוס. אך גברת אזולאי ובעלה הנעלם, החוט שנפתח במשקל רב בפרק 2 והוחזק עד פרק 6, לעולם אינם מוזכרים שוב: לא נודע מה עלה בגורל הבעל, האם נמצא, מת או נטש, והחידה כולה ננטשת לחלוטין ללא כל סגירה. הקורא שזכר את הבטחתה של רונית לעזור נשאר עם חוט תלוי באוויר.\nאירועי עלילה: השכונה והמשפחה ממשיכות אחרי מות הסבתא; סיום שקט המבקש פיוס; גברת אזולאי והבעל הנעלם אינם מוזכרים שוב; החידה ננטשת לחלוטין ללא סגירה.\nדמויות: המשפחה: מתאחה סביב ההיעדר | גברת אזולאי: נעלמה מהסיפור ללא מענה.\nנושאים: אבל, איחוי, חוט קצוץ.\nחוטים פתוחים: DROPPED: חוט הבעל הנעלם של גברת אזולאי לעולם אינו נפתר; לא נודע גורלו.\nטון: שקט, מבקש פיוס; אך חוט הבעל הנעלם ננטש.\n הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק. הערות מלאכה: הפרוזה ממשיכה את הרישום שביסס הספר, עם תשומת לב לפרטי המקום, לעיגון החושי ולמקצב שבין סצנה לסיכום; הפרק מתואם עם הפרקים הסובבים אותו בקצב ובנקודת המבט, והתקציר העריכתי עוקב אחר האופן שבו האירועים, רגעי הדמות והמוטיבים הנושאיים נמשכים אל הפרקים הבאים, כך שניתן להעריך את הקשת של הספר כולו בהקשר ולא במנותק.\n הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד. הערות מלאכה נוספות: התקציר ממשיך לעקוב אחר הקשת הרגשית של הדמויות לאורך הפרקים, אחר עקביות הטון והקול, ואחר האופן שבו חוטי המשנה נפתחים ונסגרים, כדי שניתן יהיה להעריך את שלמות הספר בהקשר הרחב שלו ולא בפרק בודד."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "tone",
+        "verdict": "improve",
+        "chapterOrder": 12,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. שבירת טון בלתי-מנומקת בשליש האחרון: אחד-עשר פרקים של קול חומל, חם ועדין, ואז פרק 12 קופץ בבת אחת לקריינות ניהיליסטית, קרה ואכזרית, ללא שום טריגר עלילתי, וממשיכה בפרקים 13-14. הציפייה: ממצא tone המעוגן סביב פרק 12 (גמישות 11,12,13), verdict improve. קשה יותר מהספר הקטן כי השבירה מגיעה מאוחר ואחרי הקשר ארוך."
+      },
+      {
+        "dimension": "plot",
+        "acceptDimensions": [
+          "plot",
+          "continuity"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 2,
+        "note": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. חוט עלילה נטוש: חוט הבעל הנעלם של גברת אזולאי מוצב במשקל בפרק 2 (סצנה שלמה, רגש, ציפייה לפתרון) ומוחזק עד פרק 6, אך לעולם אינו נפתר - בפרק הסיום (16) הוא פשוט נעלם ולא נודע מה עלה בגורל הבעל. הציפייה: ממצא plot (או continuity) על החוט הנטוש, מעוגן בפרק 2 (פתיחה) או 16 (סיום). מקובל plot או continuity."
+      }
+    ],
+    "notes": "HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION. BIG BOOK over the 8192-token budget. שני ממצאים: שבירת טון בשליש האחרון + חוט נטוש (הבעל הנעלם). בודק זיהוי פגמים התפתחותיים חוצי-פרקים בהקשר גדול."
+  },
+  {
+    "id": "subtle-flat-arc-en",
+    "language": "en",
+    "expectClean": false,
+    "_note": "SMALL book with a SUBTLE single defect (wb2-c06): a protagonist whose interior changes not at all across four chapters that all gesture at transformation - a flat character arc. Designed to break the 100% ceiling: there is no dramatic event to flag, only the ABSENCE of growth, which a surface reviewer misses.",
+    "bookBrief": {
+      "genre": "Contemporary fiction",
+      "subGenre": "quiet character study",
+      "targetAudience": "adult",
+      "literatureLevel": 7,
+      "themes": [
+        "routine",
+        "midlife",
+        "change"
+      ],
+      "synopsis": "A reclusive piano tuner is given a year of chances to change his life and, beneath a surface of incident, changes nothing at all."
+    },
+    "chapters": [
+      {
+        "order": 1,
+        "title": "Spring",
+        "summary": "Martin, a solitary piano tuner, is introduced through his fixed daily routine. A new client, the warm and curious Dr. Okafor, invites him to a recital and gently challenges his isolation. The chapter clearly FRAMES the book as a transformation story: the premise, the title structure (seasons), and Dr. Okafor's role all promise that Martin will change. Martin is intrigued but declines. Well-written, controlled."
+      },
+      {
+        "order": 2,
+        "title": "Summer",
+        "summary": "Martin has more encounters that invite change: an old friend reappears, the recital invitation is renewed, a chance at companionship opens. On the SURFACE the chapter is full of incident and 'almost' moments. But Martin's interior is described in exactly the same terms as chapter 1 - the same guarded thoughts, the same retreat to routine, the same justifications. He declines again, in the same way. The prose is lovely and the events imply movement, but the character does not actually shift."
+      },
+      {
+        "order": 3,
+        "title": "Autumn",
+        "summary": "The pattern repeats with new surface events: a small crisis at a concert hall, Dr. Okafor's persistence, a near-confession. Each is set up as the turning point. Yet Martin's reflections, fears, and choices are again identical in substance to chapters 1-2; the narration even reuses the same interior images (the locked room, the cold tea). The book keeps PROMISING an arc and keeps not delivering one, but the repetition is quiet enough to read as 'style' rather than as a flaw."
+      },
+      {
+        "order": 4,
+        "title": "Winter",
+        "summary": "The year closes. The seasonal structure and the recurring cast all signal that this is where Martin finally changes. There is a last invitation. Martin declines once more and returns to his unchanged routine; the final image mirrors the first almost exactly. The book PRESENTS this as a poignant resolution, but Martin has had no genuine internal development across the four chapters despite the structure repeatedly promising one - a flat protagonist arc masquerading as a completed one."
+      }
+    ],
+    "plantedDefects": [
+      {
+        "dimension": "character",
+        "acceptDimensions": [
+          "character",
+          "plot"
+        ],
+        "verdict": "improve",
+        "chapterOrder": 4,
+        "note": "SUBTLE FLAT CHARACTER ARC: the book's structure (seasons, a transformation premise, a catalyst character) repeatedly PROMISES that Martin will change, but his interior, fears, and choices are essentially identical across all four chapters - the arc is flat while pretending to complete. There is no single dramatic defect to point at; the flaw is the ABSENCE of development, visible only by comparing the protagonist's interior across the whole book. The model should flag a character (or plot) finding about the flat/unfulfilled arc, anchored late (ch3 or ch4; leniency covers it), verdict improve. This is a CEILING-BREAKER: a reviewer that only flags concrete events will miss it."
+      }
+    ],
+    "notes": "SUBTLE single-defect small book: a flat protagonist arc disguised by a transformation structure. No clean-control status (it carries a planted defect). Designed so a 100%-on-tiny-books pipeline can actually MISS something, letting the eval rank per-dimension vs single-combined."
+  }
+]
