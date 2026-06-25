@@ -423,8 +423,10 @@ public class BookReviewQualityTests
     /// Single-combined run: ONE prompt asking for findings across ALL six dimensions at once. Uses the
     /// PRODUCTION combined prompt (PromptFactory.BuildBookReviewCombinedPrompt) - the SAME prompt
     /// BookReviewService.RunCombinedCallAsync ships - so RUN B measures production, not a harness-local copy.
-    /// The model self-labels each finding's dimension; we do NOT stamp it here (that is the point of the
-    /// combined pass), matching the production combined path.
+    /// The model self-labels each finding's dimension; we NORMALIZE it (unknown/blank -> plot) exactly as
+    /// BookReviewService.RunCombinedAsync does before it scores + persists, so the harness credits the SAME
+    /// labels production would. Scoring the raw model string instead would under-count combined-mode recall
+    /// whenever the label is slightly off, skewing the per-dimension vs single-combined verdict.
     /// </summary>
     private async Task<(List<BookFindingItem> findings, int errors)> RunSingleCombinedAsync(
         IAiRouter router, GoldBook book, string bookContext)
@@ -436,6 +438,11 @@ public class BookReviewQualityTests
         var parsed = await CallAndParseAsync(router, instruction, book.Language);
         if (parsed?.Findings == null)
             return (new List<BookFindingItem>(), 1);
+        // Mirror BookReviewService.RunCombinedAsync: normalize each self-labelled dimension to one of the six
+        // (unknown/blank -> plot) BEFORE scoring. Production scores + persists the normalized label, so the
+        // harness must too, or it under-credits combined-mode recall on slightly-off labels.
+        foreach (var f in parsed.Findings)
+            f.Dimension = NormalizeDimension(f.Dimension);
         return (parsed.Findings, 0);
     }
 
@@ -521,6 +528,15 @@ public class BookReviewQualityTests
     }
 
     // ─── Matching helpers ───────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Normalizes a model-supplied dimension to one of the six known dimensions (case-insensitive,
+    /// trimmed); an unknown or blank value falls back to "plot". Mirrors BookReviewService.NormalizeDimension
+    /// exactly so the combined-run harness scores the SAME label production scores + persists.</summary>
+    private static string NormalizeDimension(string? dimension)
+    {
+        var d = (dimension ?? string.Empty).Trim().ToLowerInvariant();
+        return Array.IndexOf(Dimensions, d) >= 0 ? d : "plot";
+    }
 
     private static bool IsKeep(PlantedDefect d) => IsKeepVerdict(d.Verdict);
     private static bool IsKeepVerdict(string? verdict) =>
