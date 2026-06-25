@@ -49,6 +49,26 @@ public class ChunkSummary
     /// </summary>
     public DateTimeOffset? StructuredBuiltAt { get; set; }
 
+    /// <summary>
+    /// True once the user has manually edited the flat <see cref="SummaryText"/> (wb3-c04). The flat
+    /// <see cref="SummaryText"/> is the user's OWN authoritative understanding of the chapter, distinct from
+    /// the AI-generated <see cref="StructuredJson"/>. This flag is the clobber guard: the automatic flat
+    /// re-summary path (BookIntelligenceService.SummarizeChaptersAsync) SKIPS a row where this is true so it
+    /// never silently overwrites the user's edit. A subsequent automatic re-summary is gated behind an
+    /// explicit user action (the re-derive endpoint) that consumes the edited summary rather than discarding
+    /// it. Default false (legacy + AI-built rows are not user-edited).
+    /// </summary>
+    public bool SummaryUserEdited { get; set; }
+
+    /// <summary>
+    /// When the user last edited the flat <see cref="SummaryText"/> (wb3-c04). This is the freshness stamp
+    /// for the USER-EDIT on the flat surface; it is owned by the PUT-summary path and is INDEPENDENT of both
+    /// <see cref="CreatedAt"/> (the AI flat re-summary stamp) and <see cref="StructuredBuiltAt"/> (the
+    /// structured-brief stamp), so a user edit never masks structured staleness and vice-versa (dual-surface
+    /// trap). Null until the user edits the summary at least once.
+    /// </summary>
+    public DateTimeOffset? SummaryUserEditedAt { get; set; }
+
     public Book Book { get; set; } = null!;
     public Chapter Chapter { get; set; } = null!;
 }

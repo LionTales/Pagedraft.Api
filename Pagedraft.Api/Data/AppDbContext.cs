@@ -72,6 +72,10 @@ public class AppDbContext : DbContext
             // wb1-r02: structured-brief build timestamp, separate from the shared CreatedAt the flat
             // re-summary path also bumps. Nullable so legacy rows self-heal (null = stale = rebuild).
             e.Property(x => x.StructuredBuiltAt).IsRequired(false);
+            // wb3-c04: user-edit clobber guard for the flat SummaryText surface + its own freshness stamp,
+            // independent of CreatedAt/StructuredBuiltAt so neither surface masks the other (dual-surface).
+            e.Property(x => x.SummaryUserEdited).HasDefaultValue(false);
+            e.Property(x => x.SummaryUserEditedAt).IsRequired(false);
             e.Property(x => x.BuiltWithModel).HasMaxLength(200);
             e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Chapter).WithMany().HasForeignKey(x => x.ChapterId).OnDelete(DeleteBehavior.Cascade);

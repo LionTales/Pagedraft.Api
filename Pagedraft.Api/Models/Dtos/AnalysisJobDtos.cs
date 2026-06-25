@@ -1,3 +1,5 @@
+using Pagedraft.Api.Models;
+
 namespace Pagedraft.Api.Models.Dtos;
 
 /// <summary>Response for async analysis job start. The jobId can be used with analysis-progress and analysis-jobs endpoints.</summary>
@@ -203,4 +205,66 @@ public record BookReviewFindingsDto(
 /// (the imperative verbs map to the BookFinding.Status set acknowledged | dismissed | done | open).
 /// </summary>
 public record UpdateFindingStatusRequest(string? Status);
+
+// ─── Chapter summary view + edit (wb3-c04) ──────────────────────────────────────────────────────
+
+/// <summary>
+/// Response for GET .../chapters/{chapterId}/summary — the dual-surface view of one chapter's cached
+/// ChunkSummary. JSON casing is the System.Text.Json default (camelCase). The flat <c>summaryText</c> is the
+/// user's own authoritative understanding (editable); <c>hasStructuredBrief</c> indicates whether the
+/// AI-derived structured surface (read by the whole-book review) exists. Both surfaces carry their OWN
+/// freshness stamp (dual-surface trap: separate stamps, shared <c>language</c>):
+///   - createdAt:           the flat re-summary stamp (AI), or the row create time;
+///   - summaryUserEditedAt: when the user last edited the flat summary (null until edited);
+///   - structuredBuiltAt:   when the structured brief was last (re)built (null when none).
+/// summaryUserEdited is the clobber-guard flag; builtWithModel is the model the structured brief was built
+/// with. hasSummary is true when there is any non-blank flat summary to show/edit.
+///
+/// wb3-c04 fallback (READ-only enrichment): <c>structuredBrief</c> carries the PARSED structured-brief facts
+/// (<see cref="StructuredChunkSummaryData"/>: plotEvents / characterStates / thematicMarkers / toneNotes /
+/// openThreads), so the FE can render a human-readable digest of the AI analysis when the flat
+/// <c>summaryText</c> is empty (built-but-never-flat-summarized chapters). It is null when no structured brief
+/// exists OR when StructuredJson is unparseable (defensive parse via StructuredChunkSummaryParser). This GET is
+/// read-only and never mutates StructuredJson / SummaryText / any freshness stamp (dual-surface trap).
+/// </summary>
+public record ChapterSummaryViewDto(
+    Guid BookId,
+    Guid ChapterId,
+    string Language,
+    string SummaryText,
+    bool HasSummary,
+    bool HasStructuredBrief,
+    bool SummaryUserEdited,
+    DateTimeOffset? CreatedAt,
+    DateTimeOffset? SummaryUserEditedAt,
+    DateTimeOffset? StructuredBuiltAt,
+    string? BuiltWithModel,
+    StructuredChunkSummaryData? StructuredBrief);
+
+/// <summary>
+/// PUT .../chapters/{chapterId}/summary request body — the user's edited flat summary text. Saving sets
+/// SummaryUserEdited = true and stamps SummaryUserEditedAt; it does NOT touch the structured surface
+/// (dual-surface). language keys the row's shared locale (default "he").
+/// </summary>
+public record UpdateChapterSummaryRequest(string? SummaryText, string? Language = "he");
+
+/// <summary>
+/// Response for POST .../chapters/{chapterId}/summary/rederive — synchronous re-derive of the STRUCTURED
+/// brief seeded with the user's edited flat summary, so the whole-book review reflects the edit. JSON
+/// (camelCase): bookId, chapterId, language, rederived, hasStructuredBrief, structuredBuiltAt, builtWithModel,
+/// message. rederived is true when a fresh structured brief was produced; false (with a message) when the
+/// model could not produce one (graceful — the edit is still saved and clobber-guarded).
+/// </summary>
+public record RederiveChapterSummaryResponse(
+    Guid BookId,
+    Guid ChapterId,
+    string Language,
+    bool Rederived,
+    bool HasStructuredBrief,
+    DateTimeOffset? StructuredBuiltAt,
+    string? BuiltWithModel,
+    string Message);
+
+/// <summary>POST .../chapters/{chapterId}/summary/rederive request body.</summary>
+public record RederiveChapterSummaryRequest(string? Language = "he");
 

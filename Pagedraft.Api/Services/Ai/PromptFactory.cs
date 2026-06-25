@@ -18,6 +18,17 @@ public class PromptFactory
     private const string HebrewBookSystem =
         "אתה מומחה ספרותי המנתח ספרים שלמים. אתה מסוגל לזהות ז'אנרים, דמויות, מבנה עלילתי, ולספק תובנות מעמיקות על יצירה ספרותית. השב תמיד בעברית בלבד.";
 
+    // Neutral assistant system for free-form Custom prompts and QA (AiTaskType.GenericChat) plus Translation.
+    // These tasks must NOT reuse HebrewSystemBase: that is a PROOFREADER system ("correct errors, return only
+    // the corrected text") and it sabotages a free-form question - the model proofreads the chapter instead of
+    // answering, returning a near-empty fragment. A general literary-assistant framing lets the user's
+    // instruction drive the response.
+    private const string HebrewAssistantSystem =
+        "אתה עוזר ספרותי. בצע את ההנחיה שהמשתמש נותן לגבי הטקסט הנתון - ענה על שאלות, סכם או נתח לפי הבקשה, בהתבסס על תוכן הטקסט. השב תמיד בעברית בלבד.";
+
+    private const string EnglishAssistantSystem =
+        "You are a literary assistant. Follow the user's instruction about the given text - answer questions, summarize, or analyze as requested, based on the text content. Respond only in the same language as the input.";
+
     private const string EnglishProofreadSystem =
         "You are an editor and proofreader. Correct spelling, grammar, and punctuation in the given text while preserving the author's voice and style. Respond only in the same language as the input.";
 
@@ -76,7 +87,7 @@ public class PromptFactory
 
         if (taskType == AiTaskType.Translation || taskType == AiTaskType.GenericChat)
         {
-            var system = isHebrew ? HebrewSystemBase : EnglishProofreadSystem;
+            var system = isHebrew ? HebrewAssistantSystem : EnglishAssistantSystem;
             var instruction = isHebrew ? "השב בעברית בלבד לפי ההנחיות שניתנו." : "Respond according to the instructions given.";
             return (system, instruction);
         }
@@ -846,6 +857,49 @@ public class PromptFactory
         return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
             ? StructuredChapterBriefHe
             : StructuredChapterBriefEn;
+    }
+
+    /// <summary>
+    /// wb3-c04: a STRUCTURED chapter-brief instruction SEEDED with the user's own edited flat summary as the
+    /// AUTHORITATIVE understanding of the chapter. The chapter text is still supplied as <c>InputText</c> for
+    /// detail, but the model is told to treat the user's summary as the source of truth for what the chapter
+    /// is about — so the re-derived structured brief (and hence the whole-book review, which reads the
+    /// structured brief) reflects the user's manual edit rather than re-deriving purely from the raw text.
+    /// Returns the base structured-brief instruction with the user-summary block prepended. The summary is
+    /// trimmed; a blank summary falls back to the plain structured prompt (no empty seed block).
+    /// </summary>
+    public string GetStructuredChapterBriefPromptSeededWithUserSummary(string language, string userSummary)
+    {
+        var basePrompt = GetStructuredChapterBriefPrompt(language);
+        var trimmed = (userSummary ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return basePrompt;
+
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var seedBlock = isHe
+            ? $"""
+               להלן סיכום הפרק כפי שכתב אותו המחבר. זהו ההבנה הסמכותית של הפרק — התבסס עליו כמקור האמת לגבי
+               עלילת הפרק, הדמויות והנושאים, והשתמש בטקסט הפרק רק להשלמת פרטים. אל תסתור את סיכום המחבר.
+
+               סיכום המחבר:
+               {trimmed}
+
+               ---
+
+               """
+            : $"""
+               The following is the chapter summary as written by the author. This is the AUTHORITATIVE
+               understanding of the chapter — treat it as the source of truth for the chapter's plot,
+               characters, and themes, and use the chapter text only to fill in supporting detail. Do not
+               contradict the author's summary.
+
+               Author's summary:
+               {trimmed}
+
+               ---
+
+               """;
+
+        return seedBlock + basePrompt;
     }
 
     private const string StructuredChapterBriefHe =

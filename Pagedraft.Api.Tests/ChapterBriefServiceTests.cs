@@ -232,10 +232,13 @@ public class ChapterBriefServiceTests
     [Fact]
     public async Task LoadOrBuildChapterBriefAsync_CrossLanguageRefresh_ClearsStaleFlatSummary()
     {
-        // A row built flat in 'en' (Language="en", English SummaryText). A structured (re)build for 'he'
-        // flips the row's Language to "he"; the English SummaryText must NOT be left behind, or
-        // BookContextAssembler — which selects flat fallbacks by Language only — would assemble English prose
-        // into the Hebrew book context.
+        // A row built flat in 'en' (Language="en", English SummaryText) that the user MANUALLY edited
+        // (SummaryUserEdited=true). A structured (re)build for 'he' flips the row's Language to "he"; the
+        // English SummaryText must NOT be left behind, or BookContextAssembler — which selects flat fallbacks
+        // by Language only — would assemble English prose into the Hebrew book context. AND the user-edit
+        // clobber guard must be reset alongside the cleared prose: leaving SummaryUserEdited=true with an empty
+        // SummaryText makes the automatic re-summary skip this row to "preserve" a now-empty edit (so the
+        // Hebrew flat prose never regenerates) and makes the re-derive endpoint 409 on the empty text.
         using var provider = BuildServiceProvider(out var routerMock, llmResponse: ValidBriefJson);
         var db = provider.GetRequiredService<AppDbContext>();
 
@@ -251,6 +254,8 @@ public class ChapterBriefServiceTests
             ChapterId = chapterId,
             Language = "en",
             SummaryText = "English prose summary that must not leak into the Hebrew context.",
+            SummaryUserEdited = true,
+            SummaryUserEditedAt = DateTimeOffset.UtcNow.AddMinutes(-10),
             StructuredJson = null
         });
         await db.SaveChangesAsync();
@@ -268,6 +273,11 @@ public class ChapterBriefServiceTests
         // The stale English flat summary is cleared so it cannot be served as Hebrew prose by the assembler.
         Assert.True(string.IsNullOrEmpty(row.SummaryText),
             $"expected the cross-language flat summary to be cleared, got: '{row.SummaryText}'");
+        // The clobber guard is reset alongside the cleared prose — otherwise the now-empty SummaryText would
+        // be treated as a protected manual edit (automatic re-summary skipped; re-derive 409s).
+        Assert.False(row.SummaryUserEdited,
+            "expected the user-edit clobber guard to be reset when the flat summary it protected was cleared.");
+        Assert.Null(row.SummaryUserEditedAt);
     }
 
     // ─── 3. Timestamp-stale brief is rebuilt in place ─────────────────────────────────────────
