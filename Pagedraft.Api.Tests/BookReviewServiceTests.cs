@@ -459,6 +459,50 @@ public class BookReviewServiceTests
         Assert.Equal(AnalysisProgressStatus.Canceled, snap!.Status);
     }
 
+    // ─── 6d. IsReady requires HasBriefs: a fresh review with the briefs gone is NOT ready ───────────
+
+    [Fact]
+    public async Task IsReady_RequiresHasBriefs_BriefsGoneAfterBuild_NotReady_AndBuildReportsBriefsMissing()
+    {
+        // A fresh review exists (HasReview, active model, not stale), but the structured briefs it reads are
+        // GONE. IsReady must be FALSE — a build would NOT be a no-op, it would hit the briefs-absent guard and
+        // return BriefsMissing — so a caller trusting IsReady (or the DTO's `ready`) cannot treat the cached
+        // review as current. BuildBookReviewAsync must agree: it must NOT take the no-op fast path.
+        using var provider = BuildProvider(out var routerMock, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+
+        // Build once → a fresh, ready review (briefs present).
+        var first = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(first.Ready);
+        var before = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(before.IsReady);
+        Assert.True(before.HasBriefs);
+
+        // Remove the structured briefs AFTER the build: the cached findings remain, the summary baseline is NOT
+        // rebuilt (so not stale-vs-briefs), and the model is unchanged — only HasBriefs flips to false.
+        db.ChunkSummaries.RemoveRange(await db.ChunkSummaries.Where(cs => cs.BookId == bookId).ToListAsync());
+        await db.SaveChangesAsync();
+
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(status.HasReview);
+        Assert.False(status.HasBriefs);
+        Assert.False(status.StaleVsBriefs);
+        Assert.False(status.BuiltWithDifferentModel);
+        // The crux: ready must NOT be true while the briefs are gone.
+        Assert.False(status.IsReady, "IsReady must require HasBriefs so it never reports ready while briefs are gone");
+
+        // BuildBookReviewAsync agrees: NOT a no-op; it returns BriefsMissing (no fresh review produced).
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.False(result.NoOp, "with briefs gone the build must not take the IsReady no-op fast path");
+        Assert.True(result.BriefsMissing);
+        Assert.False(result.Ready);
+
+        // Only the first build spent model calls (6 per-dimension); the briefs-absent path spends none.
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Exactly(6));
+    }
+
     // ─── 7. One bad dimension does not abort the build; the other five still persist ──────────────
 
     [Fact]

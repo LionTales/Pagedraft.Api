@@ -54,11 +54,16 @@ public sealed class BookReviewStatus
     public Guid? ActiveBuildJobId { get; init; }
 
     /// <summary>
-    /// True when a build would be a genuine no-op: a usable review exists, was built under the ACTIVE model,
-    /// and is not stale versus the briefs. Mirrors the no-op gate in
-    /// <see cref="BookReviewService.BuildBookReviewAsync"/> exactly.
+    /// True when a build would be a genuine no-op: usable structured briefs exist (<see cref="HasBriefs"/>), a
+    /// usable review exists (<see cref="HasReview"/>), it was built under the ACTIVE model, and it is not stale
+    /// versus the briefs. Mirrors the no-op gate in <see cref="BookReviewService.BuildBookReviewAsync"/> exactly.
+    ///
+    /// HasBriefs is REQUIRED so this never reports ready while the briefs are gone or degraded: in that state a
+    /// build would NOT be a no-op — it would hit the briefs-absent guard and return BriefsMissing — so a caller
+    /// that trusts IsReady (or the DTO's `ready`) must not treat the cached review as current when
+    /// <see cref="HasBriefs"/> is false.
     /// </summary>
-    public bool IsReady => HasReview && !BuiltWithDifferentModel && !StaleVsBriefs;
+    public bool IsReady => HasBriefs && HasReview && !BuiltWithDifferentModel && !StaleVsBriefs;
 }
 
 /// <summary>Result of a whole-book review build job.</summary>
@@ -369,10 +374,10 @@ public class BookReviewService
                 "A whole-book review build is already in progress for this book; reattaching.");
             return new BookReviewBuildResult
             {
-                // Report Ready with the SAME gate as the intentional no-op above (IsReady = HasReview &&
-                // !BuiltWithDifferentModel && !StaleVsBriefs), NOT HasReview alone: a stale or wrong-model
-                // review must not surface Ready=true while another build is still running, or callers treat an
-                // outdated cache as fresh.
+                // Report Ready with the SAME IsReady gate as the intentional no-op above (briefs present, a
+                // usable review built under the active model, not stale), NOT HasReview alone: a stale,
+                // wrong-model, or briefs-gone review must not surface Ready=true while another build is still
+                // running, or callers treat an outdated/un-rebuildable cache as fresh.
                 Ready = preStatus.IsReady,
                 NoOp = true,
                 FindingCount = preStatus.FindingCount,
