@@ -18,6 +18,17 @@ public class PromptFactory
     private const string HebrewBookSystem =
         "אתה מומחה ספרותי המנתח ספרים שלמים. אתה מסוגל לזהות ז'אנרים, דמויות, מבנה עלילתי, ולספק תובנות מעמיקות על יצירה ספרותית. השב תמיד בעברית בלבד.";
 
+    // Neutral assistant system for free-form Custom prompts and QA (AiTaskType.GenericChat) plus Translation.
+    // These tasks must NOT reuse HebrewSystemBase: that is a PROOFREADER system ("correct errors, return only
+    // the corrected text") and it sabotages a free-form question - the model proofreads the chapter instead of
+    // answering, returning a near-empty fragment. A general literary-assistant framing lets the user's
+    // instruction drive the response.
+    private const string HebrewAssistantSystem =
+        "אתה עוזר ספרותי. בצע את ההנחיה שהמשתמש נותן לגבי הטקסט הנתון - ענה על שאלות, סכם או נתח לפי הבקשה, בהתבסס על תוכן הטקסט. השב תמיד בעברית בלבד.";
+
+    private const string EnglishAssistantSystem =
+        "You are a literary assistant. Follow the user's instruction about the given text - answer questions, summarize, or analyze as requested, based on the text content. Respond only in the same language as the input.";
+
     private const string EnglishProofreadSystem =
         "You are an editor and proofreader. Correct spelling, grammar, and punctuation in the given text while preserving the author's voice and style. Respond only in the same language as the input.";
 
@@ -76,7 +87,7 @@ public class PromptFactory
 
         if (taskType == AiTaskType.Translation || taskType == AiTaskType.GenericChat)
         {
-            var system = isHebrew ? HebrewSystemBase : EnglishProofreadSystem;
+            var system = isHebrew ? HebrewAssistantSystem : EnglishAssistantSystem;
             var instruction = isHebrew ? "השב בעברית בלבד לפי ההנחיות שניתנו." : "Respond according to the instructions given.";
             return (system, instruction);
         }

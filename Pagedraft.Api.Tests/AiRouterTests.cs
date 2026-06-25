@@ -143,4 +143,26 @@ public class AiRouterTests
         // Hebrew request: the system message must be Hebrew (the Hebrew analysis constant).
         Assert.Contains(heSystem, c => c >= '֐' && c <= '׿');
     }
+
+    [Fact]
+    public void GetPrompt_GenericChat_UsesAssistantSystem_NotProofreader()
+    {
+        var factory = new PromptFactory();
+
+        var (proofreadSystem, _) = factory.GetPrompt(AiTaskType.Proofread, "he");
+        var (heSystem, _) = factory.GetPrompt(AiTaskType.GenericChat, "he");
+        var (enSystem, _) = factory.GetPrompt(AiTaskType.GenericChat, "en");
+
+        // Regression: a free-form Custom prompt (and QA) returned a near-empty fragment because GenericChat
+        // reused the PROOFREADER system message, so the model proofread the chapter instead of answering the
+        // user's question. GenericChat must use a neutral literary-assistant system, distinct from Proofread.
+        Assert.NotEqual(proofreadSystem, heSystem);
+        Assert.DoesNotContain("מגיה", heSystem);            // not the "...עורך לשוני ומגיה טקסטים" proofreader framing
+        Assert.Contains("עוזר", heSystem);                  // assistant framing
+        Assert.Contains(heSystem, c => c >= '֐' && c <= '׿'); // Hebrew system for a he request
+
+        // English request: English assistant system, no Hebrew letters.
+        Assert.DoesNotContain(enSystem, c => c >= '֐' && c <= '׿');
+        Assert.Contains("assistant", enSystem, System.StringComparison.OrdinalIgnoreCase);
+    }
 }
