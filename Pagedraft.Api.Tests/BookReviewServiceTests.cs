@@ -383,6 +383,82 @@ public class BookReviewServiceTests
         Assert.False(status.HasReview);
     }
 
+    // ─── 6b. Briefs-absent guard with a jobId must NOT report a SUCCEEDED job (no review produced) ───
+
+    [Fact]
+    public async Task BuildBookReviewAsync_NoBriefs_WithJobId_DoesNotReportSucceededProgress()
+    {
+        // The async path can reach the briefs-absent guard when the briefs vanish AFTER the controller's
+        // request-time guard (a mid-flight race). The build returns Ready=false / BriefsMissing=true and
+        // produces NO review, so the job must NOT surface Succeeded — otherwise progress polling shows a green
+        // finish for a build that produced nothing.
+        using var provider = BuildProvider(out var routerMock, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "No Briefs", Language = "he" });
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 0, Title = "A", ContentText = "תוכן בלי תקציר." });
+        await db.SaveChangesAsync();
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        Assert.True(result.BriefsMissing);
+        Assert.False(result.Ready);
+
+        // The job is driven to a NON-success terminal (Canceled), never Succeeded.
+        Assert.True(progress.TryGet(jobId, out var snapshot));
+        Assert.NotNull(snapshot);
+        Assert.NotEqual(AnalysisProgressStatus.Succeeded, snapshot!.Status);
+        Assert.Equal(AnalysisProgressStatus.Canceled, snapshot.Status);
+
+        // No model calls were spent on the briefs-absent path.
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ─── 6c. Registry-race bail reports Ready via the IsReady gate, NOT HasReview ───────────────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_RegistryRaceLost_StaleReview_ReportsNotReady()
+    {
+        // When the async build LOSES the registry race (another build already holds the slot), the bail must
+        // report Ready using the SAME IsReady gate as the intentional no-op — NOT HasReview. A STALE existing
+        // review (HasReview=true but IsReady=false) must NOT surface Ready=true while another build runs, or
+        // the caller treats an outdated cache as fresh.
+        using var provider = BuildProvider(out _, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+
+        // Build once so a review EXISTS (HasReview=true)...
+        var first = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(first.Ready);
+        // ...then make it STALE vs briefs so IsReady=false while HasReview stays true.
+        await TouchSummaryBaselineAsync(db, bookId);
+        Assert.False((await svc.GetStatusAsync(bookId, "he")).IsReady);
+
+        // Pre-occupy the registry with a LIVE winner job so the next build loses the race (a winner whose
+        // progress is missing/terminal would be self-healed away by ResolveActiveBuildJobId, freeing the slot).
+        var registry = provider.GetRequiredService<BookReviewBuildRegistry>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var winnerJobId = Guid.NewGuid();
+        Assert.True(registry.TryStart(bookId, "he", winnerJobId));
+        progress.StartJob(winnerJobId, AnalysisScope.Book, AnalysisType.BookReview, bookId, null, null, "winner running");
+
+        var loserJobId = Guid.NewGuid();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", loserJobId);
+
+        // Race lost → no-op bail, but NOT ready (the existing review is stale, so IsReady=false).
+        Assert.True(result.NoOp);
+        Assert.False(result.Ready, "a stale review must not surface Ready=true when the build bailed on the race");
+
+        // The losing job is driven to a terminal Canceled status so its tab reattaches to the winner.
+        Assert.True(progress.TryGet(loserJobId, out var snap));
+        Assert.Equal(AnalysisProgressStatus.Canceled, snap!.Status);
+    }
+
     // ─── 7. One bad dimension does not abort the build; the other five still persist ──────────────
 
     [Fact]

@@ -369,7 +369,11 @@ public class BookReviewService
                 "A whole-book review build is already in progress for this book; reattaching.");
             return new BookReviewBuildResult
             {
-                Ready = preStatus.HasReview,
+                // Report Ready with the SAME gate as the intentional no-op above (IsReady = HasReview &&
+                // !BuiltWithDifferentModel && !StaleVsBriefs), NOT HasReview alone: a stale or wrong-model
+                // review must not surface Ready=true while another build is still running, or callers treat an
+                // outdated cache as fresh.
+                Ready = preStatus.IsReady,
                 NoOp = true,
                 FindingCount = preStatus.FindingCount,
                 Message = "A whole-book review build is already in progress for this book and language."
@@ -420,8 +424,14 @@ public class BookReviewService
                 bookId, lang, assembly.UsedStructuredBriefs, assembly.BookBrief != null,
                 assembly.IncludedChapterBriefs.Count);
 
+            // No review was produced (an unmet precondition: the briefs are gone), so this job must NOT report
+            // Succeeded — that lets progress polling show a green finish for a build that produced nothing. Use
+            // a benign non-success terminal (Canceled), mirroring the registry-race bail above: the FE then
+            // shows no error banner and refreshes to the "needs summary" row that carries this guidance. (The
+            // controller guards briefs-missing before starting a job; this path only fires when the briefs
+            // vanish AFTER that check, mid-flight.)
             if (jobId.HasValue)
-                _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded, guidance);
+                _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Canceled, guidance);
 
             var existingCount = await _db.BookFindings.CountAsync(
                 f => f.BookId == bookId && f.Language == lang, ct);
