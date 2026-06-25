@@ -511,6 +511,7 @@ public class BookSummaryServiceTests
             bookIntelligence: null!,
             styleBaseline: null!,
             bookSummary: svc,
+            bookReview: null!,
             progress: progress,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),

@@ -19,6 +19,7 @@ public class BooksController : ControllerBase
     private readonly BookIntelligenceService _bookIntelligence;
     private readonly StyleBaselineService _styleBaseline;
     private readonly BookSummaryService _bookSummary;
+    private readonly BookReviewService _bookReview;
     private readonly AnalysisProgressTracker _progress;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
@@ -29,6 +30,7 @@ public class BooksController : ControllerBase
         BookIntelligenceService bookIntelligence,
         StyleBaselineService styleBaseline,
         BookSummaryService bookSummary,
+        BookReviewService bookReview,
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
@@ -38,6 +40,7 @@ public class BooksController : ControllerBase
         _bookIntelligence = bookIntelligence;
         _styleBaseline = styleBaseline;
         _bookSummary = bookSummary;
+        _bookReview = bookReview;
         _progress = progress;
         _scopeFactory = scopeFactory;
         _appLifetime = appLifetime;
@@ -420,6 +423,336 @@ public class BooksController : ControllerBase
         return Ok(dto);
     }
 
+    // ─── Whole-book review (wb2-c03) ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Start a consented whole-book developmental review build. MIRRORS BuildBookSummary's async-job
+    /// background-execution + AnalysisProgressTracker pattern so the FE reuses analysis-progress.service.
+    /// Returns a jobId pollable via GET review/progress/{jobId}.
+    ///
+    /// IDEMPOTENT: when the review is already fresh (built under the active model, not stale vs briefs) the
+    /// build runs synchronously as a no-op and returns ready with no jobId.
+    ///
+    /// BRIEFS-MISSING GUARD: the review reads the structured chapter briefs (the book summary). When the book
+    /// has no usable briefs yet, NO model calls are spent and the response carries BriefsMissing=true plus a
+    /// guidance message ("build the book summary first") so the FE can route the user there. Surfaced as a
+    /// 200 (not an error) carrying the structured flag the FE localizes.
+    /// </summary>
+    [HttpPost("{bookId:guid}/review")]
+    public async Task<ActionResult<StartBookReviewBuildResponse>> BuildBookReview(
+        Guid bookId,
+        [FromBody] BuildBookReviewRequest? req,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
+
+        var status = await _bookReview.GetStatusAsync(bookId, lang, ct);
+
+        // Briefs-missing guard: the book has no usable structured briefs to review. Spend NO model calls;
+        // surface the structured BriefsMissing flag + guidance so the FE prompts to build the summary first.
+        if (!status.HasBriefs)
+        {
+            return Ok(new StartBookReviewBuildResponse(
+                JobId: null,
+                Language: lang,
+                NoOp: false,
+                Ready: false,
+                BriefsMissing: true,
+                FindingCount: status.FindingCount,
+                Message: "Build the book summary first; the whole-book review reads the chapter briefs."));
+        }
+
+        // Idempotent fast path: a usable review exists, built under the ACTIVE model, not stale vs briefs →
+        // no-op. Uses status.IsReady so this endpoint applies the SAME gate as GET review/status and
+        // BuildBookReviewAsync (single source of truth).
+        if (status.IsReady)
+        {
+            return Ok(new StartBookReviewBuildResponse(
+                JobId: null,
+                Language: lang,
+                NoOp: true,
+                Ready: true,
+                BriefsMissing: false,
+                FindingCount: status.FindingCount,
+                Message: "Whole-book review already up to date."));
+        }
+
+        // Dedup guard: a review build for this (bookId, language) is already running. GetStatusAsync only
+        // surfaces ActiveBuildJobId for a job the progress tracker still reports as live (self-healing a
+        // lingering/terminal entry to null), so handing back the existing jobId is safe — the FE reattaches
+        // instead of minting a SECOND build that re-issues the same paid per-dimension LLM calls. Checked
+        // AFTER the no-op fast path, BEFORE starting a new build.
+        if (status.ActiveBuildJobId is Guid activeJobId)
+        {
+            return Ok(new StartBookReviewBuildResponse(
+                JobId: activeJobId,
+                Language: lang,
+                NoOp: false,
+                Ready: false,
+                BriefsMissing: false,
+                FindingCount: status.FindingCount,
+                Message: "A whole-book review build is already in progress for this book."));
+        }
+
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new build." });
+
+        var jobId = Guid.NewGuid();
+        // Pre-register the snapshot BEFORE returning jobId so an immediate FE poll does not 404.
+        // BuildBookReviewAsync calls StartJob again to refresh the message + set total chunks.
+        _progress.StartJob(jobId, AnalysisScope.Book, Services.Ai.Contracts.AnalysisType.BookReview,
+            bookId, null, null, "Queued whole-book review build…");
+
+        // Fire-and-forget background task on a fresh DI scope (mirrors BuildBookSummary).
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var serviceScope = _scopeFactory.CreateScope();
+                var services = serviceScope.ServiceProvider;
+                var review = services.GetRequiredService<BookReviewService>();
+                var progress = services.GetRequiredService<AnalysisProgressTracker>();
+                var logger = services.GetRequiredService<ILogger<BooksController>>();
+                try
+                {
+                    await review.BuildBookReviewAsync(bookId, lang, jobId, shutdownToken);
+                }
+                catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+                {
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Canceled, "Whole-book review build canceled due to application shutdown.");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Whole-book review build job {JobId} failed for book {BookId}", jobId, bookId);
+                    progress.SetStatus(jobId, AnalysisProgressStatus.Failed, ex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                try { _progress.SetStatus(jobId, AnalysisProgressStatus.Failed, "Whole-book review build failed to start."); } catch { }
+                try { _logger.LogError(ex, "Failed to execute whole-book review build job {JobId}", jobId); } catch { }
+            }
+        }, CancellationToken.None);
+
+        return Ok(new StartBookReviewBuildResponse(
+            JobId: jobId,
+            Language: lang,
+            NoOp: false,
+            Ready: false,
+            BriefsMissing: false,
+            FindingCount: status.FindingCount,
+            Message: "Whole-book review build started."));
+    }
+
+    /// <summary>
+    /// Poll progress of a whole-book review build job. Book-scoped sibling of GetBookSummaryProgress; returns
+    /// the SAME AnalysisProgressDto shape so the FE reuses analysis-progress.service. Guarded to serve ONLY
+    /// book-wide BookReview jobs (distinct AnalysisType from the Summarization summary build and the
+    /// LinguisticAnalysis style baseline, so the three book-scoped progress routes never cross-serve).
+    /// </summary>
+    [HttpGet("{bookId:guid}/review/progress/{jobId:guid}")]
+    public ActionResult<AnalysisProgressDto> GetBookReviewProgress(Guid bookId, Guid jobId)
+    {
+        if (!_progress.TryGet(jobId, out var snapshot) || snapshot == null)
+            return NotFound();
+
+        if (snapshot.BookId.HasValue && snapshot.BookId != bookId)
+            return NotFound();
+
+        if (snapshot.Scope != AnalysisScope.Book || snapshot.AnalysisType != Services.Ai.Contracts.AnalysisType.BookReview)
+            return NotFound();
+
+        var dto = new AnalysisProgressDto(
+            snapshot.JobId,
+            snapshot.AnalysisType.ToString(),
+            snapshot.Scope.ToString(),
+            snapshot.BookId,
+            snapshot.ChapterId,
+            snapshot.SceneId,
+            snapshot.Status.ToString(),
+            snapshot.CurrentChunkIndex,
+            snapshot.TotalChunks,
+            snapshot.CompletedChunks,
+            snapshot.Message,
+            snapshot.EstimatedCompletionPercent);
+
+        return Ok(dto);
+    }
+
+    /// <summary>
+    /// GET coverage + freshness of the cached whole-book review for a language. Mirrors GET summary so the FE
+    /// reuses the same status/progress UI. Status DTO (camelCase JSON): hasReview, findingCount, lastUpdatedAt,
+    /// builtWithModel, activeModel, builtWithDifferentModel, staleVsBriefs, hasBriefs, activeBuildJobId, ready.
+    /// </summary>
+    [HttpGet("{bookId:guid}/review/status")]
+    public async Task<ActionResult<BookReviewStatusDto>> GetBookReviewStatus(
+        Guid bookId,
+        [FromQuery] string? language,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, language, ct);
+        var status = await _bookReview.GetStatusAsync(bookId, lang, ct);
+        return Ok(ToReviewStatusDto(status));
+    }
+
+    /// <summary>
+    /// GET the persisted whole-book findings + per-dimension rollup scores for a language. The findings are
+    /// the single source of truth the FE renders; the scores summarise keep/improve/cut per dimension.
+    /// </summary>
+    [HttpGet("{bookId:guid}/review/findings")]
+    public async Task<ActionResult<BookReviewFindingsDto>> GetBookReviewFindings(
+        Guid bookId,
+        [FromQuery] string? language,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, language, ct);
+        var findings = await _bookReview.GetFindingsAsync(bookId, lang, ct);
+        return Ok(ToReviewFindingsDto(findings));
+    }
+
+    /// <summary>
+    /// Update the workflow status of a single whole-book finding. Body { status: acknowledge | dismiss | done
+    /// | open }; the imperative verbs map to the BookFinding.Status set (acknowledged | dismissed | done |
+    /// open). MIRRORS AnalysisController.UpdateSuggestionOutcome: validate the value (BadRequest on invalid),
+    /// set + SaveChanges, return the updated finding. IDEMPOTENT: PATCH-ing the same status twice is a no-op
+    /// success (setting a field to its current value + SaveChanges changes nothing).
+    /// </summary>
+    [HttpPatch("{bookId:guid}/review/findings/{id:guid}/status")]
+    public async Task<ActionResult<BookFindingDto>> UpdateFindingStatus(
+        Guid bookId,
+        Guid id,
+        [FromBody] UpdateFindingStatusRequest request,
+        CancellationToken ct)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.Status))
+            return BadRequest("Status is required.");
+
+        if (!TryMapFindingStatus(request.Status, out var status))
+            return BadRequest("Invalid status. Must be acknowledge, dismiss, done, or open.");
+
+        var finding = await _db.BookFindings.FirstOrDefaultAsync(f => f.Id == id && f.BookId == bookId, ct);
+        if (finding == null) return NotFound();
+
+        finding.Status = status; // idempotent: re-setting the same value + SaveChanges is a no-op success
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(ToFindingDto(finding));
+    }
+
+    /// <summary>
+    /// Maps the FE's imperative status verb to the persisted BookFinding.Status value (case-insensitive).
+    /// Accepts both the verb form (acknowledge/dismiss) and the stored adjective form
+    /// (acknowledged/dismissed) so the endpoint is tolerant of either; "done" and "open" are identical in
+    /// both forms.
+    /// </summary>
+    private static bool TryMapFindingStatus(string raw, out string status)
+    {
+        switch (raw.Trim().ToLowerInvariant())
+        {
+            case "acknowledge":
+            case "acknowledged":
+                status = "acknowledged";
+                return true;
+            case "dismiss":
+            case "dismissed":
+                status = "dismissed";
+                return true;
+            case "done":
+                status = "done";
+                return true;
+            case "open":
+                status = "open";
+                return true;
+            default:
+                status = string.Empty;
+                return false;
+        }
+    }
+
+    private static BookReviewStatusDto ToReviewStatusDto(BookReviewStatus s) => new(
+        s.BookId,
+        s.Language,
+        s.HasReview,
+        s.FindingCount,
+        s.LastUpdatedAt,
+        s.BuiltWithModel,
+        s.ActiveModel,
+        s.BuiltWithDifferentModel,
+        s.StaleVsBriefs,
+        s.HasBriefs,
+        s.ActiveBuildJobId,
+        s.IsReady);
+
+    private static BookReviewFindingsDto ToReviewFindingsDto(BookReviewFindings f) => new(
+        f.BookId,
+        f.Language,
+        f.Findings.Select(ToFindingDto).ToList(),
+        f.Scores.Select(s => new BookReviewDimensionScoreDto(
+            s.Dimension, s.Score, s.KeepCount, s.ImproveCount, s.CutCount)).ToList());
+
+    private static readonly System.Text.Json.JsonSerializerOptions FindingJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
+    private static BookFindingDto ToFindingDto(BookFinding f)
+    {
+        var anchors = DeserializeAnchors(f.ChapterAnchorsJson);
+        var evidence = DeserializeEvidence(f.EvidenceJson);
+        return new BookFindingDto(
+            f.Id,
+            f.Dimension,
+            f.Verdict,
+            f.Severity,
+            f.Rationale,
+            evidence,
+            anchors,
+            f.SuggestedAction,
+            f.Status,
+            f.BuiltWithModel,
+            f.CreatedAt,
+            f.UpdatedAt);
+    }
+
+    private static IReadOnlyList<FindingChapterAnchorDto> DeserializeAnchors(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<FindingChapterAnchorDto>();
+        try
+        {
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<List<FindingChapterAnchor>>(json, FindingJsonOpts);
+            return parsed == null
+                ? Array.Empty<FindingChapterAnchorDto>()
+                : parsed.Select(a => new FindingChapterAnchorDto(a.ChapterId, a.Order, a.Title)).ToList();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return Array.Empty<FindingChapterAnchorDto>();
+        }
+    }
+
+    private static IReadOnlyList<FindingEvidenceDto> DeserializeEvidence(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<FindingEvidenceDto>();
+        try
+        {
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<List<FindingEvidence>>(json, FindingJsonOpts);
+            return parsed == null
+                ? Array.Empty<FindingEvidenceDto>()
+                : parsed.Select(e => new FindingEvidenceDto(e.ChapterId, e.ChapterOrder, e.Excerpt)).ToList();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return Array.Empty<FindingEvidenceDto>();
+        }
+    }
+
     [HttpPost("{bookId:guid}/ask")]
     public async Task<ActionResult<AnalysisResultDto>> Ask(Guid bookId, [FromBody] AskBookRequest req, CancellationToken ct)
     {
@@ -467,6 +800,11 @@ public class BooksController : ControllerBase
         var summaryBaselines = await _db.BookSummaryBaselines.Where(b => b.BookId == bookId).ToListAsync(ct);
         if (summaryBaselines.Count > 0)
             _db.BookSummaryBaselines.RemoveRange(summaryBaselines);
+
+        // Explicitly remove cached BookFindings to satisfy the Restrict FK on BookId.
+        var bookFindings = await _db.BookFindings.Where(f => f.BookId == bookId).ToListAsync(ct);
+        if (bookFindings.Count > 0)
+            _db.BookFindings.RemoveRange(bookFindings);
 
         // Clean up document history snapshots for this book to avoid orphaned versions.
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);

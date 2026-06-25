@@ -61,12 +61,19 @@ builder.Services.AddScoped<BookSummaryService>();
 // route through, so a large book can no longer silently overflow the model context window. Scoped: it
 // reads through the scoped DbContext + BookSummaryService.
 builder.Services.AddScoped<BookContextAssembler>();
+// Whole-book review orchestrator (wb2-c02). Scoped like BookSummaryService; assembles the budgeted book
+// context ONCE via BookContextAssembler, fans out the six per-dimension review prompts through IAiRouter
+// with a parallel cap, unions + dedups the findings, and persists BookFinding rows preserving user Status.
+builder.Services.AddScoped<BookReviewService>();
 // In-progress style-baseline build registry (DEF-2). MUST be singleton: the build runs on a background
 // DI scope while later status requests run on their own scopes, and both must share the same map so a
 // build started in one tab/session is visible (as BUILDING) after a reload or in a second tab.
 builder.Services.AddSingleton<StyleBaselineBuildRegistry>();
 // In-progress book-summary build registry — singleton for the SAME reason as StyleBaselineBuildRegistry.
 builder.Services.AddSingleton<BookSummaryBuildRegistry>();
+// In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
+// registry so a running summary build never blocks a review build (and vice versa) for the same book.
+builder.Services.AddSingleton<BookReviewBuildRegistry>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".

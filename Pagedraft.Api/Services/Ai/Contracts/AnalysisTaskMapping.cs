@@ -24,6 +24,7 @@ public static class AnalysisTaskMapping
         AnalysisType.Synopsis => AiTaskType.Summarization,
         AnalysisType.CharacterAnalysis => AiTaskType.LinguisticAnalysis,
         AnalysisType.StoryAnalysis => AiTaskType.LinguisticAnalysis,
+        AnalysisType.BookReview => AiTaskType.BookReview,
         AnalysisType.QA => AiTaskType.GenericChat,
         AnalysisType.Custom => AiTaskType.GenericChat,
         _ => AiTaskType.GenericChat

@@ -42,6 +42,34 @@ public class AiOptions
     public int MaxParallelStyleBaselineChapters { get; set; } = 2;
 
     /// <summary>
+    /// Max concurrent per-dimension whole-book review LLM calls (BookReviewService, wb2-c02). The review
+    /// fans out 6 single-dimension prompts (plot/character/pacing/tone/theme/continuity) over ONE assembled
+    /// book context; this caps how many run at once. Mirrors the
+    /// <see cref="MaxParallelStyleBaselineChapters"/> cap idiom (used via <c>Math.Max(1, ...)</c>) but is a
+    /// SEPARATE knob: a review call sends the whole book context (a much larger prompt than a single
+    /// chapter's style-baseline call), so its safe concurrency differs from the chapter-fanout cap. Default
+    /// 3 (half of the 6 dimensions) keeps the local model from thrashing while still overlapping work.
+    /// </summary>
+    public int MaxParallelBookReviewDimensions { get; set; } = 3;
+
+    /// <summary>
+    /// Whole-book review fan-out strategy (BookReviewService, wb2-r02). When TRUE (the DEFAULT) the review
+    /// runs ONE combined LLM call that assesses all six dimensions
+    /// (plot/character/pacing/tone/theme/continuity) over a single assembled book context; when FALSE it
+    /// falls back to the per-dimension fan-out (six calls, capped by
+    /// <see cref="MaxParallelBookReviewDimensions"/>).
+    ///
+    /// WHY single-combined is the default: the wb2-c04 eval measured per-dimension (6 calls/book) as a
+    /// QUALITY TIE with single-combined (1 call/book) - same 100% planted-recall, same 0 clean false
+    /// positives, identical composite - while per-dimension costs 6x the model calls and emits more noise.
+    /// wb2-c06 then showed the per-dimension fan-out (3 parallel calls at the post-c05 NumCtx=16384) CRASHES
+    /// the 8 GB dev GPU on big books, while a single combined call completes. So single-combined is cheaper,
+    /// no worse on quality, and survives the dev GPU. Per-dimension is KEPT behind this toggle purely so a
+    /// future larger-GPU host can re-measure whether the fan-out earns its cost; flip to false to use it.
+    /// </summary>
+    public bool BookReviewSingleCombined { get; set; } = true;
+
+    /// <summary>
     /// Hard token budget for the assembled WHOLE-BOOK analysis context (BookContextAssembler): the L2
     /// BookBrief plus as many L1 ChapterBriefs (or, in the degraded path, flat chapter summaries) as fit.
     /// When &lt;= 0 the budget is DERIVED from the active task model's <see cref="ProviderTuningOptions.NumCtx"/>

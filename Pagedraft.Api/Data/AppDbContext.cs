@@ -23,6 +23,7 @@ public class AppDbContext : DbContext
     public DbSet<ChapterStyleProfile> ChapterStyleProfiles => Set<ChapterStyleProfile>();
     public DbSet<BookStyleBaseline> BookStyleBaselines => Set<BookStyleBaseline>();
     public DbSet<BookSummaryBaseline> BookSummaryBaselines => Set<BookSummaryBaseline>();
+    public DbSet<BookFinding> BookFindings => Set<BookFinding>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -248,6 +249,29 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
         });
 
+        modelBuilder.Entity<BookFinding>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Language).HasMaxLength(10);
+            e.Property(x => x.Dimension).HasMaxLength(50);
+            e.Property(x => x.Verdict).HasMaxLength(20);
+            e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("open");
+            e.Property(x => x.DedupKey).HasMaxLength(64).IsRequired();
+            e.Property(x => x.BuiltWithModel).HasMaxLength(200);
+            e.Property(x => x.EvidenceJson).HasColumnType("nvarchar(max)");
+            e.Property(x => x.ChapterAnchorsJson).HasColumnType("nvarchar(max)");
+            // Book FK = Restrict (same multiple-cascade-paths guard as BookStyleBaseline and
+            // BookSummaryBaseline); BooksController.Delete removes BookFindings for the book
+            // explicitly before deleting the book.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
+            // One finding per (BookId, Language, DedupKey) -- used for rebuild status-preservation.
+            // Language is part of the key because ComputeDedupKey does NOT hash Language and every
+            // query scopes BookFinding by (BookId, Language): a he/en pair whose (dimension, order,
+            // rationale) collide produce the SAME DedupKey, and omitting Language here would throw a
+            // unique-constraint violation on the cross-language collision instead of letting both coexist.
+            e.HasIndex(x => new { x.BookId, x.Language, x.DedupKey }).IsUnique();
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -345,6 +369,11 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) bsum.CreatedAt = bsum.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) bsum.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookFinding bf)
+            {
+                if (entry.State == EntityState.Added) bf.CreatedAt = bf.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) bf.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);
