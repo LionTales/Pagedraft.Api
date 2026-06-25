@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -461,19 +460,25 @@ public class BookReviewService
         var builtWithModel = ActiveBookReviewModel;
         var deduped = UnionAndDedup(perDimension, chaptersByOrder, builtWithModel, lang);
 
-        // 7. PERSIST preserving user-set Status across the rebuild.
-        await PersistPreservingStatusAsync(bookId, lang, deduped, ct);
+        // 6. TOTAL FAILURE: the build produced ZERO fresh findings. This is a total failure whether the
+        //    dimensions ERRORED / were unparseable (null slots, failedDimensions == Dimensions.Length) OR they
+        //    parsed cleanly but EVERY one returned an empty findings[] (a degenerate result we must not trust:
+        //    typically the model silently truncating a too-large context, or the combined call emitting
+        //    {"findings": []}). The earlier gate keyed ONLY on failedDimensions == Dimensions.Length, so an
+        //    all-empty build slipped through as a SUCCESS — and worse, the persist below then ran with no
+        //    incoming rows and DELETED every still-open cached finding, silently wiping a good prior review.
+        //    Keying on the produced-finding count catches the errored AND the empty case, and is the single
+        //    point that also covers findings dropped by the rationale filter in UnionAndDedup.
+        var totalFailure = deduped.Count == 0;
+
+        // 7. PERSIST preserving user-set Status across the rebuild — ONLY when fresh findings were produced. On
+        //    a total failure we SKIP the persist entirely so the cached review survives a bad build; running it
+        //    with an empty incoming set would delete every still-open cached finding.
+        if (!totalFailure)
+            await PersistPreservingStatusAsync(bookId, lang, deduped, ct);
 
         var totalNow = await _db.BookFindings.CountAsync(
             f => f.BookId == bookId && f.Language == lang, ct);
-
-        // TOTAL FAILURE definition differs by strategy but the SEMANTICS are identical: the build produced no
-        // parseable model output at all, so ZERO fresh findings. In combined mode that is the single call
-        // failing (failedDimensions == Dimensions.Length, set by RunCombinedAsync when the one call returns
-        // null); in per-dimension mode it is every dimension failing. A total failure must NOT report
-        // Succeeded — that silently re-enabled Build with a green finish in real testing. Surface a FAILED
-        // job + a non-ready result so the FE shows an error state.
-        var totalFailure = failedDimensions == Dimensions.Length;
 
         string msg;
         if (totalFailure)
@@ -481,7 +486,7 @@ public class BookReviewService
             msg = singleCombined
                 ? "Whole-book review failed: the combined review call produced no findings. " +
                   "Try again; if it persists the book may be too large for the model context."
-                : $"Whole-book review failed: all {Dimensions.Length} dimensions failed to produce findings. " +
+                : $"Whole-book review failed: no findings were produced across any of the {Dimensions.Length} dimensions. " +
                   "Try again; if it persists the book may be too large for the model context.";
         }
         else if (!singleCombined && failedDimensions > 0)
@@ -604,9 +609,14 @@ public class BookReviewService
 
         var perDimension = new List<BookFindingItem>?[Dimensions.Length];
 
-        // TOTAL failure: the single combined call produced nothing parseable. Mark EVERY dimension slot as
-        // failed (null) so failedDimensions == Dimensions.Length and the caller treats it as a total failure.
-        if (combined == null)
+        // TOTAL failure: the single combined call produced nothing USABLE — either unparseable / errored (null)
+        // OR it parsed but returned an EMPTY findings[]. A whole-book developmental review with zero findings
+        // across all six dimensions is not a credible "clean" result; it is the degenerate/truncation symptom,
+        // so empty is a total failure just like null. The single call is the ONLY producer here (unlike the
+        // per-dimension path, where one dimension legitimately returning nothing is a clean dimension, not a
+        // failure). Mark EVERY dimension slot as failed (null) so failedDimensions == Dimensions.Length and the
+        // caller treats it as a total failure (FAILED job, not a green finish that would then wipe the cache).
+        if (combined == null || combined.Count == 0)
             return (perDimension, Dimensions.Length);
 
         // Bucket the parsed findings into their (validated) dimension slots so the shared UnionAndDedup runs
@@ -1029,19 +1039,21 @@ public class BookReviewService
 
     // ─── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Wraps the assembled book context text in the same [BOOK_CONTEXT] marker block the analysis
-    /// prompts use (mirrors PromptFactory.AppendSection), so the per-dimension prompt sees a familiar shape.
-    /// The assembler's BookBrief block already starts with [BOOK_CONTEXT]; wrapping is idempotent enough —
-    /// we emit one consistent marked block prefixed to the instruction.</summary>
+    /// <summary>
+    /// Returns the assembled book context as the prompt-prefix section, EXACTLY as <see cref="BookContextAssembler"/>
+    /// produced it. The assembler already wraps the BookBrief in a [BOOK_CONTEXT]…[/BOOK_CONTEXT] block (its own
+    /// FormatBookBrief emits the markers) and appends the chapter briefs after it, so this MUST NOT add a SECOND
+    /// [BOOK_CONTEXT] wrapper: doing so nested the markers and stranded every chapter brief between the inner
+    /// [/BOOK_CONTEXT] and the outer one, leaving the model — and only the model, since the eval harness and
+    /// every other assembly.Text consumer read it raw — with a malformed, double-wrapped context. Passing
+    /// assembly.Text through verbatim gives the review the SAME context shape every other consumer of the
+    /// assembler sends; the caller appends the dimension/combined instruction after the trailing blank line.
+    /// </summary>
     private static string BuildBookContextSection(string assembledText)
     {
         if (string.IsNullOrWhiteSpace(assembledText))
             return string.Empty;
-        var sb = new StringBuilder();
-        sb.Append("[BOOK_CONTEXT]\n");
-        sb.Append(assembledText.Trim());
-        sb.Append("\n[/BOOK_CONTEXT]\n\n");
-        return sb.ToString();
+        return assembledText.Trim() + "\n\n";
     }
 
     private async Task<Dictionary<int, (Guid Id, string Title)>> LoadChaptersByOrderAsync(

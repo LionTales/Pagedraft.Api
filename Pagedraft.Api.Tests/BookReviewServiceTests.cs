@@ -439,6 +439,56 @@ public class BookReviewServiceTests
         Assert.False(status.IsReady);
     }
 
+    // ─── 9b. TOTAL failure via ALL-EMPTY (parseable) findings must NOT report success NOR wipe the cache ─
+
+    [Fact]
+    public async Task BuildBookReviewAsync_AllDimensionsEmpty_NotReady_AndPreservesCache()
+    {
+        // Build 1 produces real findings on plot; the user leaves one open and acknowledges another. Build 2
+        // returns PARSEABLE but EMPTY findings ({"findings": []}) for every dimension — the degenerate /
+        // truncation symptom. The old gate counted only NULL (unparseable) dimensions as failed, so this
+        // all-empty build slipped through as a green SUCCESS and the persist step then DELETED every still-open
+        // cached finding. The fix: zero fresh findings is a TOTAL failure → not ready, FAILED job, and the
+        // destructive persist is SKIPPED so the prior review survives intact.
+        var build1 = FindingsPerDimension(perDimensionCount: 0);
+        build1["plot"] = JsonFindings(
+            new FindingSpec("improve", 2, "Open finding that must survive", 1),
+            new FindingSpec("cut", 3, "Acknowledged finding", 1));
+
+        using var provider = BuildProvider(out _, build1);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var afterBuild1 = await db.BookFindings.Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, afterBuild1.Count);
+        SetStatus(db, afterBuild1, "Acknowledged finding", "acknowledged");
+        await db.SaveChangesAsync();
+
+        // Build 2: every dimension returns an empty findings array; force a non-no-op via a stale-vs-briefs bump.
+        await TouchSummaryBaselineAsync(db, bookId);
+        SwapDimensionFindings(provider, FindingsPerDimension(perDimensionCount: 0));
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        // Not a successful rebuild: zero fresh findings is a total failure, not a green finish.
+        Assert.False(result.Ready, "an all-empty build must not be Ready");
+        Assert.False(result.NoOp);
+        Assert.Contains("failed", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AnalysisProgressStatus.Failed, progress.TryGet(jobId, out var snap) ? snap!.Status : AnalysisProgressStatus.Succeeded);
+
+        // CRITICAL: the cached review is PRESERVED — neither the open nor the acknowledged row was deleted.
+        var afterBuild2 = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, afterBuild2.Count);
+        Assert.Contains(afterBuild2, f => f.Rationale == "Open finding that must survive" && f.Status == "open");
+        Assert.Contains(afterBuild2, f => f.Rationale == "Acknowledged finding" && f.Status == "acknowledged");
+        Assert.Equal(2, result.FindingCount); // reports the preserved cache count, not 0
+    }
+
     // ─── 10. PARTIAL failure carries a warning but still succeeds with the findings that parsed ────────
 
     [Fact]
@@ -670,6 +720,50 @@ public class BookReviewServiceTests
         var status = await svc.GetStatusAsync(bookId, "he");
         Assert.False(status.HasReview);
         Assert.False(status.IsReady);
+    }
+
+    // ─── 14b. SINGLE-COMBINED: a parseable-but-EMPTY findings[] is a total failure and preserves the cache ─
+
+    [Fact]
+    public async Task BuildBookReviewAsync_SingleCombined_EmptyFindings_SurfacesFailed_NotReady_PreservesCache()
+    {
+        // Build 1 (combined) produces a plot finding the user leaves open. Build 2's single combined call
+        // returns a PARSEABLE-but-EMPTY findings array. In combined mode the single call is the only producer,
+        // so empty (not just null) is a TOTAL failure — like the unparseable case above: not ready, FAILED job,
+        // all six dimensions reported failed, and the destructive persist is SKIPPED so the open cached finding
+        // survives. The old gate treated empty as a green success and would have deleted the open row.
+        var build1 = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Open finding that must survive", 1));
+        using var provider = BuildCombinedProvider(out var routerMock, build1);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.Single(await db.BookFindings.Where(f => f.BookId == bookId).ToListAsync());
+
+        // Build 2: the single combined call returns an empty findings array. Force a non-no-op via a brief bump.
+        await TouchSummaryBaselineAsync(db, bookId);
+        SwapCombinedResponse(provider, """{ "findings": [] }""");
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        // Exactly one combined call on the second build (plus the one on the first build).
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+
+        Assert.False(result.Ready, "a combined build that produced no findings must not be Ready");
+        Assert.False(result.NoOp);
+        Assert.Equal(6, result.FailedDimensions); // empty combined output is a total failure, like null
+        Assert.Contains("failed", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AnalysisProgressStatus.Failed, progress.TryGet(jobId, out var snap) ? snap!.Status : AnalysisProgressStatus.Succeeded);
+
+        // The open cached finding is PRESERVED (the empty build did not wipe it).
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Single(rows);
+        Assert.Equal("Open finding that must survive", rows[0].Rationale);
+        Assert.Equal("open", rows[0].Status);
+        Assert.Equal(1, result.FindingCount);
     }
 
     // ─── 15. SINGLE-COMBINED: status preservation on rebuild still works ───────────────────────────────

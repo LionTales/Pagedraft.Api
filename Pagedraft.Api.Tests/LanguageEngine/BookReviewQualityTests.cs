@@ -478,43 +478,46 @@ public class BookReviewQualityTests
     private static readonly PromptFactory _promptFactory = new();
 
     /// <summary>
-    /// Renders the mini-book into the [BOOK_CONTEXT] block, mirroring BookReviewService.BuildBookContextSection
-    /// wrapping a BookBrief + ChapterBriefs body. The body uses the SAME field layout PromptFactory's
-    /// FormatBookBrief / FormatChapterBrief produce, so the model sees production-faithful context.
+    /// Renders the mini-book into the PRODUCTION assembly.Text shape that BookReviewService now feeds the model
+    /// verbatim (after the BuildBookContextSection double-wrap fix): the BookBrief wrapped in its OWN
+    /// [BOOK_CONTEXT]…[/BOOK_CONTEXT] block (exactly as BookContextAssembler.FormatBookBrief emits it), followed
+    /// by the chapter briefs AFTER the closing marker. The brief/chapter field layout mirrors PromptFactory's
+    /// FormatBookBrief / FormatChapterBrief, so the eval measures the same context SHAPE production ships rather
+    /// than the single-block variant it used to (which drifted from production once the assembler embedded its
+    /// own [BOOK_CONTEXT] markers around just the brief).
     /// </summary>
     private static string BuildBookContext(GoldBook book)
     {
-        var body = new StringBuilder();
+        var sb = new StringBuilder();
 
+        // The BookBrief, wrapped in its own [BOOK_CONTEXT] block (as the assembler's FormatBookBrief does).
+        sb.Append("[BOOK_CONTEXT]\n");
         var b = book.BookBrief;
         if (b != null)
         {
             if (!string.IsNullOrWhiteSpace(b.Genre))
-                body.AppendLine($"Genre: {b.Genre}{(string.IsNullOrWhiteSpace(b.SubGenre) ? "" : $" / {b.SubGenre}")}");
+                sb.AppendLine($"Genre: {b.Genre}{(string.IsNullOrWhiteSpace(b.SubGenre) ? "" : $" / {b.SubGenre}")}");
             if (!string.IsNullOrWhiteSpace(b.TargetAudience))
-                body.AppendLine($"Audience: {b.TargetAudience}");
+                sb.AppendLine($"Audience: {b.TargetAudience}");
             if (b.LiteratureLevel.HasValue)
-                body.AppendLine($"Literature level: {b.LiteratureLevel}/10");
+                sb.AppendLine($"Literature level: {b.LiteratureLevel}/10");
             if (b.Themes is { Count: > 0 })
-                body.AppendLine($"Themes: {string.Join(", ", b.Themes)}");
+                sb.AppendLine($"Themes: {string.Join(", ", b.Themes)}");
             if (!string.IsNullOrWhiteSpace(b.Synopsis))
-                body.AppendLine($"Synopsis: {b.Synopsis}");
-            body.AppendLine();
+                sb.AppendLine($"Synopsis: {b.Synopsis}");
         }
+        sb.Append("[/BOOK_CONTEXT]\n\n");
 
+        // The chapter briefs, AFTER the closing marker (mirroring assembly.Text: brief block, then chapters).
         foreach (var ch in book.Chapters.OrderBy(c => c.Order))
         {
-            body.AppendLine($"Chapter {ch.Order}: {ch.Title}");
+            sb.AppendLine($"Chapter {ch.Order}: {ch.Title}");
             if (!string.IsNullOrWhiteSpace(ch.Summary))
-                body.AppendLine(ch.Summary);
-            body.AppendLine();
+                sb.AppendLine(ch.Summary);
+            sb.AppendLine();
         }
 
-        var sb = new StringBuilder();
-        sb.Append("[BOOK_CONTEXT]\n");
-        sb.Append(body.ToString().Trim());
-        sb.Append("\n[/BOOK_CONTEXT]\n\n");
-        return sb.ToString();
+        return sb.ToString().TrimEnd() + "\n\n";
     }
 
     // ─── Matching helpers ───────────────────────────────────────────────────────────────────────────
