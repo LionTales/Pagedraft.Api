@@ -811,7 +811,11 @@ public class BookReviewService
                 if (string.IsNullOrWhiteSpace(item.Rationale))
                     continue; // a finding with no rationale is not actionable and cannot dedup stably
 
-                var primaryOrder = item.ChapterAnchors.Count > 0 ? item.ChapterAnchors[0].Order : 0;
+                // ChapterAnchors/Evidence can arrive null when the model emits "chapterAnchors": null (or a
+                // value the deserializer leaves null) — a finding with only rationale + verdict is still valid.
+                // Treat missing anchors as empty (primaryOrder 0) instead of letting a NullReferenceException
+                // here fail the ENTIRE build (UnionAndDedup runs outside the per-dimension try/catch).
+                var primaryOrder = item.ChapterAnchors is { Count: > 0 } ? item.ChapterAnchors[0].Order : 0;
                 var dedupKey = BookFinding.ComputeDedupKey(item.Dimension, primaryOrder, item.Rationale);
 
                 if (byKey.ContainsKey(dedupKey))
@@ -837,7 +841,9 @@ public class BookReviewService
         string lang)
     {
         // Backfill chapterId on anchors by Order (the model returns order + title, usually not the id).
-        var anchors = item.ChapterAnchors.Select(a =>
+        // Null-safe: the model can emit "chapterAnchors": null, which the deserializer leaves null; a finding
+        // with only rationale/verdict is still valid, so a null list projects to no anchors (not a crash).
+        var anchors = item.ChapterAnchors?.Select(a =>
         {
             var resolved = chaptersByOrder.TryGetValue(a.Order, out var ch);
             return new FindingChapterAnchor
@@ -846,10 +852,11 @@ public class BookReviewService
                 Order = a.Order,
                 Title = !string.IsNullOrWhiteSpace(a.Title) ? a.Title : (resolved ? ch.Title : string.Empty)
             };
-        }).ToList();
+        }).ToList() ?? new List<FindingChapterAnchor>();
 
         // Backfill chapterId on evidence by chapterOrder where we can (null when the order is unknown).
-        var evidence = item.Evidence.Select(e =>
+        // Null-safe for the same reason as anchors above: "evidence": null projects to no evidence.
+        var evidence = item.Evidence?.Select(e =>
         {
             Guid? chapterId = e.ChapterId;
             if (chapterId == null && chaptersByOrder.TryGetValue(e.ChapterOrder, out var ch))
@@ -860,7 +867,7 @@ public class BookReviewService
                 ChapterOrder = e.ChapterOrder,
                 Excerpt = e.Excerpt
             };
-        }).ToList();
+        }).ToList() ?? new List<FindingEvidence>();
 
         var severity = Math.Clamp(item.Severity, 1, 3);
 

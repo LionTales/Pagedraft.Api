@@ -111,6 +111,63 @@ public class BookReviewServiceTests
         Assert.Equal(2, plot.Severity);
     }
 
+    // ─── 2b. Null anchors/evidence (model omits / emits JSON null) must NOT crash the build ─────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_FindingWithNullAnchorsAndEvidence_PersistsInsteadOfCrashing()
+    {
+        // A model finding with only rationale + verdict is valid; chapterAnchors/evidence may arrive as JSON
+        // null (the deserializer leaves the lists null, NOT empty). UnionAndDedup/ProjectToEntity must treat a
+        // null list as empty rather than throwing a NullReferenceException — which, running outside the
+        // per-dimension try/catch, would otherwise fail the ENTIRE build over one anchorless finding.
+        var byDim = FindingsPerDimension(perDimensionCount: 0); // all dimensions empty...
+        byDim["plot"] =
+            """{ "findings": [ { "verdict": "improve", "severity": 2, "rationale": "Valid finding, no anchors", "chapterAnchors": null, "evidence": null } ] }""";
+
+        using var provider = BuildProvider(out _, byDim);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        // The build SUCCEEDS (the null-anchored finding does not crash it) and persists the finding.
+        Assert.True(result.Ready);
+        Assert.Equal(0, result.FailedDimensions);
+        Assert.Equal(1, result.FindingCount);
+
+        var finding = Assert.Single(await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync());
+        Assert.Equal("plot", finding.Dimension);
+        Assert.Equal("Valid finding, no anchors", finding.Rationale);
+        // Missing anchors/evidence project to empty JSON arrays, not null and not a crash.
+        Assert.Equal("[]", finding.ChapterAnchorsJson);
+        Assert.Equal("[]", finding.EvidenceJson);
+    }
+
+    [Fact]
+    public async Task BuildBookReviewAsync_SingleCombined_FindingWithNullAnchorsAndEvidence_PersistsInsteadOfCrashing()
+    {
+        // Same robustness guarantee on the DEFAULT single-combined path: the combined call's findings flow
+        // through the same UnionAndDedup/ProjectToEntity, so a null chapterAnchors/evidence must not crash it.
+        var combined =
+            """{ "findings": [ { "dimension": "character", "verdict": "improve", "severity": 2, "rationale": "Combined finding, no anchors", "chapterAnchors": null, "evidence": null } ] }""";
+
+        using var provider = BuildCombinedProvider(out _, combined);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        Assert.Equal(1, result.FindingCount);
+
+        var finding = Assert.Single(await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync());
+        Assert.Equal("character", finding.Dimension);
+        Assert.Equal("[]", finding.ChapterAnchorsJson);
+        Assert.Equal("[]", finding.EvidenceJson);
+    }
+
     // ─── 3. Status preservation on rebuild ────────────────────────────────────────────────────────
 
     [Fact]
