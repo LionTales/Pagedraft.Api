@@ -423,10 +423,12 @@ public class BookReviewQualityTests
     /// Single-combined run: ONE prompt asking for findings across ALL six dimensions at once. Uses the
     /// PRODUCTION combined prompt (PromptFactory.BuildBookReviewCombinedPrompt) - the SAME prompt
     /// BookReviewService.RunCombinedCallAsync ships - so RUN B measures production, not a harness-local copy.
-    /// The model self-labels each finding's dimension; we NORMALIZE it (unknown/blank -> plot) exactly as
-    /// BookReviewService.RunCombinedAsync does before it scores + persists, so the harness credits the SAME
-    /// labels production would. Scoring the raw model string instead would under-count combined-mode recall
-    /// whenever the label is slightly off, skewing the per-dimension vs single-combined verdict.
+    /// Failure semantics mirror BookReviewService.RunCombinedAsync EXACTLY: the single call is the only
+    /// producer, so BOTH unparseable output AND a parseable-but-EMPTY findings[] are a TOTAL FAILURE
+    /// (errors=1) - an empty whole-book review is the degenerate/truncation symptom, not a clean result. The
+    /// model self-labels each finding's dimension; we NORMALIZE it (unknown/blank -> plot) exactly as
+    /// production does before it scores + persists, so the harness credits the SAME labels production would
+    /// (scoring the raw string would under-count combined recall on slightly-off labels).
     /// </summary>
     private async Task<(List<BookFindingItem> findings, int errors)> RunSingleCombinedAsync(
         IAiRouter router, GoldBook book, string bookContext)
@@ -436,7 +438,11 @@ public class BookReviewQualityTests
         // not a harness-local copy that could drift from it (wb2-r02 reconciliation).
         var instruction = bookContext + _promptFactory.BuildBookReviewCombinedPrompt(book.Language);
         var parsed = await CallAndParseAsync(router, instruction, book.Language);
-        if (parsed?.Findings == null)
+        // TOTAL failure when the single call produced nothing USABLE - unparseable (null) OR an empty
+        // findings[], mirroring BookReviewService.RunCombinedAsync (`combined == null || combined.Count == 0`).
+        // Without the empty check a failed combined call on a clean-control book would score as a flawless
+        // "no false positives" pass (errors=0) instead of a failure, skewing the per-dim vs combined verdict.
+        if (parsed?.Findings == null || parsed.Findings.Count == 0)
             return (new List<BookFindingItem>(), 1);
         // Mirror BookReviewService.RunCombinedAsync: normalize each self-labelled dimension to one of the six
         // (unknown/blank -> plot) BEFORE scoring. Production scores + persists the normalized label, so the
