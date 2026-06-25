@@ -20,6 +20,7 @@ public class BooksController : ControllerBase
     private readonly StyleBaselineService _styleBaseline;
     private readonly BookSummaryService _bookSummary;
     private readonly BookReviewService _bookReview;
+    private readonly ChapterBriefService _chapterBrief;
     private readonly AnalysisProgressTracker _progress;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
@@ -31,6 +32,7 @@ public class BooksController : ControllerBase
         StyleBaselineService styleBaseline,
         BookSummaryService bookSummary,
         BookReviewService bookReview,
+        ChapterBriefService chapterBrief,
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
@@ -41,6 +43,7 @@ public class BooksController : ControllerBase
         _styleBaseline = styleBaseline;
         _bookSummary = bookSummary;
         _bookReview = bookReview;
+        _chapterBrief = chapterBrief;
         _progress = progress;
         _scopeFactory = scopeFactory;
         _appLifetime = appLifetime;
@@ -761,6 +764,195 @@ public class BooksController : ControllerBase
         var language = req.Language ?? "he";
         var result = await _bookIntelligence.AskAsync(bookId, req.Question.Trim(), language, ct);
         return Ok(AnalysisController.ToDto(result));
+    }
+
+    // ─── Chapter summary view + edit (wb3-c04) ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET one chapter's cached summary: the flat (user-authoritative, editable) <c>summaryText</c> plus a
+    /// structured-present indicator and BOTH freshness stamps + the user-edited flag (dual-surface trap).
+    /// Returns a ChapterSummaryViewDto even when no ChunkSummary row exists yet (empty summary, no structured
+    /// brief) so the FE can render an editable-but-empty state.
+    /// </summary>
+    [HttpGet("{bookId:guid}/chapters/{chapterId:guid}/summary")]
+    public async Task<ActionResult<ChapterSummaryViewDto>> GetChapterSummary(
+        Guid bookId,
+        Guid chapterId,
+        [FromQuery] string? language,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+        var chapter = await _db.Chapters.AsNoTracking().FirstOrDefaultAsync(c => c.Id == chapterId && c.BookId == bookId, ct);
+        if (chapter == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, language, ct);
+        var row = await _db.ChunkSummaries.AsNoTracking()
+            .FirstOrDefaultAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+
+        return Ok(ToChapterSummaryViewDto(bookId, chapterId, lang, row));
+    }
+
+    /// <summary>
+    /// PUT a chapter's edited flat summary. The flat <c>summaryText</c> is the user's OWN authoritative
+    /// understanding of the chapter. Saving sets <see cref="ChunkSummary.SummaryUserEdited"/> = true and
+    /// stamps <see cref="ChunkSummary.SummaryUserEditedAt"/> so a later automatic re-summary skips this row
+    /// (clobber guard). DUAL-SURFACE: it writes ONLY the flat surface (text + flat stamps + Language) and does
+    /// NOT touch the structured surface's StructuredJson / StructuredBuiltAt / BuiltWithModel — so the
+    /// structured brief is not orphaned and keeps its own freshness. Creates the row if the chapter has none
+    /// yet. After saving, the FE OFFERS the explicit re-derive so the review reflects the edit.
+    /// </summary>
+    [HttpPut("{bookId:guid}/chapters/{chapterId:guid}/summary")]
+    public async Task<ActionResult<ChapterSummaryViewDto>> UpdateChapterSummary(
+        Guid bookId,
+        Guid chapterId,
+        [FromBody] UpdateChapterSummaryRequest req,
+        CancellationToken ct)
+    {
+        if (req == null || string.IsNullOrWhiteSpace(req.SummaryText))
+            return BadRequest("summaryText is required.");
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+        var chapter = await _db.Chapters.AsNoTracking().FirstOrDefaultAsync(c => c.Id == chapterId && c.BookId == bookId, ct);
+        if (chapter == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, req.Language, ct);
+        var text = req.SummaryText.Trim();
+        var now = DateTimeOffset.UtcNow;
+
+        var row = await _db.ChunkSummaries
+            .FirstOrDefaultAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+        if (row == null)
+        {
+            // No row yet (chapter never summarized): create one carrying ONLY the user's flat edit. The
+            // structured surface stays empty (a re-derive builds it). CreatedAt is stamped by the SaveChanges
+            // override on Add; we also stamp the user-edit freshness explicitly.
+            row = new ChunkSummary
+            {
+                BookId = bookId,
+                ChapterId = chapterId,
+                Language = lang,
+                SummaryText = text,
+                SummaryUserEdited = true,
+                SummaryUserEditedAt = now
+            };
+            _db.ChunkSummaries.Add(row);
+        }
+        else
+        {
+            // be-c02 (language-flip guard): the row's Language is the SINGLE identity for BOTH surfaces. The
+            // incoming flat text IS in `lang` (the user just wrote it), so it is never stale; but if this PUT
+            // flips the row's Language, the EXISTING structured brief (StructuredJson, built under the OLD
+            // language) would masquerade as the new locale's brief once Language flips. Mirror the load path
+            // (LoadOrBuildChapterBriefAsync, which clears the surface that no longer matches the new locale):
+            // clear the now-stale structured surface so it cannot leak the wrong language; a re-derive rebuilds
+            // it for the new locale when the user asks. On the SAME-language path the dual-surface contract is
+            // unchanged — StructuredJson / StructuredBuiltAt / BuiltWithModel are left untouched and not orphaned.
+            // NOTE: a flip is normally unreachable (the FE always passes the book language); this only fires if
+            // the book language changed after the structured brief was built.
+            if (!string.Equals(row.Language, lang, StringComparison.Ordinal)
+                && !string.IsNullOrWhiteSpace(row.StructuredJson))
+            {
+                row.StructuredJson = null;
+                row.StructuredBuiltAt = null;
+                row.BuiltWithModel = null;
+            }
+
+            row.SummaryText = text;
+            row.SummaryUserEdited = true;
+            row.SummaryUserEditedAt = now;
+            row.Language = lang;
+        }
+
+        await _db.SaveChangesAsync(ct);
+
+        // Re-read AsNoTracking so the DTO reflects any SaveChanges-override stamps (CreatedAt on Add).
+        var saved = await _db.ChunkSummaries.AsNoTracking()
+            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+        return Ok(ToChapterSummaryViewDto(bookId, chapterId, lang, saved));
+    }
+
+    /// <summary>
+    /// POST re-derive: the user-triggered action that rebuilds the STRUCTURED brief for one chapter SEEDED
+    /// with the user's edited flat summary, so the whole-book review (which reads the structured brief, not
+    /// the flat text) reflects the edit. Synchronous (one chapter, one model call) — mirrors how the
+    /// per-chapter structured build is exposed elsewhere, and degrades gracefully: if the model cannot
+    /// produce a brief the edit is still saved + clobber-guarded and the response carries rederived=false.
+    /// Requires a user-edited flat summary to seed from (else 409, since a re-derive with nothing to seed is
+    /// just the ordinary AI build).
+    /// </summary>
+    [HttpPost("{bookId:guid}/chapters/{chapterId:guid}/summary/rederive")]
+    public async Task<ActionResult<RederiveChapterSummaryResponse>> RederiveChapterSummary(
+        Guid bookId,
+        Guid chapterId,
+        [FromBody] RederiveChapterSummaryRequest? req,
+        CancellationToken ct)
+    {
+        if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+        var chapter = await _db.Chapters.AsNoTracking().FirstOrDefaultAsync(c => c.Id == chapterId && c.BookId == bookId, ct);
+        if (chapter == null) return NotFound();
+
+        var lang = await ResolveBaselineLanguageAsync(bookId, req?.Language, ct);
+        var row = await _db.ChunkSummaries.AsNoTracking()
+            .FirstOrDefaultAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+
+        if (row == null || !row.SummaryUserEdited || string.IsNullOrWhiteSpace(row.SummaryText))
+            // Nothing authoritative to seed from: re-derive is only meaningful after a user edit. 409 rather
+            // than silently running the ordinary AI build (which the summary/build endpoints already cover).
+            return Conflict(new { error = "No user-edited summary to re-derive from. Edit and save the summary first." });
+
+        var brief = await _chapterBrief.RederiveChapterBriefFromUserSummaryAsync(bookId, chapterId, lang, ct);
+
+        // Re-read so the response reflects the persisted structured surface (or its absence on a graceful miss).
+        var after = await _db.ChunkSummaries.AsNoTracking()
+            .FirstOrDefaultAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+        var hasStructured = after != null && !string.IsNullOrWhiteSpace(after.StructuredJson);
+        var rederived = brief != null;
+
+        return Ok(new RederiveChapterSummaryResponse(
+            BookId: bookId,
+            ChapterId: chapterId,
+            Language: lang,
+            Rederived: rederived,
+            HasStructuredBrief: hasStructured,
+            StructuredBuiltAt: after?.StructuredBuiltAt,
+            BuiltWithModel: after?.BuiltWithModel,
+            Message: rederived
+                ? "Structured brief re-derived from your edited summary; rebuild the whole-book review to reflect it."
+                : "Could not re-derive the structured brief from your summary right now; your edit was saved."));
+    }
+
+    private static ChapterSummaryViewDto ToChapterSummaryViewDto(Guid bookId, Guid chapterId, string lang, ChunkSummary? row)
+    {
+        if (row == null)
+            return new ChapterSummaryViewDto(
+                bookId, chapterId, lang,
+                SummaryText: string.Empty,
+                HasSummary: false,
+                HasStructuredBrief: false,
+                SummaryUserEdited: false,
+                CreatedAt: null,
+                SummaryUserEditedAt: null,
+                StructuredBuiltAt: null,
+                BuiltWithModel: null,
+                StructuredBrief: null);
+
+        // READ-only enrichment (wb3-c04 fallback): expose the PARSED structured-brief facts so the FE can
+        // render a human-readable digest when the flat summary is empty. Defensive parse via the single
+        // source of truth (StructuredChunkSummaryParser): null/blank/unparseable StructuredJson -> null, so a
+        // malformed brief never throws and is simply omitted. HasStructuredBrief stays the cheap presence
+        // check (unchanged contract); StructuredBrief is null when the JSON is present but not usable.
+        return new ChapterSummaryViewDto(
+            row.BookId,
+            row.ChapterId,
+            row.Language,
+            row.SummaryText ?? string.Empty,
+            HasSummary: !string.IsNullOrWhiteSpace(row.SummaryText),
+            HasStructuredBrief: !string.IsNullOrWhiteSpace(row.StructuredJson),
+            row.SummaryUserEdited,
+            row.CreatedAt,
+            row.SummaryUserEditedAt,
+            row.StructuredBuiltAt,
+            row.BuiltWithModel,
+            StructuredBrief: StructuredChunkSummaryParser.Parse(row.StructuredJson));
     }
 
     [HttpPut("{bookId:guid}")]

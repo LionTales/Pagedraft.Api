@@ -859,6 +859,49 @@ public class PromptFactory
             : StructuredChapterBriefEn;
     }
 
+    /// <summary>
+    /// wb3-c04: a STRUCTURED chapter-brief instruction SEEDED with the user's own edited flat summary as the
+    /// AUTHORITATIVE understanding of the chapter. The chapter text is still supplied as <c>InputText</c> for
+    /// detail, but the model is told to treat the user's summary as the source of truth for what the chapter
+    /// is about — so the re-derived structured brief (and hence the whole-book review, which reads the
+    /// structured brief) reflects the user's manual edit rather than re-deriving purely from the raw text.
+    /// Returns the base structured-brief instruction with the user-summary block prepended. The summary is
+    /// trimmed; a blank summary falls back to the plain structured prompt (no empty seed block).
+    /// </summary>
+    public string GetStructuredChapterBriefPromptSeededWithUserSummary(string language, string userSummary)
+    {
+        var basePrompt = GetStructuredChapterBriefPrompt(language);
+        var trimmed = (userSummary ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return basePrompt;
+
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var seedBlock = isHe
+            ? $"""
+               להלן סיכום הפרק כפי שכתב אותו המחבר. זהו ההבנה הסמכותית של הפרק — התבסס עליו כמקור האמת לגבי
+               עלילת הפרק, הדמויות והנושאים, והשתמש בטקסט הפרק רק להשלמת פרטים. אל תסתור את סיכום המחבר.
+
+               סיכום המחבר:
+               {trimmed}
+
+               ---
+
+               """
+            : $"""
+               The following is the chapter summary as written by the author. This is the AUTHORITATIVE
+               understanding of the chapter — treat it as the source of truth for the chapter's plot,
+               characters, and themes, and use the chapter text only to fill in supporting detail. Do not
+               contradict the author's summary.
+
+               Author's summary:
+               {trimmed}
+
+               ---
+
+               """;
+
+        return seedBlock + basePrompt;
+    }
+
     private const string StructuredChapterBriefHe =
         """
         נתח את הפרק הבא והפק תקציר מובנה שלו. החזר אך ורק JSON תקין במבנה הבא, בלי טקסט נוסף לפני או אחרי:

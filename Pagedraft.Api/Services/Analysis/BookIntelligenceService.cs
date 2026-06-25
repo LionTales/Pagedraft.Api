@@ -80,6 +80,20 @@ public class BookIntelligenceService
                 continue;
             }
 
+            // wb3-c04 clobber guard: the user has manually edited THIS chapter's flat SummaryText, which is
+            // their own authoritative understanding of the chapter. The automatic re-summary must NOT silently
+            // overwrite it — even when the chapter text changed and the AI freshness check above would
+            // otherwise re-run. Skip the row; a deliberate overwrite is only reachable through the explicit
+            // re-derive action the user triggers (which consumes the edit rather than discarding it). This is
+            // logged at WARN so a skipped re-summary is never silent.
+            if (existing != null && existing.SummaryUserEdited)
+            {
+                _logger.LogWarning(
+                    "Chapter {ChapterId} flat summary is user-edited; skipping automatic re-summary to " +
+                    "preserve the user's manual edit (re-derive must be user-triggered).", chapter.Id);
+                continue;
+            }
+
             _logger.LogInformation("Summarizing chapter {Title} ({Id})", chapter.Title, chapter.Id);
             var summaryText = await _analysis.RunRawAsync(
                 text, AnalysisType.Summarization, null, language, ct);

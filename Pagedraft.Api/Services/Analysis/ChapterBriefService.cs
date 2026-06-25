@@ -299,6 +299,107 @@ public class ChapterBriefService
         };
     }
 
+    /// <summary>
+    /// wb3-c04 (user-triggered RE-DERIVE): rebuilds the STRUCTURED brief for one chapter, SEEDED with the
+    /// user's own edited flat <see cref="ChunkSummary.SummaryText"/> as the authoritative chapter
+    /// understanding, so the whole-book review (which reads the structured brief, NOT the flat text) reflects
+    /// the user's manual edit. UNLIKE <see cref="LoadOrBuildChapterBriefAsync"/> this is NOT freshness-gated:
+    /// the seed (the user's edit) changed even when the chapter text did not, so the brief is ALWAYS rebuilt.
+    ///
+    /// DUAL-SURFACE: this writes ONLY the structured surface (StructuredJson + BuiltWithModel +
+    /// StructuredBuiltAt) and the shared Language. It does NOT touch the flat SummaryText, its CreatedAt /
+    /// SummaryUserEditedAt stamps, or the <see cref="ChunkSummary.SummaryUserEdited"/> flag — the user's edit
+    /// remains authoritative and clobber-guarded. Returns the rebuilt brief, or null when the row/chapter is
+    /// missing, the flat summary is blank, or the LLM call/parse fails (graceful, mirroring the load path).
+    /// </summary>
+    public async Task<StructuredChunkSummaryData?> RederiveChapterBriefFromUserSummaryAsync(
+        Guid bookId,
+        Guid chapterId,
+        string language,
+        CancellationToken ct = default)
+    {
+        var lang = BaselineLanguageResolver.Normalize(language);
+        var activeModel = ActiveSummarizationModel;
+
+        try
+        {
+            var existing = await _db.ChunkSummaries
+                .FirstOrDefaultAsync(cs => cs.ChapterId == chapterId, ct);
+            if (existing == null || string.IsNullOrWhiteSpace(existing.SummaryText))
+                // Nothing to seed from: re-derive is meaningless without the user's authoritative summary.
+                return existing == null ? null : Parse(existing.StructuredJson);
+
+            var chapter = await _db.Chapters
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == chapterId, ct);
+            // Use the current chapter text for supporting detail; the user summary is the source of truth, so
+            // an empty chapter (cleared text) still re-derives from the summary alone.
+            var chapterText = chapter == null
+                ? string.Empty
+                : SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+
+            // The model needs SOMETHING to read: the user summary is always present here. Feed the chapter
+            // text as InputText when available, else the summary itself, so ComputeChapterBriefAsync's
+            // empty-text guard does not short-circuit a summary-only re-derive.
+            var inputText = string.IsNullOrWhiteSpace(chapterText) ? existing.SummaryText : chapterText;
+
+            var built = await ComputeChapterBriefAsync(inputText, lang, ct, userSummarySeed: existing.SummaryText);
+            if (built == null)
+                return null;
+
+            var (brief, builtModel) = built.Value;
+
+            // be-c02 (language-flip guard): the row's Language is the SINGLE identity for BOTH surfaces.
+            // If this re-derive switches the row to a DIFFERENT language than it currently holds, the flat
+            // SummaryText we seeded from is in the OLD language; once Language flips to `lang` it would
+            // masquerade as the new locale's prose, and BookContextAssembler selects flat fallbacks by
+            // Language only — so it would assemble that mismatched-language prose into the requested context.
+            // Mirror LoadOrBuildChapterBriefAsync's flip handling: clear the now-stale flat summary (and its
+            // user-edit clobber guard, which is meaningless once the prose no longer matches the locale) so it
+            // cannot leak. The new structured brief we just built IS in `lang`, so the surfaces stay coherent.
+            // NOTE: this branch is normally unreachable in practice (the FE always passes the book language,
+            // never a per-chapter flip); it exists so a book-language change followed by a re-derive cannot
+            // leak old-locale prose, consistent with the load path.
+            if (!string.Equals(existing.Language, lang, StringComparison.Ordinal)
+                && !string.IsNullOrWhiteSpace(existing.SummaryText))
+            {
+                existing.SummaryText = string.Empty;
+                existing.SummaryUserEdited = false;
+                existing.SummaryUserEditedAt = null;
+            }
+
+            existing.StructuredJson = JsonSerializer.Serialize(brief, SerializeOpts);
+            existing.BuiltWithModel = builtModel;
+            existing.Language = lang;
+            existing.StructuredBuiltAt = DateTimeOffset.UtcNow;
+            // Deliberately DO NOT touch SummaryText / CreatedAt / SummaryUserEdited / SummaryUserEditedAt
+            // on the SAME-language path: the flat surface (the user's authoritative edit) is preserved and
+            // stays clobber-guarded. They are reconciled ABOVE only on a language flip (stale old-locale prose).
+
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to persist re-derived structured brief for chapter {ChapterId}", chapterId);
+                _db.Entry(existing).State = EntityState.Detached;
+            }
+
+            return brief;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to re-derive structured brief for chapter {ChapterId}", chapterId);
+            return null;
+        }
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────
 
     /// <summary>
@@ -311,12 +412,18 @@ public class ChapterBriefService
     private async Task<(StructuredChunkSummaryData Brief, string? Model)?> ComputeChapterBriefAsync(
         string text,
         string language,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? userSummarySeed = null)
     {
         if (string.IsNullOrWhiteSpace(text))
             return null;
 
-        var instruction = _promptFactory.GetStructuredChapterBriefPrompt(language);
+        // wb3-c04: when a user-edited summary is supplied, seed the derivation with it as the AUTHORITATIVE
+        // chapter understanding (the chapter text still flows as InputText for detail). Otherwise use the
+        // plain structured-brief instruction (the normal AI-only derivation).
+        var instruction = string.IsNullOrWhiteSpace(userSummarySeed)
+            ? _promptFactory.GetStructuredChapterBriefPrompt(language)
+            : _promptFactory.GetStructuredChapterBriefPromptSeededWithUserSummary(language, userSummarySeed);
         var request = new AiRequest
         {
             InputText = text,
@@ -354,6 +461,21 @@ public class ChapterBriefService
         var brief = Parse(json);
         if (brief == null)
             return null;
+
+        // Phase 4c-16: a parseable-but-DEGENERATE brief (e.g. "{}" → all lists empty + blank toneNotes) is a
+        // FAILURE, not a success. Parse returns a non-null record for "{}", so absent this guard a zero-content
+        // brief would be treated as a built result — and the callers would then PERSIST it: the re-derive path
+        // would overwrite a previously-good StructuredJson with an empty one (reporting rederived=true), and
+        // LoadOrBuildChapterBriefAsync would replace/insert an empty brief. This is the documented
+        // num_ctx-truncation / empty-payload failure on the 8GB GPU. Return null so both callers take their
+        // existing graceful-miss branch (no destructive write; the prior brief is preserved; rederived=false).
+        if (StructuredChunkSummaryParser.IsDegenerate(brief))
+        {
+            _logger.LogWarning(
+                "Structured chapter-brief rejected as degenerate (no plot/character/thematic/open-thread content and blank tone notes) for a {Language} build; treating as a build failure so it cannot overwrite an existing brief",
+                language);
+            return null;
+        }
 
         var model = string.IsNullOrWhiteSpace(response.Model) ? ActiveSummarizationModel : response.Model;
         return (brief, model);

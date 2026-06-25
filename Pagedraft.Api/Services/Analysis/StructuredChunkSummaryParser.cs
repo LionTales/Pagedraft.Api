@@ -48,4 +48,24 @@ public static class StructuredChunkSummaryParser
     /// must use so they agree with <see cref="Parse"/>-based composition.
     /// </summary>
     public static bool IsUsable(string? json) => Parse(json) != null;
+
+    /// <summary>
+    /// Phase 4c-16: True when <paramref name="brief"/> carries NO usable content — every list
+    /// (PlotEvents/CharacterStates/ThematicMarkers/OpenThreads) is empty AND ToneNotes is blank. This is the
+    /// DEGENERATE shape an empty payload like <c>"{}"</c> deserializes into: <see cref="Parse"/> returns a
+    /// NON-null record (so <see cref="IsUsable"/> is true), yet it conveys nothing about the chapter — the
+    /// documented num_ctx-truncation/empty-payload failure on a small GPU.
+    ///
+    /// This is a SEPARATE notion from <see cref="IsUsable"/>/<see cref="Parse"/> on purpose. Those decide
+    /// "is the PERSISTED StructuredJson parseable?" for the freshness gate, the status count, and L1
+    /// composition — semantics those paths depend on and which MUST NOT change (a degenerate-but-parseable
+    /// persisted row still reads "built" there). This predicate is used only at BUILD time to reject a
+    /// freshly produced empty brief BEFORE it is allowed to overwrite a previously-good one.
+    /// </summary>
+    public static bool IsDegenerate(StructuredChunkSummaryData brief) =>
+        brief.PlotEvents.Count == 0
+        && brief.CharacterStates.Count == 0
+        && brief.ThematicMarkers.Count == 0
+        && brief.OpenThreads.Count == 0
+        && string.IsNullOrWhiteSpace(brief.ToneNotes);
 }
