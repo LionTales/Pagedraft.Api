@@ -512,7 +512,6 @@ public class BookSummaryServiceTests
             styleBaseline: null!,
             bookSummary: svc,
             bookReview: null!,
-            reviewRegistry: null!,
             progress: progress,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),

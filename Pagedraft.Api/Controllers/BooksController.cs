@@ -20,7 +20,6 @@ public class BooksController : ControllerBase
     private readonly StyleBaselineService _styleBaseline;
     private readonly BookSummaryService _bookSummary;
     private readonly BookReviewService _bookReview;
-    private readonly BookReviewBuildRegistry _reviewRegistry;
     private readonly AnalysisProgressTracker _progress;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
@@ -32,7 +31,6 @@ public class BooksController : ControllerBase
         StyleBaselineService styleBaseline,
         BookSummaryService bookSummary,
         BookReviewService bookReview,
-        BookReviewBuildRegistry reviewRegistry,
         AnalysisProgressTracker progress,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
@@ -43,7 +41,6 @@ public class BooksController : ControllerBase
         _styleBaseline = styleBaseline;
         _bookSummary = bookSummary;
         _bookReview = bookReview;
-        _reviewRegistry = reviewRegistry;
         _progress = progress;
         _scopeFactory = scopeFactory;
         _appLifetime = appLifetime;

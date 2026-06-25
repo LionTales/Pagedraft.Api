@@ -297,7 +297,6 @@ public class BooksReviewControllerTests
         styleBaseline: null!,
         bookSummary: null!,
         bookReview: provider.GetRequiredService<BookReviewService>(),
-        reviewRegistry: provider.GetRequiredService<BookReviewBuildRegistry>(),
         progress: provider.GetRequiredService<AnalysisProgressTracker>(),
         scopeFactory: provider.GetRequiredService<IServiceScopeFactory>(),
         appLifetime: new TestApplicationLifetime(),
