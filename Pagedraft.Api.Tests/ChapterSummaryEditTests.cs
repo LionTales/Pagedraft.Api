@@ -654,10 +654,11 @@ public class ChapterSummaryEditTests
 
     /// <summary>
     /// be-f02-c: when SaveChangesAsync throws DbUpdateException inside
-    /// ChapterBriefService.RederiveChapterBriefFromUserSummaryAsync (ChapterBriefService.cs:362-367),
-    /// the method must detach the modified entity so no tracked-Modified ChunkSummary is left on the
-    /// scoped DbContext, and it must still return the computed brief (graceful — the structured result
-    /// is returned even when persistence fails this round).
+    /// ChapterBriefService.RederiveChapterBriefFromUserSummaryAsync, the method must detach the modified
+    /// entity so no tracked-Modified ChunkSummary is left on the scoped DbContext, AND it must return null
+    /// (NOT the computed brief): the re-derive's whole purpose is to persist the structured brief, so an
+    /// unpersisted brief is a failure and the controller's rederived flag (brief != null) must mirror the
+    /// database — reporting success on an unsaved row was the bug.
     ///
     /// Uses the same ThrowOnSaveDbContext pattern established in
     /// ChapterStyleProfileAndLinguisticTests.LoadOrBuildChapterStyleProfileAsync_StaleRefreshSaveFails_*
@@ -665,10 +666,10 @@ public class ChapterSummaryEditTests
     ///
     /// Revert-verified: removing the Detach line (_db.Entry(existing).State = EntityState.Detached)
     /// from ChapterBriefService.cs left the entity in Modified state and the DoesNotContain assertion
-    /// failed.
+    /// failed; reverting the `return null` to a fall-through `return brief` failed the Assert.Null.
     /// </summary>
     [Fact]
-    public async Task RederiveChapterBriefFromUserSummaryAsync_SaveFails_DetachesEntityAndReturnsResult()
+    public async Task RederiveChapterBriefFromUserSummaryAsync_SaveFails_DetachesEntityAndReturnsNull()
     {
         var options = new DbContextOptionsBuilder<AppDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -718,8 +719,10 @@ public class ChapterSummaryEditTests
 
         var brief = await svc.RederiveChapterBriefFromUserSummaryAsync(bookId, chapterId, "he");
 
-        // The computed brief is returned (graceful degradation — not persisted this round but not lost).
-        Assert.NotNull(brief);
+        // The persist failed, so the re-derive did NOT achieve its purpose (updating the DB row the
+        // whole-book review reads). The method must return null so the controller reports rederived=false
+        // rather than claiming success on a row that was never saved.
+        Assert.Null(brief);
 
         // No tracked-Modified ChunkSummary must remain: the catch detached the entity so a later
         // SaveChanges on the same scoped context is not poisoned by the pending change.

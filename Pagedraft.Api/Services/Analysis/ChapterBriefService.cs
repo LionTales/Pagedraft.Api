@@ -156,6 +156,16 @@ public class ChapterBriefService
                     && !string.IsNullOrWhiteSpace(existing.SummaryText))
                 {
                     existing.SummaryText = string.Empty;
+                    // The flat surface's user-edit clobber guard (SummaryUserEdited/At) protected the prose we
+                    // just cleared as stale old-locale text; once the prose is gone the guard is meaningless
+                    // and actively harmful if left set. Leaving SummaryUserEdited true makes the automatic
+                    // re-summary (SummarizeChaptersAsync) SKIP this row to "preserve" an edit that is now an
+                    // empty string, so the new-locale flat prose never regenerates; and it makes the re-derive
+                    // endpoint return 409 ("no user-edited summary to seed from") on an empty SummaryText.
+                    // Reset the guard so the flat path can rebuild for the new locale, mirroring the re-derive
+                    // path's flip handling (RederiveChapterBriefFromUserSummaryAsync).
+                    existing.SummaryUserEdited = false;
+                    existing.SummaryUserEditedAt = null;
                 }
                 existing.StructuredJson = structuredJson;
                 existing.BuiltWithModel = builtModel;
@@ -310,7 +320,8 @@ public class ChapterBriefService
     /// StructuredBuiltAt) and the shared Language. It does NOT touch the flat SummaryText, its CreatedAt /
     /// SummaryUserEditedAt stamps, or the <see cref="ChunkSummary.SummaryUserEdited"/> flag — the user's edit
     /// remains authoritative and clobber-guarded. Returns the rebuilt brief, or null when the row/chapter is
-    /// missing, the flat summary is blank, or the LLM call/parse fails (graceful, mirroring the load path).
+    /// missing, the flat summary is blank, the LLM call/parse fails, OR the persist fails (a non-null return
+    /// therefore means the structured brief was actually saved, so the caller's "rederived" signal is honest).
     /// </summary>
     public async Task<StructuredChunkSummaryData?> RederiveChapterBriefFromUserSummaryAsync(
         Guid bookId,
@@ -384,7 +395,14 @@ public class ChapterBriefService
             {
                 _logger.LogWarning(ex,
                     "Failed to persist re-derived structured brief for chapter {ChapterId}", chapterId);
+                // Detach so the now-Modified state is not retried by a later SaveChanges on this scoped
+                // DbContext. UNLIKE the load path (which returns the in-memory brief because the caller can
+                // still use it this request), the re-derive's whole purpose is to PERSIST the structured brief
+                // so the whole-book review reflects the user's edit. An unpersisted brief did not achieve that,
+                // so report failure (null) — otherwise the controller's rederived flag (brief != null) would
+                // claim success while the database row was never updated.
                 _db.Entry(existing).State = EntityState.Detached;
+                return null;
             }
 
             return brief;
