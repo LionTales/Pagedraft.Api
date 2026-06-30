@@ -881,9 +881,10 @@ public class ProofreadQualityTests
         services.AddSingleton<IConfiguration>(config);
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
         // Bake-off timeout: the production OllamaProvider resolves its HttpClient via
-        // _httpFactory.CreateClient("Ollama") and uses whatever Timeout this named client carries —
-        // there is NO Ollama timeout config key, so the only place to raise it is here. The default
-        // 2-minute timeout caused cold-start/CPU-spill models (DictaLM-12B, qwen2.5:14b) to hit
+        // _httpFactory.CreateClient("Ollama") and uses whatever Timeout this named client carries.
+        // Production reads it from Ai:Providers:Ollama:TimeoutMinutes (Program.cs), but this harness builds
+        // its own ServiceCollection and does NOT bind that key, so the timeout must be set here directly.
+        // The default 2-minute timeout caused cold-start/CPU-spill models (DictaLM-12B, qwen2.5:14b) to hit
         // HttpClient.Timeout on a single slow case and fail the whole model row. Raise to 10 minutes
         // for the test harness ONLY (production wiring in Program.cs is untouched).
         services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));

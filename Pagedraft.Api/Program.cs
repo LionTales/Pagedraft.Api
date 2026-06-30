@@ -84,7 +84,17 @@ builder.Services.AddSingleton<PromptFactory>();
 builder.Services.AddScoped<IEmbeddingService, StubEmbeddingService>();
 builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
 
-builder.Services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
+// Ollama timeout is a generous-but-bounded CEILING, not a target: local models can legitimately take
+// many minutes on a big unchunked context (e.g. book-scope LinguisticAnalysis at NumCtx=16384), so a
+// short timeout fails healthy slow calls; an infinite one would hang the job on a wedged/looping model.
+// Configurable via "Ai:Providers:Ollama:TimeoutMinutes" (default 30) so it can be tuned without a rebuild.
+builder.Services.AddHttpClient("Ollama", (sp, client) =>
+{
+    var config = sp.GetRequiredService<IConfiguration>();
+    var timeoutMinutes = config.GetValue<int?>("Ai:Providers:Ollama:TimeoutMinutes") ?? 30;
+    if (timeoutMinutes <= 0) timeoutMinutes = 30;
+    client.Timeout = TimeSpan.FromMinutes(timeoutMinutes);
+});
 builder.Services.AddHttpClient("LanguageTool", (sp, client) =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
