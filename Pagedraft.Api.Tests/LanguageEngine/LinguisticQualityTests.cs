@@ -798,10 +798,11 @@ public class LinguisticQualityTests
         services.AddSingleton<IConfiguration>(config);
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
         // Bake-off timeout: OllamaProvider resolves its HttpClient via _httpFactory.CreateClient("Ollama")
-        // and uses whatever Timeout this named client carries — there is NO Ollama timeout config key, so
-        // the only place to raise it is here. The default 2-minute timeout caused cold-start/CPU-spill
-        // models to hit HttpClient.Timeout on a single slow case. Raise to 10 minutes for the harness ONLY
-        // (production wiring in Program.cs is untouched).
+        // and uses whatever Timeout this named client carries. Production reads it from
+        // Ai:Providers:Ollama:TimeoutMinutes (Program.cs), but this harness builds its own ServiceCollection
+        // and does NOT bind that key, so the timeout must be set here directly. The default 2-minute timeout
+        // caused cold-start/CPU-spill models to hit HttpClient.Timeout on a single slow case. Raise to 10
+        // minutes for the harness ONLY (production wiring in Program.cs is untouched).
         services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
         // Cloud / OpenAI-compatible providers resolve their HttpClient via the DEFAULT, unnamed
         // _httpFactory.CreateClient() — register it with the same generous timeout.
