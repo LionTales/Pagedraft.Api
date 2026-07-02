@@ -691,6 +691,319 @@ public class BookContextAssemblerTests
         Assert.NotNull(result.BookBrief);
     }
 
+    // ─── (h) Windowed path (wb4-c01): partition the whole book into ordered windows, dropping nothing ───
+
+    [Fact]
+    public async Task AssembleWindowsAsync_BigBook_PartitionsAllChaptersAcrossWindows_NoneDropped()
+    {
+        // A 64-chapter book at a tight window budget must partition into MULTIPLE windows whose PRIMARY
+        // chapters cover EVERY order exactly once (no chapter dropped — the window path replaces the drop path).
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 800,
+            windowBriefMaxTokens: 200, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Window Book", Language = "he" });
+        const int chapterCount = 64;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        // Multiple windows at this tight budget.
+        Assert.True(windows.Count > 1, $"expected multiple windows, got {windows.Count}");
+
+        // Window indices are 0..N-1 in order.
+        Assert.Equal(Enumerable.Range(0, windows.Count).ToList(),
+            windows.Select(w => w.WindowIndex ?? -1).ToList());
+
+        // No window reports drops — the window path drops NOTHING.
+        Assert.All(windows, w => Assert.Empty(w.DroppedUnits));
+
+        // PRIMARY orders (excluding overlap) cover EVERY chapter order exactly once.
+        var primaryOrders = windows
+            .SelectMany(w => w.IncludedChapterOrders.Except(w.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        Assert.Equal(Enumerable.Range(0, chapterCount).ToList(), primaryOrders);
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_EveryWindow_ContainsTrimmedBookBriefWithinBudget()
+    {
+        // The BookBrief (trimmed) is placed FIRST in EVERY window and each in-budget window stays within budget.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 900,
+            windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Brief Window Book", Language = "he" });
+        const int chapterCount = 40;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        Assert.True(windows.Count > 1);
+        foreach (var w in windows)
+        {
+            // BookBrief anchor present + first in the window text.
+            Assert.NotNull(w.BookBrief);
+            Assert.Contains("[BOOK_CONTEXT]", w.Text);
+            Assert.StartsWith("[BOOK_CONTEXT]", w.Text);
+            // The trimmed brief is charged and within the per-window brief budget (150t + separator slack).
+            var briefEnd = w.Text.IndexOf("[/BOOK_CONTEXT]", StringComparison.Ordinal);
+            Assert.True(briefEnd > 0);
+            var briefText = w.Text.Substring(0, briefEnd + "[/BOOK_CONTEXT]".Length);
+            var briefTokens = BookContextAssembler.EstimateTokens(
+                briefText, BookContextAssembler.CharsPerTokenForLanguage("he"));
+            Assert.True(briefTokens <= 150 + 16, $"trimmed brief {briefTokens}t should be within the ~150t cap");
+
+            // Every non-pathological window stays within budget.
+            if (!w.WindowExceedsBudget)
+                Assert.True(w.EstimatedTokens <= w.BudgetTokens,
+                    $"window {w.WindowIndex} used {w.EstimatedTokens}t > budget {w.BudgetTokens}t");
+        }
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_TrimsBookBrief_ComparedToFullSinglePathBrief()
+    {
+        // The windowed brief is TRIMMED relative to the full BookBrief the single path emits: a long Synopsis
+        // is capped (and the themes union too). Seed a BookProfile with a LONG synopsis so the Synopsis-cap
+        // path is exercised; assert the window brief honours the token cap, its synopsis is ellipsized, and it
+        // is strictly shorter than the single path's full (uncapped) brief.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000,
+            windowBriefMaxTokens: 120, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Trim Book", Language = "he" });
+        var longSynopsis = string.Concat(Enumerable.Repeat(
+            "This is an elaborate multi-clause synopsis sentence describing the plot at length. ", 30));
+        db.BookProfiles.Add(new BookProfile
+        {
+            BookId = bookId, Genre = "Fantasy", SubGenre = "Epic",
+            TargetAudience = "Adult", Synopsis = longSynopsis
+        });
+        for (var i = 0; i < 6; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BigBriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var single = await asm.AssembleAsync(bookId, "he");
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        Assert.NotNull(single.BookBrief);
+        // Extract the full brief block from the single path and the trimmed brief from a window.
+        var fullBriefEnd = single.Text.IndexOf("[/BOOK_CONTEXT]", StringComparison.Ordinal);
+        var fullBrief = single.Text.Substring(0, fullBriefEnd + "[/BOOK_CONTEXT]".Length);
+        Assert.Contains(longSynopsis, fullBrief); // single path carries the FULL synopsis, uncapped
+
+        var w0 = windows[0];
+        var winBriefEnd = w0.Text.IndexOf("[/BOOK_CONTEXT]", StringComparison.Ordinal);
+        var winBrief = w0.Text.Substring(0, winBriefEnd + "[/BOOK_CONTEXT]".Length);
+
+        var winBriefTokens = BookContextAssembler.EstimateTokens(
+            winBrief, BookContextAssembler.CharsPerTokenForLanguage("he"));
+        Assert.True(winBriefTokens <= 120 + 16, $"window brief {winBriefTokens}t should honour the 120t cap");
+        // The window synopsis is CAPPED — the full long synopsis is never present verbatim (it is either
+        // ellipsized or dropped entirely when the themes already fill the budget).
+        Assert.DoesNotContain(longSynopsis, winBrief);
+        // The window brief is a strict trim of the full one (full carries an uncapped synopsis).
+        Assert.True(winBrief.Length < fullBrief.Length,
+            $"window brief ({winBrief.Length} chars) should be shorter than the full brief ({fullBrief.Length} chars)");
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_Overlap_RepeatsLastKChaptersAtHeadOfNextWindow()
+    {
+        // With overlap K, window i+1 begins with the last K PRIMARY chapters of window i (boundary net).
+        const int k = 2;
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 900,
+            windowBriefMaxTokens: 150, windowOverlapChapters: k);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Overlap Book", Language = "he" });
+        const int chapterCount = 40;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+        Assert.True(windows.Count > 1);
+
+        for (var w = 1; w < windows.Count; w++)
+        {
+            var prevPrimary = windows[w - 1].IncludedChapterOrders
+                .Except(windows[w - 1].OverlapChapterOrders)
+                .ToList();
+            var expectedOverlap = prevPrimary.Skip(Math.Max(0, prevPrimary.Count - k)).ToList();
+            // This window's overlap orders == the last K primary orders of the previous window.
+            Assert.Equal(expectedOverlap, windows[w].OverlapChapterOrders.ToList());
+            // And those overlap orders are the HEAD of this window's included orders.
+            Assert.Equal(expectedOverlap, windows[w].IncludedChapterOrders.Take(expectedOverlap.Count).ToList());
+        }
+
+        // Overlap is ADDITIVE: primary coverage is still every chapter exactly once.
+        var primaryOrders = windows
+            .SelectMany(x => x.IncludedChapterOrders.Except(x.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        Assert.Equal(Enumerable.Range(0, chapterCount).ToList(), primaryOrders);
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_SingleChapterExceedingBudget_BecomesOwnOverBudgetWindow_NeverDropped()
+    {
+        // Rule c: a chapter whose block alone exceeds the window budget is emitted as its own over-budget
+        // window (flagged), never dropped. Sandwich it between normal chapters to prove partitioning continues.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 700,
+            windowBriefMaxTokens: 120, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Fat Chapter Book", Language = "he" });
+        SeedChapterWithBrief(db, bookId, order: 0, title: "Small0", briefJson: BriefJson(0));
+        // Chapter 1: a giant flat summary that alone dwarfs the 700t window budget.
+        var fatId = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = fatId, BookId = bookId, Order = 1, Title = "Fat", ContentText = "raw" });
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = fatId, Language = "he",
+            SummaryText = string.Concat(Enumerable.Repeat("overflow body sentence. ", 500)), // ~12000 chars
+            StructuredJson = null
+        });
+        SeedChapterWithBrief(db, bookId, order: 2, title: "Small2", briefJson: BriefJson(2));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        // The fat chapter is present as a PRIMARY chapter in exactly one window flagged over-budget.
+        var fatWindows = windows.Where(w =>
+            w.IncludedChapterOrders.Except(w.OverlapChapterOrders).Contains(1)).ToList();
+        Assert.Single(fatWindows);
+        Assert.True(fatWindows[0].WindowExceedsBudget, "the fat chapter's window must be flagged over-budget");
+        Assert.Contains("overflow body sentence.", fatWindows[0].Text);
+
+        // Nothing dropped; every chapter still covered exactly once as a primary.
+        Assert.All(windows, w => Assert.Empty(w.DroppedUnits));
+        var primaryOrders = windows
+            .SelectMany(w => w.IncludedChapterOrders.Except(w.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        Assert.Equal(new[] { 0, 1, 2 }, primaryOrders);
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_PartialCoverage_BackFillsFlatAndRaw_InsideWindows()
+    {
+        // The per-chapter best-representation (fresh brief > flat summary > raw text) still applies inside
+        // windows: an uncovered chapter is back-filled, not omitted.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000,
+            windowBriefMaxTokens: 300, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Window", Language = "he" });
+
+        // Chapter 0: fresh structured brief.
+        SeedChapterWithBrief(db, bookId, order: 0, title: "Covered", briefJson: BriefJson(0));
+        // Chapter 1: only a flat summary.
+        var flatId = Guid.NewGuid();
+        db.Chapters.Add(new Chapter { Id = flatId, BookId = bookId, Order = 1, Title = "FlatOnly", ContentText = "raw one" });
+        db.ChunkSummaries.Add(new ChunkSummary { BookId = bookId, ChapterId = flatId, Language = "he",
+            SummaryText = "Flat summary that must reach a window.", StructuredJson = null });
+        // Chapter 2: only raw text.
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 2, Title = "RawOnly",
+            ContentText = "Distinctive raw window body." });
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        var allText = string.Concat(windows.Select(w => w.Text));
+        Assert.Contains("Flat summary that must reach a window.", allText);
+        Assert.Contains("Distinctive raw window body.", allText);
+        // All three chapters covered exactly once as primaries.
+        var primaryOrders = windows
+            .SelectMany(w => w.IncludedChapterOrders.Except(w.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        Assert.Equal(new[] { 0, 1, 2 }, primaryOrders);
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_SmallBook_FitsInOneWindow()
+    {
+        // A book that fits the budget yields a single window (index 0) with no overlap and no over-budget flag.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000,
+            windowBriefMaxTokens: 800, windowOverlapChapters: 1);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Tiny Book", Language = "he" });
+        for (var i = 0; i < 4; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var windows = await asm.AssembleWindowsAsync(bookId, "he");
+
+        Assert.Single(windows);
+        Assert.Equal(0, windows[0].WindowIndex);
+        Assert.Empty(windows[0].OverlapChapterOrders);
+        Assert.False(windows[0].WindowExceedsBudget);
+        Assert.Equal(new[] { 0, 1, 2, 3 }, windows[0].IncludedChapterOrders.OrderBy(o => o).ToArray());
+        Assert.True(windows[0].EstimatedTokens <= windows[0].BudgetTokens);
+    }
+
+    // ─── (i) Continuity skeleton newline escaping ────────────────────────────────────────────────────
+
+    [Fact]
+    public void FormatContinuitySkeleton_EmbeddedNewlines_DoNotBreakOneLinePerChapterShape()
+    {
+        // A ChapterBrief whose Title and one OpenThread contain embedded newlines must still render as
+        // exactly ONE chapter line inside the [CONTINUITY_SKELETON]…[/CONTINUITY_SKELETON] block.
+        // (The skeleton is consumed by the continuity-reduce prompt which splits on line boundaries, so
+        // a stray interior newline would be mis-parsed as an extra chapter.)
+        var brief = new ChapterBrief
+        {
+            Title = "Chapter with\nembedded newline",
+            Order = 1,
+            OpenThreads = new[] { "who sent\nthe letter?" },
+            CharacterStates = Array.Empty<Pagedraft.Api.Models.ChapterCharacterState>()
+        };
+
+        var result = BookContextAssembler.FormatContinuitySkeleton(new[] { brief });
+
+        // Split on LF to count actual lines (AppendLine emits \r\n on Windows, \n elsewhere).
+        var lines = result.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        // Expect exactly 3 logical lines: open marker, ONE chapter line, close marker.
+        Assert.Equal(3, lines.Length);
+        // Confirm the chapter line itself has no newline characters (the fix collapsed them).
+        var chapterLine = lines[1].Trim('\r');
+        Assert.DoesNotContain("\n", chapterLine);
+        Assert.DoesNotContain("\r", chapterLine);
+        // Sanity: the title text is still present (spaces, not omitted).
+        Assert.Contains("Chapter with embedded newline", chapterLine);
+        Assert.Contains("who sent the letter?", chapterLine);
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────────────────────────────
 
     private static string BigBriefJson(int n)
@@ -754,7 +1067,9 @@ public class BookContextAssemblerTests
         int ollamaSummarizationNumCtx = 8192,
         double budgetFraction = 0.5,
         int? bookReviewNumCtx = null,
-        int? bookReviewNumPredict = null)
+        int? bookReviewNumPredict = null,
+        int? windowBriefMaxTokens = null,
+        int? windowOverlapChapters = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -772,6 +1087,8 @@ public class BookContextAssemblerTests
         {
             o.BookContextTokenBudget = bookContextTokenBudget;
             o.BookContextBudgetFraction = budgetFraction;
+            if (windowBriefMaxTokens.HasValue) o.BookReviewWindowBriefMaxTokens = windowBriefMaxTokens.Value;
+            if (windowOverlapChapters.HasValue) o.BookReviewWindowOverlapChapters = windowOverlapChapters.Value;
             // The Summarization task model's NumCtx drives the derived budget (mirrors OllamaProvider's
             // "{provider}_{task}" tuning precedence). DefaultProvider is "Ollama"; FeatureModels unset, so
             // the Summarization task resolves to provider "Ollama" → key "Ollama_Summarization".

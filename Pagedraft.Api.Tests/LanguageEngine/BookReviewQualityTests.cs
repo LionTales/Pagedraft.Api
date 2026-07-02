@@ -620,15 +620,22 @@ public class BookReviewQualityTests
 
     private static GoldBook[] LoadGold()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "TestData", "book-review-gold.json");
-        if (!File.Exists(path))
-            return Array.Empty<GoldBook>();
-        var json = File.ReadAllText(path);
-        var raw = JsonSerializer.Deserialize<GoldBook[]>(json, GoldOpts);
-        if (raw == null) return Array.Empty<GoldBook>();
-        // The first array element is a {_README/_hebrewValidation} metadata note (no chapters); skip any
-        // entry that has no chapters so iteration only sees real mini-books.
-        return raw.Where(b => b.Chapters is { Count: > 0 }).ToArray();
+        // The gold set is split across TWO files so neither grows unwieldy: the mini-book set
+        // (book-review-gold.json) and the LARGE windowed-coverage book (book-review-gold-large.json, wb4
+        // part 7 — a 48-chapter book whose summed briefs exceed the ~8192-token budget several times over).
+        // BOTH are copied to the test bin (TestData\** in the .csproj). Load and concatenate both; each
+        // file's first array element is a {_README/_hebrewValidation} metadata note (no chapters) that the
+        // chapter-count filter drops, so iteration only ever sees real books.
+        var books = new List<GoldBook>();
+        foreach (var fileName in new[] { "book-review-gold.json", "book-review-gold-large.json" })
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "TestData", fileName);
+            if (!File.Exists(path)) continue;
+            var raw = JsonSerializer.Deserialize<GoldBook[]>(File.ReadAllText(path), GoldOpts);
+            if (raw == null) continue;
+            books.AddRange(raw.Where(b => b.Chapters is { Count: > 0 }));
+        }
+        return books.ToArray();
     }
 
     private sealed class GoldBook
@@ -669,6 +676,10 @@ public class BookReviewQualityTests
         public string Verdict { get; set; } = "";
         public string[]? AcceptVerdicts { get; set; }
         public int ChapterOrder { get; set; }
+        /// <summary>Optional: for a CROSS-CHAPTER defect (e.g. a continuity break), the set of distant chapter
+        /// orders the finding must span (the large windowed-coverage book records the death chapter AND the
+        /// impossible-reappearance chapter here). Null for a single-chapter defect.</summary>
+        public int[]? SpansChapterOrders { get; set; }
         public string? Note { get; set; }
     }
 

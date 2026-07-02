@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Moq;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
@@ -799,14 +800,35 @@ public class BookReviewServiceTests
         Assert.False(result.BriefsMissing);
         Assert.Equal(0, result.FailedDimensions);
 
-        // EXACTLY ONE combined call — not six. This is the whole point of the single-combined default.
+        // ONE combined window call + ONE synthesis reduce call (wb4-c04) + ONE continuity reduce call (wb4-c05,
+        // the 3-chapter skeleton fits the generous budget in one window → auto-collapse to a single call) =
+        // THREE calls — NOT six. The point of the single-combined default is no per-dimension fan-out; the two
+        // reduce passes add exactly one call each.
         routerMock.Verify(
             r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
-            Times.Once);
-        // And the one call was the BookReview-tagged combined prompt (no per-dimension fan-out).
+            Times.Exactly(3));
+        // Exactly ONE combined window call (no reduce marker), distinguished from the synthesis reduce
+        // ([WINDOW_FINDINGS]) and the continuity reduce ([CONTINUITY_SKELETON]).
         routerMock.Verify(
             r => r.CompleteAsync(
-                It.Is<AiRequest>(req => req.TaskType == AiTaskType.BookReview),
+                It.Is<AiRequest>(req => req.TaskType == AiTaskType.BookReview
+                    && (req.Instruction == null
+                        || (!req.Instruction.Contains("[WINDOW_FINDINGS]")
+                            && !req.Instruction.Contains("[CONTINUITY_SKELETON]")))),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        // And exactly ONE synthesis reduce call (the [WINDOW_FINDINGS] one), also BookReview-tagged.
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.TaskType == AiTaskType.BookReview
+                    && req.Instruction != null && req.Instruction.Contains("[WINDOW_FINDINGS]")),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        // And exactly ONE continuity reduce call (the [CONTINUITY_SKELETON] one — auto-collapsed single call).
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.TaskType == AiTaskType.BookReview
+                    && req.Instruction != null && req.Instruction.Contains("[CONTINUITY_SKELETON]")),
                 It.IsAny<CancellationToken>()),
             Times.Once);
 
@@ -878,13 +900,17 @@ public class BookReviewServiceTests
         var svc = provider.GetRequiredService<BookReviewService>();
         var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
 
-        // Still exactly ONE call (a combined failure does not retry as a fan-out).
-        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+        // One combined window call + one synthesis reduce call + one continuity reduce call (a combined failure
+        // does not retry as a fan-out). Both reduces run but add nothing here (the briefs are present so both
+        // are attempted), so the total-failure outcome below is unchanged.
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Exactly(3));
 
         Assert.False(result.Ready, "a combined build whose single call failed must not be Ready");
         Assert.False(result.NoOp);
         Assert.False(result.BriefsMissing);
-        Assert.Equal(6, result.FailedDimensions); // total failure == all six dimensions marked failed
+        // Windowed MAP: a one-window book whose only window failed reports one failed unit (window). The
+        // load-bearing signal is total failure (Ready=false, FAILED job, cache preserved), asserted below.
+        Assert.Equal(1, result.FailedDimensions);
         Assert.Equal(0, result.FindingCount);
         Assert.Contains("failed", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(0, await db.BookFindings.CountAsync(f => f.BookId == bookId));
@@ -926,12 +952,16 @@ public class BookReviewServiceTests
         var jobId = Guid.NewGuid();
         var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
 
-        // Exactly one combined call on the second build (plus the one on the first build).
-        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+        // Each build issues one combined window call + one synthesis reduce (wb4-c04) + one continuity reduce
+        // (wb4-c05, 2-chapter skeleton fits the budget → single call): 2 builds × 3 = 6.
+        routerMock.Verify(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Exactly(6));
 
         Assert.False(result.Ready, "a combined build that produced no findings must not be Ready");
         Assert.False(result.NoOp);
-        Assert.Equal(6, result.FailedDimensions); // empty combined output is a total failure, like null
+        // Windowed MAP: an all-EMPTY (parseable but zero findings) window is NOT counted as a failed window —
+        // it parsed cleanly, it simply produced nothing. With no findings across the whole set the build is
+        // still a TOTAL failure (deduped.Count == 0), asserted via Ready=false + FAILED status + cache below.
+        Assert.Equal(0, result.FailedDimensions);
         Assert.Contains("failed", result.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(AnalysisProgressStatus.Failed, progress.TryGet(jobId, out var snap) ? snap!.Status : AnalysisProgressStatus.Succeeded);
 
@@ -1064,9 +1094,1077 @@ public class BookReviewServiceTests
         Assert.All(rows, f => Assert.Equal(sharedKey, f.DedupKey));
     }
 
+    // ═══ WINDOWED MAP (wb4-c07): AssembleWindowsAsync → sequential per-window combined calls → accumulate →
+    //     union/dedup → persist ONCE. Every test forces one window PER CHAPTER via a tiny budget. ═══
+
+    // ─── W1. N windows produce N combined calls, and findings from ALL windows persist ──────────────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_ThreeWindows_IssuesThreeCalls_AllWindowsPersist()
+    {
+        // A 3-chapter book at the tiny budget splits into THREE windows (one chapter each). The service must
+        // issue exactly THREE combined calls (one per window, SEQUENTIALLY) and persist the findings from ALL
+        // three windows in ONE persist — nothing overwrites or deletes an earlier window's findings.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Window 1 finding", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Window 2 finding", 1)),
+                [3] = JsonCombinedFindings(new CombinedFindingSpec("pacing", "cut", 3, "Window 3 finding", 2)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        Assert.False(result.NoOp);
+        Assert.False(result.BriefsMissing);
+        Assert.Equal(0, result.FailedDimensions); // no window failed
+
+        // wb4-c06 HONEST COVERAGE: three windows, one primary chapter each, so N/N coverage across 3 windows,
+        // zero failed windows, and both reduce passes ran (a full BookBrief + ordered chapter briefs existed).
+        Assert.Equal(3, result.ChaptersTotal);
+        Assert.Equal(3, result.ChaptersReviewed);
+        Assert.Equal(result.ChaptersTotal, result.ChaptersReviewed); // the N/N honest-coverage equality
+        Assert.Equal(3, result.WindowCount);
+        Assert.Equal(0, result.FailedWindows);
+        Assert.True(result.RanSynthesis);
+        Assert.True(result.RanContinuityReduce);
+        // The build message is the honest coverage claim (chapters/windows), no em-dash.
+        Assert.Contains("Reviewed 3/3 chapters across 3 window(s)", result.Message);
+        Assert.DoesNotContain('—', result.Message);
+
+        // THREE window calls (the sequential MAP) + ONE synthesis reduce call (wb4-c04) + THREE continuity
+        // GROUP calls (wb4-c05: the tiny budget forces one skeleton group per chapter; the final reduce is
+        // skipped because every empty group produced nothing to merge) = SEVEN — not one whole-book call and
+        // not six per-dimension calls.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(7));
+        // Every call was BookReview-tagged.
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.TaskType == AiTaskType.BookReview),
+                It.IsAny<CancellationToken>()),
+            Times.Exactly(7));
+        // Exactly THREE WINDOW prompts (neither reduce marker present).
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.Instruction != null
+                    && !req.Instruction.Contains("[WINDOW_FINDINGS]")
+                    && !req.Instruction.Contains("[CONTINUITY_SKELETON]")),
+                It.IsAny<CancellationToken>()),
+            Times.Exactly(3));
+        // Exactly THREE continuity GROUP calls (the [CONTINUITY_SKELETON] ones); no final reduce (empty groups).
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.Instruction != null && req.Instruction.Contains("[CONTINUITY_SKELETON]")),
+                It.IsAny<CancellationToken>()),
+            Times.Exactly(3));
+
+        // ALL THREE windows' findings survive the ONE persist (the cross-window-deletion regression guard for
+        // three windows): a per-window persist would have deleted windows 1 and 2 when window 3 persisted.
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(3, persisted.Count);
+        Assert.Single(persisted, f => f.Rationale == "Window 1 finding");
+        Assert.Single(persisted, f => f.Rationale == "Window 2 finding");
+        Assert.Single(persisted, f => f.Rationale == "Window 3 finding");
+        // Dimensions taken from each window's self-labelled finding.
+        Assert.Single(persisted, f => f.Dimension == "plot");
+        Assert.Single(persisted, f => f.Dimension == "character");
+        Assert.Single(persisted, f => f.Dimension == "pacing");
+    }
+
+    // ─── W2. THE cross-window-deletion regression guard: a 2-window build keeps BOTH windows' findings ───
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_TwoWindows_PersistsBothWindowsFindings_NoCrossWindowDeletion()
+    {
+        // The core regression this todo guards: persisting per window would run the delete-vanished-open loop
+        // for each window, so window 2's persist (whose incoming set lacks window 1's DedupKeys) would DELETE
+        // window 1's just-persisted open findings. Because we accumulate in memory and persist the whole set
+        // ONCE, BOTH windows' findings must be present after the build.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(
+                    new CombinedFindingSpec("plot", "keep", 1, "Chapter 0 strength", 0),
+                    new CombinedFindingSpec("theme", "improve", 2, "Chapter 0 theme note", 0)),
+                [2] = JsonCombinedFindings(
+                    new CombinedFindingSpec("character", "improve", 2, "Chapter 1 flat cast", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(5)); // two windows + one synthesis reduce (wb4-c04) + two continuity group calls
+                               // (wb4-c05: tiny budget → one group per chapter; empty groups skip the final reduce)
+
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // Window 1's TWO findings AND window 2's one finding all coexist — window 1 was NOT wiped by window 2.
+        Assert.Equal(3, persisted.Count);
+        Assert.Single(persisted, f => f.Rationale == "Chapter 0 strength");
+        Assert.Single(persisted, f => f.Rationale == "Chapter 0 theme note");
+        Assert.Single(persisted, f => f.Rationale == "Chapter 1 flat cast");
+        Assert.Equal(3, result.FindingCount);
+    }
+
+    // ─── W3. One bad window does not abort the build; the other windows persist (partial → warning) ──────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_OneWindowFails_OthersPersist_SucceedsWithWarning()
+    {
+        // Window 2 returns unparseable output (a window-level failure). It must NOT abort the build: windows 1
+        // and 3 still persist, and the build reports Succeeded-with-warning carrying the failed-window count.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Good window 1", 0)),
+                [2] = "{ truncated mid-stream, no closing brace", // unparseable → this window fails
+                [3] = JsonCombinedFindings(new CombinedFindingSpec("pacing", "improve", 2, "Good window 3", 2)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        // THREE window calls (the bad window is attempted, it just yields nothing) + ONE synthesis reduce call
+        // + THREE continuity group calls (wb4-c05, one skeleton group per chapter; empty groups skip the final
+        // reduce) = SEVEN.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(7));
+
+        // NOT a total failure: the two good windows produced findings, so it is Ready with a warning.
+        Assert.True(result.Ready);
+        Assert.False(result.NoOp);
+        Assert.Equal(1, result.FailedDimensions); // one failed window (back-compat field)
+        Assert.Contains("warning", result.Message, StringComparison.OrdinalIgnoreCase);
+
+        // wb4-c06 PARTIAL coverage (be-c01 HONEST-COVERAGE FIX): the failed window's chapter (order 1) is still
+        // IN SCOPE for the DENOMINATOR (the build was responsible for it), so ChaptersTotal stays 3. But it is
+        // NOT counted as REVIEWED — only windows whose call succeeded (1 and 3, orders 0 and 2) count toward the
+        // numerator, so ChaptersReviewed is 2, and reviewed < total. The failure is surfaced explicitly via
+        // FailedWindows and the warning message; the coverage claim no longer over-reports a failed window.
+        Assert.Equal(3, result.ChaptersTotal);
+        Assert.Equal(2, result.ChaptersReviewed);
+        Assert.True(result.ChaptersReviewed < result.ChaptersTotal); // failed window lowers reviewed below total
+        Assert.Equal(3, result.WindowCount);
+        Assert.Equal(1, result.FailedWindows);
+        Assert.Contains("Reviewed 2/3 chapters", result.Message);
+        Assert.Contains("1 window(s) failed", result.Message);
+        Assert.DoesNotContain('—', result.Message);
+
+        // The two good windows persisted; the failed window contributed nothing (but did not abort the build).
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, persisted.Count);
+        Assert.Single(persisted, f => f.Rationale == "Good window 1");
+        Assert.Single(persisted, f => f.Rationale == "Good window 3");
+        Assert.DoesNotContain(persisted, f => f.Dimension == "character");
+
+        // A partial build still finishes Succeeded (green), not Failed — the good windows produced a review.
+        Assert.True(progress.TryGet(jobId, out var snap));
+        Assert.Equal(AnalysisProgressStatus.Succeeded, snap!.Status);
+    }
+
+    // ─── W4. TOTAL failure (every window fails) → Failed + no persist → the prior cache survives ─────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_AllWindowsFail_SurfacesFailed_PreservesPriorCache()
+    {
+        // Build 1: two windows each produce a finding the user leaves open. Build 2: EVERY window fails
+        // (unparseable), so the whole accumulated set deduped to zero → a TOTAL failure. The destructive
+        // persist is SKIPPED so both prior open cached findings survive; the job is FAILED, not a green finish.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Prior open window 1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Prior open window 2", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var first = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(first.Ready);
+        Assert.Equal(2, await db.BookFindings.CountAsync(f => f.BookId == bookId));
+
+        // Build 2: force a non-no-op (bump the baseline) then make BOTH windows fail.
+        await TouchSummaryBaselineAsync(db, bookId);
+        holder.ByWindowIndex = new Dictionary<int, string?>
+        {
+            [1] = "{ broken", // unparseable → window 1 fails
+            [2] = "also broken, no json", // unparseable → window 2 fails
+        };
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        Assert.False(result.Ready, "every window failed → total failure → not Ready");
+        Assert.False(result.NoOp);
+        Assert.Contains("failed", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AnalysisProgressStatus.Failed, progress.TryGet(jobId, out var snap) ? snap!.Status : AnalysisProgressStatus.Succeeded);
+
+        // wb4-c06: even on a TOTAL failure the coverage shape is reported (both windows attempted → both failed),
+        // so the FE can show which windows failed without treating the build as successful.
+        Assert.Equal(2, result.WindowCount);
+        Assert.Equal(2, result.FailedWindows);
+        Assert.Equal(2, result.ChaptersTotal);
+
+        // The PRIOR cache is intact — a bad build never wipes a good review.
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, rows.Count);
+        Assert.Single(rows, f => f.Rationale == "Prior open window 1");
+        Assert.Single(rows, f => f.Rationale == "Prior open window 2");
+        Assert.Equal(2, result.FindingCount);
+    }
+
+    // ─── W5. be-c02 SCOPED DELETE: a rebuild where a window's call FAILS (its chapter not re-reviewed) must
+    //         PRESERVE that chapter's prior open findings, while a window that SUCCEEDED still refreshes its own
+    //         (deletes vanished-open). Stops the partial-empty destructive wipe. ─────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_FailedWindow_PreservesThatChaptersPriorFinding_RefreshesReviewedWindow()
+    {
+        // Six chapters at the tiny budget → six windows (one primary each, orders 0..5). Build 1: window 1 and
+        // window 6 each emit an open finding (on ch 0 and ch 5); the other windows are parsed-empty. The user
+        // leaves both open. Build 2: window 1 emits a DIFFERENT ch-0 finding (the old one vanishes) and window 6
+        // FAILS (null output → a window-level failure, so ch 5 is NOT in the reviewed set). be-c02: ch 0 IS
+        // reviewed so its vanished-open finding is deleted/replaced (unchanged behavior); ch 5 is NOT reviewed
+        // (its window failed) so its PRIOR open finding SURVIVES — the fix stops the partial wipe.
+        // Every intervening window (2..5) returns a PARSED-EMPTY result so it is a clean SUCCESS (an ABSENT key
+        // serves "" = empty OUTPUT, which is a window FAILURE, not a clean review — so populate them explicitly).
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Old ch0 finding", 0)),
+                [2] = EmptyFindings, [3] = EmptyFindings, [4] = EmptyFindings, [5] = EmptyFindings,
+                [6] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Ch5 finding must survive", 5)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 6);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var first = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(first.Ready);
+        var afterBuild1 = await db.BookFindings.Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, afterBuild1.Count);
+        Assert.Single(afterBuild1, f => f.Rationale == "Old ch0 finding");
+        Assert.Single(afterBuild1, f => f.Rationale == "Ch5 finding must survive");
+        // Both left OPEN by the user (no status change).
+
+        // Build 2: force a non-no-op, then window 1 emits a NEW ch-0 finding (old ch0 vanishes), windows 2..5 stay
+        // parsed-empty (clean), and window 6 FAILS (unparseable output → ch 5 NOT re-reviewed).
+        await TouchSummaryBaselineAsync(db, bookId);
+        holder.ByWindowIndex = new Dictionary<int, string?>
+        {
+            [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Fresh ch0 finding", 0)),
+            [2] = EmptyFindings, [3] = EmptyFindings, [4] = EmptyFindings, [5] = EmptyFindings,
+            [6] = "{ truncated, no closing brace", // unparseable → window 6 FAILS → ch 5 NOT reviewed this build
+        };
+
+        var second = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(second.Ready);
+        Assert.Equal(1, second.FailedWindows); // ONLY window 6 failed → ch 5 not in the reviewed set
+
+        var afterBuild2 = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // ch 0 (a REVIEWED window): the old vanished-open finding was deleted, the fresh one inserted.
+        Assert.DoesNotContain(afterBuild2, f => f.Rationale == "Old ch0 finding");
+        Assert.Single(afterBuild2, f => f.Rationale == "Fresh ch0 finding");
+        // ch 5 (a FAILED window, NOT re-reviewed): its prior open finding SURVIVES — the be-c02 fix.
+        Assert.Single(afterBuild2, f => f.Rationale == "Ch5 finding must survive");
+        Assert.Equal(2, afterBuild2.Count);
+    }
+
+    // ─── W6. be-c02 BOUNDARY: a PARSED-EMPTY window is a SUCCESS (be-c01) — its clean chapters ARE re-reviewed,
+    //         so a vanished-open finding on them IS deleted (the window looked and no longer surfaces it). This
+    //         pins the semantic boundary vs W5 (a FAILED window preserves). ────────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_ParsedEmptyWindow_IsReviewed_DeletesItsVanishedOpenFinding()
+    {
+        // Same shape as W5 but build 2's window 6 returns a PARSED-EMPTY result ({"findings":[]}, NOT null). Per
+        // be-c01 a parsed-empty window is a SUCCESS (its chapter was reviewed and is legitimately clean), so ch 5
+        // IS in the reviewed set → its prior vanished-open finding IS deleted (regenerated noise the window no
+        // longer surfaces). This is the opposite outcome to W5's FAILED window, proving the scope keys on
+        // reviewed-vs-not, not on incoming-emptiness alone.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Old ch0 finding", 0)),
+                [2] = EmptyFindings, [3] = EmptyFindings, [4] = EmptyFindings, [5] = EmptyFindings,
+                [6] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Ch5 finding cleaned up", 5)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 6);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        Assert.True((await svc.BuildBookReviewAsync(bookId, "he")).Ready);
+        Assert.Equal(2, await db.BookFindings.CountAsync(f => f.BookId == bookId));
+
+        await TouchSummaryBaselineAsync(db, bookId);
+        holder.ByWindowIndex = new Dictionary<int, string?>
+        {
+            [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Fresh ch0 finding", 0)),
+            [2] = EmptyFindings, [3] = EmptyFindings, [4] = EmptyFindings, [5] = EmptyFindings,
+            [6] = EmptyFindings, // PARSED-EMPTY (not null) → window 6 SUCCEEDS clean → ch 5 IS reviewed
+        };
+
+        var second = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(second.Ready);
+        Assert.Equal(0, second.FailedWindows); // parsed-empty is NOT a failed window
+
+        var afterBuild2 = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.DoesNotContain(afterBuild2, f => f.Rationale == "Old ch0 finding");
+        Assert.Single(afterBuild2, f => f.Rationale == "Fresh ch0 finding");
+        // ch 5's window reviewed cleanly and no longer surfaces the finding → it is DELETED (open noise), NOT kept.
+        Assert.DoesNotContain(afterBuild2, f => f.Rationale == "Ch5 finding cleaned up");
+        Assert.Single(afterBuild2);
+    }
+
+    // ─── W7. be-c02 NO REGRESSION: a fully-successful multi-window rebuild still deletes vanished-open findings
+    //         for the reviewed chapters (every reviewed chapter is in the set, so the delete behaves as before).
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_FullySuccessfulRebuild_StillDeletesVanishedOpen()
+    {
+        // Two windows, both succeed on both builds. Build 1: ch 0 finding + ch 1 finding, both left open. Build 2:
+        // ch 0 emits a DIFFERENT finding (old vanishes) and ch 1 is parsed-empty. Both chapters ARE reviewed, so
+        // both vanished-open findings are deleted — the scoping never preserves a reviewed chapter's stale open.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Old ch0", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Old ch1", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        Assert.True((await svc.BuildBookReviewAsync(bookId, "he")).Ready);
+        Assert.Equal(2, await db.BookFindings.CountAsync(f => f.BookId == bookId));
+
+        await TouchSummaryBaselineAsync(db, bookId);
+        holder.ByWindowIndex = new Dictionary<int, string?>
+        {
+            [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "New ch0", 0)),
+            [2] = "{ \"findings\": [] }", // ch 1 reviewed clean → its old open finding must be deleted
+        };
+
+        var second = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(second.Ready);
+        Assert.Equal(0, second.FailedWindows);
+
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Single(rows, f => f.Rationale == "New ch0");
+        Assert.DoesNotContain(rows, f => f.Rationale == "Old ch0"); // reviewed ch 0 → vanished-open deleted
+        Assert.DoesNotContain(rows, f => f.Rationale == "Old ch1"); // reviewed (clean) ch 1 → vanished-open deleted
+        Assert.Single(rows);
+    }
+
+    // ═══ COVERAGE PROVENANCE (wb4-c06): the build result + status DTO carry HONEST chapters/windows/pass
+    //     counts so the FE can show "N/N chapters across W windows" instead of trusting a truncation-prone
+    //     single call. ═══
+
+    // ─── C1. A multi-window build over MANY chapters reports N/N honest coverage (the wb4-c07 "64/64" claim in
+    //         miniature): every chapter is a primary in exactly one window, so ChaptersReviewed == ChaptersTotal.
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_ManyChapters_ReportsHonestFullCoverage()
+    {
+        // Eight chapters at the tiny budget → EIGHT windows (one primary each). Every window succeeds, so the
+        // coverage claim is 8/8 across 8 windows with zero failed windows — the honest end-to-end claim.
+        var byWindow = new Dictionary<int, string?>();
+        for (var w = 1; w <= 8; w++)
+            byWindow[w] = JsonCombinedFindings(
+                new CombinedFindingSpec("plot", "improve", 2, $"Window {w} note", w - 1));
+        var holder = new WindowedResponseHolder { ByWindowIndex = byWindow };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 8);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        Assert.Equal(8, result.ChaptersTotal);
+        Assert.Equal(8, result.ChaptersReviewed);
+        Assert.Equal(result.ChaptersTotal, result.ChaptersReviewed); // N/N honest-coverage equality
+        Assert.Equal(8, result.WindowCount);
+        Assert.Equal(0, result.FailedWindows);
+        Assert.True(result.RanSynthesis);
+        Assert.True(result.RanContinuityReduce);
+        Assert.Contains("Reviewed 8/8 chapters across 8 window(s)", result.Message);
+        Assert.Contains("+ continuity pass", result.Message);
+        Assert.DoesNotContain('—', result.Message); // no em-dash in the user-facing build message
+    }
+
+    // ─── C1a (be-c01 HEADLINE FIX). PARTIALLY-BUILT book: a chapter with content but NO fresh structured brief
+    //         windows via the flat/raw fallback. The DENOMINATOR must count it (it is a reviewable primary), so
+    //         ChaptersReviewed can NEVER exceed ChaptersTotal. This is the >100% ("Reviewed 64/40") regression:
+    //         the old denominator (orderedChapterBriefs.Count) counted ONLY fresh-brief chapters, while the
+    //         numerator counted the back-filled chapter too, so reviewed > total.
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_PartialBriefBook_ReviewedNeverExceedsTotal()
+    {
+        // THREE chapters, each its own window on the tiny budget. Chapters 0 and 2 have a FRESH structured brief;
+        // chapter 1 has content but NO ChunkSummary at all, so ComposeChapterBriefsAsync SKIPS it and it windows
+        // via the raw-text back-fill — it is a reviewable PRIMARY with no fresh brief. Every window succeeds.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Ch0 note", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("pacing", "improve", 2, "Ch1 note (no brief)", 1)),
+                [3] = JsonCombinedFindings(new CombinedFindingSpec("theme", "improve", 2, "Ch2 note", 2)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedPartialBriefBookAsync(db, chapterCount: 3, chapterWithoutBriefOrder: 1);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        // THE INVARIANT: reviewed is a SUBSET of total, so it can never exceed it (the >100% regression). All
+        // three chapters are reviewable primaries (the brief-less one windows via raw text), and every window
+        // succeeded, so this is honest 3/3 — NOT 3/2 (old denominator counted only the two fresh-brief chapters).
+        Assert.Equal(3, result.ChaptersTotal);
+        Assert.Equal(3, result.ChaptersReviewed);
+        Assert.False(result.ChaptersReviewed > result.ChaptersTotal,
+            "ChaptersReviewed must NEVER exceed ChaptersTotal — a brief-less chapter must be in the denominator too.");
+        Assert.True(result.ChaptersReviewed <= result.ChaptersTotal);
+        Assert.Equal(3, result.WindowCount);
+        Assert.Equal(0, result.FailedWindows);
+        Assert.Contains("Reviewed 3/3 chapters", result.Message);
+        Assert.DoesNotContain('—', result.Message);
+    }
+
+    // ─── C1b (be-c01 HEADLINE FIX). A failed window's chapters are NOT counted as reviewed. 2-window build where
+    //         window 2's call returns null (failed): ChaptersReviewed == window-1 primaries only, ChaptersTotal ==
+    //         ALL primaries (both windows), reviewed < total, and the failed-window count is still reported.
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_FailedWindow_NotCountedAsReviewed()
+    {
+        // Two chapters → two windows. Window 1 succeeds; window 2 returns unparseable output → its call FAILS, so
+        // its chapter (order 1) is a reviewable primary (in the denominator) but NOT reviewed (not in numerator).
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Ch0 good", 0)),
+                [2] = "{ truncated, no closing brace", // unparseable → window 2 fails
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready); // window 1 produced findings → not a total failure
+        // DENOMINATOR = all primaries across BOTH windows (the failed window's chapter is still in scope).
+        Assert.Equal(2, result.ChaptersTotal);
+        // NUMERATOR = window-1 primaries ONLY (the failed window's chapter is NOT counted as reviewed).
+        Assert.Equal(1, result.ChaptersReviewed);
+        Assert.True(result.ChaptersReviewed < result.ChaptersTotal,
+            "a failed window must lower ChaptersReviewed below ChaptersTotal, never inflate it.");
+        Assert.Equal(1, result.FailedWindows); // the failure is still reported
+        Assert.Equal(2, result.WindowCount);
+        Assert.Contains("Reviewed 1/2 chapters", result.Message);
+        Assert.Contains("1 window(s) failed", result.Message);
+        Assert.DoesNotContain('—', result.Message);
+    }
+
+    // ─── C2. The STATUS probe reports persisted-derivable coverage (N/N once a review exists); the build-time
+    //         shape (windowCount / ranSynthesis / ranContinuityReduce / failedWindows) is 0/false on the probe.
+    [Fact]
+    public async Task GetStatusAsync_AfterBuild_ReportsPersistedCoverage_BuildTimeShapeZero()
+    {
+        var byWindow = new Dictionary<int, string?>
+        {
+            [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "W1", 0)),
+            [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "W2", 1)),
+        };
+        var holder = new WindowedResponseHolder { ByWindowIndex = byWindow };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+
+        // BEFORE any build: no review yet → ChaptersReviewed 0, ChaptersTotal is the book's chapter count.
+        var before = await svc.GetStatusAsync(bookId, "he");
+        Assert.False(before.HasReview);
+        Assert.Equal(0, before.ChaptersReviewed);
+        Assert.Equal(2, before.ChaptersTotal);
+
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        // AFTER the build: the probe reports N/N persisted coverage; the build-time-only shape stays 0/false
+        // (those precise counts live on BookReviewBuildResult, not the cached status probe).
+        var after = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(after.HasReview);
+        Assert.Equal(2, after.ChaptersTotal);
+        Assert.Equal(2, after.ChaptersReviewed);
+        Assert.Equal(0, after.WindowCount);
+        Assert.False(after.RanSynthesis);
+        Assert.False(after.RanContinuityReduce);
+        Assert.Equal(0, after.FailedWindows);
+    }
+
+    // ─── C3 (data-c01 HEADLINE FIX). After a PARTIAL build (one window FAILED so the build response honestly
+    //         reports reviewed < total), the STATUS PROBE reports the SAME persisted reviewed < total — NOT the
+    //         old dishonest N/N. This is the reload-stays-honest fix. ─────────────────────────────────────────
+    [Fact]
+    public async Task GetStatusAsync_AfterPartialBuild_ReportsPersistedReviewedBelowTotal_NotNofN()
+    {
+        // Two chapters → two windows. Window 1 succeeds; window 2 returns unparseable output → its call FAILS, so
+        // its chapter (order 1) is a reviewable primary (in the denominator) but NOT reviewed (not in numerator).
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Ch0 good", 0)),
+                [2] = "{ truncated, no closing brace", // unparseable → window 2 fails
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var build = await svc.BuildBookReviewAsync(bookId, "he");
+
+        // The build response is honest: reviewed (1) < total (2) — a failed window is not counted as reviewed.
+        Assert.True(build.Ready);
+        Assert.Equal(2, build.ChaptersTotal);
+        Assert.Equal(1, build.ChaptersReviewed);
+        Assert.True(build.ChaptersReviewed < build.ChaptersTotal);
+
+        // The STATUS probe (what a page reload reads) reports the SAME persisted reviewed < total — the fix.
+        // Before data-c01 this returned N/N (2/2) regardless of the failed window.
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(status.HasReview);
+        Assert.Equal(2, status.ChaptersTotal);
+        Assert.Equal(1, status.ChaptersReviewed);
+        Assert.True(status.ChaptersReviewed < status.ChaptersTotal,
+            "a partial build's coverage must survive a reload as reviewed < total, never inflate to N/N.");
+        // The build-time-only shape stays 0/false on the probe (unchanged).
+        Assert.Equal(0, status.WindowCount);
+        Assert.False(status.RanSynthesis);
+        Assert.False(status.RanContinuityReduce);
+        Assert.Equal(0, status.FailedWindows);
+    }
+
+    // ─── C4 (data-c01 FALLBACK). A book whose findings exist WITHOUT a persisted coverage row (an old review
+    //         built before data-c01) falls back to (0, chapter count) on the probe — it does not crash and does
+    //         not claim N/N. ────────────────────────────────────────────────────────────────────────────────
+    [Fact]
+    public async Task GetStatusAsync_ReviewWithoutCoverageRow_FallsBackToZeroOfChapterCount()
+    {
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "W1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "W2", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        // Simulate an OLD review (findings persisted, but no coverage row — built before data-c01) by deleting
+        // the coverage row while leaving the findings intact.
+        var coverageRows = await db.BookReviewCoverages.Where(c => c.BookId == bookId).ToListAsync();
+        db.BookReviewCoverages.RemoveRange(coverageRows);
+        await db.SaveChangesAsync();
+
+        var status = await svc.GetStatusAsync(bookId, "he");
+        // The review still exists (findings are present)…
+        Assert.True(status.HasReview);
+        // …but with no coverage row the probe falls back to (0, chapter count) — no crash, no dishonest N/N.
+        Assert.Equal(0, status.ChaptersReviewed);
+        Assert.Equal(2, status.ChaptersTotal);
+    }
+
+    // ═══ SYNTHESIS reduce pass (wb4-c04): after the window MAP, ONE reduce call receives a COMPACT digest of
+    //     every accumulated finding + the FULL BookBrief, and its findings JOIN the persisted set. ═══
+
+    // ─── S1. The synthesis call receives the COMPACT digest (a digest line, NOT full evidence) + the full brief.
+    //         Its findings join the persisted set. ─────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Synthesis_ReceivesCompactDigest_AndFindingsPersist()
+    {
+        // Two windows each produce a finding; the synthesis pass then ADDS a book-level (arc) finding. The
+        // synthesis request must carry the COMPACT digest of the window findings (dimension | order | rationale,
+        // NOT their evidence excerpts) plus the FULL BookBrief in [BOOK_CONTEXT], and its finding must persist
+        // alongside the window findings.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Window one plot spine", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Window two flat cast", 1)),
+            },
+            // The synthesis pass adds a holistic arc-level finding the windows could not see.
+            SynthesisResponse = JsonCombinedFindings(
+                new CombinedFindingSpec("pacing", "improve", 2, "Global arc sags in the middle", 1)),
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        // Two window calls + one synthesis call + two continuity group calls (wb4-c05, one per chapter under the
+        // tiny budget; empty groups skip the final reduce) = FIVE router calls total.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(5));
+
+        // The synthesis call was issued and captured.
+        Assert.NotNull(holder.SynthesisInstruction);
+        var synthInstruction = holder.SynthesisInstruction!;
+
+        // (a) DIGEST-NOT-EVIDENCE: the compact digest carries a `dimension | order | rationale` line for each
+        //     window finding, and does NOT carry the window findings' evidence excerpt text.
+        Assert.Contains("[WINDOW_FINDINGS]", synthInstruction);
+        Assert.Contains("plot | 0 | Window one plot spine", synthInstruction);
+        Assert.Contains("character | 1 | Window two flat cast", synthInstruction);
+        Assert.DoesNotContain("an excerpt", synthInstruction); // evidence excerpt was stripped from the digest
+
+        // (b) FULL BRIEF: the full (untrimmed) BookBrief is prepended in a [BOOK_CONTEXT] block. The composed
+        //     brief's themes (the union of the seeded chapter thematic markers) appear, so the synthesis has
+        //     whole-book context. (Genre comes from a BookProfile, which the reviewable-book seed omits, so the
+        //     themes line is the load-bearing brief signal here.)
+        Assert.Contains("[BOOK_CONTEXT]", synthInstruction);
+        Assert.Contains("Themes: isolation, rebirth", synthInstruction);
+
+        // (c) SYNTHESIS FINDINGS PERSIST: the two window findings AND the synthesis arc finding all persist.
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(3, persisted.Count);
+        Assert.Single(persisted, f => f.Rationale == "Window one plot spine");
+        Assert.Single(persisted, f => f.Rationale == "Window two flat cast");
+        Assert.Single(persisted, f => f.Rationale == "Global arc sags in the middle");
+    }
+
+    // ─── S2. A synthesis finding that DUPLICATES a window finding dedups away by key (append-before-dedup) ────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Synthesis_DuplicateOfWindowFinding_DedupsAway()
+    {
+        // The synthesis pass re-emits a finding identical (dimension + primary order + rationale) to a window
+        // finding. Because synthesis findings are appended to `accumulated` BEFORE UnionAndDedup, the duplicate
+        // collapses to one row (first occurrence — the window finding — wins). A NEW synthesis finding survives.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Duplicated finding", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "A window finding", 1)),
+            },
+            SynthesisResponse = JsonCombinedFindings(
+                new CombinedFindingSpec("plot", "cut", 3, "Duplicated finding", 0),   // dup of window 1 → dedups away
+                new CombinedFindingSpec("theme", "improve", 2, "New synthesis theme note", 1)), // survives
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // window1 + window2 + new-synthesis = 3 (the duplicated synthesis finding collapsed into window 1).
+        Assert.Equal(3, persisted.Count);
+        var dup = persisted.Single(f => f.Rationale == "Duplicated finding");
+        Assert.Equal("keep", dup.Verdict);      // the WINDOW occurrence won (first), not the synthesis "cut"
+        Assert.Single(persisted, f => f.Rationale == "New synthesis theme note");
+    }
+
+    // ─── S3. A synthesis FAILURE (unparseable) does NOT fail an otherwise-good build; windows still persist ──
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_SynthesisFails_DoesNotFailBuild_WindowsPersist()
+    {
+        // The synthesis reduce call returns unparseable output (a synthesis-level failure). It must contribute
+        // ZERO findings but must NOT sink the build: the windows already produced coverage, so the build is
+        // Ready and the window findings persist. FailedDimensions counts only failed WINDOWS (zero here).
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Good window 1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Good window 2", 1)),
+            },
+            SynthesisResponse = "{ truncated synthesis, no closing brace", // unparseable → synthesis fails
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+
+        // Windows + the (failed) synthesis + the two continuity group calls (wb4-c05, one per chapter; empty
+        // groups skip the final reduce) were all called = FIVE.
+        routerMock.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()),
+            Times.Exactly(5));
+        Assert.NotNull(holder.SynthesisInstruction); // synthesis WAS attempted
+
+        // NOT a total failure: the good windows carried the build. Ready, no failed windows, and a green finish.
+        Assert.True(result.Ready, "a synthesis failure must not fail a build the windows already covered");
+        Assert.False(result.NoOp);
+        Assert.Equal(0, result.FailedDimensions); // synthesis failure is NOT counted as a failed window
+
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.Equal(2, persisted.Count); // only the two window findings; synthesis added nothing
+        Assert.Single(persisted, f => f.Rationale == "Good window 1");
+        Assert.Single(persisted, f => f.Rationale == "Good window 2");
+
+        Assert.True(progress.TryGet(jobId, out var snap));
+        Assert.Equal(AnalysisProgressStatus.Succeeded, snap!.Status);
+    }
+
+    // ─── S4. The digest is CAPPED (lowest-severity dropped) and the cap is LOGGED when over budget ────────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Synthesis_DigestOverBudget_CapsAndLogs()
+    {
+        // Window 1 emits MANY findings with long rationales so the compact digest exceeds the reduce budget.
+        // The digest must be CAPPED (dropping the lowest-severity findings first) and the cap LOGGED — no silent
+        // truncation. We assert on the warning entry (naming the drop) rather than on prompt bytes.
+        var longRationale = new string('ל', 140); // 140 Hebrew chars → a full-length digest line
+        var manySpecs = Enumerable.Range(0, 12)
+            // Ascending severity so the LOW-severity ones are the drop candidates; distinct rationale per line.
+            .Select(i => new CombinedFindingSpec("plot", "improve", (i % 3) + 1, $"{longRationale} #{i}", i))
+            .ToArray();
+
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(manySpecs), // one window, many long findings → oversized digest
+            },
+            SynthesisResponse = JsonCombinedFindings(
+                new CombinedFindingSpec("theme", "improve", 2, "Synthesis note", 0)),
+        };
+
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildWindowedProvider(out _, holder, logCapture);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 1); // one chapter → one window carrying all findings
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        // The synthesis call still fired and its digest was capped: a WARNING names the cap + the drop count.
+        Assert.NotNull(holder.SynthesisInstruction);
+        var capWarning = logCapture.Entries.FirstOrDefault(e =>
+            e.Level == LogLevel.Warning
+            && e.Message.Contains("digest", StringComparison.OrdinalIgnoreCase)
+            && e.Message.Contains("capped", StringComparison.OrdinalIgnoreCase));
+        Assert.False(string.IsNullOrEmpty(capWarning.Message),
+            "an over-budget synthesis digest must LOG a cap warning (no silent truncation)");
+        Assert.Contains("dropped", capWarning.Message, StringComparison.OrdinalIgnoreCase);
+
+        // The digest was capped to fewer than all 12 window lines: at least one full-length line was dropped.
+        var digestLineCount = holder.SynthesisInstruction!
+            .Split('\n')
+            .Count(l => l.Contains(longRationale, StringComparison.Ordinal));
+        Assert.True(digestLineCount < 12, $"expected the digest to drop some lines, kept {digestLineCount}/12");
+    }
+
+    // ═══ HIERARCHICAL CONTINUITY reduce (wb4-c05): a deterministic skeleton grouping runs the continuity prompt
+    //     once when the whole skeleton fits one budget window (auto-collapse) or per-group + a final reduce when
+    //     it overflows; its findings anchor to chapters and JOIN the persisted set; a group failure is non-fatal.
+
+    // ─── C1. AUTO-COLLAPSE: the whole skeleton fits one budget window → EXACTLY ONE continuity call. ──────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Continuity_SkeletonFitsOneWindow_IssuesExactlyOneContinuityCall()
+    {
+        // A GENEROUS budget keeps the 3-chapter book ONE window AND its whole continuity skeleton ONE group, so
+        // the continuity pass AUTO-COLLAPSES to a single call (no final reduce) — exactly what a bigger window or
+        // cloud model gets for free. This is the load-bearing "scales to a bigger window unchanged" proof.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Whole-book window finding", 0)),
+            },
+            // One continuity finding proves the single call's output persists (dimension forced to continuity).
+            ContinuityResponse = JsonContinuityFindings(
+                new ContinuityFindingSpec("improve", 2, "Dropped thread across chapters", new[] { 0, 2 })),
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        // EXACTLY ONE continuity call (the auto-collapse): a single [CONTINUITY_SKELETON] request, no final reduce.
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.Instruction != null && req.Instruction.Contains("[CONTINUITY_SKELETON]")),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        Assert.Single(holder.ContinuityInstructions);
+
+        // That single skeleton carried ALL three chapters (dense per-chapter lines, threads + states), proving the
+        // whole book was reviewed in one continuity pass rather than fanned out.
+        var skeleton = holder.ContinuityInstructions[0];
+        Assert.Contains("[CONTINUITY_SKELETON]", skeleton);
+        Assert.Contains("#0 Chapter 0 | threads: who sent the letter? | states: Dana:fleeing", skeleton);
+        Assert.Contains("#1 Chapter 1 | threads:", skeleton);
+        Assert.Contains("#2 Chapter 2 | threads:", skeleton);
+
+        // The continuity finding persisted with dimension='continuity' and its anchors on the involved chapters.
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        var cont = Assert.Single(persisted, f => f.Rationale == "Dropped thread across chapters");
+        Assert.Equal("continuity", cont.Dimension);
+        Assert.Single(persisted, f => f.Rationale == "Whole-book window finding");
+    }
+
+    // ─── C2. OVERFLOW HIERARCHY: the skeleton does not fit one window → per-GROUP calls + ONE final reduce. ────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Continuity_SkeletonOverflows_GroupCallsThenOneFinalReduce()
+    {
+        // The tiny default budget forces one skeleton GROUP per chapter (3 chapters → 3 groups), so the pass runs
+        // three group continuity calls and THEN one final reduce that merges their findings — 4 continuity calls.
+        // Each group returns a distinct finding; the final reduce (the 4th continuity call) returns the merged
+        // cross-group finding that becomes the persisted continuity result.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "W1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "W2", 1)),
+                [3] = JsonCombinedFindings(new CombinedFindingSpec("pacing", "improve", 2, "W3", 2)),
+            },
+            // Continuity call ordinals: 1..3 = the three group calls, 4 = the final reduce over their union.
+            ContinuityByCallIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonContinuityFindings(new ContinuityFindingSpec("improve", 2, "Group 1 thread", new[] { 0 })),
+                [2] = JsonContinuityFindings(new ContinuityFindingSpec("improve", 2, "Group 2 thread", new[] { 1 })),
+                [3] = JsonContinuityFindings(new ContinuityFindingSpec("improve", 2, "Group 3 thread", new[] { 2 })),
+                [4] = JsonContinuityFindings(
+                    new ContinuityFindingSpec("improve", 3, "Merged cross-group break", new[] { 0, 2 })),
+            },
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        // FOUR continuity calls total: three group calls + one final reduce (the deterministic group+1 topology).
+        routerMock.Verify(
+            r => r.CompleteAsync(
+                It.Is<AiRequest>(req => req.Instruction != null && req.Instruction.Contains("[CONTINUITY_SKELETON]")),
+                It.IsAny<CancellationToken>()),
+            Times.Exactly(4));
+        Assert.Equal(4, holder.ContinuityInstructions.Count);
+
+        // The first three continuity calls are GROUP calls whose skeletons carry chapter lines (#0/#1/#2). The
+        // 4th is the FINAL reduce whose input is the DIGEST of the group findings (continuity | orders | rationale
+        // lines), NOT raw chapter skeleton lines — so it merges cross-group continuity issues.
+        Assert.Contains("#0 Chapter 0 | threads:", holder.ContinuityInstructions[0]);
+        var finalReduceInput = holder.ContinuityInstructions[3];
+        Assert.Contains("[CONTINUITY_SKELETON]", finalReduceInput);
+        Assert.Contains("continuity | 0 | Group 1 thread", finalReduceInput);
+        Assert.Contains("continuity | 1 | Group 2 thread", finalReduceInput);
+        Assert.Contains("continuity | 2 | Group 3 thread", finalReduceInput);
+
+        // The FINAL reduce's merged finding is the authoritative continuity result that persists (its output
+        // supersedes the raw group findings). It is dimension='continuity' and anchors the involved chapters.
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        var merged = Assert.Single(persisted, f => f.Rationale == "Merged cross-group break");
+        Assert.Equal("continuity", merged.Dimension);
+        // The three window findings coexist with the merged continuity finding.
+        Assert.Single(persisted, f => f.Rationale == "W1");
+        Assert.Single(persisted, f => f.Rationale == "W2");
+        Assert.Single(persisted, f => f.Rationale == "W3");
+    }
+
+    // ─── C3. ANCHORING + PERSIST: a continuity finding's chapterAnchors backfill to the right chapter rows. ────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Continuity_FindingAnchorsToChapters_AndPersists()
+    {
+        // A single-window book (generous budget) whose continuity pass emits a break anchored to chapters 0 AND
+        // 2. The persisted continuity row must carry BOTH anchors, with each anchor's chapterId backfilled from
+        // the chapter Order (Phase-3 navigation), so the FE can jump to the exact chapters involved in the break.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "A window finding", 0)),
+            },
+            ContinuityResponse = JsonContinuityFindings(
+                new ContinuityFindingSpec("improve", 3, "Timeline break between ch0 and ch2", new[] { 0, 2 })),
+        };
+        using var provider = BuildWindowedProvider(out _, holder, bookContextTokenBudget: 100_000);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        // Map chapter Order → Id so we can assert the persisted anchors backfilled the right chapter ids.
+        var chaptersByOrder = await db.Chapters.AsNoTracking()
+            .Where(c => c.BookId == bookId).ToDictionaryAsync(c => c.Order, c => c.Id);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        var cont = Assert.Single(persisted, f => f.Rationale == "Timeline break between ch0 and ch2");
+        Assert.Equal("continuity", cont.Dimension);
+
+        // The anchors deserialize to the two involved chapters (orders 0 and 2), each with its chapterId
+        // backfilled from the Order → Id map (Phase-3 navigation).
+        var anchors = JsonSerializer.Deserialize<List<FindingChapterAnchor>>(cont.ChapterAnchorsJson)!;
+        Assert.Equal(2, anchors.Count);
+        Assert.Contains(anchors, a => a.Order == 0 && a.ChapterId == chaptersByOrder[0]);
+        Assert.Contains(anchors, a => a.Order == 2 && a.ChapterId == chaptersByOrder[2]);
+    }
+
+    // ─── C4. GROUP FAILURE is NON-FATAL: a failed group contributes nothing; the build still succeeds. ────────
+
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_Continuity_GroupFailure_IsNonFatal_OtherFindingsPersist()
+    {
+        // The tiny budget forces 3 continuity groups. Group 2's continuity call returns unparseable output (a
+        // group-level failure): it must contribute NOTHING but NOT abort the pass or the build. Groups 1 and 3
+        // still produce findings, and the final reduce merges what survived — the build is Ready.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "Win 1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Win 2", 1)),
+                [3] = JsonCombinedFindings(new CombinedFindingSpec("pacing", "improve", 2, "Win 3", 2)),
+            },
+            ContinuityByCallIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonContinuityFindings(new ContinuityFindingSpec("improve", 2, "Surviving group finding", new[] { 0 })),
+                [2] = "{ truncated group continuity, no closing brace", // group 2 FAILS (non-fatal)
+                [3] = JsonContinuityFindings(new ContinuityFindingSpec("improve", 2, "Another surviving finding", new[] { 2 })),
+                // Final reduce (call 4) returns EMPTY → the pass falls back to the raw surviving group findings.
+                [4] = """{ "findings": [] }""",
+            },
+        };
+        using var provider = BuildWindowedProvider(out var routerMock, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        // The build is Ready (a group failure is NON-FATAL) and NOT counted as a failed window/dimension.
+        Assert.True(result.Ready, "a continuity group failure must not fail an otherwise-good build");
+        Assert.Equal(0, result.FailedDimensions);
+
+        // All four continuity calls were still made (the bad group was attempted, it just yielded nothing).
+        Assert.Equal(4, holder.ContinuityInstructions.Count);
+
+        var persisted = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // The two SURVIVING group findings persist (final reduce empty → fall back to the raw group union); the
+        // failed group contributed nothing but did not sink the pass. Window findings coexist.
+        Assert.Single(persisted, f => f.Rationale == "Surviving group finding");
+        Assert.Single(persisted, f => f.Rationale == "Another surviving finding");
+        Assert.Single(persisted, f => f.Rationale == "Win 1");
+        Assert.Single(persisted, f => f.Rationale == "Win 3");
+        // Every surviving continuity finding is dimension='continuity'.
+        Assert.All(persisted.Where(f => f.Rationale!.Contains("finding")), f => Assert.Equal("continuity", f.Dimension));
+    }
+
     // ─── Test helpers ─────────────────────────────────────────────────────────────────────────────
     // FindingSpec, FindingsPerDimension, JsonFindings, SeedReviewableBookAsync live in BookReviewTestHelpers
     // (shared with BooksReviewControllerTests). The class-level helpers below are specific to this suite.
+
+    /// <summary>Seeds a PARTIALLY-BUILT book (be-c01 coverage regression fixture): <paramref name="chapterCount"/>
+    /// chapters each with content, but the chapter at <paramref name="chapterWithoutBriefOrder"/> gets NO
+    /// ChunkSummary at all, so ComposeChapterBriefsAsync SKIPS it (no fresh structured brief) while it still
+    /// windows via the raw-text back-fill — a reviewable primary with no fresh brief. The other chapters get a
+    /// FRESH structured brief (so bookBrief != null and the structured windowed path is taken, not the whole-book
+    /// flat fallback). This is the shape where the OLD denominator (fresh-brief count) undercounts the reviewable
+    /// set and lets reviewed exceed total.</summary>
+    private static async Task<Guid> SeedPartialBriefBookAsync(AppDbContext db, int chapterCount, int chapterWithoutBriefOrder)
+    {
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Partial Brief Book", Language = "he" });
+        for (var i = 0; i < chapterCount; i++)
+        {
+            var chId = Guid.NewGuid();
+            db.Chapters.Add(new Chapter { Id = chId, BookId = bookId, Order = i, Title = $"Chapter {i}", ContentText = $"תוכן {i}." });
+            if (i == chapterWithoutBriefOrder)
+                continue; // NO ChunkSummary → no fresh structured brief; windows via raw-text back-fill
+            db.ChunkSummaries.Add(new ChunkSummary
+            {
+                BookId = bookId, ChapterId = chId, Language = "he",
+                StructuredJson = StructuredBriefJson, BuiltWithModel = ActiveModel,
+                StructuredBuiltAt = DateTimeOffset.UtcNow.AddMinutes(1) // fresh: after the chapter UpdatedAt
+            });
+        }
+        // A cached BookSummaryBaseline so the assembler has an L2 BookBrief (the structured windowed path needs it).
+        db.BookSummaryBaselines.Add(new BookSummaryBaseline
+        {
+            BookId = bookId, Language = "he",
+            BookBriefJson = """{ "genre": "Fantasy", "themes": ["isolation"] }""",
+            BuiltChapterCount = chapterCount, BuiltWithModel = ActiveModel
+        });
+        await db.SaveChangesAsync();
+        return bookId;
+    }
 
     private static void SetStatus(AppDbContext db, List<BookFinding> findings, string rationale, string status)
     {
@@ -1196,10 +2294,29 @@ public class BookReviewServiceTests
         routerMock
             .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((AiRequest req, CancellationToken _) =>
-                new AiResponse { Content = holder.Response, Model = ActiveModel, Provider = "test-provider" });
+            {
+                // wb4-c04/c05: the single-combined path runs ONE synthesis reduce pass ([WINDOW_FINDINGS]) AND
+                // ONE continuity reduce pass ([CONTINUITY_SKELETON], since the small seeded book's skeleton fits
+                // the generous budget in one window) after its lone window. These combined-path tests assert the
+                // COMBINED call's parse/dedup/persist, not the reduces, so BOTH reduce calls return an EMPTY
+                // findings set — clean no-ops that keep every combined test's PERSISTED expectations intact (they
+                // add two router calls, which those tests' call-count asserts now account for).
+                var instruction = req.Instruction ?? string.Empty;
+                var isReduce = instruction.Contains("[WINDOW_FINDINGS]", StringComparison.Ordinal)
+                    || instruction.Contains("[CONTINUITY_SKELETON]", StringComparison.Ordinal);
+                var content = isReduce ? "{ \"findings\": [] }" : holder.Response;
+                return new AiResponse { Content = content, Model = ActiveModel, Provider = "test-provider" };
+            });
         services.AddSingleton(routerMock.Object);
         // Explicit ON, even though it is the default, so the intent is visible at the call site.
-        services.Configure<AiOptions>(o => o.BookReviewSingleCombined = true);
+        // A GENEROUS fixed budget so the small seeded books in these single-combined tests stay ONE window
+        // (the windowed MAP degenerates to a single combined call). The dedicated multi-window tests below use
+        // BuildWindowedProvider, which forces a tiny budget to split the book into several windows.
+        services.Configure<AiOptions>(o =>
+        {
+            o.BookReviewSingleCombined = true;
+            o.BookContextTokenBudget = 100_000; // one window for any small test book
+        });
 
         services.AddScoped<ChapterBriefService>();
         services.AddScoped<BookSummaryService>();
@@ -1210,6 +2327,172 @@ public class BookReviewServiceTests
         services.AddSingleton<BookReviewBuildRegistry>();
 
         return services.BuildServiceProvider();
+    }
+
+    /// <summary>Mutable per-window response map keyed on the 1-based window index (wb4-c07 windowed MAP).
+    /// The wb4-c04 SYNTHESIS reduce pass is served from <see cref="SynthesisResponse"/> (detected by the
+    /// [WINDOW_FINDINGS] marker the synthesis prompt carries, which the windowed prompts never do), and the
+    /// synthesis request's Instruction is captured into <see cref="SynthesisInstruction"/> for assertions.</summary>
+    private sealed class WindowedResponseHolder
+    {
+        public Dictionary<int, string?> ByWindowIndex { get; set; } = new();
+
+        /// <summary>Canned JSON the SYNTHESIS reduce call returns. Null (default) → empty output → the
+        /// synthesis pass contributes zero findings (models the "no synthesis" / failure case).</summary>
+        public string? SynthesisResponse { get; set; }
+
+        /// <summary>The Instruction of the LAST synthesis call the mock saw (the compact digest + full brief +
+        /// synthesis prompt body). Null until a synthesis call is issued.</summary>
+        public string? SynthesisInstruction { get; set; }
+
+        /// <summary>Canned JSON EVERY wb4-c05 CONTINUITY reduce call returns (group calls AND the final reduce,
+        /// all carrying [CONTINUITY_SKELETON]). Null (default) → empty output → the continuity pass contributes
+        /// zero findings, so the existing window/synthesis tests are unaffected by its added calls. A dedicated
+        /// continuity test overrides this to prove the pass's findings persist. When
+        /// <see cref="ContinuityByCallIndex"/> is set it takes precedence per call.</summary>
+        public string? ContinuityResponse { get; set; }
+
+        /// <summary>Optional per-call continuity responses keyed on the 1-based CONTINUITY call ordinal (1 =
+        /// first group call, …, last = the final reduce), so a multi-group test can hand each group a distinct
+        /// findings set and assert the final reduce merged them. Overrides <see cref="ContinuityResponse"/> for
+        /// any index present.</summary>
+        public Dictionary<int, string?>? ContinuityByCallIndex { get; set; }
+
+        /// <summary>Every CONTINUITY reduce call's Instruction, in call order (group calls then final reduce),
+        /// captured so a test can assert the skeleton shape, the group→final-reduce topology, and anchoring.</summary>
+        public List<string> ContinuityInstructions { get; } = new();
+    }
+
+    /// <summary>
+    /// Builds a DI provider for the WINDOWED MAP path (single-combined ON). A tiny fixed BookContextTokenBudget
+    /// forces the BookContextAssembler to split the seeded book into ONE WINDOW PER CHAPTER (each chapter is a
+    /// window's sole primary), so an N-chapter book yields N windows. The mock IAiRouter reads the 1-based
+    /// window index out of the wb4-c03 window frame ("(זהו חלון {n})") baked into each windowed prompt and
+    /// returns that window's configured canned JSON — so a test can hand each window a DIFFERENT findings set
+    /// (or a failure) and assert every window's findings survive the ONE persist.
+    /// </summary>
+    private static ServiceProvider BuildWindowedProvider(
+        out Mock<IAiRouter> routerMock,
+        WindowedResponseHolder holder,
+        CapturingLoggerProvider? logCapture = null,
+        int? bookContextTokenBudget = null)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging(b =>
+        {
+            if (logCapture != null)
+            {
+                b.SetMinimumLevel(LogLevel.Trace);
+                b.AddProvider(logCapture);
+            }
+        });
+        services.AddDbContext<AppDbContext>(opt => opt.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        services.AddSingleton<SfdtConversionService>();
+        services.AddSingleton<PromptFactory>();
+        services.AddSingleton(holder);
+
+        routerMock = new Mock<IAiRouter>();
+        routerMock
+            .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((AiRequest req, CancellationToken _) =>
+            {
+                var instruction = req.Instruction ?? string.Empty;
+                // The wb4-c04 SYNTHESIS reduce call is the only one carrying the [WINDOW_FINDINGS] marker (the
+                // windowed prompts never do). Detect it, capture its instruction, and serve the synthesis
+                // response so a test can assert the digest shape and that synthesis findings persist.
+                if (instruction.Contains("[WINDOW_FINDINGS]", StringComparison.Ordinal))
+                {
+                    holder.SynthesisInstruction = instruction;
+                    return new AiResponse { Content = holder.SynthesisResponse ?? string.Empty, Model = ActiveModel, Provider = "test-provider" };
+                }
+                // The wb4-c05 CONTINUITY reduce calls (group calls + the final reduce) are the only ones carrying
+                // the [CONTINUITY_SKELETON] marker. Capture each in call order and serve either a per-call
+                // response (ContinuityByCallIndex) or the shared ContinuityResponse. Default (null) = empty, so
+                // the continuity pass adds no findings and the window/synthesis tests are unaffected by its calls.
+                if (instruction.Contains("[CONTINUITY_SKELETON]", StringComparison.Ordinal))
+                {
+                    holder.ContinuityInstructions.Add(instruction);
+                    var callIndex = holder.ContinuityInstructions.Count; // 1-based ordinal of this continuity call
+                    string? json = null;
+                    if (holder.ContinuityByCallIndex != null && holder.ContinuityByCallIndex.TryGetValue(callIndex, out var perCall))
+                        json = perCall;
+                    else
+                        json = holder.ContinuityResponse;
+                    return new AiResponse { Content = json ?? string.Empty, Model = ActiveModel, Provider = "test-provider" };
+                }
+                // The wb4-c03 Hebrew window frame ends the window index with "(זהו חלון {n})". Pull {n} out so
+                // the mock serves the right window's response. Fall back to window 1 if the token is absent.
+                var windowIndex = ExtractWindowIndex(instruction);
+                holder.ByWindowIndex.TryGetValue(windowIndex, out var wjson);
+                return new AiResponse { Content = wjson ?? string.Empty, Model = ActiveModel, Provider = "test-provider" };
+            });
+        services.AddSingleton(routerMock.Object);
+
+        services.Configure<AiOptions>(o =>
+        {
+            o.BookReviewSingleCombined = true;
+            // A tiny positive budget wins verbatim (EffectiveBookContextTokenBudget), so every chapter becomes
+            // its own window (the loop always keeps at least one primary chapter, then the next exceeds). Tests
+            // that need the SYNTHESIS digest to fit (so windows + synthesis both run) pass a larger budget.
+            o.BookContextTokenBudget = bookContextTokenBudget ?? 1;
+            o.BookReviewWindowOverlapChapters = 0; // no overlap: keep the per-window primary set clean for asserts
+        });
+
+        services.AddScoped<ChapterBriefService>();
+        services.AddScoped<BookSummaryService>();
+        services.AddScoped<BookContextAssembler>();
+        services.AddScoped<BookReviewService>();
+        services.AddSingleton<AnalysisProgressTracker>();
+        services.AddSingleton<BookSummaryBuildRegistry>();
+        services.AddSingleton<BookReviewBuildRegistry>();
+
+        return services.BuildServiceProvider();
+    }
+
+    /// <summary>Minimal in-memory <see cref="ILoggerProvider"/> that records every log entry's level +
+    /// rendered message, so a test can assert the wb4-c04 digest-cap warning fired (no silent truncation).</summary>
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        public readonly List<(LogLevel Level, string Message)> Entries = new();
+        private readonly object _gate = new();
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(this);
+        public void Dispose() { }
+
+        internal void Add(LogLevel level, string message)
+        {
+            lock (_gate) Entries.Add((level, message));
+        }
+
+        private sealed class CapturingLogger : ILogger
+        {
+            private readonly CapturingLoggerProvider _owner;
+            public CapturingLogger(CapturingLoggerProvider owner) => _owner = owner;
+            public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+                => _owner.Add(logLevel, formatter(state, exception));
+
+            private sealed class NullScope : IDisposable
+            {
+                public static readonly NullScope Instance = new();
+                public void Dispose() { }
+            }
+        }
+    }
+
+    /// <summary>Extracts the 1-based window index from the wb4-c03 Hebrew window frame token "(זהו חלון {n})".
+    /// Returns 1 when the token is absent (defensive; every windowed prompt carries it).</summary>
+    private static int ExtractWindowIndex(string instruction)
+    {
+        const string marker = "זהו חלון ";
+        var at = instruction.IndexOf(marker, StringComparison.Ordinal);
+        if (at < 0) return 1;
+        var i = at + marker.Length;
+        var digits = new System.Text.StringBuilder();
+        while (i < instruction.Length && char.IsDigit(instruction[i])) { digits.Append(instruction[i]); i++; }
+        return digits.Length > 0 && int.TryParse(digits.ToString(), out var n) ? n : 1;
     }
 
     /// <summary>Serialises a combined BookReviewResult-shaped JSON (findings[] spanning multiple dimensions)
@@ -1232,4 +2515,30 @@ public class BookReviewServiceTests
 
     /// <summary>Spec for a single combined-path model finding (carries its own self-labelled dimension).</summary>
     private sealed record CombinedFindingSpec(string Dimension, string Verdict, int Severity, string Rationale, int Order);
+
+    /// <summary>A PARSED-EMPTY window response ({"findings":[]}): a clean SUCCESS (the window reviewed its chapter
+    /// and surfaced nothing), distinct from an ABSENT map key (empty OUTPUT "" = a window FAILURE). be-c02 tests
+    /// use this to make intervening windows reviewed-clean so the reviewed set is exact.</summary>
+    private const string EmptyFindings = "{ \"findings\": [] }";
+
+    /// <summary>Serialises a BookReviewResult-shaped JSON for the CONTINUITY reduce mock to return: each finding
+    /// is dimension='continuity' and can anchor MULTIPLE chapter orders (a continuity break spans chapters).</summary>
+    private static string JsonContinuityFindings(params ContinuityFindingSpec[] specs)
+    {
+        var findings = specs.Select(s => new
+        {
+            dimension = "continuity",
+            verdict = s.Verdict,
+            severity = s.Severity,
+            rationale = s.Rationale,
+            chapterAnchors = s.Orders.Select(o => new { order = o, title = $"Chapter {o}" }).ToArray(),
+            evidence = s.Orders.Select(o => new { chapterOrder = o, excerpt = "a skeleton excerpt" }).ToArray(),
+            suggestedAction = (string?)null
+        }).ToArray();
+        return JsonSerializer.Serialize(new { findings });
+    }
+
+    /// <summary>Spec for a single continuity-pass model finding: a verdict/severity/rationale plus the chapter
+    /// orders the break involves (anchored on all of them).</summary>
+    private sealed record ContinuityFindingSpec(string Verdict, int Severity, string Rationale, int[] Orders);
 }
