@@ -690,6 +690,12 @@ public class BooksController : ControllerBase
         s.BuiltWithDifferentModel,
         s.StaleVsBriefs,
         s.HasBriefs,
+        s.ChaptersReviewed,
+        s.ChaptersTotal,
+        s.WindowCount,
+        s.RanSynthesis,
+        s.RanContinuityReduce,
+        s.FailedWindows,
         s.ActiveBuildJobId,
         s.IsReady);
 
@@ -997,6 +1003,11 @@ public class BooksController : ControllerBase
         var bookFindings = await _db.BookFindings.Where(f => f.BookId == bookId).ToListAsync(ct);
         if (bookFindings.Count > 0)
             _db.BookFindings.RemoveRange(bookFindings);
+
+        // Explicitly remove persisted BookReviewCoverages (data-c01) to satisfy the Restrict FK on BookId.
+        var reviewCoverages = await _db.BookReviewCoverages.Where(c => c.BookId == bookId).ToListAsync(ct);
+        if (reviewCoverages.Count > 0)
+            _db.BookReviewCoverages.RemoveRange(reviewCoverages);
 
         // Clean up document history snapshots for this book to avoid orphaned versions.
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);

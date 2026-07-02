@@ -122,7 +122,17 @@ public record StartBookReviewBuildResponse(
 /// Response for GET .../review/status — coverage + freshness of the cached whole-book review (BookFinding
 /// rows). JSON casing follows the System.Text.Json default (camelCase): bookId, language, hasReview,
 /// findingCount, lastUpdatedAt, builtWithModel, activeModel, builtWithDifferentModel, staleVsBriefs,
-/// hasBriefs, activeBuildJobId, ready.
+/// hasBriefs, chaptersReviewed, chaptersTotal, windowCount, ranSynthesis, ranContinuityReduce, failedWindows,
+/// activeBuildJobId, ready.
+///
+/// wb4-c06 coverage provenance (chaptersReviewed / chaptersTotal / windowCount / ranSynthesis /
+/// ranContinuityReduce / failedWindows) makes coverage HONEST end to end. On this STATUS probe, only the
+/// persisted-derivable fields carry real values: chaptersReviewed / chaptersTotal are read from the
+/// persisted BookReviewCoverage row (data-c01), so a PARTIAL/degraded build reports reviewed &lt; total here
+/// too (not a dishonest N/N), and a review built before data-c01 (no coverage row) falls back to
+/// (0, book chapter count). The build-time-only shape (windowCount / ranSynthesis / ranContinuityReduce /
+/// failedWindows) is not persisted, so it reports 0/false here — the precise per-build counts live on
+/// BookReviewBuildResult (the POST /review build response path). wb4-f01 mirrors these EXACT camelCase names.
 /// </summary>
 public record BookReviewStatusDto(
     Guid BookId,
@@ -135,6 +145,12 @@ public record BookReviewStatusDto(
     bool BuiltWithDifferentModel,
     bool StaleVsBriefs,
     bool HasBriefs,
+    int ChaptersReviewed,
+    int ChaptersTotal,
+    int WindowCount,
+    bool RanSynthesis,
+    bool RanContinuityReduce,
+    int FailedWindows,
     Guid? ActiveBuildJobId,
     bool Ready);
 
