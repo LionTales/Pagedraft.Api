@@ -568,6 +568,9 @@ public class BooksController : ControllerBase
         if (snapshot.Scope != AnalysisScope.Book || snapshot.AnalysisType != Services.Ai.Contracts.AnalysisType.BookReview)
             return NotFound();
 
+        // wb4-c06: carry the transient review build-shape the BookReview build stamps at its terminal, so the FE
+        // can render the "N windows[, continuity pass]" detail + the "N windows failed" partial warning right
+        // after a build (the persisted status probe reports these as 0/false, so this LIVE poll is their channel).
         var dto = new AnalysisProgressDto(
             snapshot.JobId,
             snapshot.AnalysisType.ToString(),
@@ -580,7 +583,10 @@ public class BooksController : ControllerBase
             snapshot.TotalChunks,
             snapshot.CompletedChunks,
             snapshot.Message,
-            snapshot.EstimatedCompletionPercent);
+            snapshot.EstimatedCompletionPercent,
+            snapshot.BookReviewWindowCount,
+            snapshot.BookReviewRanContinuityReduce,
+            snapshot.BookReviewFailedWindows);
 
         return Ok(dto);
     }

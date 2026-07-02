@@ -1881,6 +1881,75 @@ public class BookReviewServiceTests
         Assert.Equal(2, after.ChaptersReviewed);
     }
 
+    // ─── C7 (wb4-c06 FE delivery). A windowed build STAMPS the transient build-shape (windowCount /
+    //         ranContinuityReduce / failedWindows) onto the PROGRESS job at its terminal, so the FE's LIVE
+    //         progress poll can render the window detail + partial warning the persisted status probe omits
+    //         (it reports 0/false). The build result and the stamped shape must agree. ─────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_StampsBuildShapeOnProgressJob_ForTheLiveTerminalPoll()
+    {
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "keep", 1, "W1", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "W2", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+        Assert.True(result.Ready);
+
+        // The terminal progress snapshot carries the SAME shape the build result reports — this is the channel
+        // the FE reads (the status probe leaves these 0/false). Two windows, both succeeded, continuity ran.
+        Assert.True(progress.TryGet(jobId, out var snapshot));
+        Assert.NotNull(snapshot);
+        Assert.Equal(AnalysisProgressStatus.Succeeded, snapshot!.Status);
+        Assert.Equal(2, snapshot.BookReviewWindowCount);
+        Assert.Equal(result.WindowCount, snapshot.BookReviewWindowCount);
+        Assert.True(snapshot.BookReviewRanContinuityReduce);
+        Assert.Equal(result.RanContinuityReduce, snapshot.BookReviewRanContinuityReduce);
+        Assert.Equal(0, snapshot.BookReviewFailedWindows);
+    }
+
+    // ─── C8 (wb4-c06 FE delivery). A PARTIAL build stamps failedWindows > 0 on the progress job, so the FE's
+    //         partial-window warning renders from the live terminal poll. ───────────────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_PartialFailure_StampsFailedWindowsOnProgressJob()
+    {
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Ch0 good", 0)),
+                [2] = "{ truncated, no closing brace", // window 2 fails → failedWindows = 1
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var progress = provider.GetRequiredService<AnalysisProgressTracker>();
+        var jobId = Guid.NewGuid();
+
+        var result = await svc.BuildBookReviewAsync(bookId, "he", jobId);
+        Assert.True(result.Ready);
+        Assert.Equal(1, result.FailedWindows);
+
+        Assert.True(progress.TryGet(jobId, out var snapshot));
+        Assert.Equal(2, snapshot!.BookReviewWindowCount);
+        Assert.Equal(1, snapshot.BookReviewFailedWindows);
+        Assert.Equal(result.FailedWindows, snapshot.BookReviewFailedWindows);
+    }
+
     // ═══ SYNTHESIS reduce pass (wb4-c04): after the window MAP, ONE reduce call receives a COMPACT digest of
     //     every accumulated finding + the FULL BookBrief, and its findings JOIN the persisted set. ═══
 
