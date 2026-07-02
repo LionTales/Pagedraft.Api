@@ -32,18 +32,21 @@ public class DocxParserService
             var text = para != null ? GetParagraphText(para) : null;
             var style = para != null ? GetParagraphStyle(para) : null;
 
-            // Hebrew markers (highest priority)
-            if (text != null)
+            // Hebrew markers (highest priority) — but ONLY on short, heading-like lines
+            // where the marker starts the line. Without this gate, common prose words
+            // (פרק = "joint/segment", חלק = "portion/part") inside body paragraphs trigger
+            // bogus chapter splits and overwrite the part name with random prose.
+            var trimmed = text?.Trim();
+            if (IsHeadingLikeLine(trimmed))
             {
-                var partMatch = PartRegex.Match(text);
-                if (partMatch.Success)
+                if (StartsWithMatch(PartRegex, trimmed!))
                 {
-                    currentPartName = text.Trim();
+                    currentPartName = trimmed;
                     currentElements.Add(element.CloneNode(true));
                     continue;
                 }
 
-                if (PrologRegex.IsMatch(text))
+                if (StartsWithMatch(PrologRegex, trimmed!))
                 {
                     FlushChapter();
                     currentPartName = null;
@@ -53,19 +56,24 @@ public class DocxParserService
                     continue;
                 }
 
-                if (ChapterRegex.IsMatch(text))
+                // Known residual edge: ChapterRegex is פרק\s+(\d+|[א-ת]+), which cannot distinguish a real
+                // chapter heading ("פרק ראשון") from a body sentence that happens to START with "פרק <Hebrew word>"
+                // (e.g. "פרק ידי כאב לי" = "my wrist hurt"). Such a line still triggers a split.
+                // Accepted low-probability limitation — real manuscripts rarely open body paragraphs this way,
+                // and the real-book validation (be-c01) confirmed the shipped corpus has no such case.
+                if (StartsWithMatch(ChapterRegex, trimmed!))
                 {
                     FlushChapter();
                     // keep currentPartName for new chapter
                     currentElements = new List<OpenXmlElement> { element.CloneNode(true) };
-                    currentTitle = text.Trim();
+                    currentTitle = trimmed;
                     order++;
                     continue;
                 }
             }
 
             // Heading 1 style
-            if (style != null && (style.Contains("Heading1") || style.Contains("1כותרת") || style == "1"))
+            if (IsHeading1Style(style))
             {
                 FlushChapter();
                 currentElements = new List<OpenXmlElement> { element.CloneNode(true) };
@@ -114,6 +122,28 @@ public class DocxParserService
     private static string? GetParagraphText(Paragraph p)
     {
         return string.Join("", p.Descendants<Text>().Select(t => t.Text));
+    }
+
+    // Real Hebrew chapter/part headings are short standalone lines. Gating on length
+    // keeps common prose words (פרק/חלק) inside long body paragraphs from splitting chapters.
+    private const int MaxHeadingLineLength = 60;
+
+    private static bool IsHeadingLikeLine(string? trimmed)
+        => !string.IsNullOrEmpty(trimmed) && trimmed.Length <= MaxHeadingLineLength;
+
+    private static bool StartsWithMatch(System.Text.RegularExpressions.Regex regex, string text)
+    {
+        var m = regex.Match(text);
+        return m.Success && m.Index == 0;
+    }
+
+    private static bool IsHeading1Style(string? style)
+    {
+        if (string.IsNullOrEmpty(style)) return false;
+        // Normalize: drop whitespace + lowercase so "Heading 1", "heading1", "HEADING1" all match.
+        var normalized = style.Replace(" ", "").ToLowerInvariant();
+        // Exact-level match avoids false positives on Heading10/Heading11 etc.
+        return normalized is "heading1" or "1" or "כותרת1" or "1כותרת";
     }
 
     private static string? GetParagraphStyle(Paragraph p)
