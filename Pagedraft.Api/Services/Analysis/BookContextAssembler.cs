@@ -59,6 +59,31 @@ public sealed record BookContextAssembly
     /// <summary>Convenience: how many units were dropped.</summary>
     public int DroppedCount => DroppedUnits.Count;
 
+    // ─── Windowed-path metadata (AssembleWindowsAsync, wb4-c01) ────────────────────────────────────────
+    // These are populated ONLY by the windowed whole-book review path so wb4-c02 can label progress and tag
+    // findings by window. The single AssembleAsync path leaves them at their defaults (null / empty), so a
+    // single assembly is indistinguishable from its prior shape — the window fields simply do not apply.
+
+    /// <summary>Zero-based index of this window within the ordered window list, or null for a single
+    /// (non-windowed) assembly produced by <see cref="BookContextAssembler.AssembleAsync"/>.</summary>
+    public int? WindowIndex { get; init; }
+
+    /// <summary>The chapter Orders included in this window, in narrative order — INCLUDING any leading
+    /// overlap chapters repeated from the previous window (see
+    /// <see cref="BookContextAssembler.AssembleWindowsAsync"/>). Empty for a single (non-windowed) assembly.</summary>
+    public IReadOnlyList<int> IncludedChapterOrders { get; init; } = Array.Empty<int>();
+
+    /// <summary>The subset of <see cref="IncludedChapterOrders"/> that are OVERLAP chapters repeated from the
+    /// previous window (not this window's primary chapters). Empty for the first window and for single
+    /// assemblies. Lets wb4-c02 attribute a finding to a chapter's PRIMARY window when it also appears as
+    /// overlap elsewhere.</summary>
+    public IReadOnlyList<int> OverlapChapterOrders { get; init; } = Array.Empty<int>();
+
+    /// <summary>True when this window's assembled Text alone exceeds <see cref="BudgetTokens"/> because a
+    /// SINGLE chapter's block did not fit any window (rule c: it becomes its own over-budget window rather
+    /// than being dropped). Logged when set. False for every in-budget window and for single assemblies.</summary>
+    public bool WindowExceedsBudget { get; init; }
+
     /// <summary>
     /// SINGLE source of truth for "does this assembly carry usable structured briefs?" — the dense path the
     /// whole-book review reads. True only when the structured-brief path was taken AND there is at least one
@@ -282,6 +307,257 @@ public class BookContextAssembler
         return await AssembleFlatFallbackAsync(bookId, language, budget, ct);
     }
 
+    // ─── Windowed path (wb4-c01): partition the WHOLE book into ordered windows, dropping NOTHING ────────
+
+    /// <summary>
+    /// Assembles the whole-book context as an ORDERED list of WINDOWS for the whole-book review fan-out
+    /// (wb4). Unlike <see cref="AssembleAsync"/> — which keeps ONE budgeted assembly and DROPS the chapters
+    /// that do not fit — this partitions EVERY chapter into exactly one PRIMARY window: when adding a chapter
+    /// would exceed a window's budget, the current window is CLOSED and a new one is STARTED, so no chapter is
+    /// ever dropped for budget. The single <see cref="AssembleAsync"/> path and its other consumers
+    /// (BookIntelligenceService, AnalysisContextService) are untouched.
+    ///
+    /// Per the todo rules:
+    ///  (a) the BookBrief is placed FIRST in EVERY window (global anchor) and charged to that window's budget,
+    ///      TRIMMED to <see cref="AiOptions.BookReviewWindowBriefMaxTokens"/> (Synopsis capped) so it leaves
+    ///      room for chapters; the FULL brief is used only by the reduce passes;
+    ///  (b) <see cref="AiOptions.BookReviewWindowOverlapChapters"/> (K) repeats the last K PRIMARY chapters of
+    ///      window i at the head of window i+1 so a boundary-straddling issue is visible to one window intact;
+    ///  (c) a single chapter whose block alone exceeds the window budget becomes its OWN over-budget window
+    ///      (logged, <see cref="BookContextAssembly.WindowExceedsBudget"/> = true), never dropped;
+    ///  (d) EVERY chapter lands in exactly one PRIMARY window — asserted, so nothing is silently omitted.
+    ///
+    /// When NO fresh structured briefs exist the per-chapter selection still degrades PER CHAPTER (fresh brief
+    /// &gt; flat summary &gt; raw text), identical to the single path, so a partially-built book still windows.
+    /// Returns one <see cref="BookContextAssembly"/> per window carrying the trimmed BookBrief, the included
+    /// structured briefs, WindowIndex, IncludedChapterOrders and OverlapChapterOrders for wb4-c02.
+    /// </summary>
+    public async Task<IReadOnlyList<BookContextAssembly>> AssembleWindowsAsync(
+        Guid bookId,
+        string language,
+        IReadOnlyCollection<AiTaskType>? consumingTasks = null,
+        CancellationToken ct = default)
+    {
+        var budget = ResolveBudgetTokens(consumingTasks);
+        var lang = BaselineLanguageResolver.Normalize(language);
+        var charsPerToken = CharsPerTokenForLanguage(lang);
+
+        // Reuse the SAME structured composition the single path uses (fresh L1 briefs + L2 rollup).
+        var chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
+        BookBrief? bookBrief = chapterBriefs.Count > 0
+            ? await _bookSummary.ComposeBookBriefAsync(bookId, chapterBriefs, ct)
+            : null;
+        var freshBriefByOrder = chapterBriefs.ToDictionary(b => b.Order);
+
+        // FULL chapter set in narrative order (so every chapter is windowed, dense or degraded).
+        var chapters = await _db.Chapters
+            .AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .OrderBy(c => c.Order)
+            .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
+            .ToListAsync(ct);
+
+        var flatByChapterId = await LoadFlatSummariesByNormalizedLanguageAsync(bookId, lang, ct);
+
+        // Trimmed BookBrief repeated at the head of every window (rule a). Charged with its separator, exactly
+        // like the single structured path charges the BookBrief block.
+        var briefMaxTokens = Math.Max(64, _aiOptions.Value.BookReviewWindowBriefMaxTokens);
+        string briefBlock = string.Empty;
+        int briefBlockTokens = 0;
+        if (bookBrief != null)
+        {
+            var (briefText, trimmed) = FormatBookBriefTrimmed(bookBrief, briefMaxTokens, charsPerToken);
+            if (!string.IsNullOrWhiteSpace(briefText))
+            {
+                briefBlock = briefText + BlockSeparator;
+                briefBlockTokens = EstimateTokens(briefBlock, charsPerToken);
+            }
+            if (trimmed)
+                _logger.LogInformation(
+                    "BookContextAssembler (windows): BookBrief for book {BookId} trimmed to fit the per-window " +
+                    "brief budget ({BriefMaxTokens} tokens) so each window keeps room for chapters.",
+                    bookId, briefMaxTokens);
+        }
+
+        // Precompute each chapter's block + cost ONCE (narrative order), skipping genuinely empty chapters.
+        var units = new List<(int Order, string Title, string Block, int Tokens, ChapterBrief? Brief)>();
+        foreach (var chapter in chapters)
+        {
+            var title = chapter.Title ?? string.Empty;
+            var (block, brief) = BuildChapterBlock(
+                chapter.Order, title, chapter.Id, chapter.ContentText, freshBriefByOrder, flatByChapterId);
+            if (block == null)
+                continue; // genuinely empty chapter: nothing to window and nothing to truncate
+            units.Add((chapter.Order, title, block, EstimateTokens(block, charsPerToken), brief));
+        }
+
+        var overlapK = Math.Max(0, _aiOptions.Value.BookReviewWindowOverlapChapters);
+
+        // Greedy narrative-order partition: fill a window until the next chapter would exceed the budget, then
+        // CLOSE it and START a new one (never drop). A single chapter that alone exceeds the budget becomes its
+        // own over-budget window (rule c). Track PRIMARY membership per window so overlap is additive and every
+        // chapter has exactly one primary window (rule d).
+        var windows = new List<BookContextAssembly>();
+        var prevPrimary = new List<(int Order, string Block, int Tokens)>(); // previous window's primary units
+        var i = 0;
+        while (i < units.Count)
+        {
+            var windowIndex = windows.Count;
+
+            // Overlap prefix: repeat the last K PRIMARY chapters of the previous window (rule b). Charged to
+            // this window's budget just like any chapter; if the overlap itself would blow the budget we still
+            // include it (it is bounded by K, small) so the boundary context is intact.
+            var overlapOrders = new List<int>();
+            var overlapBlocks = new List<string>();
+            var overlapTokens = 0;
+            if (overlapK > 0 && windowIndex > 0)
+            {
+                var take = Math.Min(overlapK, prevPrimary.Count);
+                for (var k = prevPrimary.Count - take; k < prevPrimary.Count; k++)
+                {
+                    overlapOrders.Add(prevPrimary[k].Order);
+                    overlapBlocks.Add(prevPrimary[k].Block);
+                    overlapTokens += prevPrimary[k].Tokens;
+                }
+            }
+
+            var sb = new StringBuilder();
+            sb.Append(briefBlock);
+            foreach (var ob in overlapBlocks) sb.Append(ob);
+            var used = briefBlockTokens + overlapTokens;
+
+            var includedBriefs = new List<ChapterBrief>();
+            var includedOrders = new List<int>(overlapOrders); // overlap first, then primaries
+            var primaryUnitsThisWindow = new List<(int Order, string Block, int Tokens)>();
+            var windowExceedsBudget = false;
+
+            // Add primary chapters until the budget is hit. The window ALWAYS takes at least ONE primary
+            // chapter so it makes progress even if that chapter alone is over budget (rule c).
+            while (i < units.Count)
+            {
+                var u = units[i];
+                var isFirstPrimary = primaryUnitsThisWindow.Count == 0;
+                var wouldExceed = used + u.Tokens > budget;
+
+                if (wouldExceed && !isFirstPrimary)
+                    break; // close this window, start a new one with the next chapter (never drop)
+
+                sb.Append(u.Block);
+                used += u.Tokens;
+                includedOrders.Add(u.Order);
+                if (u.Brief != null) includedBriefs.Add(u.Brief);
+                primaryUnitsThisWindow.Add((u.Order, u.Block, u.Tokens));
+                i++;
+
+                if (wouldExceed && isFirstPrimary)
+                {
+                    // Rule c: a single chapter whose block alone exceeds the window budget is its own window.
+                    windowExceedsBudget = true;
+                    _logger.LogWarning(
+                        "BookContextAssembler (windows): chapter #{Order} '{Title}' ({Tokens} tokens, plus " +
+                        "brief {BriefTokens}) alone exceeds the window budget ({Budget} tokens) for book " +
+                        "{BookId}; emitting it as its own over-budget window (never dropped).",
+                        u.Order, u.Title, u.Tokens, briefBlockTokens, budget, bookId);
+                    break; // an over-budget solo chapter closes the window immediately
+                }
+            }
+
+            prevPrimary = primaryUnitsThisWindow;
+
+            windows.Add(new BookContextAssembly
+            {
+                Text = sb.ToString().TrimEnd(),
+                BookBrief = bookBrief,
+                IncludedChapterBriefs = includedBriefs,
+                DroppedUnits = Array.Empty<DroppedBookUnit>(), // windows drop NOTHING
+                UsedStructuredBriefs = bookBrief != null || includedBriefs.Count > 0,
+                BudgetTokens = budget,
+                EstimatedTokens = used,
+                WindowIndex = windowIndex,
+                IncludedChapterOrders = includedOrders,
+                OverlapChapterOrders = overlapOrders,
+                WindowExceedsBudget = windowExceedsBudget
+            });
+        }
+
+        // Rule d: assert EVERY non-empty chapter landed in exactly one PRIMARY window (overlap excluded).
+        var primaryOrders = windows
+            .SelectMany(w => w.IncludedChapterOrders.Except(w.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        var expectedOrders = units.Select(u => u.Order).OrderBy(o => o).ToList();
+        if (!primaryOrders.SequenceEqual(expectedOrders))
+        {
+            // This is a programming invariant, not a user condition; loud so a regression cannot pass silently.
+            var missing = expectedOrders.Except(primaryOrders).ToList();
+            var extra = primaryOrders.Except(expectedOrders).ToList();
+            _logger.LogError(
+                "BookContextAssembler (windows): PRIMARY-window partition dropped/duplicated chapters for book " +
+                "{BookId}. Missing: [{Missing}]; unexpected: [{Extra}].",
+                bookId, string.Join(",", missing), string.Join(",", extra));
+            throw new InvalidOperationException(
+                $"AssembleWindowsAsync partition invariant violated for book {bookId}: " +
+                $"missing primary chapters [{string.Join(",", missing)}], unexpected [{string.Join(",", extra)}].");
+        }
+
+        _logger.LogInformation(
+            "BookContextAssembler (windows): book {BookId} ({Lang}) partitioned into {WindowCount} window(s) " +
+            "over {ChapterCount} chapter(s); budget {Budget}t/window, overlap K={OverlapK}, {StructuredMode}.",
+            bookId, lang, windows.Count, units.Count, budget, overlapK,
+            bookBrief != null ? "structured briefs" : "degraded flat/raw fill");
+
+        return windows;
+    }
+
+    /// <summary>
+    /// Counts the REVIEWABLE (non-empty) chapters of (bookId, language): those that carry a fresh structured
+    /// brief, a flat summary, or raw text — i.e. exactly the chapters that ENTER a window in
+    /// <see cref="AssembleWindowsAsync"/> as a PRIMARY. A genuinely empty chapter (no brief, no summary, no text)
+    /// is skipped by <see cref="BuildChapterBlock"/> and is NEVER windowed, so it is NOT counted. This is the
+    /// SAME denominator a windowed build persists as <c>BookReviewCoverage.ChaptersTotal</c> (the distinct
+    /// primaries across all windows), derived through the SHARED per-chapter selection (<see cref="BuildChapterBlock"/>)
+    /// so the count cannot DRIFT from what the windowed build considers reviewable.
+    ///
+    /// WHY: the whole-book review's STATUS probe falls back to a chapter count when no persisted coverage row
+    /// exists yet (before the first build). Using the RAW <c>Chapters</c> row count there made the coverage
+    /// denominator JUMP after the first build (raw count → reviewable primaries) whenever the book had any empty
+    /// chapters; this probe gives the status fallback the SAME reviewable denominator the build will persist, so
+    /// it stays stable. LLM-free: composition reads only cached briefs (no summarization model call), mirroring
+    /// the assemble paths.
+    /// </summary>
+    public async Task<int> CountReviewableChaptersAsync(
+        Guid bookId,
+        string language,
+        CancellationToken ct = default)
+    {
+        var lang = BaselineLanguageResolver.Normalize(language);
+
+        // Same three inputs BuildChapterBlock consumes in AssembleWindowsAsync: fresh structured briefs by Order,
+        // the chapters (Id/Order/Title/ContentText), and the flat per-chapter summaries. Reusing BuildChapterBlock
+        // keeps the empty-chapter decision single-sourced with the windowed partition.
+        var chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
+        var freshBriefByOrder = chapterBriefs.ToDictionary(b => b.Order);
+
+        var chapters = await _db.Chapters
+            .AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
+            .ToListAsync(ct);
+
+        var flatByChapterId = await LoadFlatSummariesByNormalizedLanguageAsync(bookId, lang, ct);
+
+        var count = 0;
+        foreach (var chapter in chapters)
+        {
+            var (block, _) = BuildChapterBlock(
+                chapter.Order, chapter.Title ?? string.Empty, chapter.Id, chapter.ContentText,
+                freshBriefByOrder, flatByChapterId);
+            if (block != null)
+                count++; // genuinely empty chapters return a null block and are not reviewable
+        }
+        return count;
+    }
+
     // ─── Shared read helper ───────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -386,22 +662,10 @@ public class BookContextAssembler
             var title = chapter.Title ?? string.Empty;
 
             // Best available representation for this chapter: fresh structured brief > flat summary > raw text.
-            string block;
-            ChapterBrief? structuredBrief = null;
-            if (freshBriefByOrder.TryGetValue(chapter.Order, out var brief))
-            {
-                structuredBrief = brief;
-                block = FormatChapterBrief(brief) + BlockSeparator;
-            }
-            else
-            {
-                var body = flatByChapterId.TryGetValue(chapter.Id, out var summary) && !string.IsNullOrWhiteSpace(summary)
-                    ? summary
-                    : SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
-                if (string.IsNullOrWhiteSpace(body))
-                    continue; // genuinely empty chapter: nothing to include and nothing to truncate
-                block = FormatFlatChapterBlock(title, body);
-            }
+            var (block, structuredBrief) = BuildChapterBlock(
+                chapter.Order, title, chapter.Id, chapter.ContentText, freshBriefByOrder, flatByChapterId);
+            if (block == null)
+                continue; // genuinely empty chapter: nothing to include and nothing to truncate
 
             var blockTokens = EstimateTokens(block, charsPerToken);
             if (budgetExhausted || used + blockTokens > budget)
@@ -542,6 +806,35 @@ public class BookContextAssembler
         };
     }
 
+    // ─── Shared per-chapter block selection (used by the single path AND the windowed path) ────────────
+
+    /// <summary>
+    /// The SINGLE source of a chapter's best-representation block: fresh structured brief &gt; flat summary &gt;
+    /// raw text. Returns the rendered block (already carrying its trailing <see cref="BlockSeparator"/>) plus
+    /// the structured brief when one was used (null otherwise), or (null, null) for a genuinely empty chapter
+    /// (no brief, no summary, no text) that has nothing to contribute and is not a truncation. Both
+    /// <see cref="AssembleStructuredWithFallbackAsync"/> and <see cref="AssembleWindowsAsync"/> call this so
+    /// their per-chapter selection and rendering cannot drift.
+    /// </summary>
+    private static (string? Block, ChapterBrief? StructuredBrief) BuildChapterBlock(
+        int order,
+        string title,
+        Guid chapterId,
+        string? contentText,
+        IReadOnlyDictionary<int, ChapterBrief> freshBriefByOrder,
+        IReadOnlyDictionary<Guid, string> flatByChapterId)
+    {
+        if (freshBriefByOrder.TryGetValue(order, out var brief))
+            return (FormatChapterBrief(brief) + BlockSeparator, brief);
+
+        var body = flatByChapterId.TryGetValue(chapterId, out var summary) && !string.IsNullOrWhiteSpace(summary)
+            ? summary
+            : SyncfusionWatermarkStripper.StripSyncfusionWatermark(contentText ?? "");
+        if (string.IsNullOrWhiteSpace(body))
+            return (null, null); // genuinely empty chapter: nothing to include and nothing to truncate
+        return (FormatFlatChapterBlock(title, body), null);
+    }
+
     // ─── Rendering (mirrors PromptFactory's brief formatting so the model reads a familiar shape) ──────
 
     /// <summary>
@@ -552,7 +845,15 @@ public class BookContextAssembler
     private static string FormatFlatChapterBlock(string title, string body) =>
         $"## פרק / Chapter: {title}\n{body}{BlockSeparator}";
 
-    private static string FormatBookBrief(BookBrief b)
+    /// <summary>
+    /// Renders the FULL (untrimmed) BookBrief into a self-contained <c>[BOOK_CONTEXT]…[/BOOK_CONTEXT]</c>
+    /// block — the same markers every consumer of the assembled context reads. Public so the whole-book
+    /// review REDUCE passes (wb4-c04 synthesis / wb4-c05 continuity) can reuse the SAME formatter to prepend
+    /// the full brief to their reduce prompts rather than hand-rolling a divergent formatter (the windowed
+    /// MAP charges a TRIMMED brief per window via <see cref="FormatBookBriefTrimmed"/>; the reduce passes get
+    /// the whole brief once, so this untrimmed formatter is the right one for them).
+    /// </summary>
+    public static string FormatBookBrief(BookBrief b)
     {
         var sb = new StringBuilder();
         sb.AppendLine("[BOOK_CONTEXT]");
@@ -563,6 +864,92 @@ public class BookContextAssembler
         if (b.Synopsis != null) sb.AppendLine($"Synopsis: {b.Synopsis}");
         sb.Append("[/BOOK_CONTEXT]");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Renders a BookBrief trimmed to fit <paramref name="maxTokens"/> for the windowed review path, where the
+    /// brief is repeated at the head of EVERY window and charged to each window's budget. The tiny fixed
+    /// metadata lines (genre / audience / literature level) are ALWAYS kept — they are cheap and globally
+    /// load-bearing. The two UNBOUNDED fields are then capped to fit the budget: the Themes list (a union of
+    /// every chapter's markers, so it grows with book length) is truncated to as many entries as fit, then the
+    /// Synopsis is capped to whatever room remains (Synopsis is the first thing sacrificed since Themes are the
+    /// densest global signal). Returns the rendered text and whether ANYTHING was shortened (so the caller can
+    /// log it: no silent truncation). The FULL untrimmed brief is still available via
+    /// <see cref="FormatBookBrief"/> for the reduce passes. Uses the language-aware char/token density so the
+    /// cap corresponds to real tokens.
+    /// </summary>
+    private static (string Text, bool Trimmed) FormatBookBriefTrimmed(BookBrief b, int maxTokens, double charsPerToken)
+    {
+        var full = FormatBookBrief(b);
+        if (EstimateTokens(full, charsPerToken) <= maxTokens)
+            return (full, false);
+
+        const string closer = "[/BOOK_CONTEXT]";
+        const string ellipsis = "…";
+
+        // Irreducible metadata header (always kept): the cheap fixed lines.
+        var head = new StringBuilder();
+        head.AppendLine("[BOOK_CONTEXT]");
+        if (b.Genre != null) head.AppendLine($"Genre: {b.Genre}{(b.SubGenre != null ? $" / {b.SubGenre}" : "")}");
+        if (b.TargetAudience != null) head.AppendLine($"Audience: {b.TargetAudience}");
+        if (b.LiteratureLevel.HasValue) head.AppendLine($"Literature level: {b.LiteratureLevel}/10");
+        var headTokens = EstimateTokens(head.ToString() + closer, charsPerToken);
+
+        // Fit as many Themes as the remaining room allows (Themes are the densest global signal; keep them
+        // before the Synopsis). Build up entry-by-entry so we never exceed the cap.
+        var themesLine = new StringBuilder();
+        var themesTrimmed = false;
+        if (b.Themes.Count > 0)
+        {
+            var kept = new List<string>();
+            foreach (var theme in b.Themes)
+            {
+                var candidate = kept.Count == 0 ? theme : $"{string.Join(", ", kept)}, {theme}";
+                var candidateTokens = EstimateTokens($"Themes: {candidate}\n", charsPerToken);
+                // Keep at least one theme; stop once adding the next would break the cap (reserve a little
+                // room for the Synopsis label too, but Themes get first claim after the header).
+                if (kept.Count > 0 && headTokens + candidateTokens > maxTokens)
+                {
+                    themesTrimmed = true;
+                    break;
+                }
+                kept.Add(theme);
+            }
+            if (kept.Count < b.Themes.Count) themesTrimmed = true;
+            if (kept.Count > 0) themesLine.Append($"Themes: {string.Join(", ", kept)}\n");
+        }
+        var afterThemesTokens = headTokens + EstimateTokens(themesLine.ToString(), charsPerToken);
+
+        // Fit the Synopsis into whatever room remains after header + (possibly-trimmed) themes.
+        var synopsisLine = new StringBuilder();
+        var synopsisTrimmed = false;
+        if (!string.IsNullOrWhiteSpace(b.Synopsis))
+        {
+            var labelTokens = EstimateTokens("Synopsis: \n", charsPerToken);
+            var remainingTokens = maxTokens - afterThemesTokens - labelTokens;
+            if (remainingTokens > 0)
+            {
+                var maxSynopsisChars = Math.Max(0, (int)(remainingTokens * charsPerToken) - ellipsis.Length);
+                if (b.Synopsis.Length > maxSynopsisChars)
+                {
+                    synopsisLine.Append($"Synopsis: {b.Synopsis.Substring(0, maxSynopsisChars).TrimEnd()}{ellipsis}\n");
+                    synopsisTrimmed = true;
+                }
+                else
+                {
+                    synopsisLine.Append($"Synopsis: {b.Synopsis}\n");
+                }
+            }
+            else
+            {
+                synopsisTrimmed = true; // no room at all → Synopsis dropped
+            }
+        }
+
+        head.Append(themesLine);
+        head.Append(synopsisLine);
+        head.Append(closer);
+        return (head.ToString(), themesTrimmed || synopsisTrimmed);
     }
 
     private static string FormatChapterBrief(ChapterBrief ch)
@@ -585,5 +972,57 @@ public class BookContextAssembler
         if (ch.OpenThreads.Count > 0) sb.AppendLine($"Open threads: {string.Join("; ", ch.OpenThreads)}");
         if (!string.IsNullOrWhiteSpace(ch.ToneNotes)) sb.AppendLine($"Tone: {ch.ToneNotes}");
         return sb.ToString().TrimEnd();
+    }
+
+    // ─── Continuity skeleton (wb4-c05 hierarchical continuity reduce) ──────────────────────────────────
+
+    /// <summary>Open/close markers wrapping the dense continuity skeleton block. The wb4-c05 continuity reduce
+    /// prompt reads chapters from between these, and the test mock switch distinguishes the continuity pass
+    /// from the synthesis pass (which carries [WINDOW_FINDINGS]) on this marker.</summary>
+    public const string ContinuitySkeletonOpen = "[CONTINUITY_SKELETON]";
+    public const string ContinuitySkeletonClose = "[/CONTINUITY_SKELETON]";
+
+    /// <summary>
+    /// DETERMINISTIC (no model call) dense per-chapter continuity line — MUCH denser than a full
+    /// <see cref="FormatChapterBrief"/> block: plot prose, tone and summary are DROPPED, keeping only the two
+    /// signals a cross-chapter continuity pass needs — the chapter's OPEN THREADS and its CHARACTER STATES.
+    /// Format: <c>#&lt;order&gt; &lt;title&gt; | threads: &lt;openThreads joined '; '&gt; | states: &lt;name:state; ...&gt;</c>.
+    /// A missing state renders the bare name; an empty threads/states list renders an empty segment (kept so
+    /// every line has the same fixed shape). Mirrors <see cref="FormatChapterBrief"/>'s CharacterStates /
+    /// OpenThreads iteration so the two renderers cannot drift on which fields count.
+    /// </summary>
+    public static string FormatContinuitySkeletonLine(ChapterBrief ch)
+    {
+        var threads = ch.OpenThreads.Count > 0
+            ? string.Join("; ", ch.OpenThreads.Select(OneLine))
+            : string.Empty;
+        var states = ch.CharacterStates.Count > 0
+            ? string.Join("; ", ch.CharacterStates.Select(cs =>
+                string.IsNullOrWhiteSpace(cs.State) ? OneLine(cs.Name) : $"{OneLine(cs.Name)}:{OneLine(cs.State)}"))
+            : string.Empty;
+        return $"#{ch.Order} {OneLine(ch.Title)} | threads: {threads} | states: {states}";
+    }
+
+    /// <summary>
+    /// Collapses embedded CR/LF to a single space so no field value can break the strict
+    /// one-line-per-chapter shape the continuity-reduce prompt relies on.
+    /// </summary>
+    private static string OneLine(string? s) => (s ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
+
+    /// <summary>
+    /// Builds the full <c>[CONTINUITY_SKELETON]…[/CONTINUITY_SKELETON]</c> block over the supplied chapter
+    /// briefs (narrative order) via <see cref="FormatContinuitySkeletonLine"/> — one dense line per chapter.
+    /// DETERMINISTIC: no model call, so wb4-c05 can compute the grouping (and thus the reduce call count) from
+    /// the already-composed briefs BEFORE reserving progress chunks. Public so the review service + its tests
+    /// can reach it.
+    /// </summary>
+    public static string FormatContinuitySkeleton(IReadOnlyList<ChapterBrief> briefs)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine(ContinuitySkeletonOpen);
+        foreach (var ch in briefs)
+            sb.AppendLine(FormatContinuitySkeletonLine(ch));
+        sb.Append(ContinuitySkeletonClose);
+        return sb.ToString();
     }
 }

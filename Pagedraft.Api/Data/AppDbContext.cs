@@ -24,6 +24,7 @@ public class AppDbContext : DbContext
     public DbSet<BookStyleBaseline> BookStyleBaselines => Set<BookStyleBaseline>();
     public DbSet<BookSummaryBaseline> BookSummaryBaselines => Set<BookSummaryBaseline>();
     public DbSet<BookFinding> BookFindings => Set<BookFinding>();
+    public DbSet<BookReviewCoverage> BookReviewCoverages => Set<BookReviewCoverage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -276,6 +277,18 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.BookId, x.Language, x.DedupKey }).IsUnique();
         });
 
+        modelBuilder.Entity<BookReviewCoverage>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Language).HasMaxLength(10);
+            // Book FK = Restrict (same multiple-cascade-paths guard as BookStyleBaseline / BookSummaryBaseline /
+            // BookFinding); BooksController.Delete removes BookReviewCoverages for the book explicitly before
+            // deleting the book.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Restrict);
+            // One persisted coverage row per (BookId, Language) - the cache/upsert key.
+            e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -378,6 +391,11 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) bf.CreatedAt = bf.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) bf.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookReviewCoverage brc)
+            {
+                if (entry.State == EntityState.Added) brc.CreatedAt = brc.UpdatedAt = DateTimeOffset.UtcNow;
+                else if (entry.State == EntityState.Modified) brc.UpdatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);

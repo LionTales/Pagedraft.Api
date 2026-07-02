@@ -146,6 +146,84 @@ public class BooksReviewControllerTests
         Assert.False(status.BuiltWithDifferentModel);
         Assert.True(status.Ready);
         Assert.NotNull(status.LastUpdatedAt);
+
+        // data-c01 coverage provenance on the status DTO: the probe reports the PERSISTED BookReviewCoverage
+        // row (not the live chapter count). This legacy per-dimension build reviews the whole book, so it
+        // persists honest FULL coverage (reviewed == total == 2 chapters seeded); the build-time-only shape
+        // stays at 0/false (those precise counts ride on BookReviewBuildResult, not the cached status probe).
+        Assert.Equal(2, status.ChaptersTotal);
+        Assert.Equal(2, status.ChaptersReviewed);
+        Assert.Equal(0, status.WindowCount);
+        Assert.False(status.RanSynthesis);
+        Assert.False(status.RanContinuityReduce);
+        Assert.Equal(0, status.FailedWindows);
+    }
+
+    // ─── GET review/status: the new coverage fields serialize as the camelCase names wb4-f01 mirrors ─────
+    [Fact]
+    public async Task GetBookReviewStatus_SerializesCoverageFields_CamelCase()
+    {
+        using var provider = BuildProvider(out _, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var controller = BuildController(provider);
+        var action = await controller.GetBookReviewStatus(bookId, "he", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var status = Assert.IsType<BookReviewStatusDto>(ok.Value);
+
+        // Serialize with the SAME default policy the API uses (System.Text.Json camelCase) and assert the exact
+        // camelCase property names the FE (wb4-f01) reads. This is the FE-contract guard: a rename here breaks
+        // the mirror silently otherwise.
+        var json = System.Text.Json.JsonSerializer.Serialize(status,
+            new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            });
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal(2, root.GetProperty("chaptersReviewed").GetInt32());
+        Assert.Equal(2, root.GetProperty("chaptersTotal").GetInt32());
+        Assert.Equal(0, root.GetProperty("windowCount").GetInt32());
+        Assert.False(root.GetProperty("ranSynthesis").GetBoolean());
+        Assert.False(root.GetProperty("ranContinuityReduce").GetBoolean());
+        Assert.Equal(0, root.GetProperty("failedWindows").GetInt32());
+    }
+
+    // ─── GET review/status: a PERSISTED PARTIAL coverage row surfaces as reviewed < total on the DTO (data-c01
+    //         reload-honest path at the controller boundary — the probe reads the persisted row, not the live
+    //         chapter count, so a partial build stays honest across a reload). ─────────────────────────────────
+    [Fact]
+    public async Task GetBookReviewStatus_PersistedPartialCoverage_ReportsReviewedBelowTotal()
+    {
+        using var provider = BuildProvider(out _, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 4);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        // Simulate a build that persisted PARTIAL coverage (e.g. one window failed): overwrite the coverage row
+        // with reviewed < total, mirroring what a partial windowed build would persist. The status probe must
+        // report THIS persisted value, not the live chapter count (which would dishonestly claim 4/4).
+        var coverage = await db.BookReviewCoverages.SingleAsync(c => c.BookId == bookId && c.Language == "he");
+        coverage.ChaptersReviewed = 3;
+        coverage.ChaptersTotal = 4;
+        await db.SaveChangesAsync();
+
+        var controller = BuildController(provider);
+        var action = await controller.GetBookReviewStatus(bookId, "he", CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var status = Assert.IsType<BookReviewStatusDto>(ok.Value);
+
+        Assert.True(status.HasReview);
+        Assert.Equal(4, status.ChaptersTotal);
+        Assert.Equal(3, status.ChaptersReviewed);
+        Assert.True(status.ChaptersReviewed < status.ChaptersTotal,
+            "a persisted partial coverage must survive a reload as reviewed < total, not inflate to N/N.");
     }
 
     [Fact]
