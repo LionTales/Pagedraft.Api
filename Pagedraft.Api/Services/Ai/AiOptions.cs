@@ -70,6 +70,28 @@ public class AiOptions
     public bool BookReviewSingleCombined { get; set; } = true;
 
     /// <summary>
+    /// Max tokens the trimmed BookBrief may occupy when it is repeated at the head of EVERY window of the
+    /// windowed whole-book review path (BookContextAssembler.AssembleWindowsAsync, wb4-c01). The BookBrief is
+    /// the global anchor placed first in each window and charged to that window's budget; a full BookBrief
+    /// (especially its Synopsis) can eat a large share of a window and starve it of chapters, so for windows
+    /// the Synopsis is CAPPED to fit this budget (the other, short metadata lines are always kept). The FULL,
+    /// untrimmed BookBrief is used only by the reduce passes (wb4-c04/c05), never by the per-window fan-out.
+    /// Default ~800 tokens. Clamped to a small positive minimum so at least the metadata header survives.
+    /// </summary>
+    public int BookReviewWindowBriefMaxTokens { get; set; } = 800;
+
+    /// <summary>
+    /// How many chapters at the TAIL of window i are repeated at the HEAD of window i+1 in the windowed
+    /// whole-book review path (BookContextAssembler.AssembleWindowsAsync, wb4-c01), so an issue that straddles
+    /// a window boundary is visible to at least one window intact. Kept small (default 1) because the
+    /// continuity-reduce pass is the real cross-window net; a larger K wastes budget re-sending chapters.
+    /// The overlap is ADDITIONAL to each chapter's single PRIMARY window: every chapter still lands in exactly
+    /// one primary window (no chapter is dropped), and the first K chapters of a window are its overlap tail
+    /// from the previous window. Clamped to &gt;= 0 (0 disables overlap).
+    /// </summary>
+    public int BookReviewWindowOverlapChapters { get; set; } = 1;
+
+    /// <summary>
     /// Hard token budget for the assembled WHOLE-BOOK analysis context (BookContextAssembler): the L2
     /// BookBrief plus as many L1 ChapterBriefs (or, in the degraded path, flat chapter summaries) as fit.
     /// When &lt;= 0 the budget is DERIVED from the active task model's <see cref="ProviderTuningOptions.NumCtx"/>
