@@ -949,10 +949,19 @@ public class BookReviewService
         }
 
         if (jobId.HasValue)
+        {
+            // wb4-c06: stamp the TRANSIENT build-shape onto the job BEFORE the terminal status, so the SAME
+            // terminal progress poll that observes Succeeded/Failed also carries the window/continuity/failed-
+            // window counts. These are build-time-only (the persisted status probe reports 0/false), so this
+            // live progress payload is the FE's channel for the "N windows[, continuity pass]" detail + the
+            // "N windows failed" partial warning. Values mirror the returned result exactly (0/false/failedUnits
+            // on the legacy per-dimension path, where windowCount is 0 so the FE hides the window detail).
+            _progress.SetBookReviewShape(jobId.Value, windowCountForResult, ranContinuityReduce, failedUnits);
             _progress.SetStatus(
                 jobId.Value,
                 totalFailure ? AnalysisProgressStatus.Failed : AnalysisProgressStatus.Succeeded,
                 msg);
+        }
 
         return new BookReviewBuildResult
         {

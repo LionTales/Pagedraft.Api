@@ -28,6 +28,16 @@ public sealed class AnalysisProgressSnapshot
     public DateTimeOffset LastUpdatedUtc { get; init; }
     public int EstimatedCompletionPercent =>
         TotalChunks <= 0 ? 0 : (int)Math.Ceiling(100.0 * CompletedChunks / TotalChunks);
+
+    // ── Whole-book REVIEW build-shape (wb4-c06). The TRANSIENT per-build window/continuity/failed-window
+    //    provenance the BookReview build stamps at its terminal so the FE's LIVE progress poll can render the
+    //    "N windows[, continuity pass]" detail + the "N windows failed" partial warning right after a build.
+    //    This is deliberately the LIVE build-completion channel — the persisted status probe reports these as
+    //    0/false (they are build-time-only), so the FE reads them from the terminal progress payload instead.
+    //    Null for every other job type and until the review build sets them. ──
+    public int? BookReviewWindowCount { get; init; }
+    public bool? BookReviewRanContinuityReduce { get; init; }
+    public int? BookReviewFailedWindows { get; init; }
 }
 
 internal sealed class AnalysisProgressState
@@ -44,6 +54,11 @@ internal sealed class AnalysisProgressState
     public AnalysisProgressStatus Status { get; set; } = AnalysisProgressStatus.Pending;
     public string Message { get; set; } = string.Empty;
     public DateTimeOffset LastUpdatedUtc { get; set; } = DateTimeOffset.UtcNow;
+
+    // Whole-book REVIEW build-shape (see AnalysisProgressSnapshot). Null until the review build stamps them.
+    public int? BookReviewWindowCount { get; set; }
+    public bool? BookReviewRanContinuityReduce { get; set; }
+    public int? BookReviewFailedWindows { get; set; }
 }
 
 /// <summary>
@@ -124,6 +139,24 @@ public sealed class AnalysisProgressTracker
         PruneExpired();
     }
 
+    /// <summary>
+    /// Stamp the whole-book REVIEW build-shape (window count, whether the continuity reduce pass ran, and the
+    /// failed-window count) onto the job so the FE's LIVE progress poll can render the coverage-provenance detail
+    /// right after a build. Called by <see cref="BookReviewService"/> at the build terminal BEFORE the terminal
+    /// <see cref="SetStatus"/>, so the SAME terminal poll that observes Succeeded/Failed also carries the shape.
+    /// No-op when the job is unknown. These values are TRANSIENT (in-memory, TTL-pruned) and review-specific;
+    /// the persisted status probe deliberately does NOT carry them (it reports 0/false).
+    /// </summary>
+    public void SetBookReviewShape(Guid jobId, int windowCount, bool ranContinuityReduce, int failedWindows)
+    {
+        if (!_jobs.TryGetValue(jobId, out var state)) return;
+        state.BookReviewWindowCount = windowCount;
+        state.BookReviewRanContinuityReduce = ranContinuityReduce;
+        state.BookReviewFailedWindows = failedWindows;
+        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        PruneExpired();
+    }
+
     public bool TryGet(Guid jobId, out AnalysisProgressSnapshot? snapshot)
     {
         snapshot = null;
@@ -149,7 +182,10 @@ public sealed class AnalysisProgressTracker
             CurrentChunkIndex = state.CurrentChunkIndex,
             Status = state.Status,
             Message = state.Message,
-            LastUpdatedUtc = state.LastUpdatedUtc
+            LastUpdatedUtc = state.LastUpdatedUtc,
+            BookReviewWindowCount = state.BookReviewWindowCount,
+            BookReviewRanContinuityReduce = state.BookReviewRanContinuityReduce,
+            BookReviewFailedWindows = state.BookReviewFailedWindows
         };
         return true;
     }
