@@ -509,6 +509,55 @@ public class BookContextAssembler
         return windows;
     }
 
+    /// <summary>
+    /// Counts the REVIEWABLE (non-empty) chapters of (bookId, language): those that carry a fresh structured
+    /// brief, a flat summary, or raw text — i.e. exactly the chapters that ENTER a window in
+    /// <see cref="AssembleWindowsAsync"/> as a PRIMARY. A genuinely empty chapter (no brief, no summary, no text)
+    /// is skipped by <see cref="BuildChapterBlock"/> and is NEVER windowed, so it is NOT counted. This is the
+    /// SAME denominator a windowed build persists as <c>BookReviewCoverage.ChaptersTotal</c> (the distinct
+    /// primaries across all windows), derived through the SHARED per-chapter selection (<see cref="BuildChapterBlock"/>)
+    /// so the count cannot DRIFT from what the windowed build considers reviewable.
+    ///
+    /// WHY: the whole-book review's STATUS probe falls back to a chapter count when no persisted coverage row
+    /// exists yet (before the first build). Using the RAW <c>Chapters</c> row count there made the coverage
+    /// denominator JUMP after the first build (raw count → reviewable primaries) whenever the book had any empty
+    /// chapters; this probe gives the status fallback the SAME reviewable denominator the build will persist, so
+    /// it stays stable. LLM-free: composition reads only cached briefs (no summarization model call), mirroring
+    /// the assemble paths.
+    /// </summary>
+    public async Task<int> CountReviewableChaptersAsync(
+        Guid bookId,
+        string language,
+        CancellationToken ct = default)
+    {
+        var lang = BaselineLanguageResolver.Normalize(language);
+
+        // Same three inputs BuildChapterBlock consumes in AssembleWindowsAsync: fresh structured briefs by Order,
+        // the chapters (Id/Order/Title/ContentText), and the flat per-chapter summaries. Reusing BuildChapterBlock
+        // keeps the empty-chapter decision single-sourced with the windowed partition.
+        var chapterBriefs = await _bookSummary.ComposeChapterBriefsAsync(bookId, language, ct);
+        var freshBriefByOrder = chapterBriefs.ToDictionary(b => b.Order);
+
+        var chapters = await _db.Chapters
+            .AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .Select(c => new { c.Id, c.Order, c.Title, c.ContentText })
+            .ToListAsync(ct);
+
+        var flatByChapterId = await LoadFlatSummariesByNormalizedLanguageAsync(bookId, lang, ct);
+
+        var count = 0;
+        foreach (var chapter in chapters)
+        {
+            var (block, _) = BuildChapterBlock(
+                chapter.Order, chapter.Title ?? string.Empty, chapter.Id, chapter.ContentText,
+                freshBriefByOrder, flatByChapterId);
+            if (block != null)
+                count++; // genuinely empty chapters return a null block and are not reviewable
+        }
+        return count;
+    }
+
     // ─── Shared read helper ───────────────────────────────────────────────────────────────────────────
 
     /// <summary>

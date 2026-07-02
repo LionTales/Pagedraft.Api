@@ -1491,6 +1491,83 @@ public class BookReviewServiceTests
         Assert.Single(rows);
     }
 
+    // ─── W8. be-c02 MULTI-ANCHOR SCOPE (bug fix): a vanished-open finding anchored to SEVERAL chapters must be
+    //         PRESERVED when ANY of those chapters was NOT re-reviewed — even if its FIRST anchor was. The old
+    //         first-anchor-only scope (PrimaryChapterOrderOf) wrongly deleted such multi-chapter continuity
+    //         findings whenever the first anchor happened to be reviewed. ───────────────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_MultiChapterFinding_LaterAnchorWindowFails_IsPreserved()
+    {
+        // A continuity finding anchored to BOTH ch 0 and ch 1 is open. On rebuild window 1 (ch 0) SUCCEEDS but
+        // window 2 (ch 1) FAILS, so ch 1 is NOT re-reviewed. The finding vanishes from `incoming`. Because it
+        // anchors an UN-reviewed chapter (ch 1), it must be PRESERVED — its absence is a failure artifact, not a
+        // retraction. Pre-fix, the scope keyed on the FIRST anchor (ch 0, which WAS reviewed) and deleted it.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Fresh ch0 finding", 0)),
+                [2] = "{ truncated, no closing brace", // unparseable → window 2 FAILS → ch 1 NOT re-reviewed
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        // Seed the prior OPEN multi-chapter continuity finding (anchors ch 0 AND ch 1), then force a real rebuild
+        // (stale vs briefs) so the persist step's scoped delete actually runs (not an idempotent no-op).
+        await SeedOpenFindingAsync(db, bookId, "continuity-0-1", "Continuity break spanning ch 0 and ch 1", 0, 1);
+        await TouchSummaryBaselineAsync(db, bookId);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+        Assert.Equal(1, result.FailedWindows); // only window 2 failed → ch 1 not in the reviewed set
+
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // The multi-chapter finding SURVIVES: ch 1 (a SECOND anchor) was NOT re-reviewed this build.
+        Assert.Single(rows, f => f.Rationale == "Continuity break spanning ch 0 and ch 1");
+        // The reviewed chapter's fresh finding was inserted alongside it.
+        Assert.Single(rows, f => f.Rationale == "Fresh ch0 finding");
+        Assert.Equal(2, rows.Count);
+    }
+
+    // ─── W9. be-c02 MULTI-ANCHOR BOUNDARY: the SAME multi-chapter finding IS deleted when EVERY anchored chapter
+    //         was re-reviewed (both windows succeed). Proves the fix requires ALL anchors reviewed to delete — it
+    //         does not blanket-preserve every multi-chapter finding. ────────────────────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_Windowed_MultiChapterFinding_AllAnchorsReviewed_IsDeleted()
+    {
+        // Window 1 emits a fresh ch-0 finding (ch 0 reviewed) and window 2 is PARSED-EMPTY (a clean SUCCESS → ch 1
+        // reviewed). Every anchored chapter of the seeded [0,1] finding was re-reviewed and the model no longer
+        // surfaces it, so it IS deleted (regenerated noise) — the opposite outcome to W8's failed window.
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Fresh ch0 finding", 0)),
+                [2] = EmptyFindings, // parsed-empty → window 2 SUCCEEDS clean → ch 1 IS re-reviewed
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        await SeedOpenFindingAsync(db, bookId, "continuity-0-1", "Continuity break spanning ch 0 and ch 1", 0, 1);
+        await TouchSummaryBaselineAsync(db, bookId);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(result.Ready);
+        Assert.Equal(0, result.FailedWindows); // both windows succeeded (parsed-empty is not a failure)
+
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        // Both anchored chapters were re-reviewed → the vanished-open finding is deleted.
+        Assert.DoesNotContain(rows, f => f.Rationale == "Continuity break spanning ch 0 and ch 1");
+        Assert.Single(rows, f => f.Rationale == "Fresh ch0 finding");
+        Assert.Single(rows);
+    }
+
     // ═══ COVERAGE PROVENANCE (wb4-c06): the build result + status DTO carry HONEST chapters/windows/pass
     //     counts so the FE can show "N/N chapters across W windows" instead of trusting a truncation-prone
     //     single call. ═══
@@ -1717,9 +1794,91 @@ public class BookReviewServiceTests
         var status = await svc.GetStatusAsync(bookId, "he");
         // The review still exists (findings are present)…
         Assert.True(status.HasReview);
-        // …but with no coverage row the probe falls back to (0, chapter count) — no crash, no dishonest N/N.
+        // …but with no coverage row the probe falls back to (0, reviewable-chapter count) — no crash, no dishonest
+        // N/N. Both seeded chapters are reviewable, so the reviewable count equals the raw chapter count here (2).
         Assert.Equal(0, status.ChaptersReviewed);
         Assert.Equal(2, status.ChaptersTotal);
+    }
+
+    // ─── C5 (Bug 1). LEGACY per-dimension path reports HONEST coverage on the RESULT (reviewed == total ==
+    //         chapter count), not 0/0. Only the windowed block assigned the coverage counters, so the legacy
+    //         BookReviewBuildResult under-reported 0/0 even though PersistPreservingStatusAsync wrote honest
+    //         coverage. This asserts the returned result AND the persisted row AND the status probe all agree. ──
+    [Fact]
+    public async Task BuildBookReviewAsync_PerDimension_ReportsHonestFullCoverage_OnResultAndStatus()
+    {
+        using var provider = BuildProvider(out _, FindingsPerDimension(perDimensionCount: 1));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        Assert.False(result.BriefsMissing);
+        // The legacy path reviews the WHOLE book in one concatenated context, so every chapter is reviewed:
+        // reviewed == total == chapter count. Before the fix BOTH were 0 (only the windowed block set them).
+        Assert.Equal(3, result.ChaptersTotal);
+        Assert.Equal(3, result.ChaptersReviewed);
+        Assert.Equal(result.ChaptersTotal, result.ChaptersReviewed);
+
+        // The persisted coverage row was always honest (the bug was only the RETURNED result); assert they agree.
+        var coverage = await db.BookReviewCoverages.AsNoTracking().SingleAsync(c => c.BookId == bookId);
+        Assert.Equal(3, coverage.ChaptersTotal);
+        Assert.Equal(3, coverage.ChaptersReviewed);
+
+        // And the status probe (reading that row) reports 3/3, consistent with the build result.
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.Equal(3, status.ChaptersTotal);
+        Assert.Equal(3, status.ChaptersReviewed);
+    }
+
+    // ─── C6 (Bug 2). STATUS DENOMINATOR STABLE across the first build for a book with a genuinely-empty chapter.
+    //         The windowed build persists ChaptersTotal as the REVIEWABLE primaries only (an empty chapter never
+    //         enters a window); the pre-build fallback must report the SAME reviewable denominator, not the raw
+    //         chapter count — otherwise the denominator JUMPS from 3 to 2 after the first build. ─────────────────
+    [Fact]
+    public async Task GetStatusAsync_BookWithEmptyChapter_FallbackDenominatorMatchesPersistedReviewableTotal()
+    {
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Ch0 note", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Ch1 note", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        // Two REVIEWABLE chapters (orders 0,1: content + a fresh brief each)…
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        // …plus a THIRD, GENUINELY-EMPTY chapter (order 2): no ChunkSummary (so no brief, no flat summary) and a
+        // blank ContentText. BuildChapterBlock returns a null block for it, so it never enters a window and is not
+        // reviewable — the raw chapter count is 3 but the reviewable count is 2.
+        db.Chapters.Add(new Chapter { Id = Guid.NewGuid(), BookId = bookId, Order = 2, Title = "Empty", ContentText = "" });
+        await db.SaveChangesAsync();
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+
+        // BEFORE any build (no coverage row → the fallback): the denominator is the REVIEWABLE count (2), NOT the
+        // raw chapter count (3). Before the fix this reported 3 and then dropped to 2 after the build.
+        var before = await svc.GetStatusAsync(bookId, "he");
+        Assert.False(before.HasReview);
+        Assert.Equal(0, before.ChaptersReviewed);
+        Assert.Equal(2, before.ChaptersTotal);
+
+        var build = await svc.BuildBookReviewAsync(bookId, "he");
+        Assert.True(build.Ready);
+        // The build is responsible for the two reviewable chapters only; the empty chapter is never windowed.
+        Assert.Equal(2, build.ChaptersTotal);
+        Assert.Equal(2, build.ChaptersReviewed);
+
+        // AFTER the build: the denominator is UNCHANGED (2/2) — it did NOT jump from 3 to 2.
+        var after = await svc.GetStatusAsync(bookId, "he");
+        Assert.True(after.HasReview);
+        Assert.Equal(before.ChaptersTotal, after.ChaptersTotal);
+        Assert.Equal(2, after.ChaptersTotal);
+        Assert.Equal(2, after.ChaptersReviewed);
     }
 
     // ═══ SYNTHESIS reduce pass (wb4-c04): after the window MAP, ONE reduce call receives a COMPACT digest of
@@ -2180,6 +2339,39 @@ public class BookReviewServiceTests
         var baseline = await db.BookSummaryBaselines.SingleAsync(b => b.BookId == bookId);
         baseline.BuiltChapterCount += 0; // mark modified
         db.Entry(baseline).State = EntityState.Modified;
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seeds one OPEN BookFinding (dimension='continuity', since multi-chapter findings are continuity
+    /// ones) anchored to <paramref name="anchorOrders"/>, stamped with <see cref="ActiveModel"/> so it reads
+    /// model-fresh. ChapterAnchorsJson is written in the SAME camelCase shape ProjectToEntity emits, so the
+    /// service's ChapterOrdersOf reads every anchor order back. Used by the be-c02 multi-anchor scoped-delete
+    /// tests to plant a prior finding spanning several chapters.</summary>
+    private static async Task SeedOpenFindingAsync(
+        AppDbContext db, Guid bookId, string dedupKey, string rationale, params int[] anchorOrders)
+    {
+        // Omit chapterId: FindingChapterAnchor.ChapterId is a non-nullable Guid, so a serialized "chapterId":null
+        // would throw on deserialize. The service only reads each anchor's Order for the scoped delete anyway.
+        var anchors = anchorOrders
+            .Select(o => new { order = o, title = $"Chapter {o}" })
+            .ToArray();
+        var anchorsJson = JsonSerializer.Serialize(anchors,
+            new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+
+        db.BookFindings.Add(new BookFinding
+        {
+            BookId = bookId,
+            Language = "he",
+            Dimension = "continuity",
+            Verdict = "improve",
+            Severity = 2,
+            Rationale = rationale,
+            EvidenceJson = "[]",
+            ChapterAnchorsJson = anchorsJson,
+            Status = "open",
+            DedupKey = dedupKey,
+            BuiltWithModel = ActiveModel
+        });
         await db.SaveChangesAsync();
     }
 

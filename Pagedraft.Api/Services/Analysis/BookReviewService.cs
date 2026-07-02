@@ -308,7 +308,13 @@ public class BookReviewService
         //     ChaptersTotal — the exact honest counts the last persisting build computed (be-c01). A partial
         //     build persists reviewed < total, so the probe now reports the SAME reviewed < total, not N/N.
         //   • When NO row exists (a review built before data-c01, or no review yet), fall back to
-        //     (0, book chapter count) — old reviews keep working and the probe never crashes.
+        //     (0, reviewable-chapter count) — old reviews keep working and the probe never crashes. The
+        //     denominator is the REVIEWABLE (non-empty) chapter count, NOT the raw Chapters row count: a windowed
+        //     build persists ChaptersTotal as the distinct reviewable primaries only (a chapter with no brief,
+        //     summary, or text never enters a window), so using the raw count here would make the status
+        //     denominator JUMP after the first build on any book with empty chapters. CountReviewableChaptersAsync
+        //     derives the SAME reviewable set through the assembler's shared per-chapter selection, so the
+        //     fallback denominator matches what the first build will persist.
         // The build-time-only shape (WindowCount / RanSynthesis / RanContinuityReduce / FailedWindows) is NOT
         // persisted, so it is left at its default (0/false) here — the precise per-build counts ride on
         // BookReviewBuildResult, not this cached probe.
@@ -327,7 +333,7 @@ public class BookReviewService
         else
         {
             chaptersReviewed = 0;
-            chaptersTotal = await _db.Chapters.CountAsync(c => c.BookId == bookId, ct);
+            chaptersTotal = await _contextAssembler.CountReviewableChaptersAsync(bookId, lang, ct);
         }
 
         return new BookReviewStatus
@@ -857,6 +863,17 @@ public class BookReviewService
             // be empty here and the delete would never fire, silently preserving regenerated noise.
             foreach (var order in chaptersByOrder.Keys)
                 reviewedPrimaryOrders.Add(order);
+
+            // wb4-c06 coverage provenance for the RETURNED result on the legacy path. chaptersReviewedCount /
+            // chaptersTotalCount are otherwise assigned ONLY inside the windowed block above, so without this the
+            // returned BookReviewBuildResult reports 0/0 even though PersistPreservingStatusAsync writes HONEST
+            // coverage (reviewed == total == chapter count, from reviewedPrimaryOrders / chaptersByOrder.Count on
+            // this path). Mirror that persisted coverage here so the result agrees with what is stored: the whole
+            // book is reviewed in one concatenated context, so every chapter is both reviewable and reviewed.
+            // (windowCountForResult stays 0 — the legacy path has no windows; its message uses the dimensions
+            // wording, not the windowed coverage string, so the 0 window count never leaks into user-facing text.)
+            chaptersReviewedCount = reviewedPrimaryOrders.Count;
+            chaptersTotalCount = chaptersByOrder.Count;
         }
 
         ct.ThrowIfCancellationRequested();
@@ -1933,15 +1950,17 @@ public class BookReviewService
     ///   • VANISHED (existing row whose key is NOT in the new set): a user decision must not be lost, so
     ///     DELETE ONLY rows still "open" (pure regenerated noise the model no longer surfaces) and PRESERVE
     ///     any the user acted on (acknowledged/dismissed/done) — they remain as a record of that decision.
-    ///     be-c02 SCOPING: the delete is FURTHER gated to only findings whose PRIMARY chapter order is in
+    ///     be-c02 SCOPING: the delete is FURTHER gated to only findings whose EVERY anchored chapter order is in
     ///     <paramref name="reviewedChapterOrders"/> (the primaries of windows whose model call SUCCEEDED this
-    ///     build). A vanished-open finding anchored to a chapter whose window FAILED (or was never covered) is
+    ///     build). A vanished-open finding anchored to ANY chapter whose window FAILED (or was never covered) is
     ///     PRESERVED — we did not actually re-review that chapter, so its absence from `incoming` is a
-    ///     truncation/failure artifact, NOT the model retracting the finding. Without this scope a partial
-    ///     rebuild (some windows fail) would silently wipe the prior still-open findings — and their user Status
-    ///     path was already handled above — for the un-reviewed chapters. A parsed-EMPTY window is a SUCCESS per
-    ///     be-c01 (its chapters ARE in reviewedChapterOrders and legitimately clean), so its vanished-open
-    ///     findings ARE deleted — the window reviewed them and no longer surfaces them (regenerated noise).
+    ///     truncation/failure artifact, NOT the model retracting the finding. Checking ALL anchors (not just the
+    ///     first) matters for MULTI-chapter continuity findings: one whose first anchor was re-reviewed but a
+    ///     later anchored chapter's window failed must survive. Without this scope a partial rebuild (some windows
+    ///     fail) would silently wipe the prior still-open findings — and their user Status path was already handled
+    ///     above — for the un-reviewed chapters. A parsed-EMPTY window is a SUCCESS per be-c01 (its chapters ARE in
+    ///     reviewedChapterOrders and legitimately clean), so a finding anchored ENTIRELY within reviewed chapters
+    ///     IS deleted — the window(s) reviewed them and no longer surface it (regenerated noise).
     ///
     /// DECISION (delete-open vs superseded status): we DELETE vanished "open" rows rather than introduce a
     /// "superseded" status. A superseded status would need a migration + widening the status set + FE
@@ -1951,8 +1970,8 @@ public class BookReviewService
     /// </summary>
     /// <param name="reviewedChapterOrders">The distinct PRIMARY chapter orders of the windows whose model call
     /// SUCCEEDED this build (be-c01's <c>reviewedPrimaryOrders</c>, passed through verbatim). A vanished-open
-    /// finding is deleted ONLY when its primary chapter order is in this set; findings for un-reviewed
-    /// (failed/uncovered) chapters are preserved. On a fully-successful build this covers every reviewed
+    /// finding is deleted ONLY when EVERY chapter order it anchors is in this set; a finding anchored to any
+    /// un-reviewed (failed/uncovered) chapter is preserved. On a fully-successful build this covers every reviewed
     /// chapter, so the delete behaves exactly as before (no behavior change).</param>
     /// <param name="chaptersReviewed">data-c01 HONEST coverage numerator to persist (see
     /// <see cref="BookReviewCoverage"/>): chapters actually reviewed this build. Upserted into the (BookId,
@@ -2005,20 +2024,27 @@ public class BookReviewService
 
         // VANISHED rows: delete ONLY those still "open" (regenerated noise); preserve user-acted ones. be-c02:
         // AND scope the delete to chapters actually REVIEWED this build — a still-open finding vanishes from the
-        // delete ONLY when its primary chapter order is in `reviewedChapterOrders` (a window that SUCCEEDED). A
-        // finding anchored to a chapter whose window FAILED / was uncovered is PRESERVED (its absence from
+        // delete ONLY when EVERY chapter order it anchors is in `reviewedChapterOrders` (windows that SUCCEEDED).
+        // A finding anchored to ANY chapter whose window FAILED / was uncovered is PRESERVED (its absence from
         // `incoming` is a truncation/failure artifact, not the model retracting it), stopping a partial rebuild
-        // from silently wiping prior open findings. The primary order of an EXISTING row is derived in memory
-        // from its persisted ChapterAnchorsJson (first anchor's Order, else 0) — the same primaryOrder=0
-        // no-anchor convention UnionAndDedup uses — since the JSON is not SQL-queryable.
+        // from silently wiping prior open findings. The anchor orders of an EXISTING row are derived in memory
+        // from its persisted ChapterAnchorsJson (every anchor's Order, else {0}) — the same no-anchor convention
+        // UnionAndDedup uses — since the JSON is not SQL-queryable.
         foreach (var stale in existing)
         {
             if (incomingKeys.Contains(stale.DedupKey))
                 continue; // still present → handled above
             if (!string.Equals(stale.Status, "open", StringComparison.Ordinal))
                 continue; // acknowledged/dismissed/done → preserve the user's decision (keep the row).
-            if (!reviewedChapterOrders.Contains(PrimaryChapterOrderOf(stale)))
-                continue; // its chapter's window did NOT succeed this build → not re-reviewed → preserve.
+            // be-c02 multi-anchor scope: a vanished-open finding is deleted ONLY when EVERY chapter it anchors was
+            // reviewed this build. A MULTI-chapter continuity finding (anchors spanning e.g. ch 5 and ch 12) whose
+            // FIRST anchor was re-reviewed but another anchored chapter's window FAILED / was uncovered must be
+            // PRESERVED — its absence from `incoming` is a truncation/failure artifact for the un-reviewed anchor,
+            // not the model retracting the finding. Requiring ALL anchor orders (not just the first, as the old
+            // PrimaryChapterOrderOf did) closes that gap. A no-anchor finding maps to {0}, preserving the prior
+            // order-0 convention: deletable only when 0 is itself a reviewed order.
+            if (!ChapterOrdersOf(stale).All(reviewedChapterOrders.Contains))
+                continue; // at least one anchored chapter was NOT re-reviewed this build → preserve.
             _db.BookFindings.Remove(stale);
         }
 
@@ -2078,28 +2104,37 @@ public class BookReviewService
         }
     }
 
+    /// <summary>The order set an EXISTING finding with NO usable anchors maps to — the single order 0, matching
+    /// the primaryOrder=0 no-anchor convention <see cref="UnionAndDedup"/> uses for INCOMING findings (so a
+    /// no-anchor row is deletable only when 0 is itself a reviewed order). Shared instance to avoid re-allocating.</summary>
+    private static readonly IReadOnlyCollection<int> NoAnchorOrders = new[] { 0 };
+
     /// <summary>
-    /// Derives the PRIMARY chapter order of an EXISTING persisted <see cref="BookFinding"/> from its
-    /// <see cref="BookFinding.ChapterAnchorsJson"/> (a serialized <c>List&lt;FindingChapterAnchor&gt;</c>): the
-    /// FIRST anchor's <c>Order</c>, or 0 when there are no anchors — the SAME primaryOrder=0 no-anchor
-    /// convention <see cref="UnionAndDedup"/> uses for INCOMING findings. The JSON is not SQL-queryable, so this
-    /// runs in memory on the already-loaded rows. Deserialized with <see cref="DeserializeOpts"/> (case-
-    /// insensitive CamelCase), matching the CamelCase writer in <see cref="ProjectToEntity"/>. A malformed /
-    /// empty payload is treated defensively as order 0 (a review-content wipe must never be triggered by a
-    /// parse blip — order 0 is only deletable when 0 is itself a reviewed order).
+    /// Derives the FULL set of chapter orders an EXISTING persisted <see cref="BookFinding"/> anchors, from its
+    /// <see cref="BookFinding.ChapterAnchorsJson"/> (a serialized <c>List&lt;FindingChapterAnchor&gt;</c>): EVERY
+    /// anchor's <c>Order</c> (deduped), or <see cref="NoAnchorOrders"/> ({0}) when there are none — the SAME
+    /// no-anchor convention <see cref="UnionAndDedup"/> uses for INCOMING findings. Used by the be-c02 scoped
+    /// delete to require that ALL of a finding's anchored chapters were reviewed this build before a vanished-open
+    /// row is deleted, so a MULTI-chapter continuity finding is not wiped when only its first anchor was
+    /// re-reviewed. The JSON is not SQL-queryable, so this runs in memory on the already-loaded rows. Deserialized
+    /// with <see cref="DeserializeOpts"/> (case-insensitive CamelCase), matching the CamelCase writer in
+    /// <see cref="ProjectToEntity"/>. A malformed / empty payload is treated defensively as {0} (a review-content
+    /// wipe must never be triggered by a parse blip — order 0 is only deletable when 0 is itself a reviewed order).
     /// </summary>
-    private static int PrimaryChapterOrderOf(BookFinding finding)
+    private static IReadOnlyCollection<int> ChapterOrdersOf(BookFinding finding)
     {
         if (string.IsNullOrWhiteSpace(finding.ChapterAnchorsJson))
-            return 0;
+            return NoAnchorOrders;
         try
         {
             var anchors = JsonSerializer.Deserialize<List<FindingChapterAnchor>>(finding.ChapterAnchorsJson, DeserializeOpts);
-            return anchors is { Count: > 0 } ? anchors[0].Order : 0;
+            if (anchors is { Count: > 0 })
+                return anchors.Select(a => a.Order).Distinct().ToList();
+            return NoAnchorOrders;
         }
         catch (JsonException)
         {
-            return 0;
+            return NoAnchorOrders;
         }
     }
 
