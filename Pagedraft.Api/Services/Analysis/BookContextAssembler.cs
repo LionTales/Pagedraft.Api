@@ -102,11 +102,14 @@ public sealed record BookContextAssembly
 /// </summary>
 public class BookContextAssembler
 {
-    // Rough chars-per-token estimate. Hebrew/English mixed prose lands around 3-4 chars/token for typical
-    // tokenizers; 4 is the common conservative English heuristic. We deliberately bias LOW (more tokens per
-    // text => smaller assembly) so the estimate over- rather than under-counts and we stay safely under the
-    // hard num_ctx wall where Ollama truncates. Centralized so the estimate is identical everywhere.
-    private const double CharsPerToken = 4.0;
+    // Chars-per-token estimate, LANGUAGE-AWARE. Token density differs sharply by script: Latin prose is
+    // ~4 chars/token, but Hebrew/Arabic are FAR denser (~2 chars/token) because those scripts fragment into
+    // many more sub-word tokens. Using the Latin 4.0 for Hebrew UNDER-counts tokens ~2x, so the assembler
+    // packed ~2x too much and the whole-book review overflowed num_ctx (the model then truncated its output
+    // to nothing -> "no dimension yielded findings"). We pick the estimate by the assembly's language so the
+    // budget cap corresponds to REAL tokens. Centralized so the estimate is identical everywhere.
+    private const double CharsPerTokenLatin = 4.0;
+    private const double CharsPerTokenDense = 2.0; // Hebrew / Arabic and other token-dense scripts
 
     // Separator written between the BookBrief and every ChapterBrief in the assembled Text. It is part of the
     // emitted string, so it MUST be charged against the budget: fold it into each block before estimating
@@ -131,9 +134,52 @@ public class BookContextAssembler
         _logger = logger;
     }
 
-    /// <summary>Estimated token cost of a text blob (shared heuristic).</summary>
-    public static int EstimateTokens(string? text) =>
-        string.IsNullOrEmpty(text) ? 0 : (int)Math.Ceiling(text.Length / CharsPerToken);
+    /// <summary>Chars-per-token estimate for a language (normalized or raw).
+    ///
+    /// Dense scripts (he / iw / ar) → <see cref="CharsPerTokenDense"/> (2.0).
+    /// Recognised Latin-script languages → <see cref="CharsPerTokenLatin"/> (4.0).
+    ///
+    /// EVERYTHING ELSE — null, empty, whitespace, or any code not in either set — falls back to
+    /// <see cref="CharsPerTokenDense"/> (2.0), the CONSERVATIVE direction. Under-counting tokens
+    /// over-fills the context window and silently truncates model output ("no dimension yielded
+    /// findings"); over-counting drops a few extra chapters at the tail, which is always safe.
+    /// A Hebrew book whose Language field is unset or non-standard must NOT silently revert to the
+    /// Latin (lenient) estimate and recreate the whole-book review truncation this fix addresses.
+    ///
+    /// Latin allowlist (StartsWith match on the normalised code, so "en-US" → "en"):
+    /// en, fr, es, de, it, pt, nl, ca, ro, sv, da, no, fi</summary>
+    public static double CharsPerTokenForLanguage(string? language)
+    {
+        var lang = (language ?? string.Empty).Trim().ToLowerInvariant();
+
+        // Dense scripts: Hebrew (he / iw legacy code) and Arabic.
+        if (lang.StartsWith("he") || lang.StartsWith("iw") || lang.StartsWith("ar"))
+            return CharsPerTokenDense;
+
+        // Recognised Latin-script languages. Extend this allowlist when a new script is explicitly
+        // validated — never add an unknown code here (unknown → conservative dense default below).
+        if (lang.StartsWith("en") || lang.StartsWith("fr") || lang.StartsWith("es") ||
+            lang.StartsWith("de") || lang.StartsWith("it") || lang.StartsWith("pt") ||
+            lang.StartsWith("nl") || lang.StartsWith("ca") || lang.StartsWith("ro") ||
+            lang.StartsWith("sv") || lang.StartsWith("da") || lang.StartsWith("no") ||
+            lang.StartsWith("fi"))
+            return CharsPerTokenLatin;
+
+        // Unknown, empty, or whitespace-only: default to DENSE (conservative).
+        // Under-counting is the dangerous direction (overflows num_ctx); over-counting is safe.
+        return CharsPerTokenDense;
+    }
+
+    /// <summary>Estimated token cost of a text blob using the Latin heuristic (~4 chars/token). For
+    /// language-aware budgeting use the <see cref="EstimateTokens(string?, double)"/> overload with
+    /// <see cref="CharsPerTokenForLanguage"/>.</summary>
+    public static int EstimateTokens(string? text) => EstimateTokens(text, CharsPerTokenLatin);
+
+    /// <summary>Estimated token cost of a text blob at a given chars-per-token density.</summary>
+    public static int EstimateTokens(string? text, double charsPerToken) =>
+        string.IsNullOrEmpty(text)
+            ? 0
+            : (int)Math.Ceiling(text.Length / (charsPerToken > 0 ? charsPerToken : CharsPerTokenLatin));
 
     /// <summary>
     /// Resolves the effective token budget for the whole-book context. Honours an explicit
@@ -158,7 +204,10 @@ public class BookContextAssembler
             ? consumingTasks
             : new[] { AiTaskType.Summarization };
         var numCtx = tasks.Min(t => ResolveNumCtxForTask(opt, t));
-        return opt.EffectiveBookContextTokenBudget(numCtx);
+        // Reserve the LARGEST output among the consuming tasks so the tightest window still leaves room for
+        // that task's generated output (input + output must fit num_ctx, else Ollama truncates the output).
+        var numPredict = tasks.Max(t => ResolveNumPredictForTask(opt, t));
+        return opt.EffectiveBookContextTokenBudget(numCtx, numPredict);
     }
 
     /// <summary>
@@ -178,6 +227,25 @@ public class BookContextAssembler
                 return providerTuning.NumCtx;
         }
         return new ProviderTuningOptions().NumCtx; // 4096, same fallback the provider uses
+    }
+
+    /// <summary>
+    /// Active-model output reservation (num_predict) for a task, mirroring the NumCtx precedence:
+    /// "{provider}_{task}" → "{provider}" → ProviderTuningOptions default (2048). Used to reserve output
+    /// headroom in the book-context budget so input + output fit the window.
+    /// </summary>
+    private static int ResolveNumPredictForTask(AiOptions opt, AiTaskType task)
+    {
+        var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task);
+        var settings = opt.ProviderSettings;
+        if (settings != null)
+        {
+            if (settings.TryGetValue($"{provider}_{task}", out var taskTuning) && taskTuning.NumPredict > 0)
+                return taskTuning.NumPredict;
+            if (settings.TryGetValue(provider, out var providerTuning) && providerTuning.NumPredict > 0)
+                return providerTuning.NumPredict;
+        }
+        return new ProviderTuningOptions().NumPredict; // 2048, same fallback the provider uses
     }
 
     /// <summary>
@@ -263,6 +331,7 @@ public class BookContextAssembler
         CancellationToken ct)
     {
         var lang = BaselineLanguageResolver.Normalize(language);
+        var charsPerToken = CharsPerTokenForLanguage(lang);
 
         // The FULL chapter set in narrative order, so chapters without a fresh structured brief can be
         // back-filled rather than silently omitted. Carries raw ContentText for the last-resort fill.
@@ -291,7 +360,7 @@ public class BookContextAssembler
         {
             var block = bookBriefText + BlockSeparator;
             sb.Append(block);
-            used += EstimateTokens(block);
+            used += EstimateTokens(block, charsPerToken);
         }
 
         if (used > budget)
@@ -334,7 +403,7 @@ public class BookContextAssembler
                 block = FormatFlatChapterBlock(title, body);
             }
 
-            var blockTokens = EstimateTokens(block);
+            var blockTokens = EstimateTokens(block, charsPerToken);
             if (budgetExhausted || used + blockTokens > budget)
             {
                 budgetExhausted = true; // once we drop one, drop the rest to keep a contiguous prefix
@@ -387,6 +456,7 @@ public class BookContextAssembler
         CancellationToken ct)
     {
         var lang = BaselineLanguageResolver.Normalize(language);
+        var charsPerToken = CharsPerTokenForLanguage(lang);
 
         // Walk the FULL chapter set in narrative order so NO chapter is silently omitted: each chapter is
         // represented by its flat summary if present, else its raw text. The prior version built the unit
@@ -437,7 +507,7 @@ public class BookContextAssembler
                 continue; // genuinely empty chapter: nothing to include and nothing to truncate
 
             var block = FormatFlatChapterBlock(title, body);
-            var blockTokens = EstimateTokens(block);
+            var blockTokens = EstimateTokens(block, charsPerToken);
 
             if (budgetExhausted || used + blockTokens > budget)
             {
