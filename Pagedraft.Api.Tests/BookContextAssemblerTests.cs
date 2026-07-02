@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Moq;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
@@ -540,12 +541,14 @@ public class BookContextAssemblerTests
         Assert.Equal(8192, asm.ResolveBudgetTokens());
         Assert.Equal(8192, asm.ResolveBudgetTokens(new[] { AiTaskType.Summarization }));
 
-        // GenericChat (the QA route) has no Ollama_GenericChat key → falls back to the Ollama window (4096),
-        // so the budget must follow that tighter window: 4096 * 0.5 = 2048.
-        Assert.Equal(2048, asm.ResolveBudgetTokens(new[] { AiTaskType.GenericChat }));
+        // GenericChat (the QA route) has no Ollama_GenericChat key → falls back to the Ollama window (4096).
+        // The derived budget now RESERVES output (2048) + prompt (1536) + margin (512); 4096 minus that
+        // reservation is <= 0, so it floors to the 256 minimum (the tight fallback window leaves no room for
+        // book context once output is reserved — QA in prod uses a 16384 window, unaffected).
+        Assert.Equal(256, asm.ResolveBudgetTokens(new[] { AiTaskType.GenericChat }));
 
         // When several tasks share ONE assembly, budget to the SMALLEST window so it fits the tightest one.
-        Assert.Equal(2048, asm.ResolveBudgetTokens(new[] { AiTaskType.Summarization, AiTaskType.GenericChat }));
+        Assert.Equal(256, asm.ResolveBudgetTokens(new[] { AiTaskType.Summarization, AiTaskType.GenericChat }));
     }
 
     [Fact]
@@ -569,8 +572,123 @@ public class BookContextAssemblerTests
         Assert.Equal(8192, summarization.BudgetTokens); // 16384 * 0.5
 
         var genericChat = await asm.AssembleAsync(bookId, "he", new[] { AiTaskType.GenericChat });
-        Assert.Equal(2048, genericChat.BudgetTokens); // tighter Ollama fallback window 4096 * 0.5
+        Assert.Equal(256, genericChat.BudgetTokens); // 4096 window minus output/prompt/margin reservation, floored
         Assert.True(genericChat.EstimatedTokens <= genericChat.BudgetTokens);
+    }
+
+    // ─── (g) Output-reserving budget + Hebrew-dense estimate (whole-book review truncation fix) ───────
+
+    [Fact]
+    public void CharsPerTokenForLanguage_HebrewIsDenser_ThanLatin()
+    {
+        Assert.Equal(4.0, BookContextAssembler.CharsPerTokenForLanguage("en"));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("he"));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("he-IL"));
+
+        // The Latin default UNDER-counts Hebrew ~2x; the language-aware estimate roughly doubles it so the
+        // budget corresponds to real tokens (this under-count over-filled the window and truncated the review).
+        var hebrew = string.Concat(Enumerable.Repeat("שלום עולם זהו טקסט בעברית לבדיקה. ", 40));
+        var latin = BookContextAssembler.EstimateTokens(hebrew);
+        var dense = BookContextAssembler.EstimateTokens(hebrew, BookContextAssembler.CharsPerTokenForLanguage("he"));
+        Assert.True(dense >= latin * 1.9, $"Hebrew dense estimate {dense} should be ~2x the Latin {latin}");
+    }
+
+    [Fact]
+    public void CharsPerTokenForLanguage_UnknownOrEmptyLanguage_ReturnsDenseConservativeDefault()
+    {
+        // Null, empty, whitespace, and unrecognised codes must all return the DENSE (conservative) estimate
+        // so a Hebrew book whose Language field is unset does not silently revert to the lenient Latin
+        // estimate and recreate the whole-book review truncation. Over-counting is safe; under-counting
+        // overflows num_ctx and silently truncates model output.
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage(null));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage(""));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("   "));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("zz")); // unrecognised code
+    }
+
+    [Fact]
+    public void CharsPerTokenForLanguage_LatinAllowlist_ReturnsLatinEstimate()
+    {
+        // Recognised Latin-script language codes (bare and with region suffix) return the Latin estimate.
+        Assert.Equal(4.0, BookContextAssembler.CharsPerTokenForLanguage("en"));
+        Assert.Equal(4.0, BookContextAssembler.CharsPerTokenForLanguage("en-US"));
+    }
+
+    [Fact]
+    public void CharsPerTokenForLanguage_DenseScripts_ReturnDenseEstimate()
+    {
+        // All Hebrew/Arabic variants (including the legacy "iw" code) return the dense estimate.
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("he"));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("he-IL"));
+        Assert.Equal(2.0, BookContextAssembler.CharsPerTokenForLanguage("ar"));
+    }
+
+    [Fact]
+    public void EffectiveBookContextTokenBudget_ReservesOutputPromptAndMargin()
+    {
+        var opt = new AiOptions
+        {
+            BookContextBudgetFraction = 0.5,
+            BookContextPromptReserveTokens = 1536,
+            BookContextSafetyMarginTokens = 512
+        };
+
+        // BookReview-shaped window (16384 ctx, 6144 output): input budget + output + prompt + margin must fit.
+        var budget = opt.EffectiveBookContextTokenBudget(16384, 6144);
+        Assert.True(budget + 6144 + 1536 + 512 <= 16384,
+            $"budget {budget} + output 6144 + prompt 1536 + margin 512 must fit 16384");
+
+        // Raising the output reservation MUST shrink the input budget (principled, not a fixed fraction).
+        var tighter = opt.EffectiveBookContextTokenBudget(16384, 10000);
+        Assert.True(tighter < budget, $"larger NumPredict must shrink the input budget ({tighter} < {budget})");
+
+        // Explicit override still wins verbatim, ignoring the reservation.
+        var overridden = new AiOptions { BookContextTokenBudget = 1234 };
+        Assert.Equal(1234, overridden.EffectiveBookContextTokenBudget(16384, 6144));
+    }
+
+    [Fact]
+    public async Task AssembleAsync_BigHebrewBook_ForBookReview_LeavesRoomForOutput()
+    {
+        // RULE 0 for the truncation bug: a large HEBREW book assembled for the BookReview consumer must leave
+        // the model room to GENERATE. Assert the assembled context, measured with the Hebrew-DENSE estimate,
+        // plus the review's output (NumPredict) + prompt overhead + margin, fits the BookReview num_ctx — i.e.
+        // it can no longer fill the window and truncate the findings ("no dimension yielded findings").
+        const int numCtx = 16384;
+        const int numPredict = 6144;
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 0, budgetFraction: 0.5,
+            bookReviewNumCtx: numCtx, bookReviewNumPredict: numPredict);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var opt = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "ספר גדול", Language = "he" });
+        const int chapterCount = 80;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"פרק {i}", briefJson: HebrewBriefJson(i));
+        await db.SaveChangesAsync();
+
+        var expectedBudget = asm.ResolveBudgetTokens(new[] { AiTaskType.BookReview });
+        var result = await asm.AssembleAsync(bookId, "he", new[] { AiTaskType.BookReview });
+
+        // The assembled context in REAL (Hebrew-dense) tokens stays within budget...
+        var contextTokens = BookContextAssembler.EstimateTokens(
+            result.Text, BookContextAssembler.CharsPerTokenForLanguage("he"));
+        Assert.True(contextTokens <= expectedBudget,
+            $"assembled {contextTokens} dense-tokens must be <= budget {expectedBudget}");
+
+        // ...and the anti-truncation invariant holds: context + output + prompt + margin fits num_ctx.
+        Assert.True(
+            contextTokens + numPredict + opt.BookContextPromptReserveTokens + opt.BookContextSafetyMarginTokens <= numCtx,
+            $"context {contextTokens} + output {numPredict} + prompt {opt.BookContextPromptReserveTokens} + " +
+            $"margin {opt.BookContextSafetyMarginTokens} must fit num_ctx {numCtx}");
+
+        // A large book → most chapters dropped, REPORTED (no silent truncation), BookBrief always present.
+        Assert.True(result.DroppedCount > 0);
+        Assert.Equal(chapterCount, result.IncludedChapterBriefs.Count + result.DroppedCount);
+        Assert.NotNull(result.BookBrief);
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────────────────────
@@ -590,6 +708,18 @@ public class BookContextAssemblerTests
             }
             """;
     }
+
+    // Hebrew-content brief so the language-aware (dense) token estimate applies — used by the big-Hebrew-book
+    // review-fit test that pins that the whole-book review can no longer overfill num_ctx and truncate.
+    private static string HebrewBriefJson(int n) => $$"""
+        {
+          "plotEvents": ["בפרק {{n}} הגיבור יוצא למסע ומגלה סוד ישן ששובר את שגרת חייו לחלוטין", "עימות דרמטי וטעון רגשית מתרחש לקראת סוף הפרק {{n}}"],
+          "characterStates": [ { "name": "דנה", "state": "מתמודדת עם ספקות וחששות כבדים בפרק {{n}}", "emotionalArc": "מפחד אל עבר תקווה זהירה" } ],
+          "thematicMarkers": ["בדידות-{{n}}", "גאולה", "זהות-{{n}}"],
+          "toneNotes": "אווירה מתוחה, אפלה ומאיימת שנמשכת לאורך כל הפרק {{n}} ומעצימה את תחושת חוסר הוודאות",
+          "openThreads": ["מי שלח את המכתב המסתורי בפרק {{n}}?", "האם דנה תבטח שוב במנהיג?"]
+        }
+        """;
 
     private static void SeedChapterWithBrief(
         AppDbContext db, Guid bookId, int order, string title, string briefJson, string? rawBody = null)
@@ -622,7 +752,9 @@ public class BookContextAssemblerTests
         string dbName,
         int bookContextTokenBudget,
         int ollamaSummarizationNumCtx = 8192,
-        double budgetFraction = 0.5)
+        double budgetFraction = 0.5,
+        int? bookReviewNumCtx = null,
+        int? bookReviewNumPredict = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -648,6 +780,12 @@ public class BookContextAssemblerTests
                 ["Ollama"] = new ProviderTuningOptions { NumCtx = 4096 },
                 ["Ollama_Summarization"] = new ProviderTuningOptions { NumCtx = ollamaSummarizationNumCtx }
             };
+            if (bookReviewNumCtx.HasValue)
+                o.ProviderSettings["Ollama_BookReview"] = new ProviderTuningOptions
+                {
+                    NumCtx = bookReviewNumCtx.Value,
+                    NumPredict = bookReviewNumPredict ?? 2048
+                };
         });
 
         services.AddScoped<ChapterBriefService>();

@@ -89,23 +89,58 @@ public class AiOptions
     public double BookContextBudgetFraction { get; set; } = 0.5;
 
     /// <summary>
+    /// Instruction + system-prompt overhead (tokens) added to the assembled book context AFTER budgeting —
+    /// e.g. BookReviewService prepends the assembled text to the 6-dimension prompt template. Reserved by
+    /// <see cref="EffectiveBookContextTokenBudget"/> so input (context + prompt) + output all fit the window.
+    /// Sized for the largest consumer (the whole-book review prompt). Clamped to &gt;= 0.
+    /// </summary>
+    public int BookContextPromptReserveTokens { get; set; } = 1536;
+
+    /// <summary>Safety margin (tokens) kept free after reserving input + output, to absorb token-estimate
+    /// error. Clamped to &gt;= 0.</summary>
+    public int BookContextSafetyMarginTokens { get; set; } = 512;
+
+    /// <summary>Output reservation used when the consuming task's NumPredict is unknown (&lt;= 0).</summary>
+    private const int DefaultOutputReserveTokens = 2048;
+
+    /// <summary>
     /// Resolves the effective token budget for the whole-book context. When
-    /// <see cref="BookContextTokenBudget"/> is positive it wins verbatim; otherwise it is derived as
-    /// <c>numCtx * <see cref="BookContextBudgetFraction"/></c> (fraction clamped to (0,1], result floored at
-    /// a small positive minimum so the BookBrief alone can always be attempted).
+    /// <see cref="BookContextTokenBudget"/> is positive it wins verbatim; otherwise it is derived to leave
+    /// room for the model's OUTPUT (<paramref name="numPredict"/>) plus the prompt/system overhead
+    /// (<see cref="BookContextPromptReserveTokens"/>) plus a safety margin
+    /// (<see cref="BookContextSafetyMarginTokens"/>), so input + output can never exceed the window — Ollama
+    /// silently TRUNCATES past num_ctx, which caused the whole-book review's "no dimension yielded findings"
+    /// failure on a large book (the context filled the window and left no room for the findings JSON).
+    /// <see cref="BookContextBudgetFraction"/> is kept as an additional UPPER bound. Floored at a small
+    /// positive minimum so the BookBrief alone can always be attempted.
     /// </summary>
     /// <param name="numCtx">The active task model's context window (Ollama num_ctx) in tokens.</param>
-    public int EffectiveBookContextTokenBudget(int numCtx)
+    /// <param name="numPredict">The consuming task's output reservation (Ollama num_predict); &lt;= 0 uses a default.</param>
+    public int EffectiveBookContextTokenBudget(int numCtx, int numPredict = 0)
     {
         if (BookContextTokenBudget > 0)
             return BookContextTokenBudget;
 
+        var ctx = numCtx > 0 ? numCtx : 4096; // mirror ProviderTuningOptions.NumCtx default
+
+        // Reserve OUTPUT + prompt overhead + margin so input (context + prompt) + output fits the window.
+        // With the defaults (BookContextBudgetFraction=0.5, BookReview NumCtx=16384, NumPredict=6144,
+        // and other book-context consumers also at 16384), byFraction=8192 is <= byReserve for every
+        // current consumer, so byReserve is DEFENSE-IN-DEPTH that only activates when numPredict is large
+        // enough that byReserve < byFraction (roughly numPredict > ctx*(1-fraction) - promptReserve -
+        // safetyMargin, i.e. > ~6144 at these settings). The language-aware token estimate in
+        // BookContextAssembler (Hebrew ~2 chars/token) is the load-bearing fix for the "no dimension
+        // yielded findings" truncation; this reservation guards future configs.
+        var output = numPredict > 0 ? numPredict : DefaultOutputReserveTokens;
+        var byReserve = ctx - output - Math.Max(0, BookContextPromptReserveTokens) - Math.Max(0, BookContextSafetyMarginTokens);
+
+        // Additional upper bound: the context never claims more than a configured share of the window.
         var fraction = BookContextBudgetFraction;
         if (fraction <= 0 || double.IsNaN(fraction)) fraction = 0.5;
         if (fraction > 1) fraction = 1;
+        var byFraction = (int)Math.Floor(ctx * fraction);
 
-        var ctx = numCtx > 0 ? numCtx : 4096; // mirror ProviderTuningOptions.NumCtx default
-        var derived = (int)Math.Floor(ctx * fraction);
+        var derived = Math.Min(byFraction, byReserve);
         return Math.Max(256, derived); // never below a floor so the BookBrief can always be attempted
     }
 }
