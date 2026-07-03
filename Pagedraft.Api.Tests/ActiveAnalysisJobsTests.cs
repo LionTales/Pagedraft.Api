@@ -186,6 +186,74 @@ public class ActiveAnalysisJobsTests
         Assert.Equal(AnalysisScope.Scene, results[0].Scope);
     }
 
+    // ─── Book-level builds are EXCLUDED (chapter/scene reattach endpoint only) ─────────────────────
+
+    [Fact]
+    public void GetActiveJobsByBook_ExcludesBookLevelBuilds()
+    {
+        var tracker = new AnalysisProgressTracker();
+        var bookId = Guid.NewGuid();
+
+        // Book-level builds (style baseline / summary / review) are surfaced by their own status
+        // endpoints' activeBuildJobId, NOT the chapter/scene reattach endpoint. Even while in flight
+        // they must never appear here.
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.LinguisticAnalysis, bookId, null, null);
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.Summarization, bookId, null, null);
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.BookReview, bookId, null, null);
+
+        var results = tracker.GetActiveJobsByBook(bookId);
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void GetActiveJobsByBook_ReturnsChapterJobs_ButNotBookLevelBuilds()
+    {
+        var tracker = new AnalysisProgressTracker();
+        var bookId = Guid.NewGuid();
+        var chapterJobId = Guid.NewGuid();
+
+        tracker.StartJob(chapterJobId, AnalysisScope.Chapter, AnalysisType.Proofread, bookId, Guid.NewGuid(), null);
+        // A book-level review build for the SAME book must not be co-mingled with the chapter job.
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.BookReview, bookId, null, null);
+
+        var results = tracker.GetActiveJobsByBook(bookId);
+
+        Assert.Single(results);
+        Assert.Equal(chapterJobId, results[0].JobId);
+        Assert.All(results, r => Assert.NotEqual(AnalysisScope.Book, r.Scope));
+    }
+
+    // ─── A job that finishes DURING the snapshot must not leak as active (TOCTOU) ───────────────────
+
+    /// <summary>
+    /// Bug 2 race: a job passes the live-status pre-filter as Running, then transitions to terminal
+    /// DURING TryGet's snapshot build (which maps current state without its own terminal check). The
+    /// post-snapshot terminal re-check must exclude it, so a succeeded/failed/canceled job never leaks
+    /// into the active list. Driven deterministically via a one-shot side-effect clock (no threads):
+    /// the effect fires on the FIRST GetUtcNow() inside GetActiveJobsByBook — TryGet's TTL read — which
+    /// is AFTER the pre-filter (which does not read the clock) and BEFORE the snapshot is materialized.
+    /// </summary>
+    [Fact]
+    public void GetActiveJobsByBook_JobFinishesDuringSnapshot_IsExcluded()
+    {
+        var now = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var clock = new OneShotSideEffectTimeProvider(now);
+        var tracker = new AnalysisProgressTracker(clock);
+        var bookId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+
+        tracker.StartJob(jobId, AnalysisScope.Chapter, AnalysisType.Proofread, bookId, Guid.NewGuid(), null);
+
+        // Arm the race: the job finishes (Succeeded) the moment TryGet reads the clock, i.e. after the
+        // pre-filter already accepted it as active but before its snapshot status is captured.
+        clock.ArmOnce(() => tracker.SetStatus(jobId, AnalysisProgressStatus.Succeeded));
+
+        var results = tracker.GetActiveJobsByBook(bookId);
+
+        Assert.Empty(results);
+    }
+
     // ─── TTL / clock-seam expiry tests (be-c01) ───────────────────────────────────────────────────
 
     /// <summary>
@@ -319,6 +387,31 @@ public class ActiveAnalysisJobsTests
     }
 
     [Fact]
+    public void GetActiveAnalysisJobs_BookLevelBuildsExcluded()
+    {
+        var tracker = new AnalysisProgressTracker();
+        var bookId = Guid.NewGuid();
+        var chapterJobId = Guid.NewGuid();
+
+        tracker.StartJob(chapterJobId, AnalysisScope.Chapter, AnalysisType.LineEdit, bookId, Guid.NewGuid(), null);
+        // In-flight book-level builds for the same book are surfaced by their own status endpoints and
+        // must NOT be returned by the chapter/scene reattach endpoint.
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.Summarization, bookId, null, null);
+        tracker.StartJob(Guid.NewGuid(), AnalysisScope.Book, AnalysisType.BookReview, bookId, null, null);
+
+        var controller = BuildMinimalBooksController(tracker);
+
+        var action = controller.GetActiveAnalysisJobs(bookId);
+
+        var ok = Assert.IsType<OkObjectResult>(action.Result);
+        var dtos = Assert.IsType<List<AnalysisJobSummaryDto>>(ok.Value);
+
+        Assert.Single(dtos);
+        Assert.Equal(chapterJobId, dtos[0].JobId);
+        Assert.All(dtos, d => Assert.NotEqual("Book", d.Scope));
+    }
+
+    [Fact]
     public void GetActiveAnalysisJobs_OtherBooksJobsExcluded()
     {
         var tracker = new AnalysisProgressTracker();
@@ -379,4 +472,29 @@ internal sealed class MutableTimeProvider : TimeProvider
     public override DateTimeOffset GetUtcNow() => _now;
 
     public void Advance(TimeSpan by) => _now = _now.Add(by);
+}
+
+/// <summary>
+/// A fixed-time <see cref="TimeProvider"/> that runs a ONE-SHOT side effect on its next
+/// <see cref="GetUtcNow"/> call, then reverts to a plain clock. Used to deterministically simulate a
+/// job transitioning to terminal DURING GetActiveJobsByBook's TryGet (the Bug 2 TOCTOU window) without
+/// threads. Disarms BEFORE invoking the effect so the effect's own clock reads (SetStatus /
+/// PruneExpired) do not re-trigger it.
+/// </summary>
+internal sealed class OneShotSideEffectTimeProvider : TimeProvider
+{
+    private readonly DateTimeOffset _now;
+    private Action? _onNext;
+
+    public OneShotSideEffectTimeProvider(DateTimeOffset now) => _now = now;
+
+    public void ArmOnce(Action onNext) => _onNext = onNext;
+
+    public override DateTimeOffset GetUtcNow()
+    {
+        var effect = _onNext;
+        _onNext = null; // disarm first so the effect's own GetUtcNow reads don't recurse
+        effect?.Invoke();
+        return _now;
+    }
 }

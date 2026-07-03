@@ -202,9 +202,19 @@ public sealed class AnalysisProgressTracker
     }
 
     /// <summary>
-    /// Returns snapshots of all non-terminal (Pending or Running), non-expired jobs whose
-    /// <see cref="AnalysisProgressState.BookId"/> matches <paramref name="bookId"/>.  Reuses
+    /// Returns snapshots of the in-flight CHAPTER/SCENE analysis jobs (Proofread / LineEdit) for a book:
+    /// non-terminal (Pending or Running), non-expired, and NOT book-level builds.  Reuses
     /// <see cref="TryGet"/> per key so the TTL check and snapshot mapping are NEVER duplicated.
+    ///
+    /// Book-level builds (<see cref="AnalysisScope.Book"/> — style baseline, summary, review) are
+    /// deliberately EXCLUDED: they are surfaced by their own status endpoints' <c>activeBuildJobId</c>
+    /// fields, and the chapter-reattach endpoint + its DTO document chapter/scene jobs only. Leaking a
+    /// book-level jobId here would let the FE reattach to a build meant to be tracked elsewhere.
+    ///
+    /// Terminal status is re-checked on the SNAPSHOT, not just the pre-filter: a job can finish between
+    /// the live pre-filter and the <see cref="TryGet"/> snapshot (which maps CURRENT state without a
+    /// terminal check of its own), so without the second check a job that succeeds/fails/cancels in that
+    /// window would leak into the "active" list.
     ///
     /// Semantics: survives a BROWSER refresh (the server keeps running) but NOT an API restart
     /// (in-memory, 30-min TTL) — identical to how the book-level build registries already behave.
@@ -215,12 +225,18 @@ public sealed class AnalysisProgressTracker
         foreach (var kvp in _jobs)
         {
             var state = kvp.Value;
-            // Quick pre-filter: wrong book, or already terminal — skip before the full TryGet path.
+            // Quick pre-filter: wrong book, a book-level build (surfaced elsewhere), or already
+            // terminal — skip before the full TryGet path.
             if (state.BookId != bookId) continue;
+            if (state.Scope == AnalysisScope.Book) continue;
             if (IsTerminalStatus(state.Status)) continue;
 
-            // Delegate to TryGet so the TTL check + snapshot mapping are single-sourced.
-            if (TryGet(kvp.Key, out var snapshot) && snapshot != null)
+            // Delegate to TryGet so the TTL check + snapshot mapping are single-sourced. TryGet builds
+            // the snapshot from CURRENT state without re-checking terminal status, so re-check the
+            // SNAPSHOT here: a job that finished between the pre-filter above and this snapshot must not
+            // be reported as active.
+            if (TryGet(kvp.Key, out var snapshot) && snapshot != null
+                && !IsTerminalStatus(snapshot.Status))
                 result.Add(snapshot);
         }
         return result;
