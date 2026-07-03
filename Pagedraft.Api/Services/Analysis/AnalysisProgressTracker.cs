@@ -70,6 +70,17 @@ public sealed class AnalysisProgressTracker
     private readonly ConcurrentDictionary<Guid, AnalysisProgressState> _jobs = new();
     private readonly TimeSpan _ttl = TimeSpan.FromMinutes(30);
 
+    // Clock seam (be-c01): all TTL/LastUpdated reads go through this so a test can drive expiry without
+    // waiting 30 real minutes. Defaults to the real wall-clock (TimeProvider.System) in production; the
+    // DI singleton keeps working with the parameterless default. The 30-min TTL VALUE and the
+    // expiry-exclusion SEMANTICS are unchanged — only the clock is injectable.
+    private readonly TimeProvider _timeProvider;
+
+    public AnalysisProgressTracker(TimeProvider? timeProvider = null)
+    {
+        _timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
     public void StartJob(
         Guid jobId,
         AnalysisScope scope,
@@ -89,7 +100,7 @@ public sealed class AnalysisProgressTracker
             SceneId = sceneId,
             Status = AnalysisProgressStatus.Running,
             Message = message ?? "Starting analysis…",
-            LastUpdatedUtc = DateTimeOffset.UtcNow
+            LastUpdatedUtc = _timeProvider.GetUtcNow()
         };
         _jobs.AddOrUpdate(jobId, state, (_, _) => state);
         PruneExpired();
@@ -101,7 +112,7 @@ public sealed class AnalysisProgressTracker
         state.TotalChunks = totalChunks;
         state.Status = AnalysisProgressStatus.Running;
         state.Message = message ?? state.Message;
-        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        state.LastUpdatedUtc = _timeProvider.GetUtcNow();
         PruneExpired();
     }
 
@@ -112,7 +123,7 @@ public sealed class AnalysisProgressTracker
         state.CurrentChunkIndex = chunkIndex;
         state.Status = AnalysisProgressStatus.Running;
         state.Message = $"Running chunk {chunkIndex}/{totalChunks}";
-        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        state.LastUpdatedUtc = _timeProvider.GetUtcNow();
         PruneExpired();
     }
 
@@ -125,7 +136,7 @@ public sealed class AnalysisProgressTracker
             state.CompletedChunks = chunkIndex;
         state.Status = AnalysisProgressStatus.Running;
         state.Message = $"Completed chunk {chunkIndex}/{totalChunks}";
-        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        state.LastUpdatedUtc = _timeProvider.GetUtcNow();
         PruneExpired();
     }
 
@@ -135,7 +146,7 @@ public sealed class AnalysisProgressTracker
         state.Status = status;
         if (!string.IsNullOrWhiteSpace(message))
             state.Message = message!;
-        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        state.LastUpdatedUtc = _timeProvider.GetUtcNow();
         PruneExpired();
     }
 
@@ -153,7 +164,7 @@ public sealed class AnalysisProgressTracker
         state.BookReviewWindowCount = windowCount;
         state.BookReviewRanContinuityReduce = ranContinuityReduce;
         state.BookReviewFailedWindows = failedWindows;
-        state.LastUpdatedUtc = DateTimeOffset.UtcNow;
+        state.LastUpdatedUtc = _timeProvider.GetUtcNow();
         PruneExpired();
     }
 
@@ -163,7 +174,7 @@ public sealed class AnalysisProgressTracker
         if (!_jobs.TryGetValue(jobId, out var state))
             return false;
 
-        if (DateTimeOffset.UtcNow - state.LastUpdatedUtc > _ttl)
+        if (_timeProvider.GetUtcNow() - state.LastUpdatedUtc > _ttl)
         {
             _jobs.TryRemove(jobId, out _);
             return false;
@@ -190,9 +201,40 @@ public sealed class AnalysisProgressTracker
         return true;
     }
 
+    /// <summary>
+    /// Returns snapshots of all non-terminal (Pending or Running), non-expired jobs whose
+    /// <see cref="AnalysisProgressState.BookId"/> matches <paramref name="bookId"/>.  Reuses
+    /// <see cref="TryGet"/> per key so the TTL check and snapshot mapping are NEVER duplicated.
+    ///
+    /// Semantics: survives a BROWSER refresh (the server keeps running) but NOT an API restart
+    /// (in-memory, 30-min TTL) — identical to how the book-level build registries already behave.
+    /// </summary>
+    public IReadOnlyList<AnalysisProgressSnapshot> GetActiveJobsByBook(Guid bookId)
+    {
+        var result = new List<AnalysisProgressSnapshot>();
+        foreach (var kvp in _jobs)
+        {
+            var state = kvp.Value;
+            // Quick pre-filter: wrong book, or already terminal — skip before the full TryGet path.
+            if (state.BookId != bookId) continue;
+            if (IsTerminalStatus(state.Status)) continue;
+
+            // Delegate to TryGet so the TTL check + snapshot mapping are single-sourced.
+            if (TryGet(kvp.Key, out var snapshot) && snapshot != null)
+                result.Add(snapshot);
+        }
+        return result;
+    }
+
+    /// <summary>Returns true when <paramref name="status"/> is a terminal state (Succeeded, Failed, or Canceled).</summary>
+    private static bool IsTerminalStatus(AnalysisProgressStatus status) =>
+        status == AnalysisProgressStatus.Succeeded
+        || status == AnalysisProgressStatus.Failed
+        || status == AnalysisProgressStatus.Canceled;
+
     private void PruneExpired()
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         foreach (var kvp in _jobs)
         {
             if (now - kvp.Value.LastUpdatedUtc > _ttl)

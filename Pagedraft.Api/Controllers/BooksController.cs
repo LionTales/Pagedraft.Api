@@ -967,6 +967,45 @@ public class BooksController : ControllerBase
             StructuredBrief: StructuredChunkSummaryParser.Parse(row.StructuredJson));
     }
 
+    // ─── Active chapter analysis jobs (rf-b01) ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GET all non-terminal (Pending or Running), non-expired in-flight chapter analysis jobs for a
+    /// book. Allows a refreshed web client to rediscover an async Proofread or LineEdit job and
+    /// reattach to its progress without losing the jobId on a browser refresh.
+    ///
+    /// READ-ONLY: no side effects, no DB queries. Reads the existing singleton
+    /// <see cref="AnalysisProgressTracker"/> (in-memory, 30-min TTL). Returns an empty list when no
+    /// active jobs exist. Semantics: survives a BROWSER refresh (server process stays up) but NOT an
+    /// API restart — identical to how the book-level builds (style-baseline, summary, review) already
+    /// behave with their <c>activeBuildJobId</c> fields.
+    ///
+    /// Covers Proofread and LineEdit chapter/scene jobs only (started via POST .../analysis-jobs).
+    /// Book-level jobs (style-baseline, summary, review) are surfaced on their own status endpoints.
+    /// </summary>
+    // SECURITY DEBT (be-c01): this action performs NO ownership check on {bookId}. Any caller who knows
+    // (or guesses) a bookId gets back that book's reattachable jobIds, chapter/scene GUIDs, and free-text
+    // progress messages. This is acceptable under the current SINGLE-USER posture (one operator, no auth,
+    // local/trusted deployment). When the multi-user production service + authentication land, this MUST
+    // be scoped to the caller's own books (verify the authenticated user owns {bookId} before returning).
+    // Out of scope for this change — do NOT add auth here.
+    [HttpGet("{bookId:guid}/active-analysis-jobs")]
+    public ActionResult<List<AnalysisJobSummaryDto>> GetActiveAnalysisJobs(Guid bookId)
+    {
+        var snapshots = _progress.GetActiveJobsByBook(bookId);
+        var dtos = snapshots.Select(s => new AnalysisJobSummaryDto(
+            JobId: s.JobId,
+            AnalysisType: s.AnalysisType.ToString(),
+            Scope: s.Scope.ToString(),
+            ChapterId: s.ChapterId,
+            SceneId: s.SceneId,
+            Status: s.Status.ToString(),
+            EstimatedCompletionPercent: s.EstimatedCompletionPercent,
+            Message: s.Message,
+            LastUpdatedUtc: s.LastUpdatedUtc)).ToList();
+        return Ok(dtos);
+    }
+
     [HttpPut("{bookId:guid}")]
     public async Task<ActionResult<BookDto>> Update(Guid bookId, [FromBody] CreateBookRequest req, CancellationToken ct)
     {
