@@ -9,6 +9,28 @@ public record StartAnalysisJobResponse(
     string Scope);
 
 /// <summary>
+/// One in-flight (non-terminal) chapter/scene analysis job for a book, returned by
+/// <c>GET api/books/{bookId}/active-analysis-jobs</c>. Covers Proofread and LineEdit jobs started via
+/// <c>POST .../analysis-jobs</c>; book-level jobs (style-baseline, summary, review) are excluded.
+///
+/// JSON casing is the System.Text.Json default (camelCase): jobId, analysisType, scope, chapterId,
+/// sceneId, status, estimatedCompletionPercent, message, lastUpdatedUtc.
+///
+/// Semantics: survives a BROWSER refresh (the API process keeps running) but NOT an API restart
+/// (in-memory singleton, 30-min TTL) — identical to how book-level builds already behave.
+/// </summary>
+public record AnalysisJobSummaryDto(
+    Guid JobId,
+    string AnalysisType,
+    string Scope,
+    Guid? ChapterId,
+    Guid? SceneId,
+    string Status,
+    int EstimatedCompletionPercent,
+    string Message,
+    DateTimeOffset LastUpdatedUtc);
+
+/// <summary>
 /// Response for POST .../style-baseline/build. The jobId is pollable via the existing
 /// analysis-progress endpoint so the FE reuses analysis-progress.service. NoOp is true when the
 /// baseline was already up to date (nothing rebuilt).
