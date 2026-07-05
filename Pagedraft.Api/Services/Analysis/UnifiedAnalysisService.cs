@@ -315,7 +315,12 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
-            var chunkTargetWords = opts.EffectiveProofreadChunkTargetWords;
+            // Language-aware chunk sizing: derive the per-chunk WORD target from an estimated-TOKEN budget so a
+            // dense-script (Hebrew) chunk gets fewer words than an English one for the same token footprint and
+            // stays inside the model's reliable window. The configured EffectiveProofreadChunkTargetWords is the
+            // CEILING (English keeps today's 500); dense scripts shrink from the token math (see helper).
+            var chunkTargetWords = EffectiveChunkTargetWords(
+                opts, AiTaskType.Proofread, language, opts.EffectiveProofreadChunkTargetWords);
             var maxParallel = Math.Max(1, opts.MaxParallelProofreadChunks);
             var wordCount = WordCount(inputText);
 
@@ -333,7 +338,10 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.LineEdit)
         {
             var opts = _aiOptions.Value;
-            var chunkTargetWords = opts.EffectiveLineEditChunkTargetWords;
+            // Same language-aware sizing as Proofread: EffectiveLineEditChunkTargetWords is the Latin ceiling,
+            // dense scripts shrink from the token math so a Hebrew chunk stays within the model window.
+            var chunkTargetWords = EffectiveChunkTargetWords(
+                opts, AiTaskType.LineEdit, language, opts.EffectiveLineEditChunkTargetWords);
             var maxParallel = Math.Max(1, opts.MaxParallelLineEditChunks);
             var wordCount = WordCount(inputText);
 
@@ -991,10 +999,113 @@ public class UnifiedAnalysisService
         return result;
     }
 
+    // ─── Test seams (InternalsVisibleTo Pagedraft.Api.Tests) ──────────────────────────────────────────────
+    // The chunk records above are private, so tests observe the chunker through these plain-tuple projections
+    // rather than reflecting on the private return types. They call the real chunkers, so a test on chunk count
+    // / boundaries / OverlapPrefix exercises the production path exactly.
+
+    /// <summary>Test seam: proofread chunks as (Text, SeparatorAfter, OverlapPrefix) tuples.</summary>
+    internal static List<(string Text, string SeparatorAfter, string? OverlapPrefix)> ChunkForProofreadForTest(
+        string fullText, int targetWordsPerChunk) =>
+        ChunkForProofread(fullText, targetWordsPerChunk)
+            .Select(c => (c.Text, c.SeparatorAfter, c.OverlapPrefix))
+            .ToList();
+
+    /// <summary>Test seam: LineEdit chunks as (Text, SeparatorAfter, OverlapPrefix, OverlapSuffix) tuples.</summary>
+    internal static List<(string Text, string SeparatorAfter, string? OverlapPrefix, string? OverlapSuffix)> ChunkForLineEditForTest(
+        string fullText, int targetWordsPerChunk) =>
+        ChunkForLineEdit(fullText, targetWordsPerChunk)
+            .Select(c => (c.Text, c.SeparatorAfter, c.OverlapPrefix, c.OverlapSuffix))
+            .ToList();
+
     private static int WordCount(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return 0;
         return Regex.Split(text.Trim(), @"\s+").Count(s => s.Length > 0);
+    }
+
+    /// <summary>
+    /// Average characters per word (a whole word PLUS its one trailing separator) used to convert BETWEEN a
+    /// word count and its estimated token footprint. It is the ONE bridge constant between the word-based
+    /// chunker and the token math; the script-density difference (Hebrew vs. Latin) is carried ENTIRELY by
+    /// <see cref="BookContextAssembler.CharsPerTokenForLanguage"/>, NOT by this value, so the Hebrew shrink is
+    /// DERIVED (half the chars/token → half the words for the same token footprint), never a magic "half".
+    /// 6.0 (~5-char word + 1 separator) matches the estimator's assumptions; because it appears symmetrically
+    /// in the word→token and token→word conversions it cancels in the language-ratio, so the Latin/Hebrew ratio
+    /// depends only on the char/token densities.
+    /// </summary>
+    private const double AvgCharsPerWord = 6.0;
+
+    /// <summary>
+    /// Language-aware effective per-chunk WORD target for the proofread / LineEdit chunker. Sizes each chunk by
+    /// an ESTIMATED-TOKEN footprint rather than a raw word count, so a dense-script (Hebrew/Arabic) chunk gets
+    /// FEWER words than an English chunk for the SAME token footprint and therefore stays inside the model's
+    /// reliable context window (Ollama silently TRUNCATES past num_ctx, which is what makes an over-long Hebrew
+    /// chunk trip the proofread reliability guard).
+    ///
+    /// Two bounds, both derived from the SHARED estimator helpers (no duplicated char/token constants):
+    ///
+    ///  (A) LANGUAGE-NORMALIZED CEILING. The configured ceiling (<paramref name="configuredCeiling"/>, the
+    ///      effective 500) is defined in LATIN words; its token footprint is
+    ///      <c>ceiling * AvgCharsPerWord / charsPerToken("en")</c>. Re-expressing that SAME token footprint in
+    ///      THIS language's words gives
+    ///          <c>ceiling * charsPerToken(lang) / charsPerToken("en")</c>
+    ///      (AvgCharsPerWord cancels). charsPerToken is 4.0 for Latin and 2.0 for Hebrew/Arabic
+    ///      (<see cref="BookContextAssembler.CharsPerTokenForLanguage"/>), so Latin keeps the full 500 while
+    ///      Hebrew resolves to ~250 — the "~half" falls out of the density ratio, it is not hardcoded.
+    ///
+    ///  (B) WINDOW FIT. Independently, the chunk INPUT plus its generated OUTPUT plus the prompt/system overhead
+    ///      plus a safety margin must fit the model's context window (num_ctx). Unlike the whole-book review
+    ///      (where a small generation coexists with a large context, the model
+    ///      <see cref="AiOptions.EffectiveBookContextTokenBudget"/> assumes), a proofread/LineEdit response is a
+    ///      CORRECTED COPY of the input, so OUTPUT ≈ INPUT. We therefore split the generation window in HALF for
+    ///      input vs output, after subtracting the SAME prompt-overhead + safety-margin reserves the book-context
+    ///      budget uses (reused from <see cref="AiOptions"/> so the accounting is single-sourced):
+    ///          generationWindow = numCtx - BookContextPromptReserveTokens - BookContextSafetyMarginTokens
+    ///          availableInputTokens = generationWindow / 2   (output ≈ input)
+    ///      num_ctx is resolved through the SAME provider/task tuning precedence the model uses at request time
+    ///      (<see cref="BookContextAssembler.ResolveNumCtxForTask"/>). Converting to words for this language:
+    ///          wordsThatFitWindow = availableInputTokens * charsPerToken(lang) / AvgCharsPerWord.
+    ///      This only bites when the window is tighter than the language ceiling footprint.
+    ///
+    /// The result is <c>min(A, B)</c>, floored at 1 so a chunk is always made. Latin is unchanged at the
+    /// production config (500); Hebrew halves via (A) and shrinks further via (B) on a tight window. This only
+    /// changes HOW OFTEN the reliability guard LEGITIMATELY trips; the <c>ProofreadResultUnreliable</c> semantics
+    /// are untouched.
+    /// </summary>
+    internal static int EffectiveChunkTargetWords(AiOptions opts, AiTaskType task, string? language, int configuredCeiling)
+    {
+        var ceiling = configuredCeiling > 0
+            ? configuredCeiling
+            : task == AiTaskType.LineEdit
+                ? AiOptions.DefaultLineEditChunkTargetWords
+                : AiOptions.DefaultProofreadChunkTargetWords;
+
+        // Shared, language-aware char/token densities (single source of truth — no duplicated constants).
+        var charsPerTokenLang = BookContextAssembler.CharsPerTokenForLanguage(language);
+        var charsPerTokenLatin = BookContextAssembler.CharsPerTokenForLanguage("en");
+
+        // (A) The ceiling is a LATIN word count; re-express its token footprint in this language's words so a
+        //     dense script gets proportionally fewer words (AvgCharsPerWord cancels → pure density ratio).
+        var languageCeiling = (int)Math.Floor(ceiling * charsPerTokenLang / charsPerTokenLatin);
+
+        // (B) Words that fit the model window when INPUT and its ~equal-sized OUTPUT must both fit num_ctx.
+        // Note: the per-chunk OverlapPrefix is prepended at request time and is NOT charged against this
+        // budget. This is safe today because bound (A) — the language ceiling — dominates with comfortable
+        // margin, so overlap tokens do not push any chunk past the window. It is a latent coupling: if the
+        // proofread num_ctx were ever dropped well below the current 4096, bound (B) could tighten enough
+        // that the uncharged overlap causes actual window overflow.
+        var numCtx = BookContextAssembler.ResolveNumCtxForTask(opts, task);
+        var generationWindow = numCtx
+            - Math.Max(0, opts.BookContextPromptReserveTokens)
+            - Math.Max(0, opts.BookContextSafetyMarginTokens);
+        // Split the remaining window in half (output ≈ input for a proofread/LineEdit rewrite). Floor at a small
+        // positive minimum so a pathologically tiny window still yields a workable (if tiny) chunk.
+        var availableInputTokens = Math.Max(64, generationWindow / 2);
+        var wordsThatFitWindow = (int)Math.Floor(availableInputTokens * charsPerTokenLang / AvgCharsPerWord);
+
+        // Take the tighter of the two bounds; always make at least one (small) chunk.
+        return Math.Max(1, Math.Min(languageCeiling, wordsThatFitWindow));
     }
 
     /// <summary>Splits text into segments of at most targetWords words (word-boundary). Last segment gets lastSegmentSep, others get betweenSep.</summary>
@@ -1382,6 +1493,9 @@ public class UnifiedAnalysisService
             ResultText = cleanContent,
             StructuredResult = mergedJson,
             Language = language,
+            // "chunked" is an internal sentinel: the run fanned out over many per-chunk model calls so
+            // there is no single model to surface. The FE suppresses this exact token in result headings
+            // (visibleModelName in visible-model-name.ts); a rename here must be mirrored FE-side.
             ModelName = "chunked",
             JobId = jobId,
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
@@ -1636,6 +1750,9 @@ public class UnifiedAnalysisService
             ResultText = mergedResultText,
             StructuredResult = null,
             Language = language,
+            // "chunked" is an internal sentinel: the run fanned out over many per-chunk model calls so
+            // there is no single model to surface. The FE suppresses this exact token in result headings
+            // (visibleModelName in visible-model-name.ts); a rename here must be mirrored FE-side.
             ModelName = "chunked",
             ProofreadNoChangesHint = noChangesHint,
             // ProofreadResultUnreliable is set below, AFTER AttachSuggestions populates result.Suggestions,
