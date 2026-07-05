@@ -224,7 +224,8 @@ public class LineEditChunkingTests
         {
             Suggestions = new List<LineEditSuggestion>
             {
-                new() { Original = "Some text\r\nwith breaks.", Suggested = "Fixed A.", Reason = "r1", Category = "clarity" },
+                // A single CR normalizes 1:1 to one space -> "Some text with breaks."
+                new() { Original = "Some text\rwith breaks.", Suggested = "Fixed A.", Reason = "r1", Category = "clarity" },
             },
             OverallFeedback = ""
         };
@@ -232,8 +233,9 @@ public class LineEditChunkingTests
         {
             Suggestions = new List<LineEditSuggestion>
             {
-                // Same text after normalization (line breaks stripped)
-                new() { Original = "Some textwith breaks.", Suggested = "Fixed B.", Reason = "r2", Category = "flow" },
+                // Same text after normalization: the line break above becomes the space here, so the
+                // two originals normalize to the identical "Some text with breaks." and must dedupe.
+                new() { Original = "Some text with breaks.", Suggested = "Fixed B.", Reason = "r2", Category = "flow" },
             },
             OverallFeedback = ""
         };

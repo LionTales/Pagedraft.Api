@@ -238,9 +238,12 @@ public class BookContextAssembler
     /// <summary>
     /// Active-model context window (num_ctx) for a task, mirroring OllamaProvider.GetTuning's key precedence:
     /// "{provider}_{task}" → "{provider}" → ProviderTuningOptions default. The tuning key uses the provider
-    /// NAME (resolved via the shared resolver), exactly as the provider does at request time.
+    /// NAME (resolved via the shared resolver), exactly as the provider does at request time. Public so other
+    /// budget-aware sizers (e.g. the language-aware proofread/LineEdit chunker in
+    /// <see cref="UnifiedAnalysisService"/>) resolve a task's context window through the SAME precedence
+    /// rather than duplicating it.
     /// </summary>
-    private static int ResolveNumCtxForTask(AiOptions opt, AiTaskType task)
+    public static int ResolveNumCtxForTask(AiOptions opt, AiTaskType task)
     {
         var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task);
         var settings = opt.ProviderSettings;

@@ -22,18 +22,140 @@ namespace Pagedraft.Api.Tests;
 public class TextNormalizationAndContextTests
 {
     [Fact]
-    public void NormalizeTextForAnalysis_StripsBidiControlsAndNewlines()
+    public void NormalizeTextForAnalysis_ConvertsLineBreaksToSpaces_AndDropsBidiControls()
     {
-        var input = "שורה ראשונה\u200E\r\nשורה\u200F שנייה\u202A";
+        var input = "\u05e9\u05d5\u05e8\u05d4 \u05e8\u05d0\u05e9\u05d5\u05e0\u05d4\u200E\r\n\u05e9\u05d5\u05e8\u05d4\u200F \u05e9\u05e0\u05d9\u05d9\u05d4\u202A";
 
         var normalized = TextNormalization.NormalizeTextForAnalysis(input);
 
-        Assert.DoesNotContain("\r", normalized);
-        Assert.DoesNotContain("\n", normalized);
+        // Line breaks are gone (converted to spaces), not present as raw \r/\n. Use the char
+        // overload: Assert.DoesNotContain(string, string) is culture-sensitive and treats bidi/
+        // ignorable characters as matching at position 0 in ANY string, producing false failures.
+        Assert.DoesNotContain('\r', normalized);
+        Assert.DoesNotContain('\n', normalized);
+        // Bidi controls are dropped entirely.
+        Assert.DoesNotContain('\u200E', normalized);
+        Assert.DoesNotContain('\u200F', normalized);
+        Assert.DoesNotContain('\u202A', normalized);
 
-        Assert.Contains("שורה ראשונה", normalized);
-        Assert.Contains("שורה שנייה", normalized);
+        Assert.Contains("\u05e9\u05d5\u05e8\u05d4 \u05e8\u05d0\u05e9\u05d5\u05e0\u05d4", normalized, StringComparison.Ordinal);
+        Assert.Contains("\u05e9\u05d5\u05e8\u05d4 \u05e9\u05e0\u05d9\u05d9\u05d4", normalized, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void NormalizeTextForAnalysis_HardLineBreak_BecomesSpace_NotGlued()
+    {
+        // Root cause of the content-dropping proofread bug: the chapter title (RONI) is the first
+        // body line, so ContentText head is RONI + newline + HITORARTI. Dropping the newline glued it
+        // into a non-word, which the model "fixed" by deleting the title word. The break must map to a
+        // space so the model sees a separated proper noun.
+        Assert.Equal("\u05e8\u05d5\u05e0\u05d9 \u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9", TextNormalization.NormalizeTextForAnalysis("\u05e8\u05d5\u05e0\u05d9\n\u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9"));
+        Assert.NotEqual("\u05e8\u05d5\u05e0\u05d9\u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9", TextNormalization.NormalizeTextForAnalysis("\u05e8\u05d5\u05e0\u05d9\n\u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9"));
+    }
+
+    [Fact]
+    public void NormalizeTextForAnalysis_IsStableUnderRepeatedApplication_NoSpaceGrowth()
+    {
+        // Idempotent-ish: normalizing already-normalized text is a no-op (spaces are not line breaks,
+        // so a second pass adds nothing). Guards against a rule that keeps growing whitespace.
+        var once = TextNormalization.NormalizeTextForAnalysis("\u05e8\u05d5\u05e0\u05d9\r\n\u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9");
+        var twice = TextNormalization.NormalizeTextForAnalysis(once);
+        Assert.Equal(once, twice);
+    }
+
+    // Shared FE/BE parity vector. The SAME input->expected pairs are asserted by the frontend spec
+    // (normalize-text-for-analysis.spec.ts, SHARED_PARITY_VECTOR) so FE and BE normalization are
+    // provably identical. Keep the two lists in lockstep when either changes.
+    [Theory]
+    [InlineData("\u05e8\u05d5\u05e0\u05d9\n\u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9", "\u05e8\u05d5\u05e0\u05d9 \u05d4\u05ea\u05e2\u05d5\u05e8\u05ea\u05d9")]
+    [InlineData("a\r\nb", "a  b")]
+    [InlineData("a\rb\nc", "a b c")]
+    [InlineData("x\u200Ey", "xy")]
+    [InlineData("\u05e9\u05d5\u05e8\u05d4\u200F \u05e9\u05e0\u05d9\u05d9\u05d4", "\u05e9\u05d5\u05e8\u05d4 \u05e9\u05e0\u05d9\u05d9\u05d4")]
+    [InlineData("plain text", "plain text")]
+    public void NormalizeTextForAnalysis_SharedParityVector(string input, string expected)
+    {
+        Assert.Equal(expected, TextNormalization.NormalizeTextForAnalysis(input));
+    }
+
+    // ─── Paragraph-separator offset-alignment invariant (be-c01) ─────────────────────────────
+    //
+    // The FE SFDT offset walk (SfdtManipulationService) advances a CONSTANT
+    // BLOCK_SEPARATOR_NORM_LEN = normalizeTextForAnalysis('\n').length = 1 between consecutive
+    // blocks, i.e. it assumes each inter-paragraph boundary in the backend's offset string is
+    // EXACTLY ONE normalized character. Backend suggestion offsets are computed by
+    // SuggestionDiffService against NormalizeTextForAnalysis(TargetText), where TargetText is
+    // the chapter/scene plain text AFTER SyncfusionWatermarkStripper.StripSyncfusionWatermark.
+    //
+    // Latent trap: Syncfusion's WordDocument.GetText() joins paragraphs with CRLF ("\r\n"), which
+    // NormalizeTextForAnalysis maps to TWO spaces (the shared parity vector proves "a\r\nb" -> "a  b").
+    // If that CRLF reached the offset string, every suggestion past the first paragraph break would
+    // drift +1 and ACCUMULATE. It does NOT today ONLY because StripSyncfusionWatermark collapses
+    // [\r\n]+ -> "\n" (a single '\n') before normalization, so each boundary contributes exactly ONE
+    // space (matching the FE's BLOCK_SEPARATOR_NORM_LEN of 1). These tests lock that invariant so a
+    // future change to the stripper (or a path that bypasses it) cannot silently reintroduce the drift.
+
+    [Fact]
+    public void ParagraphSeparator_OffsetString_ContributesExactlyOneSpacePerParagraphBreak()
+    {
+        // Build a real, Syncfusion-round-tripped SFDT (the same path chapter/scene ContentText takes),
+        // then run the EXACT offset-string pipeline the backend uses:
+        //   Syncfusion GetText() -> StripSyncfusionWatermark -> NormalizeTextForAnalysis
+        var sfdt = SfdtConversionService.CreateMinimalSfdtFromText("para1\npara2\npara3");
+        var (contentText, _) = new SfdtConversionService().GetTextFromSfdt(sfdt);
+
+        var offsetString = OffsetString(contentText);
+
+        // Three paragraphs => two inter-paragraph separators, each exactly ONE normalized char (a space),
+        // so the offset string is "para1 para2 para3": 5 + 1 + 5 + 1 + 5 = 17 chars.
+        Assert.Equal("para1 para2 para3", offsetString);
+        Assert.Equal(17, offsetString.Length);
+
+        // No raw line breaks survive into the offset string.
+        Assert.DoesNotContain('\r', offsetString);
+        Assert.DoesNotContain('\n', offsetString);
+        // And no DOUBLE space (the CRLF-would-be-two-spaces failure mode) between words.
+        Assert.DoesNotContain("  ", offsetString, StringComparison.Ordinal);
+
+        // Directly assert the per-separator contribution matches the FE's BLOCK_SEPARATOR_NORM_LEN (1):
+        // (offsetLen - sum(word lengths)) / separatorCount == 1.
+        const int wordLenSum = 5 + 5 + 5; // "para1" + "para2" + "para3"
+        const int separatorCount = 2;
+        var perSeparatorNormLen = (offsetString.Length - wordLenSum) / separatorCount;
+        Assert.Equal(1, perSeparatorNormLen); // must equal FE BLOCK_SEPARATOR_NORM_LEN
+    }
+
+    [Fact]
+    public void ParagraphSeparator_RawSyncfusionSeparatorIsCrlf_ButStripperCollapsesItToSingleLf()
+    {
+        // Pins the two facts the invariant depends on:
+        //   (1) Syncfusion GetText() DOES emit CRLF ("\r\n") between paragraphs (the trap), and
+        //   (2) StripSyncfusionWatermark collapses that CRLF to a single '\n' (the safety), so
+        //       NormalizeTextForAnalysis then yields ONE space, not two.
+        var sfdt = SfdtConversionService.CreateMinimalSfdtFromText("alpha\nbeta");
+        var (contentText, _) = new SfdtConversionService().GetTextFromSfdt(sfdt);
+
+        // (1) The raw Syncfusion text still carries the CRLF paragraph mark.
+        Assert.Contains("alpha\r\nbeta", contentText, StringComparison.Ordinal);
+
+        // (2) After stripping, the boundary is a SINGLE '\n' (the [\r\n]+ -> "\n" collapse).
+        var stripped = SyncfusionWatermarkStripper.StripSyncfusionWatermark(contentText);
+        Assert.Equal("alpha\nbeta", stripped);
+        Assert.DoesNotContain('\r', stripped);
+
+        // Therefore the normalized offset string has exactly ONE space at the boundary (not two).
+        Assert.Equal("alpha beta", TextNormalization.NormalizeTextForAnalysis(stripped));
+    }
+
+    /// <summary>
+    /// Reproduces the backend's exact offset-string pipeline for chapter/scene text:
+    /// StripSyncfusionWatermark (removes the trial watermark AND collapses [\r\n]+ to a single '\n')
+    /// followed by NormalizeTextForAnalysis (bidi-strip + each line break -> one space). This is the
+    /// string SuggestionDiffService indexes suggestion offsets against.
+    /// </summary>
+    private static string OffsetString(string rawSyncfusionText) =>
+        TextNormalization.NormalizeTextForAnalysis(
+            SyncfusionWatermarkStripper.StripSyncfusionWatermark(rawSyncfusionText));
 
     [Fact]
     public void NormalizeTextForStorage_StripsBidiControlsOnly()

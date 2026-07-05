@@ -34,14 +34,13 @@ public static class KtivMaleWordList
         // ── vav (ו) for the /o/ and /u/ sounds ──────────────────────────
         ["תכנית"]   = "תוכנית",    // plan / program (canonical Academy example)
         ["תכניות"]  = "תוכניות",   // plans (plural)
-        ["עצמה"]    = "עוצמה",     // power / intensity (canonical Academy example)
-        ["תכנה"]    = "תוכנה",     // software
-        ["חכמה"]    = "חוכמה",     // wisdom
+        // עצמה, חכמה, אמן, אמנות, משמרת intentionally NOT listed here - they are AMBIGUOUS
+        // HOMOGRAPHS whose haser (short) form is itself a common independent word with a DIFFERENT
+        // meaning, so a context-blind checker cannot safely flag them. See
+        // AmbiguousHomographPairsExcluded below for the pairs and the rationale.
+        ["תכנה"]    = "תוכנה",     // software (haser תכנה collides only with the rare verb "she planned"; kept - low FP risk)
         ["אמנם"]    = "אומנם",     // indeed / admittedly
-        ["אמן"]     = "אומן",      // craftsman / artisan
-        ["אמנות"]   = "אומנות",    // craft / craftsmanship
         ["דאר"]     = "דואר",      // mail / post
-        ["משמרת"]   = "משמורת",    // custody (legal sense)
         ["כתנת"]    = "כותנת",     // tunic / shirt
 
         // ── yod (י) for the /i/ and /e/ sounds ──────────────────────────
@@ -71,13 +70,16 @@ public static class KtivMaleWordList
         // noun גילוי ("revelation/discovery"); suggesting the change would be a meaning-changing
         // miscorrection on ordinary prose, so this high-frequency homograph is excluded by design.
         ["צמצום"]   = "צמצום",     // reduction (already male per shva-nach rule - never flag)
-        ["ספור"]    = "סיפור",     // story
-        ["ספורים"]  = "סיפורים",   // stories
-        ["דבור"]    = "דיבור",     // speech
-        ["חבור"]    = "חיבור",     // composition / connection
+        ["ספור"]    = "סיפור",     // story (haser ספור collides only with the rare passive participle "counted"; kept - low FP risk)
+        // ספורים intentionally NOT listed - it is an AMBIGUOUS HOMOGRAPH: סְפוּרִים / "numbered, few"
+        // (the very common idiom ימים ספורים = "a few / numbered days") is a distinct everyday word,
+        // not the haser of סיפורים "stories". See AmbiguousHomographPairsExcluded below.
+        ["דבור"]    = "דיבור",     // speech (haser דבור collides only with the rare passive participle "spoken"; kept - low FP risk)
+        ["חבור"]    = "חיבור",     // composition / connection (haser חבור collides only with the rarer passive participle "connected"; kept - low FP risk)
         ["חבורים"]  = "חיבורים",   // compositions
-        ["שעור"]    = "שיעור",     // lesson / rate
-        ["שעורים"]  = "שיעורים",   // lessons
+        ["שעור"]    = "שיעור",     // lesson / rate (haser שעור is not a common distinct word; kept)
+        // שעורים intentionally NOT listed - it is an AMBIGUOUS HOMOGRAPH: שְׂעוֹרִים / "barley" is a
+        // common everyday noun, not the haser of שיעורים "lessons". See AmbiguousHomographPairsExcluded.
         ["צור"]     = "ציור",      // drawing (noun) - note: distinct from צוּר "rock"; see note below
         ["מלון"]    = "מילון",     // dictionary
         ["גבור"]    = "גיבור",     // hero
@@ -94,6 +96,39 @@ public static class KtivMaleWordList
     // meaning-changing miscorrection. If false-positive noise from צור/מלון proves annoying in
     // practice, move them to a separate "low-confidence" tier rather than deleting the whole list.
     // They are kept here so the seed demonstrates both vav and yod families.
+
+    /// <summary>
+    /// Haser→male pairs DELIBERATELY EXCLUDED from the active <see cref="HaserToMale"/> auto-flag list
+    /// because the KEY (the haser / short spelling) is itself a COMMON independent Hebrew word with a
+    /// DIFFERENT meaning than the VALUE (the male / full spelling). These are AMBIGUOUS HOMOGRAPHS.
+    ///
+    /// WHY excluded, not listed: <see cref="KtivMaleChecker"/> is CONTEXT-BLIND - it flags every
+    /// whole-word occurrence of a key (optionally behind one prefix letter) with no ability to tell
+    /// which sense the author meant. For these words the short form is, in ordinary prose,
+    /// OVERWHELMINGLY the OTHER (valid, on-purpose) word - so auto-flagging them would deterministically
+    /// produce a MEANING-CHANGING wrong suggestion, violating the checker's conservative
+    /// "never touch an intentional spelling" contract. A ktiv-male auto-flag is only safe when the haser
+    /// form is NOT also a frequent standalone word with an unrelated sense.
+    ///
+    /// This set is kept (a) so the knowledge is preserved and auditable rather than silently dropped,
+    /// and (b) so a test can assert these keys are never flagged. It is NOT consulted by the checker
+    /// (an entry simply absent from <see cref="HaserToMale"/> is already never flagged); it exists to
+    /// DOCUMENT the exclusions. Do NOT move any of these back into HaserToMale without a
+    /// context-aware disambiguation step (POS / surrounding words), which this deterministic checker
+    /// does not have.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> AmbiguousHomographPairsExcluded = new Dictionary<string, string>
+    {
+        // KEY = common standalone word (its usual sense) ; VALUE = the male spelling we would WRONGLY
+        // suggest ; trailing comment = the everyday meaning of the KEY that makes the flag unsafe.
+        ["עצמה"]   = "עוצמה",   // עַצְמָהּ = "herself / itself / its own / by itself" (reflexive/possessive) - hugely common; עוצמה = "power/intensity". The confirmed root-cause miscorrection.
+        ["חכמה"]   = "חוכמה",   // חֲכָמָה = "wise" (feminine adjective, e.g. אישה חכמה "a wise woman") - very common; חוכמה = "wisdom".
+        ["אמן"]    = "אומן",    // אָמָּן = "artist" and אָמֵן = "amen" - both common; אומן = "craftsman/artisan". Different words.
+        ["אמנות"]  = "אומנות",  // אָמָּנוּת = "art" (painting/music/the arts) - very common; אומנות = "craftsmanship/trade". Different words.
+        ["משמרת"]  = "משמורת",  // מִשְׁמֶרֶת = "(work) shift / watch" - very common; משמורת = "custody" (legal). Different words.
+        ["ספורים"] = "סיפורים", // סְפוּרִים = "numbered / few" (idiom ימים ספורים "a few days") - common; סיפורים = "stories".
+        ["שעורים"] = "שיעורים", // שְׂעוֹרִים = "barley" - common everyday noun; שיעורים = "lessons".
+    };
 
     /// <summary>
     /// Sentinel entries above whose key == value are already-male spellings included only to

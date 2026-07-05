@@ -19,7 +19,7 @@ public class KtivMaleCheckerTests
     [Theory]
     // vav-for-/o/ family
     [InlineData("הגשתי תכנית לעבודה.", "תכנית", "תוכנית")]
-    [InlineData("הוא הפגין עצמה רבה.", "עצמה", "עוצמה")]
+    [InlineData("שלחתי את המכתב דרך דאר רשום.", "דאר", "דואר")]
     [InlineData("התקנו תכנה חדשה.", "תכנה", "תוכנה")]
     // yod-for-/i,e/ family
     [InlineData("זה סיפור אמתי.", "אמתי", "אמיתי")]
@@ -43,7 +43,7 @@ public class KtivMaleCheckerTests
     // The classic "לעיתים" case: ל prefix + עתים → לעיתים. Prefix is preserved on the suggestion.
     [InlineData("לעתים הוא מאחר.", "לעתים", "לעיתים")]
     [InlineData("התכנית אושרה.", "התכנית", "התוכנית")]
-    [InlineData("בעצמה גדולה.", "בעצמה", "בעוצמה")]
+    [InlineData("בתכנה החדשה יש באג.", "בתכנה", "בתוכנה")]
     public void FindSuggestions_PrefixedHaserForm_FlagsMaleWithPrefix(string text, string expectedOriginal, string expectedMale)
     {
         var checker = MakeChecker();
@@ -112,6 +112,42 @@ public class KtivMaleCheckerTests
         var suggestions = checker.FindSuggestions("הסוד היה גלוי לכולם וגלוי לב.", "he");
 
         Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void FindSuggestions_AtsmaReflexiveHomograph_IsNeverFlagged()
+    {
+        // ROOT-CAUSE REGRESSION GUARD: עַצְמָהּ = "herself / its own / by itself" (reflexive/possessive)
+        // is overwhelmingly the sense of עצמה in ordinary prose - NOT the haser form of עוצמה "power".
+        // A context-blind עצמה→עוצמה auto-flag deterministically produced a MEANING-CHANGING wrong
+        // suggestion ("makes plans with herself" → "...with power"), violating the checker's conservative
+        // contract. עצמה is therefore excluded (AmbiguousHomographPairsExcluded). This asserts the
+        // canonical sentence yields zero suggestions, including behind a common prefix (בעצמה).
+        var checker = MakeChecker();
+
+        var suggestions = checker.FindSuggestions("היא קובעת תוכניות עם עצמה בעצמה.", "he");
+
+        Assert.Empty(suggestions);
+    }
+
+    [Fact]
+    public void FindSuggestions_AmbiguousHomographKeys_AreNeverFlagged()
+    {
+        // Every key in AmbiguousHomographPairsExcluded is a common standalone word whose male form has a
+        // DIFFERENT meaning, so the context-blind checker must never flag any of them (bare or behind a
+        // single common prefix letter). This is the documented, auditable exclusion set; if any of these
+        // keys were (re-)added to HaserToMale, this test fails.
+        var checker = MakeChecker();
+
+        foreach (var key in KtivMaleWordList.AmbiguousHomographPairsExcluded.Keys)
+        {
+            var bare = checker.FindSuggestions(key, "he");
+            Assert.Empty(bare);
+
+            // Also assert it is not reachable behind a single common Hebrew prefix (ו/ה/ב/כ/ל/מ/ש).
+            var prefixed = checker.FindSuggestions("ו" + key, "he");
+            Assert.Empty(prefixed);
+        }
     }
 
     // ── INTENTIONAL-STYLE: dialogue/colloquial spelling not on the list is left alone ─
@@ -192,10 +228,10 @@ public class KtivMaleCheckerTests
     {
         var checker = MakeChecker();
 
-        var suggestions = checker.FindSuggestions("התכנית הראתה עצמה ואת הנסיון.", "he");
+        var suggestions = checker.FindSuggestions("התכנית עם התכנה שיפרו את הנסיון.", "he");
 
         Assert.Contains(suggestions, s => s.OriginalText == "התכנית" && s.SuggestedText == "התוכנית");
-        Assert.Contains(suggestions, s => s.OriginalText == "עצמה" && s.SuggestedText == "עוצמה");
+        Assert.Contains(suggestions, s => s.OriginalText == "התכנה" && s.SuggestedText == "התוכנה");
         Assert.Contains(suggestions, s => s.OriginalText == "הנסיון" && s.SuggestedText == "הניסיון");
     }
 }
