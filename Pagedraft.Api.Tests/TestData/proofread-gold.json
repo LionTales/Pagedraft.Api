@@ -705,5 +705,40 @@
     "language": "he-IL",
     "shouldHaveNoChanges": true,
     "_note": "Provenance: 2026-06-20 overreach measurement. A CLEAN passage — a chapter heading ('פרק ראשון') plus a correct sentence — that the proofreader must leave UNCHANGED. Any correction here is a false positive (shouldHaveNoChanges drives the fp-rate metric), so this measures overreach directly on already-correct text including a heading line."
+  },
+  {
+    "id": "longtext-clean-ms-01",
+    "input": "התעוררתי בבהלה. השעה הייתה 06:10. כנראה כיביתי את השעון המעורר מתוך שינה. ניסיתי לנשום עמוק ולהירגע, אבל החלומות רדפו אותי וכל תמונה שצפה לנגד עיניי העלתה רגשות שליליים אחרים. התגעגעתי לשני, דאגתי לרוני, כעסתי על אימא ולא סמכתי על אמילי. החלטה לקבוע עוד אימונים עם עידו התגבשה בראשי בזמן שלבשתי בגדי ספורט. לפחות עידו לא גורם לי לסיוטים.\n\nאף שניסיתי לדבר איתה, אמילי לא החליפה איתי מילה אחת נוספת לאורך כל היום. היא הייתה עסוקה בכל רגע פנוי בשיחות עם אילון ויכולתי להישבע שגם כשהם לא מדברים, היא מסתכלת עליו. זה לא מצא חן בעיניי. לא מפני שהתחשק לי ממש לדבר איתה, אבל היה לי ברור שאם אני הולך לבלות איתה ערב שלם, אני צריך לדעת עליה קצת יותר. אחרי שהבנתי שלא אצליח להוציא יותר מדי מידע מאילון, עברתי לתוכנית ב'.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true,
+    "_note": "Provenance: 2026-07-03 pf-b01 long-Hebrew proofread eval. Two consecutive CLEAN, correctly-spelled paragraphs (131 words) lifted verbatim from a long chapter ('תומר') of the manuscript 'זיכרונות של מכשף' — the same 80-chapter book whose long chapters tripped ProofreadResultUnreliable in the review-funnel session. Its script density is exactly what overflowed the OLD language-agnostic 500-word chunk sizing. This entry guards the DENSE-Hebrew overreach/false-positive surface single-shot (any edit here is a false positive) but does NOT by itself exercise the chunking fix: the single-shot gold harness (ProofreadQualityTests) drives IAiRouter directly and never enters RunProofreadChunkedAsync. The actual chunking/reliability guard for pf-b01 is (1) the ProofreadChunkSizingTests unit tests (language-aware EffectiveChunkTargetWords: Hebrew 250 vs Latin 500, every chunk fits num_ctx) and (2) the 2026-07-03 end-to-end eval that ran this book's longest chapter (2878 words) through the real chunked proofread endpoint: 12 chunks, all Succeeded, ProofreadResultUnreliable=false, ~9.1 min on DictaLM-3.0-Nemotron-12B."
+  },
+  {
+    "id": "overreach-ms-04",
+    "input": "בזמן שהיא מחכה היא קובעת תוכניות עם עצמה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "עצמה",
+        "suggested": "עוצמה",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Provenance: 2026-07-03 real-chapter proofread overreach (pq-b02). Guards a HOMOGRAPH meaning-error: 'עצמה' here is the reflexive pronoun ('with herself', עם עצמה) and is CORRECT — the model must NOT 'fix' it to 'עוצמה' (power/might), a different word with a different meaning. The whole sentence is clean, so shouldHaveNoChanges drives the fp-rate; forbiddenCorrections עצמה->עוצמה additionally names the exact bad homograph rewrite so the overreach column trips even if some future scorer credits it at the right span. Distinct from overreach-ms-01, where עצמה IS an error ('עצמה רגשית' should be 'עוצמה רגשית'): the reflexive-pronoun context here is precisely where the ktiv-male 'fix' becomes an overreach."
+  },
+  {
+    "id": "overreach-ms-05",
+    "input": "היא אהבה לקבל מתנות שהושקעה בהן מחשבה.",
+    "language": "he-IL",
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "שהושקעה",
+        "suggested": "שהושקיעה",
+        "category": "overreach"
+      }
+    ],
+    "_note": "Provenance: 2026-07-03 real-chapter proofread overreach (pq-b02). Guards a verb-VOICE flip: 'שהושקעה' is passive (הופעל, agreeing with the singular feminine 'מחשבה' — thought that WAS invested in them) and is grammatically CORRECT in context. The model must NOT flip it to the active 'שהושקיעה' (that SHE invested), which changes the meaning and the subject. The sentence is clean, so shouldHaveNoChanges drives the fp-rate; forbiddenCorrections שהושקעה->שהושקיעה names the exact passive->active rewrite for the overreach column."
   }
 ]
