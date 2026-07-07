@@ -815,7 +815,19 @@ public class UnifiedAnalysisService
         };
 
         var response = await _router.CompleteAsync(request, ct);
-        return SanitizeResponse(response.Content);
+        var sanitized = SanitizeResponse(response.Content);
+
+        // Apply the SAME analysis-output repair layer the persisted seams (RunAsync / RunWithInputAsync /
+        // streaming / chunked LineEdit) run. Without this, a Hebrew Summarization routed through this raw
+        // path — which BookIntelligenceService.SummarizeChaptersAsync persists into ChunkSummary.SummaryText
+        // — would skip the shipped glossary repair and leak English that every other summarization run has
+        // cleaned. The repair layer is type-aware and fail-safe: for the non-target types RunRawAsync also
+        // serves (BookOverview / Synopsis / CharacterAnalysis / StoryAnalysis) it is a strict no-op that
+        // returns the text byte-identical. Summarization has no structured payload, so the whole text is the
+        // repairable prose (structuredJson: null).
+        var (_, repaired) = await ApplyAnalysisRepairAsync(
+            structuredJson: null, cleanContent: sanitized, analysisType, language, ct);
+        return repaired;
     }
 
     // ─── Proofread chunking (paragraph/sentence aware) ───────────────
