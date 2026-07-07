@@ -361,6 +361,35 @@ public class GlossaryRepairPassTests
         Assert.Empty(result.ResidualLatinRuns);
     }
 
+    // ─── Fault channel: null on success/no-op paths (fires only on swallowed exception) ──
+
+    /// <summary>
+    /// <see cref="GlossaryRepairResult.Fault"/> is the ONLY signal a caller has that the pass caught
+    /// and swallowed an internal fault (it never throws) — <c>ApplyAnalysisRepairAsync</c> logs on it,
+    /// otherwise a re-serialize / accessor-walk fault would leave leaked English with no warning. This
+    /// guards the other half of that contract: on the normal success AND clean-no-op paths Fault stays
+    /// null so it can never false-fire a warning. (The swallowed-exception path itself is the
+    /// belt-and-braces catch over a now-fully-null-guarded walk; it has no deterministic public trigger,
+    /// so it is exercised by inspection of the catch, not a brittle fault-injection input.)
+    /// </summary>
+    [Fact]
+    public void SuccessAndNoOp_HaveNullFault()
+    {
+        var repaired = GlossaryRepairPass.Apply(
+            AnalysisType.LiteraryAnalysis,
+            Serialize(new LiteraryAnalysisResult { Summary = "תיאור פעולה (Action) עז." }),
+            "", "he", JsonOpts);
+        Assert.Equal(1, repaired.FieldsChanged); // a repair fired...
+        Assert.Null(repaired.Fault);             // ...with no fault.
+
+        var clean = GlossaryRepairPass.Apply(
+            AnalysisType.LiteraryAnalysis,
+            Serialize(new LiteraryAnalysisResult { Summary = "הפרק בונה מתח ומגיע לשיא." }),
+            "", "he", JsonOpts);
+        Assert.Equal(0, clean.FieldsChanged);    // clean no-op...
+        Assert.Null(clean.Fault);                // ...also faultless.
+    }
+
     // ─── Serialization + leaf-diff helpers (mirror RepairableFieldsTests) ────
 
     private static string Serialize(object instance)

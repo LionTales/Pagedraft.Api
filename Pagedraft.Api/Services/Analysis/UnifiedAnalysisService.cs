@@ -2658,6 +2658,17 @@ public class UnifiedAnalysisService
             structuredJson = repair.StructuredJson;
             cleanContent = repair.CleanContent;
             glossaryChanged = repair.FieldsChanged;
+
+            // The glossary pass is itself fail-safe: an accessor-walk / re-serialize fault is CAUGHT
+            // INSIDE Apply, which returns the inputs unchanged rather than throwing — so it never reaches
+            // the catch below. Surface that swallowed fault here (via repair.Fault) and log it, otherwise
+            // a repair that silently no-op'd would leave leaked English in the output with no warning.
+            if (repair.Fault is not null)
+            {
+                _logger.LogWarning(repair.Fault,
+                    "AnalysisRepair Stage 1 (glossary) swallowed a fault for type={Type}; keeping un-repaired inputs (fail-safe)",
+                    analysisType);
+            }
         }
         catch (Exception ex)
         {

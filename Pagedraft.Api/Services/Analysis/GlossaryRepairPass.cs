@@ -47,13 +47,18 @@ namespace Pagedraft.Api.Services.Analysis;
 /// call site; when nothing changed they are the byte-identical inputs.
 /// <see cref="ResidualLatinRuns"/> are the Latin runs that remained AFTER the glossary ran —
 /// the hand-off list for the p3 LLM repair pass.
+/// <see cref="Fault"/> is the exception the pass CAUGHT AND SWALLOWED on its fail-safe path
+/// (returning the inputs unchanged); it is null on every success/no-op path. Because the pass
+/// never throws, this is the ONLY signal that a fault occurred — the caller inspects it to log a
+/// swallowed accessor-walk / re-serialize fault that would otherwise leave leaked English silently.
 /// </summary>
 public readonly record struct GlossaryRepairResult(
     string? StructuredJson,
     string CleanContent,
     int FieldsScanned,
     int FieldsChanged,
-    IReadOnlyList<string> ResidualLatinRuns);
+    IReadOnlyList<string> ResidualLatinRuns,
+    Exception? Fault = null);
 
 /// <summary>
 /// Deterministic English -> Hebrew glossary replacement over the repairable prose fields of
@@ -177,7 +182,9 @@ public static class GlossaryRepairPass
         // so ANY escape here would crash the whole analysis. A model can emit `"themes": null`
         // etc.; RepairableFields is now null-guarded, but this belt-and-braces guarantees that no
         // unforeseen accessor/serialization fault (e.g. a null element, a serializer edge case)
-        // can ever throw out of the repair layer. On ANY exception the INPUT is returned unchanged.
+        // can ever throw out of the repair layer. On ANY exception the INPUT is returned unchanged
+        // AND the caught exception is surfaced via GlossaryRepairResult.Fault so the caller logs it —
+        // this stage swallowing a fault silently is what previously left leaked English with no warning.
         try
         {
             var accessors = accessorsOf(parsed);
@@ -220,9 +227,12 @@ public static class GlossaryRepairPass
             var newJson = JsonSerializer.Serialize(parsed, jsonOptions);
             return new GlossaryRepairResult(newJson, cleanContent, scanned, changed, residual);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            return NoOp(structuredJson, cleanContent); // fail-safe: never throw into RunAsync
+            // fail-safe: never throw into RunAsync. But surface the swallowed fault via the result so
+            // the caller (ApplyAnalysisRepairAsync) can log it — otherwise an accessor-walk / re-serialize
+            // fault would silently return the inputs unchanged and leave leaked English with NO warning.
+            return new GlossaryRepairResult(structuredJson, cleanContent, 0, 0, Array.Empty<string>(), ex);
         }
     }
 
