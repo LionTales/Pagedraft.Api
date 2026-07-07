@@ -1,0 +1,127 @@
+[
+  {
+    "_README": "HEBREW VALIDATION REQUIRED — Every Hebrew-language entry here is an AI-authored draft that MUST be reviewed and approved by a native Hebrew speaker before the repair scores are trusted (mirrors linguistic-gold.json / proofread-gold.json). Seed corpus for the Analysis Output Repair layer (plan: analysis-output-repair-2026-07-03). Each entry is a PROSE VALUE the value-only repair pass sees — never a full JSON document (feeding raw JSON to the repair model is destructive; structure is held by code). Schema per entry: { id, language, input, expectedLatinRemoved:[leaked Latin terms the repair MUST strip], mustPreserve:[Hebrew/English substrings that MUST survive verbatim], isCleanControl:bool (repair MUST be a no-op), expectedGarbleFixed?:[garbled non-words that should be corrected away — advisory], notes? }. GROWTH HABIT (mirrors the proofread-gold-growth habit): every real leak/garble found in production analysis output should be promoted into a new entry here so the repair gate reflects production reality. Entries seeded from THIS machine's Phase-0 diagnostic (## Phase 0 baseline in the plan): p0-theme-magic-vs-nature-he (theme name leak), p0-tone-high-stakes-he (toneDescription leak), p0-mood-tension-he (moodProgression leak), p0-linguistic-action-he (linguistic summary leak). The scrambled probe (leak-narrator-scramble-he) is copied verbatim from OutputQualityDiagnostic.scrambledProbe."
+  },
+
+  {
+    "id": "leak-narrator-scramble-he",
+    "language": "he-IL",
+    "input": "הקטע כתוב בגוף ראשון, וה-narrator הוא הדמות הראשית. הטון הוא tense ומלא suspense. יש כאן foreshadowing חזק, והסופר משתמש ב-imagery של טבע כדי לבנות את ה-mood. הקצב מהיר וה-tension עולה בהדרגה עד ל-climax של הקרב.",
+    "expectedLatinRemoved": ["narrator", "tense", "suspense", "foreshadowing", "imagery", "mood", "tension", "climax"],
+    "mustPreserve": ["בגוף ראשון", "הדמות הראשית", "הקרב"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. Copied verbatim from OutputQualityDiagnostic.scrambledProbe. The prototype removed 100% of these 8 Latin terms with gemma4:12b. Covers the named real leaks 'narrator' + 'foreshadowing' (plus tension). Expected Hebrew equivalents: narrator->מספר, tone->טון, suspense->מתח, foreshadowing->רמיזה מקדימה, imagery->דימויים, mood->מצב רוח, tension->מתח, climax->שיא."
+  },
+
+  {
+    "id": "leak-action-paren-he",
+    "language": "he-IL",
+    "input": "הפרק נפתח בסצנה של פעולה מהירה (Action) שבה הגיבור רץ לאורך הסמטה האפלה.",
+    "expectedLatinRemoved": ["Action"],
+    "mustPreserve": ["פעולה", "הגיבור", "הסמטה"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. The '(Action)' parenthetical-English family the LiteraryAnalysis model leaks into Hebrew value strings. The Hebrew 'פעולה' is already correct, so the fix is simply dropping the parenthetical '(Action)'. mustPreserve holds robust single-noun anchors (a value-preserving repair may reword descriptive phrases but must keep these)."
+  },
+
+  {
+    "id": "leak-tension-paren-he",
+    "language": "he-IL",
+    "input": "המתח (Tension) בין שתי הדמויות עולה ככל שהדיאלוג מתקדם, עד לרגע השיא.",
+    "expectedLatinRemoved": ["Tension"],
+    "mustPreserve": ["המתח", "הדמויות", "השיא"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. The '(Tension)' parenthetical leak. Hebrew 'המתח' is already present; the repair should drop the redundant English gloss."
+  },
+
+  {
+    "id": "p0-theme-magic-vs-nature-he",
+    "language": "he-IL",
+    "input": "הנושא המרכזי הוא העימות בין קסם לטבע (Magic vs. Nature), המלווה את הגיבור לאורך כל המסע.",
+    "expectedLatinRemoved": ["Magic", "vs", "Nature"],
+    "mustPreserve": ["קסם", "טבע", "המסע"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. PHASE-0 REAL LEAK: 'Magic vs. Nature' leaked inside a Hebrew LiteraryAnalysis theme name (## Phase 0 baseline). The Hebrew 'קסם לטבע' already carries the meaning; the English gloss must go."
+  },
+
+  {
+    "id": "p0-tone-high-stakes-he",
+    "language": "he-IL",
+    "input": "הטון דרוך ומתוח, עם תחושה מתמדת של סיכון גבוה (High Stakes) לאורך כל הסצנה.",
+    "expectedLatinRemoved": ["High", "Stakes"],
+    "mustPreserve": ["הטון", "סיכון גבוה", "הסצנה"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. PHASE-0 REAL LEAK: 'High Stakes' leaked in a Hebrew LiteraryAnalysis toneDescription (## Phase 0 baseline). Hebrew 'סיכון גבוה' is the correct equivalent already present."
+  },
+
+  {
+    "id": "p0-mood-tension-he",
+    "language": "he-IL",
+    "input": "מצב הרוח מתפתח מרוגע שקט אל שיא של מתח (Tension) לקראת סוף הפרק.",
+    "expectedLatinRemoved": ["Tension"],
+    "mustPreserve": ["מצב הרוח", "מתח", "סוף הפרק"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. PHASE-0 REAL LEAK: 'Tension' leaked in a Hebrew LiteraryAnalysis moodProgression (## Phase 0 baseline). Hebrew 'מתח' already present; drop the English gloss."
+  },
+
+  {
+    "id": "p0-linguistic-action-he",
+    "language": "he-IL",
+    "input": "הקטע כתוב בסגנון תיאורי עשיר, עם דגש חזק על פעולה (Action) ותנועה מתמדת של הדמויות.",
+    "expectedLatinRemoved": ["Action"],
+    "mustPreserve": ["סגנון", "פעולה", "הדמויות"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. PHASE-0 REAL LEAK: '(Action)' leaked inside a LinguisticAnalysis summary value (## Phase 0 baseline). Hebrew 'פעולה' already present; drop the parenthetical."
+  },
+
+  {
+    "id": "garble-yoman-taktiyim-he",
+    "language": "he-IL",
+    "input": "הדמות שוקדת על יומן טקטיים כדי לתכנן את הקרב הבא מול אויביה.",
+    "expectedLatinRemoved": [],
+    "expectedGarbleFixed": ["יומן טקטיים"],
+    "mustPreserve": ["הדמות", "הקרב", "אויביה"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. REAL GARBLE from Summarization (qwen3.5:9b): 'יומן טקטיים' ('tactical diary', gender-mismatched masc-sing + masc-plural) where the source meant tactical planning/strategy. No Latin to remove — this measures wrong-word repair (advisory via expectedGarbleFixed; the LLM-judge meaning line is the real signal). A good repair yields e.g. 'תכנון טקטי' / 'אסטרטגיה טקטית' while preserving the surrounding meaning."
+  },
+
+  {
+    "id": "garble-metzayach-he",
+    "language": "he-IL",
+    "input": "הכותב מצייח תמונה חיה של הנוף ההררי בעזרת דימויים חושניים.",
+    "expectedLatinRemoved": [],
+    "expectedGarbleFixed": ["מצייח"],
+    "mustPreserve": ["תמונה", "הנוף", "דימויים"],
+    "isCleanControl": false,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. REAL GARBLE class: 'מצייח' is a non-word (intended 'מצייר' — paints/draws). No Latin; measures non-word repair. A good repair yields 'מצייר' while preserving 'תמונה חיה'/'הנוף ההררי'/'דימויים חושניים'."
+  },
+
+  {
+    "id": "clean-he-01",
+    "language": "he-IL",
+    "input": "הפרק מתאר את בדידותה של הגיבורה בעיר הזרה, ומדגיש את הניגוד בין ההמון הסואן לבין השקט הפנימי שלה.",
+    "expectedLatinRemoved": [],
+    "mustPreserve": ["בדידותה של הגיבורה", "העיר הזרה", "ההמון הסואן", "השקט הפנימי"],
+    "isCleanControl": true,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. CLEAN CONTROL: fluent Hebrew literary prose with NO leaks and NO garbles. Repair MUST be a no-op — no Latin removed, every mustPreserve substring survives, length ratio ~1. Any change here is a false-positive repair."
+  },
+
+  {
+    "id": "clean-he-02",
+    "language": "he-IL",
+    "input": "הסופר בונה מתח הדרגתי לאורך הסצנה, ומשתמש בתיאורי טבע כדי לשקף את מצב רוחה של הדמות הראשית.",
+    "expectedLatinRemoved": [],
+    "mustPreserve": ["מתח הדרגתי", "תיאורי טבע", "מצב רוחה", "הדמות הראשית"],
+    "isCleanControl": true,
+    "notes": "HEBREW DRAFT — NATIVE-SPEAKER VALIDATION REQUIRED. CLEAN CONTROL: uses the Hebrew equivalents (מתח, מצב רוח) that the glossary maps English leaks TO — verifies the repair does not 'fix' already-correct Hebrew. Repair MUST be a no-op."
+  },
+
+  {
+    "id": "clean-en-01",
+    "language": "en",
+    "input": "The chapter opens with a quiet, introspective tone. The narrator reflects on the passage of time and the weight of memory, using imagery of autumn to convey a sense of gradual loss.",
+    "expectedLatinRemoved": [],
+    "mustPreserve": ["narrator", "imagery of autumn", "gradual loss"],
+    "isCleanControl": true,
+    "notes": "ENGLISH CONTROL (author-validated). For an EN book the repair targets the book language — clean English is legitimate and MUST survive untouched (NOT translated to Hebrew, NOT stripped of 'narrator'/'imagery'). expectedLatinRemoved is empty; every English mustPreserve substring must survive. A repair that translates or mangles this is a defect the p3-gate must catch."
+  }
+]

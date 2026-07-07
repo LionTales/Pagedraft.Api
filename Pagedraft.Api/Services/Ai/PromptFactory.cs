@@ -12,8 +12,18 @@ public class PromptFactory
     private const string HebrewSystemBase =
         "אתה עורך לשוני ומגיה טקסטים בעברית. עליך לתקן שגיאות לשון, דקדוק, כתיב ופיסוק בטקסטים ספרותיים בעברית, תוך שמירה על הקול, הסגנון והכוונה של המחבר. השב תמיד בעברית בלבד.";
 
+    // Appended to HebrewAnalysisSystem (the shared system message for LinguisticAnalysis, LiteraryAnalysis,
+    // Summarization and BookReview — see AnalysisTaskMapping + GetPrompt) so every Hebrew analysis output is
+    // steered away from the real CONTENT-value English leaks the diagnostic captured ("(Action)", "Tension",
+    // "High Stakes"). p5-prompts of analysis-output-repair-2026-07-03.plan.md: an UPSTREAM reduction so the
+    // deterministic glossary/guard pass fires less often. Kept SHORT (one line + a compact 8-term glossary
+    // subset of LiteraryTermGlossary) to avoid prompt bloat / recall regression. NO em-dash (the model echoes
+    // punctuation from its system frame).
+    private const string HebrewNoEnglishTermsClause =
+        " כתוב את כל הפלט בעברית בלבד. אל תשבץ מילים או מונחים באנגלית, לא בסוגריים ולא בכל צורה אחרת; אם דרוש מונח ספרותי או לשוני, השתמש במקבילה העברית שלו. מקבילות מקובלות: narrator=מספר, tone=טון, mood=מצב רוח, foreshadowing=רמיזה מקדימה, imagery=דימויים, tension=מתח, climax=שיא, action=פעולה.";
+
     private const string HebrewAnalysisSystem =
-        "אתה מומחה לניתוח ספרותי ולשוני של טקסטים בעברית. אתה מנתח כתיבה ספרותית, פרוזה ופואטיקה. השב תמיד בעברית בלבד, בסגנון מקצועי ותמציתי.";
+        "אתה מומחה לניתוח ספרותי ולשוני של טקסטים בעברית. אתה מנתח כתיבה ספרותית, פרוזה ופואטיקה. השב תמיד בעברית בלבד, בסגנון מקצועי ותמציתי." + HebrewNoEnglishTermsClause;
 
     private const string HebrewBookSystem =
         "אתה מומחה ספרותי המנתח ספרים שלמים. אתה מסוגל לזהות ז'אנרים, דמויות, מבנה עלילתי, ולספק תובנות מעמיקות על יצירה ספרותית. השב תמיד בעברית בלבד.";
@@ -33,7 +43,7 @@ public class PromptFactory
         "You are an editor and proofreader. Correct spelling, grammar, and punctuation in the given text while preserving the author's voice and style. Respond only in the same language as the input.";
 
     private const string EnglishAnalysisSystem =
-        "You are an expert literary and linguistic analyst. You analyze prose, poetry, and creative writing with depth and precision. Respond in a professional, concise style.";
+        "You are an expert literary and linguistic analyst. You analyze prose, poetry, and creative writing with depth and precision. Respond in a professional, concise style. Respond in English only; do not insert non-English terms parenthetically.";
 
     private const string EnglishBookSystem =
         "You are a literary expert who analyzes complete books. You can identify genres, characters, plot structure, and provide deep insights about literary works. Respond in a professional, concise style.";

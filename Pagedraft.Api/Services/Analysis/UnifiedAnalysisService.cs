@@ -1,8 +1,11 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -32,6 +35,7 @@ public class UnifiedAnalysisService
     private readonly IAnalysisContextService _contextService;
     private readonly SuggestionDiffService _suggestionDiff;
     private readonly Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker _ktivMaleChecker;
+    private readonly AnalysisRepairService _analysisRepair;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -49,7 +53,8 @@ public class UnifiedAnalysisService
         AnalysisProgressTracker progress,
         IAnalysisContextService contextService,
         SuggestionDiffService suggestionDiff,
-        Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker ktivMaleChecker)
+        Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker ktivMaleChecker,
+        AnalysisRepairService analysisRepair)
     {
         _db = db;
         _router = router;
@@ -61,6 +66,7 @@ public class UnifiedAnalysisService
         _contextService = contextService;
         _suggestionDiff = suggestionDiff;
         _ktivMaleChecker = ktivMaleChecker;
+        _analysisRepair = analysisRepair;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -424,6 +430,10 @@ public class UnifiedAnalysisService
         var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
+        // Analysis-output repair (RunAsync seam), all gated by Ai:AnalysisRepair. Shipped default
+        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
+
         var result = new AnalysisResult
         {
             ChapterId = chapterId ?? Guid.Empty,
@@ -544,6 +554,10 @@ public class UnifiedAnalysisService
 
         var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
+
+        // Analysis-output repair (RunWithInputAsync seam), all gated by Ai:AnalysisRepair. Shipped default
+        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
 
         var result = new AnalysisResult
         {
@@ -705,6 +719,10 @@ public class UnifiedAnalysisService
 
         var llmOutputText = cleanContent;
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
+
+        // Analysis-output repair (streaming seam), all gated by Ai:AnalysisRepair. Shipped default
+        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
 
         var result = new AnalysisResult
         {
@@ -1288,6 +1306,143 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
+    /// Backstop cap on the number of LineEdit suggestions that survive
+    /// <see cref="NormalizeLineEditSuggestions"/>. The observed repetition-loop failure produced
+    /// ~10 identical suggestions; a legitimate per-chapter line-edit is comfortably under this, so
+    /// 50 only ever truncates a pathological run whose duplicates were near-identical (and thus
+    /// slipped past the exact-pair dedupe) rather than byte-identical.
+    /// </summary>
+    private const int MaxLineEditSuggestions = 50;
+
+    /// <summary>
+    /// Deserialize a serialized <see cref="LineEditResult"/>, run it through
+    /// <see cref="NormalizeLineEditSuggestions"/>, and re-serialize. Applied to EVERY successful
+    /// LineEdit parse/salvage path in <see cref="TryParseStructured"/> so the persisted
+    /// StructuredResult (read directly by the FE, not only the derived AnalysisSuggestion cards) is
+    /// clean. FAIL-SAFE: if the input cannot be re-parsed for any reason the ORIGINAL json is
+    /// returned unchanged so a normalization hiccup can never drop a hard-won salvaged result.
+    /// <paramref name="logger"/> is optional (static helper, no instance logger) and is forwarded to
+    /// <see cref="NormalizeLineEditSuggestions"/> purely so it can warn when the cap actually truncates.
+    /// </summary>
+    internal static string? NormalizeLineEditResultJson(string? json, ILogger? logger = null)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return json;
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<LineEditResult>(json, JsonOpts);
+            if (parsed is null) return json;
+            var normalized = NormalizeLineEditSuggestions(parsed, logger);
+            return JsonSerializer.Serialize(normalized, JsonOpts);
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+    }
+
+    /// <summary>
+    /// Post-parse normalization for LineEdit suggestions, applied to every successful parse/salvage
+    /// path so the persisted StructuredResult is clean — not only the derived cards. Three
+    /// deterministic passes, in order (OverallFeedback and every surviving suggestion's fields —
+    /// Reason, Category, ... — are preserved verbatim):
+    ///  1. DROP no-op suggestions. Two cases are treated as no-ops: (a) Original == Suggested after
+    ///     trimming + Unicode normalization (reuses <see cref="IsNoOpSuggestion"/>); and (b)
+    ///     suggestions that differ ONLY by SURROUNDING (leading/trailing) punctuation or whitespace,
+    ///     e.g. the real "לא," -> "לא" repetition-loop noise the diagnostic flagged. "Surrounding"
+    ///     is deliberately conservative — internal punctuation changes (e.g. "טוב, מאוד" -> "טוב מאוד")
+    ///     are a REAL edit and are kept.
+    ///  2. DEDUPE on the (Original, Suggested) pair (trimmed + normalized, ordinal), keeping the
+    ///     FIRST occurrence and preserving order — the live run emitted ~10 identical cards.
+    ///  3. CAP the survivors at <see cref="MaxLineEditSuggestions"/> as a backstop against a
+    ///     pathological run whose near-identical entries slipped past the exact-pair dedupe.
+    /// An optional <paramref name="logger"/> gets a single LogWarning ONLY when the cap actually
+    /// truncates (i.e. raw suggestions beyond the cap were left unevaluated) — not on every call.
+    /// </summary>
+    internal static LineEditResult NormalizeLineEditSuggestions(LineEditResult result, ILogger? logger = null)
+    {
+        if (result?.Suggestions is null || result.Suggestions.Count == 0)
+            return result ?? new LineEditResult();
+
+        var suggestions = result.Suggestions;
+        var deduped = new List<LineEditSuggestion>();
+        var seen = new HashSet<(string Original, string Suggested)>();
+
+        for (var i = 0; i < suggestions.Count; i++)
+        {
+            var suggestion = suggestions[i];
+            if (suggestion is null) continue;
+
+            // Pass 1: drop exact no-ops and surrounding-punctuation-only "noise" edits.
+            if (IsNoOpSuggestion(suggestion) || IsSurroundingPunctuationOnlyDiff(suggestion))
+                continue;
+
+            // Pass 2: dedupe identical (Original, Suggested) pairs, first occurrence wins.
+            var key = (
+                TextNormalization.NormalizeTextForAnalysis((suggestion.Original ?? string.Empty).Trim()),
+                TextNormalization.NormalizeTextForAnalysis((suggestion.Suggested ?? string.Empty).Trim()));
+            if (!seen.Add(key)) continue;
+
+            deduped.Add(suggestion);
+
+            // Pass 3: cap.
+            if (deduped.Count >= MaxLineEditSuggestions)
+            {
+                var unprocessed = suggestions.Count - (i + 1);
+                if (unprocessed > 0)
+                {
+                    logger?.LogWarning(
+                        "NormalizeLineEditSuggestions: hit the {Cap}-suggestion cap with {Unprocessed} raw suggestion(s) beyond it left unevaluated (dropped).",
+                        MaxLineEditSuggestions, unprocessed);
+                }
+                break;
+            }
+        }
+
+        result.Suggestions = deduped;
+        return result;
+    }
+
+    /// <summary>
+    /// True when a suggestion's Original and Suggested are identical once SURROUNDING
+    /// (leading/trailing) punctuation and whitespace are stripped after Unicode normalization —
+    /// e.g. "לא," vs "לא". Conservative by construction: only the outer edges are trimmed, so any
+    /// change to the inner text (word order, internal punctuation, added/removed words) is a real
+    /// edit and returns false. If BOTH sides trim to an empty core they were pure punctuation on
+    /// each side (e.g. "?" vs "!"); those are left for <see cref="IsNoOpSuggestion"/>/dedupe to
+    /// judge rather than collapsed here, so distinct punctuation-only edits are not falsely merged.
+    /// </summary>
+    private static bool IsSurroundingPunctuationOnlyDiff(LineEditSuggestion suggestion)
+    {
+        var original = TextNormalization.NormalizeTextForAnalysis((suggestion.Original ?? string.Empty).Trim());
+        var suggested = TextNormalization.NormalizeTextForAnalysis((suggestion.Suggested ?? string.Empty).Trim());
+
+        var originalCore = TrimSurroundingPunctuation(original);
+        var suggestedCore = TrimSurroundingPunctuation(suggested);
+
+        if (originalCore.Length == 0 && suggestedCore.Length == 0)
+            return false;
+
+        return string.Equals(originalCore, suggestedCore, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Strip leading and trailing punctuation and whitespace, preserving the inner text verbatim.
+    /// </summary>
+    private static string TrimSurroundingPunctuation(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+
+        int start = 0;
+        int end = text.Length - 1;
+        while (start <= end && (char.IsWhiteSpace(text[start]) || char.IsPunctuation(text[start])))
+            start++;
+        while (end >= start && (char.IsWhiteSpace(text[end]) || char.IsPunctuation(text[end])))
+            end--;
+
+        return start > end ? string.Empty : text[start..(end + 1)];
+    }
+
+    /// <summary>
     /// Run LineEdit in chunks with limited parallelism, then merge into one AnalysisResult.
     /// Updates AnalysisProgressTracker for live progress polling.
     /// </summary>
@@ -1469,7 +1624,13 @@ public class UnifiedAnalysisService
         await Task.WhenAll(tasks);
         overallSw.Stop();
 
-        var merged = MergeLineEditResults(chunkResults.ToList());
+        // Merge across chunks (cross-chunk Original-dedupe + combined OverallFeedback), then run the
+        // SAME post-parse normalization the per-chunk parse path applies (NormalizeLineEditSuggestions):
+        // surrounding-punctuation-only noise drop + MaxLineEditSuggestions (50) cap. MergeLineEditResults
+        // enforces neither, so a repetition loop spread across many chunks could otherwise accumulate
+        // >50 suggestions / punctuation-noise into the merged, persisted StructuredResult. Normalization
+        // only touches the suggestions list; OverallFeedback and the cross-chunk dedupe are preserved.
+        var merged = NormalizeLineEditSuggestions(MergeLineEditResults(chunkResults.ToList()), _logger);
         var mergedJson = JsonSerializer.Serialize(merged, JsonOpts);
 
         _logger.LogInformation("LineEdit merge complete: {SuggestionCount} suggestions", merged.Suggestions.Count);
@@ -1478,6 +1639,16 @@ public class UnifiedAnalysisService
         await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, AnalysisType.LineEdit, ct);
 
         var cleanContent = MaybeReplaceLineEditResultText(AnalysisType.LineEdit, mergedJson, merged.OverallFeedback ?? string.Empty);
+
+        // Analysis-output repair (chunked LineEdit seam) — mirror the three non-chunked seams (:435, :560,
+        // :725) so LONG Hebrew chapters (which route here) get the same glossary/repair layer as short ones.
+        // Gated by Ai:AnalysisRepair (shipped default { Enabled:true, GuardOnly:true } = deterministic
+        // glossary only, LLM off). ApplyAnalysisRepairAsync re-derives ResultText from the repaired
+        // overallFeedback for LineEdit, preserving the MaybeReplaceLineEditResultText behaviour above.
+        var (repairedJson, repairedText) = await ApplyAnalysisRepairAsync(
+            mergedJson, cleanContent, AnalysisType.LineEdit, language, ct);
+        mergedJson = repairedJson ?? mergedJson;
+        cleanContent = repairedText;
 
         var result = new AnalysisResult
         {
@@ -1827,23 +1998,27 @@ public class UnifiedAnalysisService
     {
         if (type == AnalysisType.LineEdit)
         {
+            // Every successful parse/salvage path is routed through NormalizeLineEditResultJson so the
+            // persisted StructuredResult (which the FE reads directly, not just the derived cards) is
+            // deduped + no-op-stripped + capped. See NormalizeLineEditSuggestions for the exact rules.
             var result = TryExtractAndReserializeWithLogging<LineEditResult>(content, AnalysisType.LineEdit);
-            if (result != null) return result;
+            if (result != null) return NormalizeLineEditResultJson(result, _logger);
 
             // Aggressive retry: strip all markdown fences/formatting, bidi, then try direct deserialize
             result = TryLineEditAggressiveParse(content);
             if (result != null)
             {
                 _logger.LogInformation("LineEdit aggressive parse fallback succeeded after primary parse failed.");
-                return result;
+                return NormalizeLineEditResultJson(result, _logger);
             }
 
             // Final fallback: salvage truncated JSON by keeping only fully-closed suggestion objects
             result = SalvageTruncatedLineEditJson(content);
             if (result != null)
+            {
                 _logger.LogInformation("LineEdit truncation salvage succeeded: recovered partial suggestions from truncated JSON.");
-            if (result != null)
-                return result;
+                return NormalizeLineEditResultJson(result, _logger);
+            }
 
             // XML-like fallback: when the model returns a structured but non-JSON response
             // (e.g. <edit><instruction>...</instruction></edit>), salvage it into a minimal
@@ -1854,7 +2029,7 @@ public class UnifiedAnalysisService
             {
                 _logger.LogInformation(
                     "LineEdit XML fallback produced OverallFeedback from non-JSON structured output.");
-                return xmlFallback;
+                return NormalizeLineEditResultJson(xmlFallback, _logger);
             }
 
             _logger.LogWarning(
@@ -1866,12 +2041,12 @@ public class UnifiedAnalysisService
 
         return type switch
         {
-            AnalysisType.LinguisticAnalysis => TryExtractAndReserialize<LinguisticAnalysisResult>(content),
-            AnalysisType.LiteraryAnalysis => TryExtractAndReserialize<LiteraryAnalysisResult>(content),
-            AnalysisType.BookOverview => TryExtractAndReserialize<BookOverviewResult>(content),
-            AnalysisType.CharacterAnalysis => TryExtractAndReserialize<CharacterAnalysisResult>(content),
-            AnalysisType.StoryAnalysis => TryExtractAndReserialize<StoryAnalysisResult>(content),
-            AnalysisType.QA => TryExtractAndReserialize<QAResult>(content),
+            AnalysisType.LinguisticAnalysis => TryExtractAndReserialize<LinguisticAnalysisResult>(content, _logger),
+            AnalysisType.LiteraryAnalysis => TryExtractAndReserialize<LiteraryAnalysisResult>(content, _logger),
+            AnalysisType.BookOverview => TryExtractAndReserialize<BookOverviewResult>(content, _logger),
+            AnalysisType.CharacterAnalysis => TryExtractAndReserialize<CharacterAnalysisResult>(content, _logger),
+            AnalysisType.StoryAnalysis => TryExtractAndReserialize<StoryAnalysisResult>(content, _logger),
+            AnalysisType.QA => TryExtractAndReserialize<QAResult>(content, _logger),
             _ => null
         };
     }
@@ -2006,12 +2181,18 @@ public class UnifiedAnalysisService
         return JsonSerializer.Serialize(fallback, JsonOpts);
     }
 
-    private static string? TryExtractAndReserialize<T>(string content) where T : class
+    internal static string? TryExtractAndReserialize<T>(string content, ILogger? logger = null) where T : class
     {
         try
         {
             var json = ExtractJson(content);
             if (json == null) return null;
+
+            // Tolerate a single model typo in a KNOWN top-level key (e.g. "narriceVoiceDescription"
+            // -> "narrativeVoiceDescription") so a field is not silently dropped in the FE.
+            // KEY NAMES only, never values/enum values; fail-safe (bad input -> unchanged). See
+            // p4-key-tolerance in analysis-output-repair-2026-07-03.plan.md.
+            json = RepairNearMissKeys<T>(json, logger);
 
             var parsed = JsonSerializer.Deserialize<T>(json, JsonOpts);
             if (parsed == null) return null;
@@ -2022,6 +2203,194 @@ public class UnifiedAnalysisService
         {
             return null;
         }
+    }
+
+    // Per-type cache of the KNOWN top-level JSON key names (from each property's
+    // [JsonPropertyName], falling back to the camelCase property name to match JsonOpts).
+    private static readonly ConcurrentDictionary<Type, string[]> KnownJsonKeyCache = new();
+
+    private static string[] GetKnownJsonKeys<T>()
+    {
+        return KnownJsonKeyCache.GetOrAdd(typeof(T), static t =>
+        {
+            var keys = new List<string>();
+            foreach (var prop in t.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                var attr = prop.GetCustomAttribute<JsonPropertyNameAttribute>();
+                var name = attr?.Name ?? JsonNamingPolicy.CamelCase.ConvertName(prop.Name);
+                if (!string.IsNullOrEmpty(name))
+                    keys.Add(name);
+            }
+            return keys.ToArray();
+        });
+    }
+
+    /// <summary>
+    /// Bounded, fail-safe repair of a single model typo in a KNOWN top-level JSON key so a field is
+    /// not silently lost (real case: "narriceVoiceDescription" -> "narrativeVoiceDescription", which
+    /// left the FE reading blank). For each known schema key that is ABSENT from the top-level object,
+    /// if EXACTLY ONE present, not-already-known, not-yet-claimed key is a near-match
+    /// (Levenshtein &lt;= 3 AND length within 2), it is renamed to the known key. Zero or more-than-one
+    /// candidate = ambiguous = left untouched. Symmetrically, a present typo key that is a near-miss to
+    /// TWO OR MORE absent known keys is ALSO ambiguous and left untouched (else it would silently bind to
+    /// whichever known key is first in reflection order). A key already present (case-insensitively,
+    /// matching the deserializer) is never overwritten (no clobber).
+    /// NOTE: the real "narriceVoiceDescription" vs "narrativeVoiceDescription" typo is Levenshtein
+    /// distance 3 (length diff 2), NOT 2 as the p4-key-tolerance plan text states; the bound is 3 so the
+    /// documented real fixture actually binds. Still tiny/bounded, paired with the length window +
+    /// ambiguity + no-clobber + not-a-known-key guards.
+    /// Only KEY NAMES are touched — never values, never enum values (e.g. significance "majr" is left
+    /// as-is). Nested objects/arrays are OUT OF SCOPE (top-level keys only); the real failure was a
+    /// top-level key, and nested-key repair is future work. Any parse issue / non-object JSON returns
+    /// the input unchanged (never throws). Re-serializes only when a rename actually fires, so clean
+    /// JSON passes through byte-identical.
+    /// </summary>
+    internal static string RepairNearMissKeys<T>(string json, ILogger? logger = null) where T : class
+    {
+        if (string.IsNullOrWhiteSpace(json)) return json;
+
+        JsonObject? obj;
+        try
+        {
+            obj = JsonNode.Parse(json) as JsonObject;
+        }
+        catch
+        {
+            return json; // not parseable -> leave unchanged (deserialize will fail the same way it did before)
+        }
+
+        if (obj == null) return json; // top-level array/primitive -> out of scope
+
+        var knownKeys = GetKnownJsonKeys<T>();
+        var knownSet = new HashSet<string>(knownKeys, StringComparer.OrdinalIgnoreCase);
+
+        // Present top-level keys, compared case-insensitively to mirror JsonOpts.PropertyNameCaseInsensitive.
+        var presentKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in obj)
+            presentKeys.Add(kvp.Key);
+
+        var renames = new List<(string From, string To)>();
+        var claimed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Symmetric ambiguity guard (be-c03 / P3-4): the matchCount>1 bail in the loop below covers
+        // "one ABSENT known key matched by MULTIPLE present typos". This guards the MIRROR case — ONE
+        // present non-known key that is a near-miss (Levenshtein <=3 AND length window <=2, the SAME
+        // bounds as below) to TWO OR MORE ABSENT known keys. Without it such a key silently binds to
+        // whichever known key is first in reflection order (GetKnownJsonKeys -> GetProperties), which
+        // could land the value under the WRONG field. A candidate ambiguous across >1 absent known key
+        // is excluded up-front and left untouched. A key that is a near-miss to EXACTLY ONE absent
+        // known key still renames (the real narriceVoiceDescription -> narrativeVoiceDescription case).
+        var ambiguousCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in obj)
+        {
+            var key = kvp.Key;
+            if (knownSet.Contains(key)) continue; // only present NON-known keys can be candidates
+            var nearAbsentKnownCount = 0;
+            foreach (var known in knownKeys)
+            {
+                if (presentKeys.Contains(known)) continue; // only ABSENT known keys are rename targets
+                if (Math.Abs(key.Length - known.Length) > 2) continue; // length window (<= 2), mirrors the loop below
+                var d = BoundedLevenshtein(key, known, 3);
+                if (d >= 1 && d <= 3)
+                {
+                    nearAbsentKnownCount++;
+                    if (nearAbsentKnownCount > 1) break; // ambiguous across >1 absent known key
+                }
+            }
+            if (nearAbsentKnownCount > 1)
+                ambiguousCandidates.Add(key);
+        }
+
+        foreach (var known in knownKeys)
+        {
+            // Only fill in an ABSENT known key; never overwrite one already present (no clobber).
+            if (presentKeys.Contains(known)) continue;
+
+            string? candidate = null;
+            var matchCount = 0;
+            foreach (var kvp in obj)
+            {
+                var key = kvp.Key;
+                if (knownSet.Contains(key)) continue;   // a candidate must not itself be a known key
+                if (claimed.Contains(key)) continue;    // already used by an earlier rename
+                if (ambiguousCandidates.Contains(key)) continue; // symmetric guard: near-miss to >1 absent known key
+                if (Math.Abs(key.Length - known.Length) > 2) continue; // length window (<= 2)
+                var dist = BoundedLevenshtein(key, known, 3);
+                if (dist >= 1 && dist <= 3)
+                {
+                    candidate = key;
+                    matchCount++;
+                    if (matchCount > 1) break; // ambiguous -> bail, leave untouched
+                }
+            }
+
+            if (matchCount == 1 && candidate != null)
+            {
+                renames.Add((candidate, known));
+                claimed.Add(candidate);
+            }
+            // zero or >1 candidate -> leave alone (bounded / safe)
+        }
+
+        if (renames.Count == 0) return json; // no near-miss -> pass through byte-identical
+
+        foreach (var (from, to) in renames)
+        {
+            if (obj.ContainsKey(to)) continue; // defensive no-clobber (should not happen: 'to' was absent)
+            var value = obj[from];
+            // DeepClone detaches the node from its current parent so it can be re-added under the new key.
+            var moved = value?.DeepClone();
+            obj.Remove(from);
+            obj[to] = moved;
+            logger?.LogInformation(
+                "Structured parse key repair ({Type}): renamed near-miss JSON key '{WrongKey}' -> '{CorrectKey}' (Levenshtein<=3, length window<=2).",
+                typeof(T).Name, from, to);
+        }
+
+        try
+        {
+            return obj.ToJsonString();
+        }
+        catch
+        {
+            return json;
+        }
+    }
+
+    /// <summary>
+    /// Levenshtein edit distance between <paramref name="a"/> and <paramref name="b"/>, short-circuited
+    /// at <paramref name="max"/>: as soon as an entire DP row exceeds max it returns max+1 (the exact value
+    /// past the bound does not matter to the caller). Case-sensitive. No external dependency.
+    /// </summary>
+    private static int BoundedLevenshtein(string a, string b, int max)
+    {
+        if (a == b) return 0;
+        int la = a.Length, lb = b.Length;
+        if (Math.Abs(la - lb) > max) return max + 1;
+        if (la == 0) return lb;
+        if (lb == 0) return la;
+
+        var prev = new int[lb + 1];
+        var curr = new int[lb + 1];
+        for (var j = 0; j <= lb; j++) prev[j] = j;
+
+        for (var i = 1; i <= la; i++)
+        {
+            curr[0] = i;
+            var rowMin = curr[0];
+            var ca = a[i - 1];
+            for (var j = 1; j <= lb; j++)
+            {
+                var cost = ca == b[j - 1] ? 0 : 1;
+                var v = Math.Min(Math.Min(prev[j] + 1, curr[j - 1] + 1), prev[j - 1] + cost);
+                curr[j] = v;
+                if (v < rowMin) rowMin = v;
+            }
+            if (rowMin > max) return max + 1; // no cell can drop below max on later rows
+            (prev, curr) = (curr, prev);
+        }
+
+        return prev[lb];
     }
 
     /// <summary>
@@ -2223,6 +2592,135 @@ public class UnifiedAnalysisService
             // Structured JSON was already validated; ignore any unlikely failure here
         }
         return cleanContent;
+    }
+
+    /// <summary>
+    /// The single, shared insertion point for the analysis-output repair layer. Called at all three
+    /// non-Proofread seams (RunAsync, RunWithInputAsync, streaming) right after structuredJson +
+    /// cleanContent are finalised and before the <see cref="AnalysisResult"/> is built. Governed end-to-end
+    /// by <c>Ai:AnalysisRepair</c> (<see cref="Ai.AnalysisRepairOptions"/>) with three-way semantics:
+    ///
+    ///   • block null OR <c>Enabled=false</c> → FULL no-op: NEITHER stage runs; inputs returned unchanged.
+    ///   • <c>Enabled=true</c> + a <c>PerType</c> gate that excludes this type → skipped (both stages).
+    ///   • <c>Enabled=true</c> + type allowed → Stage 1 runs; Stage 2 runs only when <c>GuardOnly=false</c>.
+    ///
+    ///   Stage 1 — DETERMINISTIC glossary pass (<see cref="GlossaryRepairPass"/>): English-&gt;Hebrew
+    ///   substitution over the whitelisted PROSE fields, itself guard-gated + fail-safe (a no-op for
+    ///   Proofread, a non-Hebrew book, or any term the closed glossary does not cover).
+    ///   Stage 2 — VALUE-SCOPED LLM repair (<see cref="AnalysisRepairService.RepairAnalysisAsync"/>): runs
+    ///   ONLY when <c>GuardOnly=false</c>. Guard-gated inside the service (a clean field makes ZERO model
+    ///   calls) and fail-safe (can only ever leave a field cleaner). Never runs for Proofread.
+    ///
+    /// The SHIPPED appsettings default is { Enabled:true, GuardOnly:true } = Stage-1-only (the p3-gate
+    /// GUARD-ONLY decision), which reproduces the pre-p6 behaviour (always-on glossary, LLM off). Setting
+    /// Enabled=false makes the whole layer a strict no-op per the plan.
+    ///
+    /// For LineEdit the prose-primary ResultText is refreshed from the repaired overallFeedback AFTER both
+    /// stages; for Literary/Linguistic only StructuredResult changes (the FE renders it); for Summarization
+    /// the passes return the repaired whole text.
+    /// </summary>
+    private async Task<(string? structuredJson, string cleanContent)> ApplyAnalysisRepairAsync(
+        string? structuredJson,
+        string cleanContent,
+        AnalysisType analysisType,
+        string language,
+        CancellationToken ct)
+    {
+        var cfg = _aiOptions.Value.AnalysisRepair;
+
+        // FULL no-op when the layer is disabled. A null block (no Ai:AnalysisRepair in config) or
+        // Enabled=false BOTH mean off — neither the deterministic glossary (Stage 1) nor the LLM pass
+        // (Stage 2) runs, and the inputs are returned byte-identical. The shipped appsettings block sets
+        // Enabled=true, so production runs Stage 1 (glossary), preserving the pre-p6 behaviour. Also skip
+        // when a non-empty PerType map excludes this analysis type (a type absent/false is skipped).
+        if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, analysisType))
+        {
+            return (structuredJson, cleanContent);
+        }
+
+        // Observability (p6-observability): time the whole repair layer and tally what each stage did, then
+        // emit ONE aggregate line per run. It goes out at INFO only when the layer actually flagged/changed
+        // something (glossaryChanged > 0 || llmFlagged > 0); a clean analysis logs a single Debug no-op line
+        // so a healthy run produces no INFO noise. The Stopwatch/logging is wrapped so it can never throw or
+        // alter the repair control flow.
+        var repairSw = Stopwatch.StartNew();
+
+        // Stage 1 — deterministic glossary pass. Runs for every enabled + PerType-allowed type; fail-safe
+        // (a no-op for Proofread, a non-Hebrew book, or an out-of-glossary term). GlossaryRepairPass is
+        // itself catch-all fail-safe, but the layer's load-bearing invariant is "the repair layer can
+        // NEVER throw into RunAsync", so wrap this always-on seam too (belt-and-braces): on ANY exception
+        // log and keep the un-repaired inputs. Without this, a fault here (e.g. a model-emitted null JSON
+        // array walked unguarded) would propagate through RunAsync and crash the entire analysis.
+        var glossaryChanged = 0;
+        try
+        {
+            var repair = GlossaryRepairPass.Apply(analysisType, structuredJson, cleanContent, language, JsonOpts);
+            structuredJson = repair.StructuredJson;
+            cleanContent = repair.CleanContent;
+            glossaryChanged = repair.FieldsChanged;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "AnalysisRepair Stage 1 (glossary) threw for type={Type}; keeping un-repaired inputs (fail-safe)",
+                analysisType);
+        }
+
+        // Stage 2 — value-scoped LLM repair. Runs ONLY when NOT GuardOnly. The shipped default is
+        // GuardOnly=true, so this is skipped by default (glossary-only, no model calls). Guard-gated +
+        // fail-safe inside the service (a clean field makes ZERO model calls; Proofread is never routed).
+        // Counters (N/M/K) stay 0 while the LLM stage is skipped.
+        var llmFlagged = 0;
+        var llmRepaired = 0;
+        var llmFailSafe = 0;
+        if (!cfg.GuardOnly)
+        {
+            var repairResult = await _analysisRepair.RepairAnalysisAsync(
+                analysisType, structuredJson, cleanContent, language, JsonOpts, ct);
+            structuredJson = repairResult.StructuredJson;
+            cleanContent = repairResult.CleanContent;
+            llmFlagged = repairResult.LlmFlagged;
+            llmRepaired = repairResult.LlmRepaired;
+            llmFailSafe = repairResult.LlmFailSafe;
+        }
+
+        // LineEdit is prose-primary via overallFeedback: re-derive ResultText from the repaired structured
+        // feedback AFTER both passes (mirrors the pre-repair MaybeReplaceLineEditResultText call above).
+        if (analysisType == AnalysisType.LineEdit)
+        {
+            cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
+        }
+
+        repairSw.Stop();
+
+        // One aggregate line per run. G = glossary fields changed; N/M/K = LLM fields flagged / accepted-and-
+        // changed / fail-safe-discarded. Structured placeholders (no interpolation) so the fields are queryable.
+        if (glossaryChanged > 0 || llmFlagged > 0)
+        {
+            _logger.LogInformation(
+                "AnalysisRepair: type={Type} glossaryChanged={G} llmFlagged={N} llmRepaired={M} llmFailSafe={K} totalMs={Ms}",
+                analysisType, glossaryChanged, llmFlagged, llmRepaired, llmFailSafe, repairSw.ElapsedMilliseconds);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "AnalysisRepair: type={Type} no-op (glossaryChanged=0 llmFlagged=0) totalMs={Ms}",
+                analysisType, repairSw.ElapsedMilliseconds);
+        }
+
+        return (structuredJson, cleanContent);
+    }
+
+    /// <summary>
+    /// Per-type gate for the repair layer (p6-config). When <see cref="Ai.AnalysisRepairOptions.PerType"/>
+    /// is null/empty there is NO per-type restriction (every repairable type is allowed). When it is a
+    /// non-empty map it is a strict allowlist: a type absent from the map, or mapped to false, is skipped.
+    /// Keyed by the <see cref="AnalysisType"/> name (e.g. "Summarization", "LiteraryAnalysis").
+    /// </summary>
+    private static bool PerTypeAllows(Ai.AnalysisRepairOptions cfg, AnalysisType analysisType)
+    {
+        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
+        return cfg.PerType.TryGetValue(analysisType.ToString(), out var enabled) && enabled;
     }
 
     // ─── Sanitization ───────────────────────────────────────────────

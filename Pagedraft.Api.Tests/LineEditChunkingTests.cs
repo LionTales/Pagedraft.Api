@@ -410,6 +410,101 @@ public class LineEditChunkingTests
         Assert.Equal("F1\n\n---\n\nF2\n\n---\n\nF3", merged.OverallFeedback);
     }
 
+    // ─── Merge + normalize (persisted-result) tests ─────────────────
+    // Guard the RunLineEditChunkedAsync fix (UnifiedAnalysisService.cs :1611): the merged chunked
+    // result is run through NormalizeLineEditSuggestions BEFORE it is serialized/persisted, so the
+    // surrounding-punctuation-only drop and the MaxLineEditSuggestions (50) cap — which
+    // MergeLineEditResults does NOT enforce — apply to a repetition loop spread across many chunks
+    // (the exact failure mode this feature targets). These exercise the precise composition the fix
+    // wires: NormalizeLineEditSuggestions(MergeLineEditResults(...)).
+
+    [Fact]
+    public void MergeThenNormalize_CrossChunkOverflowAndPunctuationNoise_CappedAndDropped()
+    {
+        const string realOriginal = "טוב, מאוד";   // internal-punctuation change = REAL edit, must survive
+        const string realSuggested = "טוב מאוד";
+        const string noiseOriginal = "לא,";          // surrounding-punctuation-only = loop noise, must drop
+        const string noiseSuggested = "לא";
+
+        // Chunk 1 leads with the real edit + the punctuation-noise pair, then 30 distinct fillers.
+        var chunk1Suggestions = new List<LineEditSuggestion>
+        {
+            new() { Original = realOriginal, Suggested = realSuggested, Reason = "punctuation", Category = "clarity" },
+            new() { Original = noiseOriginal, Suggested = noiseSuggested, Reason = "loop-noise", Category = "clarity" },
+        };
+        for (var i = 0; i < 30; i++)
+            chunk1Suggestions.Add(new LineEditSuggestion
+            {
+                Original = $"chunk1 original number {i}.",
+                Suggested = $"chunk1 rewritten number {i}.",
+                Reason = "r",
+                Category = "flow"
+            });
+
+        // Chunk 2 adds 30 more DISTINCT-Original fillers (so they survive the cross-chunk Original-dedupe).
+        var chunk2Suggestions = new List<LineEditSuggestion>();
+        for (var i = 0; i < 30; i++)
+            chunk2Suggestions.Add(new LineEditSuggestion
+            {
+                Original = $"chunk2 original number {i}.",
+                Suggested = $"chunk2 rewritten number {i}.",
+                Reason = "r",
+                Category = "style"
+            });
+
+        var chunk1 = new LineEditResult { Suggestions = chunk1Suggestions, OverallFeedback = "Feedback A" };
+        var chunk2 = new LineEditResult { Suggestions = chunk2Suggestions, OverallFeedback = "Feedback B" };
+
+        // Exact wiring of the fix: normalize the merged result before it would be serialized/persisted.
+        var merged = UnifiedAnalysisService.NormalizeLineEditSuggestions(
+            UnifiedAnalysisService.MergeLineEditResults(new List<LineEditResult> { chunk1, chunk2 }));
+
+        // 62 distinct-Original survivors of the merge (1 real + 1 noise + 60 fillers); normalization drops
+        // the noise pair (61 left) then caps at 50 — the accumulation MergeLineEditResults alone would miss.
+        Assert.Equal(50, merged.Suggestions.Count);
+
+        // Surrounding-punctuation-only noise pair is gone.
+        Assert.DoesNotContain(merged.Suggestions, s => s.Original == noiseOriginal);
+
+        // The real internal-punctuation edit survives (it led the list, well inside the cap).
+        Assert.Equal(realOriginal, merged.Suggestions[0].Original);
+        Assert.Equal(realSuggested, merged.Suggestions[0].Suggested);
+
+        // OverallFeedback from the cross-chunk merge is preserved by normalization (it touches only Suggestions).
+        Assert.Equal("Feedback A\n\n---\n\nFeedback B", merged.OverallFeedback);
+    }
+
+    [Fact]
+    public void MergeThenNormalize_SurroundingPunctuationNoise_DroppedWhileRealEditSurvives()
+    {
+        // MergeLineEditResults keeps this pair (its no-op check requires normalized equality, and
+        // "לא," != "לא"); only NormalizeLineEditSuggestions' surrounding-punctuation pass drops it.
+        var chunk1 = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "לא,", Suggested = "לא", Reason = "loop-noise", Category = "clarity" },
+            },
+            OverallFeedback = "Solo feedback"
+        };
+        var chunk2 = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "טוב, מאוד", Suggested = "טוב מאוד", Reason = "punctuation", Category = "clarity" },
+            },
+            OverallFeedback = ""
+        };
+
+        var merged = UnifiedAnalysisService.NormalizeLineEditSuggestions(
+            UnifiedAnalysisService.MergeLineEditResults(new List<LineEditResult> { chunk1, chunk2 }));
+
+        var survivor = Assert.Single(merged.Suggestions);
+        Assert.Equal("טוב, מאוד", survivor.Original);
+        Assert.Equal("טוב מאוד", survivor.Suggested);
+        Assert.Equal("Solo feedback", merged.OverallFeedback);
+    }
+
     // ─── Offset-correctness integration tests ──────────────────────
 
     private static readonly string[] OffsetMarkers =

@@ -43,6 +43,10 @@ builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
+// Value-scoped, fail-safe analysis-output repair (analysis-output-repair plan, p3). Scoped to match its
+// future consumer UnifiedAnalysisService (p3-wire); depends only on the singleton IAiRouter + a logger, so
+// it has no captive-dependency concern. Not yet wired into any analysis path.
+builder.Services.AddScoped<AnalysisRepairService>();
 builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();

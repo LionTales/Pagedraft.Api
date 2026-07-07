@@ -18,6 +18,18 @@ public class AiOptions
     public Dictionary<string, ProviderTuningOptions>? ProviderSettings { get; set; }
     public Dictionary<string, FeatureModelOptions>? FeatureModels { get; set; }
 
+    /// <summary>
+    /// Analysis-output repair layer config (analysis-output-repair plan, p6-config). Gates the repair
+    /// stages in <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. See
+    /// <see cref="AnalysisRepairOptions"/> for the three-way semantics (Enabled / GuardOnly / PerType).
+    /// A null block OR Enabled=false is a FULL no-op (neither the deterministic glossary nor the LLM
+    /// pass runs). The SHIPPED default (appsettings "Ai:AnalysisRepair") is { Enabled:true,
+    /// GuardOnly:true } = deterministic glossary ONLY, LLM off — the p3-gate GUARD-ONLY decision.
+    /// KEEP IN SYNC with the appsettings "Ai:AnalysisRepair" block (and its Model with
+    /// "Ai:FeatureModels:AnalysisRepair").
+    /// </summary>
+    public AnalysisRepairOptions? AnalysisRepair { get; set; }
+
     /// <summary>Proofread chunking: when text exceeds ChunkTargetWords, split and run in parallel.</summary>
     public int ProofreadChunkTargetWords { get; set; } = DefaultProofreadChunkTargetWords;
     /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
@@ -212,4 +224,50 @@ public class FeatureModelOptions
 {
     public string Provider { get; set; } = "";
     public string Model { get; set; } = "";
+}
+
+/// <summary>
+/// Config for the analysis-output repair layer (analysis-output-repair plan, p6-config), read by
+/// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. There are two repair stages —
+/// a DETERMINISTIC glossary substitution (<see cref="Analysis.GlossaryRepairPass"/>) and a value-scoped
+/// LLM repair (<see cref="Analysis.AnalysisRepairService"/>) — and this block governs BOTH via three
+/// knobs:
+///
+///   • <see cref="Enabled"/> = false (or a null block) → FULL no-op: NEITHER stage runs; inputs returned
+///     byte-identical. This is the strict off switch.
+///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = true → deterministic glossary ONLY (no
+///     LLM, no model calls). This is the SHIPPED DEFAULT (appsettings "Ai:AnalysisRepair") per the
+///     p3-gate GUARD-ONLY decision: the glossary is deterministic + fail-safe + validated, while the LLM
+///     pass showed an over-rewrite tendency on mixed leak+prose fields, so it stays opt-in.
+///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = false → glossary + value-scoped LLM repair
+///     (guard-gated + fail-safe inside the service; a clean field still makes ZERO model calls).
+///   • <see cref="PerType"/> → gates repair per analysis-type name (see below).
+///
+/// The class-level defaults are the SAFE posture (Enabled=false = off; if turned on, GuardOnly=true so
+/// the LLM stays off unless explicitly opted into). Production reads the explicit appsettings block, so
+/// these defaults only apply to programmatic/test construction. KEEP IN SYNC with the appsettings
+/// "Ai:AnalysisRepair" block.
+/// </summary>
+public class AnalysisRepairOptions
+{
+    /// <summary>Master switch for the whole repair layer. false (the class default) = FULL no-op: neither
+    /// the deterministic glossary nor the LLM pass runs. The shipped appsettings value is true.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>When true (the class default and the SHIPPED default), only the deterministic glossary
+    /// pass runs — the value-scoped LLM repair is skipped entirely (no model calls). Set false to also run
+    /// the LLM repair. Only consulted when <see cref="Enabled"/> is true.</summary>
+    public bool GuardOnly { get; set; } = true;
+
+    /// <summary>The model the value-scoped LLM repair routes to. KEEP IN SYNC with
+    /// "Ai:FeatureModels:AnalysisRepair" (and "Ai:ProviderSettings:Ollama_AnalysisRepair") — those keys do
+    /// the actual routing; this field documents/asserts the intended model at the config surface.</summary>
+    public string Model { get; set; } = "gemma4:12b";
+
+    /// <summary>Per-analysis-type gate, keyed by the <see cref="Contracts.AnalysisType"/> name
+    /// ("Summarization", "LiteraryAnalysis", "LinguisticAnalysis", "LineEdit" — the repairable types).
+    /// A type mapped to false, OR absent when the map is non-empty, is SKIPPED (both stages). A null/empty
+    /// map means NO per-type restriction (every repairable type is allowed). Proofread is never repaired
+    /// regardless of this map.</summary>
+    public Dictionary<string, bool>? PerType { get; set; }
 }
