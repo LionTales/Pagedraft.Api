@@ -18,6 +18,13 @@ public class ConfigControllerTests
 {
     // Production-shaped options mirroring ProofreadChunkSizingTests so the derived targets match production
     // (Latin ceiling 500; dense-script halves to 250 at the production window).
+    //
+    // The base "Ollama" NumCtx=8192 below is NEVER exercised for Proofread/LineEdit: both
+    // "Ollama_Proofread" and "Ollama_LineEdit" omit NumCtx, so ResolveNumCtxForTask resolves the C#
+    // property default (4096) for those tasks and never falls through to the base entry's 8192 (see
+    // ProofreadChunkSizingTests.ProdShapedOptions for the traced explanation). And even at 4096 the
+    // window-fit (bound B) still exceeds the language ceiling (bound A: Latin 500 / dense-script 250),
+    // so bound A dominates the chunk-size math regardless of which NumCtx value is in play here.
     private static AiOptions ProdShapedOptions() => new()
     {
         DefaultProvider = "Ollama",

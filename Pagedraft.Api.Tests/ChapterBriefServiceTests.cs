@@ -818,6 +818,7 @@ public class ChapterBriefServiceTests
         services.AddScoped<BookSummaryService>();
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
+        services.AddScoped<AnalysisRepairService>();
         services.AddScoped<UnifiedAnalysisService>();
         services.AddScoped<BookIntelligenceService>();
 

@@ -22,13 +22,15 @@ public static class TextNormalization
     /// Strip Unicode bidi control characters and convert hard line breaks to spaces so text
     /// used for analysis and diffing matches the client normalization.
     ///
-    /// Bidi controls (LRM, RLM, embeddings, isolates) are truly invisible and are DROPPED.
+    /// Bidi controls (LRM, RLM, embeddings, isolates) are truly invisible and are DROPPED — this
+    /// makes the overall transform LENGTH-REDUCING, not 1:1, whenever the input contains any.
     /// Hard line breaks (\r, \n) are a WORD BOUNDARY, so each is replaced 1:1 with a single
     /// space rather than dropped: dropping them glued the chapter title into the first body
     /// word ("רוני\nהתעוררתי" -> "רוניהתעוררתי"), which the model then "fixed" by deleting a
-    /// word. The 1:1 replacement (each \r -> space, each \n -> space; a CRLF becomes two
-    /// spaces) preserves character-length parity so the offset mapping (normalizedOffsetToRawOffset)
-    /// stays a simple 1:1 walk, and keeps the client's per-character normalization identical.
+    /// word. Only THIS substitution (each \r -> space, each \n -> space; a CRLF becomes two
+    /// spaces) is character-length-preserving; the offset mapping (normalizedOffsetToRawOffset)
+    /// must account for bidi-control removal separately and cannot assume a simple 1:1 walk over
+    /// the whole string.
     /// </summary>
     public static string NormalizeTextForAnalysis(string text)
     {

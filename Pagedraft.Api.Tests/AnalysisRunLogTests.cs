@@ -74,7 +74,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -157,7 +158,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -248,7 +250,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -338,7 +341,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -431,7 +435,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -500,7 +505,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunWithInputAsync(
             AnalysisScope.Book,
@@ -551,7 +557,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -656,7 +663,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -730,7 +738,8 @@ public class AnalysisRunLogTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions()));
+            new KtivMaleChecker(new HebrewStyleOptions()),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunLineEditChunkedAsync",

@@ -20,5 +20,16 @@ public enum AiTaskType
     /// sets that key, LinguisticModelResolver.ResolveForTask(BookReview) falls back to the default model
     /// (both-non-empty predicate) -- which is fine: no real model call happens in c02's tests.
     /// </summary>
-    BookReview
+    BookReview,
+
+    /// <summary>
+    /// Value-scoped analysis-output repair (analysis-output-repair plan, p3). AnalysisRepairService tags
+    /// its per-field cleanup AiRequest with this task type so the router (a) resolves the
+    /// Ai:FeatureModels:AnalysisRepair key -> gemma4:12b (the "routes to itself"; there is NO
+    /// AnalysisType.AnalysisRepair, so AnalysisTaskMapping is untouched), (b) sends the value-only Hebrew
+    /// repair instruction VERBATIM (see AiRouter.ShouldUseUnifiedInstructionVerbatim), and (c) picks up the
+    /// Ollama_AnalysisRepair tuning block (low temperature, 16k ctx). The repair pass is FAIL-SAFE: the
+    /// service validates the model output and keeps the ORIGINAL value on any doubt.
+    /// </summary>
+    AnalysisRepair
 }

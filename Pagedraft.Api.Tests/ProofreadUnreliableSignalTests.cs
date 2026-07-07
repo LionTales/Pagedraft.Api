@@ -71,7 +71,8 @@ public class ProofreadUnreliableSignalTests
             new SuggestionDiffService(),
             // Ktiv-male enforcement OFF so the deterministic spelling sub-check never appends extra
             // suggestions and these tests exercise ONLY the proofread-unreliable signal in isolation.
-            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }));
+            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
     }
 
     [Fact]
@@ -622,7 +623,8 @@ public class ProofreadUnreliableSignalTests
             new AnalysisProgressTracker(),
             contextMock.Object,
             new SuggestionDiffService(),
-            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }));
+            new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
