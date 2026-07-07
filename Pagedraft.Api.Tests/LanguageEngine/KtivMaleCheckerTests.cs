@@ -131,6 +131,24 @@ public class KtivMaleCheckerTests
     }
 
     [Fact]
+    public void FindSuggestions_MalonAndTzurHomographs_AreNeverFlagged()
+    {
+        // HOMOGRAPH GUARD (be-c01): מָלוֹן = "hotel / melon" and צוּר = "rock / Tyre / besiege!" are
+        // common everyday words - in ordinary prose they are NOT the haser of מילון "dictionary" /
+        // ציור "drawing". A context-blind מלון→מילון or צור→ציור auto-flag would deterministically
+        // produce a meaning-changing wrong suggestion, so both are excluded (moved out of HaserToMale
+        // into AmbiguousHomographPairsExcluded), the same class as עצמה/חכמה/גלוי. This asserts they
+        // yield zero suggestions bare AND behind a single common prefix (המלון "the hotel", במלון
+        // "in the hotel"). Guards against re-adding the pairs to HaserToMale.
+        var checker = MakeChecker();
+
+        Assert.Empty(checker.FindSuggestions("לנו יש מלון גדול על החוף.", "he"));   // hotel
+        Assert.Empty(checker.FindSuggestions("המלון היה מלא בקיץ.", "he"));         // "the hotel", ה prefix
+        Assert.Empty(checker.FindSuggestions("נפגשנו במלון ליד הים.", "he"));       // "in the hotel", ב prefix
+        Assert.Empty(checker.FindSuggestions("הם בנו את חומת צור.", "he"));         // "Tyre / rock"
+    }
+
+    [Fact]
     public void FindSuggestions_AmbiguousHomographKeys_AreNeverFlagged()
     {
         // Every key in AmbiguousHomographPairsExcluded is a common standalone word whose male form has a

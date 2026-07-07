@@ -80,22 +80,22 @@ public static class KtivMaleWordList
         ["שעור"]    = "שיעור",     // lesson / rate (haser שעור is not a common distinct word; kept)
         // שעורים intentionally NOT listed - it is an AMBIGUOUS HOMOGRAPH: שְׂעוֹרִים / "barley" is a
         // common everyday noun, not the haser of שיעורים "lessons". See AmbiguousHomographPairsExcluded.
-        ["צור"]     = "ציור",      // drawing (noun) - note: distinct from צוּר "rock"; see note below
-        ["מלון"]    = "מילון",     // dictionary
+        // צור and מלון intentionally NOT listed - they are AMBIGUOUS HOMOGRAPHS: צוּר = "rock / Tyre /
+        // besiege!" and מָלוֹן = "hotel / melon" are common everyday words, NOT (in ordinary prose) the
+        // haser of ציור "drawing" / מילון "dictionary". See AmbiguousHomographPairsExcluded below.
         ["גבור"]    = "גיבור",     // hero
         ["גבורים"]  = "גיבורים",   // heroes
     };
 
-    // NOTE on ambiguous keys (e.g. "צור", "מלון", "גלוי"): a few defective forms collide with a
-    // legitimate distinct word (צוּר "rock"; מָלוֹן "hotel/lodging"; גָּלוּי "visible/open/revealed",
-    // a שם תואר). Because PageDraft is human-in-the-loop and only SURFACES a suggestion (never
-    // auto-fixes), surfacing the lower-frequency collisions (צור, מלון) is acceptable - the author
-    // accepts or rejects. גלוי is DELIBERATELY EXCLUDED from the list above (no גלוי→גילוי pair):
-    // the adjective גָּלוּי is very common in ordinary prose, so its practical false-positive rate is
-    // materially higher than צור/מלון, and suggesting the unrelated noun גילוי would be a
-    // meaning-changing miscorrection. If false-positive noise from צור/מלון proves annoying in
-    // practice, move them to a separate "low-confidence" tier rather than deleting the whole list.
-    // They are kept here so the seed demonstrates both vav and yod families.
+    // NOTE on ambiguous keys (e.g. "צור", "מלון", "גלוי", "עצמה"): a defective form can collide with a
+    // legitimate, distinct, COMMON word (צוּר "rock/Tyre/besiege!"; מָלוֹן "hotel/melon"; גָּלוּי
+    // "visible/open/revealed", a שם תואר; עַצְמָהּ "herself/its own"). Even though PageDraft is
+    // human-in-the-loop and only SURFACES a suggestion (never auto-fixes), a context-blind flag on such a
+    // word is, in ordinary prose, OVERWHELMINGLY a meaning-changing WRONG suggestion (the author meant the
+    // everyday word, not the rare haser sense) - noise the author must reject on every occurrence. So
+    // these homographs are DELIBERATELY EXCLUDED from the list above and documented in
+    // AmbiguousHomographPairsExcluded below, NOT kept as "low-confidence" auto-flags. Only forms whose
+    // haser spelling is NOT also a frequent standalone word with an unrelated sense stay in HaserToMale.
 
     /// <summary>
     /// Haser→male pairs DELIBERATELY EXCLUDED from the active <see cref="HaserToMale"/> auto-flag list
@@ -128,6 +128,8 @@ public static class KtivMaleWordList
         ["משמרת"]  = "משמורת",  // מִשְׁמֶרֶת = "(work) shift / watch" - very common; משמורת = "custody" (legal). Different words.
         ["ספורים"] = "סיפורים", // סְפוּרִים = "numbered / few" (idiom ימים ספורים "a few days") - common; סיפורים = "stories".
         ["שעורים"] = "שיעורים", // שְׂעוֹרִים = "barley" - common everyday noun; שיעורים = "lessons".
+        ["מלון"]   = "מילון",   // מָלוֹן = "hotel / melon" - very common everyday word; מילון = "dictionary". Different words.
+        ["צור"]    = "ציור",    // צוּר = "rock / Tyre / besiege!" (the everyday noun/name/imperative) - common; ציור = "drawing". Different words.
     };
 
     /// <summary>
