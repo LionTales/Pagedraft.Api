@@ -378,6 +378,14 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread)
             _logger.LogInformation("Proofread input length: {Length} characters (~{EstTokens} tokens). Long text may hit model limits.", inputText.Length, EstimateTokenCount(inputText));
 
+        // Async-job (background) dispatch of a single-shot type: the controller already StartJob'd this jobId,
+        // so move it out of "queued" into "running" for the duration of the (possibly multi-minute) LLM call.
+        // Chunked Proofread/LineEdit drive their own progress; this covers the non-chunked types
+        // (Linguistic/Literary/Summarization/Custom) now allowed on the async path. No-op when jobId is null
+        // (synchronous /analyze) or the job is untracked.
+        if (jobId.HasValue)
+            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Running, $"Running {analysisType}…");
+
         var llmSw = Stopwatch.StartNew();
         var response = await _router.CompleteAsync(request, ct);
         llmSw.Stop();
@@ -447,6 +455,11 @@ public class UnifiedAnalysisService
             StructuredResult = structuredJson,
             Language = language,
             ModelName = $"{response.Provider}:{response.Model}",
+            // Stamp the async job id when this single-shot run was dispatched as a background job, so
+            // GetAnalysisByJobId can locate the persisted row exactly like the chunked paths do (lines
+            // ModelName="chunked" set JobId there). Null for the synchronous /analyze path (jobId == null),
+            // which returns the row directly and never polls by job id.
+            JobId = jobId,
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
@@ -502,6 +515,11 @@ public class UnifiedAnalysisService
         }
 
         await _db.SaveChangesAsync(ct);
+
+        // Async-job dispatch: the row is now persisted with JobId set, so the poller's GetAnalysisByJobId
+        // will find it. Mark the job Succeeded to end the FE progress poll. No-op for the sync path.
+        if (jobId.HasValue)
+            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded, $"{analysisType} finished");
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;

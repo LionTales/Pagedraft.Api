@@ -257,10 +257,21 @@ public class AnalysisController : ControllerBase
         var scope = sceneId.HasValue ? AnalysisScope.Scene : AnalysisScope.Chapter;
         var targetId = sceneId ?? chapterId;
 
-        // Async job path is focused on long-running, chunked analyses (currently Proofread and LineEdit).
-        if (analysisType != AnalysisType.Proofread && analysisType != AnalysisType.LineEdit)
+        // Async job path covers long-running analyses: the chunked ones (Proofread, LineEdit) AND the
+        // single-shot whole-chapter LLM types (Linguistic/Literary/Summarization/Custom) which can each run
+        // for minutes on a large chapter and otherwise block a synchronous request until it times out.
+        // RunAsync stamps the jobId on the persisted row and drives the progress tracker for these types,
+        // so GetAnalysisByJobId + the progress poll work uniformly. Only book-scope Q&A (RunWithInputAsync)
+        // and streaming stay off this path.
+        var asyncSupported = analysisType is AnalysisType.Proofread
+            or AnalysisType.LineEdit
+            or AnalysisType.LinguisticAnalysis
+            or AnalysisType.LiteraryAnalysis
+            or AnalysisType.Summarization
+            or AnalysisType.Custom;
+        if (!asyncSupported)
         {
-            return BadRequest(new { error = "Async analysis jobs are currently supported only for Proofread and LineEdit types." });
+            return BadRequest(new { error = $"Async analysis jobs are not supported for the {analysisType} type." });
         }
 
         // If the application is already stopping, don't enqueue new jobs that can never run.
@@ -280,9 +291,7 @@ public class AnalysisController : ControllerBase
             bookId,
             chapterId,
             sceneId,
-            analysisType == AnalysisType.LineEdit
-                ? "Queued LineEdit job…"
-                : "Queued proofread job…");
+            $"Queued {analysisType} job…");
 
         // Fire-and-forget background task that runs the actual analysis using a new DI scope.
         // Tie the inner work to the host's shutdown token, but always start the task so we can
