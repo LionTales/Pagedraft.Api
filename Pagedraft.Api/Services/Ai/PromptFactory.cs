@@ -695,7 +695,7 @@ public class PromptFactory
           ]
         }
 
-        מלא ערכים מדויקים ככל האפשר. הציון grammaticalityScore הוא בין 0 ל-1.
+        מלא ערכים מדויקים ככל האפשר. הציון grammaticalityScore הוא בין 0 ל-1, וכך גם readability ו-lexicalDensity.
 
         paragraphAnnotations — שדה עזר פנימי למחשבה (הוא אינו מוצג למשתמש, לכן השקע בו מאמץ). לפני שתחליט על consistencyIssues, סמן כל פסקה בטקסט הנתון לפי הסדר: "paragraph" = המספר הסידורי שלה (החל מ-1), "tense" = הזמן הדקדוקי הדומיננטי של הקריינות באותה פסקה (past או present), "povHolder" = הדמות שבתודעתה מעוגנת הקריינות (הדמות הנקובה בשם שמחשבותיה ורגשותיה הפרטיים מדווחים, או "first-person" כשהסיפור בגוף ראשון אני/אנחנו, או "none" כשהפסקה מתארת רק פעולה גלויה ללא תודעה פנימית של איש), "register" = הטון של הקריינות. סמן רק את הטקסט הנתון, לא את [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT]. לאחר מכן גזור את consistencyIssues מתוך השינויים לאורך הרשימה הזו: בעיית "tense" כאשר הזמן הדומיננטי מתהפך בין פסקאות סמוכות; בעיית "pov" כאשר ה-povHolder עובר לדמות נקובה אחרת ("קפיצה בין ראשים") או בין גוף ראשון לגוף שלישי; בעיית "register" כאשר רישום הקריינות משתנה. פסקה שה-povHolder שלה "none" אינה יוצרת בעצמה בעיית pov. אם כל הפסקאות חולקות אותו tense, povHolder ו-register — החזר מערך consistencyIssues ריק [].
 
@@ -766,7 +766,7 @@ public class PromptFactory
           ]
         }
 
-        Fill in values as accurately as possible. The grammaticalityScore is between 0 and 1.
+        Fill in values as accurately as possible. The grammaticalityScore is between 0 and 1, and so are readability and lexicalDensity.
 
         paragraphAnnotations — an INTERNAL reasoning aid (it is not shown to the user, so spend effort here). Before you decide on consistencyIssues, annotate EACH paragraph of the analyzed text in order: "paragraph" = its 1-based index, "tense" = the dominant narrative tense of that paragraph's NARRATION (past or present), "povHolder" = whose interiority the narration is anchored in (the named character whose private thoughts/feelings are reported, or "first-person" when narrated as I/we, or "none" when the paragraph reports only observable action and no one's inner state), "register" = the narration's tone. Annotate only the given analyzed text, not [PRECEDING_CONTEXT]/[FOLLOWING_CONTEXT]. Then DERIVE consistencyIssues from the CHANGES across this list: a "tense" issue where the dominant tense flips between adjacent paragraphs; a "pov" issue where the povHolder changes to a DIFFERENT named character (head-hopping) or between first-person and third-person; a "register" issue where the narration's register shifts. A paragraph whose povHolder is "none" does not by itself create a pov issue. If every paragraph shares the same tense, povHolder, and register, return an empty consistencyIssues array [].
 
