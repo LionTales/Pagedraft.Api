@@ -715,4 +715,62 @@ public class ProofreadUnreliableSignalTests
 
         Assert.False(reloaded.ProofreadResultUnreliable); // persisted default holds
     }
+
+    // ─── ProofreadDroppedContent: contiguity branch deleted-char gate ────────────────────────
+    // Direct unit tests for the merged-level dropped-content guard. Input and output are equal-length so the
+    // length backstop (signal a) never fires and ONLY the contiguity branch (b) is exercised.
+
+    private static AnalysisSuggestion Deletion(int start, int end) =>
+        new() { StartOffset = start, EndOffset = end, SuggestedText = string.Empty, OriginalText = new string('x', end - start) };
+
+    [Fact]
+    public void ProofreadDroppedContent_ManyTinyContiguousDeletions_NotFlagged()
+    {
+        // The live false positive: 8 offset-adjacent pure deletions that TOGETHER remove only ~17 chars
+        // (ktiv-male + punctuation micro-edits bunched up). A run of >= 6 forms, but almost no text is
+        // actually deleted, so it must NOT be treated as a dropped passage.
+        var text = new string('א', 500);
+        var deletions = new[]
+        {
+            Deletion(10, 12), Deletion(13, 15), Deletion(16, 18), Deletion(19, 22),
+            Deletion(23, 25), Deletion(26, 28), Deletion(29, 31), Deletion(32, 34),
+        };
+
+        Assert.False(UnifiedAnalysisService.ProofreadDroppedContent(text, text, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_ContiguousRunDeletingSubstantialText_Flagged()
+    {
+        // A genuinely dropped clause: 8 offset-adjacent word-deletions that together remove ~48 chars.
+        // High count AND substantial deleted-char total => a dropped passage => flagged.
+        var text = new string('א', 500);
+        var deletions = new[]
+        {
+            Deletion(10, 16), Deletion(17, 23), Deletion(24, 30), Deletion(31, 37),
+            Deletion(38, 44), Deletion(45, 51), Deletion(52, 58), Deletion(59, 65),
+        };
+
+        Assert.True(UnifiedAnalysisService.ProofreadDroppedContent(text, text, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_SingleWideDeletionSpan_Flagged()
+    {
+        // A single pure deletion covering a wide span (>= 60 chars) is a dropped passage regardless of count.
+        var text = new string('א', 500);
+        var deletions = new[] { Deletion(100, 175) };
+
+        Assert.True(UnifiedAnalysisService.ProofreadDroppedContent(text, text, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_SingleNarrowDeletion_NotFlagged()
+    {
+        // One short deletion is a normal in-place edit, not an omission.
+        var text = new string('א', 500);
+        var deletions = new[] { Deletion(100, 130) };
+
+        Assert.False(UnifiedAnalysisService.ProofreadDroppedContent(text, text, deletions));
+    }
 }
