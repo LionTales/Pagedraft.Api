@@ -587,6 +587,125 @@ public class ExtractJsonAndLineEditParseTests
         Assert.Equal("טוב, מאוד", normalized.Suggestions[0].Original);
     }
 
+    // ─── garbage-suggestion guards: unanchorable / scaffolding / clause->punctuation collapse ─────
+
+    [Fact]
+    public void NormalizeLineEdit_EmptyOriginal_Dropped()
+    {
+        // A suggestion with no Original cannot be anchored (IndexOf("") mis-anchors as a zero-width
+        // insertion) and is the vector by which leaked scaffolding reached the manuscript. Dropped.
+        var result = new LineEditResult
+        {
+            OverallFeedback = "fb",
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "", Suggested = "[\"דוגמה\", טקסט מומצא.] ... [/", Reason = "r", Category = "style" },
+                new() { Original = "משפט אמיתי", Suggested = "משפט משופר", Reason = "r", Category = "clarity" }
+            }
+        };
+
+        var normalized = UnifiedAnalysisService.NormalizeLineEditSuggestions(result);
+
+        Assert.Single(normalized.Suggestions);
+        Assert.Equal("משפט אמיתי", normalized.Suggestions[0].Original);
+    }
+
+    [Fact]
+    public void NormalizeLineEdit_ScaffoldingMarker_Dropped()
+    {
+        var result = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "טקסט אמיתי כאן", Suggested = "[TEXT_TO_EDIT]", Reason = "r", Category = "style" },
+                new() { Original = "עוד משפט", Suggested = "עוד משפט טוב", Reason = "r", Category = "clarity" }
+            }
+        };
+
+        var normalized = UnifiedAnalysisService.NormalizeLineEditSuggestions(result);
+
+        Assert.Single(normalized.Suggestions);
+        Assert.Equal("עוד משפט", normalized.Suggestions[0].Original);
+    }
+
+    [Fact]
+    public void NormalizeLineEdit_MultiWordClauseCollapsedToPunctuation_Dropped()
+    {
+        // The "change a comma but remove a full line" bug: a whole clause replaced by a bare comma.
+        var result = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "אמרה לו בקול רך אבל נחוש", Suggested = ",", Reason = "פיסוק", Category = "style" },
+                new() { Original = "משפט תקין", Suggested = "משפט תקין יותר", Reason = "r", Category = "clarity" }
+            }
+        };
+
+        var normalized = UnifiedAnalysisService.NormalizeLineEditSuggestions(result);
+
+        Assert.Single(normalized.Suggestions);
+        Assert.Equal("משפט תקין", normalized.Suggestions[0].Original);
+    }
+
+    [Fact]
+    public void NormalizeLineEdit_ShortDeletionAndRealShortening_Kept()
+    {
+        // Conservative: a small (<3 word) deletion and a real multi-word shortening (Suggested still has
+        // words) are legitimate edits and must survive the collapse guard.
+        var result = new LineEditResult
+        {
+            Suggestions = new List<LineEditSuggestion>
+            {
+                new() { Original = "מאוד מאוד", Suggested = "", Reason = "כפילות", Category = "style" },
+                new() { Original = "הבית הגדול הענק", Suggested = "הבית הענק", Reason = "תמציתיות", Category = "conciseness" }
+            }
+        };
+
+        var normalized = UnifiedAnalysisService.NormalizeLineEditSuggestions(result);
+
+        Assert.Equal(2, normalized.Suggestions.Count);
+    }
+
+    [Fact]
+    public void NormalizeLineEdit_MultiWordFullDeletion_Kept_ButClauseToCommaStillDropped()
+    {
+        // c01-collapse-guard-narrowing: a clean full-clause DELETION (3+ word Original -> EMPTY Suggested) is
+        // a legitimate conciseness edit and must SURVIVE — the un-narrowed guard wrongly dropped it. The
+        // "clause -> comma" garbage (3+ word Original -> NON-EMPTY bare punctuation) is still DROPPED. Runaway
+        // deletions are backstopped upstream by IsLikelyLineEditRepetitionLoop, not by this secondary guard.
+        var result = new LineEditResult
+        {
+            OverallFeedback = "fb",
+            Suggestions = new List<LineEditSuggestion>
+            {
+                // Legit 3-word full deletion -> KEPT.
+                new() { Original = "בסופו של דבר", Suggested = "", Reason = "תמציתיות", Category = "conciseness" },
+                // Whole clause collapsed to a bare comma -> DROPPED.
+                new() { Original = "אמרה לו בקול רך אבל נחוש", Suggested = ",", Reason = "פיסוק", Category = "style" }
+            }
+        };
+
+        var normalized = UnifiedAnalysisService.NormalizeLineEditSuggestions(result);
+
+        Assert.Single(normalized.Suggestions);
+        Assert.Equal("בסופו של דבר", normalized.Suggestions[0].Original);
+        Assert.Equal("", normalized.Suggestions[0].Suggested);
+        // The clause->comma garbage did not survive.
+        Assert.DoesNotContain(normalized.Suggestions, s => s.Suggested == ",");
+    }
+
+    [Theory]
+    [InlineData(1155, 12728, true)]   // observed live runaway (~11x)
+    [InlineData(1314, 13309, true)]   // observed live runaway (~10x)
+    [InlineData(1307, 1407, false)]   // normal chunk (~1.1x)
+    [InlineData(1241, 429, false)]    // normal chunk (short)
+    [InlineData(1300, 3000, false)]   // busy but legitimate chunk (~2.3x, under 4x+500)
+    [InlineData(0, 5000, false)]      // no input => never flagged
+    public void IsLikelyLineEditRepetitionLoop_MatchesExpected(int inputLen, int outputLen, bool expected)
+    {
+        Assert.Equal(expected, UnifiedAnalysisService.IsLikelyLineEditRepetitionLoop(inputLen, outputLen));
+    }
+
     [Fact]
     public void NormalizeLineEdit_ExceedsCap_TruncatedToFifty()
     {

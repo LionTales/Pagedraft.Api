@@ -378,6 +378,14 @@ public class UnifiedAnalysisService
         if (analysisType == AnalysisType.Proofread)
             _logger.LogInformation("Proofread input length: {Length} characters (~{EstTokens} tokens). Long text may hit model limits.", inputText.Length, EstimateTokenCount(inputText));
 
+        // Async-job (background) dispatch of a single-shot type: the controller already StartJob'd this jobId,
+        // so move it out of "queued" into "running" for the duration of the (possibly multi-minute) LLM call.
+        // Chunked Proofread/LineEdit drive their own progress; this covers the non-chunked types
+        // (Linguistic/Literary/Summarization/Custom) now allowed on the async path. No-op when jobId is null
+        // (synchronous /analyze) or the job is untracked.
+        if (jobId.HasValue)
+            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Running, $"Running {analysisType}…");
+
         var llmSw = Stopwatch.StartNew();
         var response = await _router.CompleteAsync(request, ct);
         llmSw.Stop();
@@ -447,6 +455,11 @@ public class UnifiedAnalysisService
             StructuredResult = structuredJson,
             Language = language,
             ModelName = $"{response.Provider}:{response.Model}",
+            // Stamp the async job id when this single-shot run was dispatched as a background job, so
+            // GetAnalysisByJobId can locate the persisted row exactly like the chunked paths do (lines
+            // ModelName="chunked" set JobId there). Null for the synchronous /analyze path (jobId == null),
+            // which returns the row directly and never polls by job id.
+            JobId = jobId,
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
@@ -502,6 +515,11 @@ public class UnifiedAnalysisService
         }
 
         await _db.SaveChangesAsync(ct);
+
+        // Async-job dispatch: the row is now persisted with JobId set, so the poller's GetAnalysisByJobId
+        // will find it. Mark the job Succeeded to end the FE progress poll. No-op for the sync path.
+        if (jobId.HasValue)
+            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded, $"{analysisType} finished");
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
@@ -1327,6 +1345,25 @@ public class UnifiedAnalysisService
     private const int MaxLineEditSuggestions = 50;
 
     /// <summary>
+    /// A LineEdit chunk whose (sanitized) model output balloons far past its input is in a decoding
+    /// repetition loop — the failure the Ollama_LineEdit RepeatPenalty tuning targets but does not always
+    /// break. Such a chunk both burns minutes of generation AND yields garbage suggestions, so its output is
+    /// discarded rather than parsed. LineEdit output is structured JSON (each suggestion repeats a snippet of
+    /// Original + Suggested + reason), so it is legitimately a small multiple of the input; only a runaway is
+    /// several times larger. Ratio 4 + a 500-char floor clears the busiest legitimate chunk (observed live:
+    /// clean chunks ~0.3-1.4x input) while catching the loops (observed live: ~10-11x input).
+    /// </summary>
+    private const double LineEditRepetitionLoopRatio = 4.0;
+
+    /// <summary>
+    /// True when a LineEdit chunk's sanitized output length indicates a decoding repetition loop relative to
+    /// its input length (see <see cref="LineEditRepetitionLoopRatio"/>). Pure function so it is unit-testable
+    /// without a live model.
+    /// </summary>
+    internal static bool IsLikelyLineEditRepetitionLoop(int inputLength, int outputLength)
+        => inputLength > 0 && outputLength > inputLength * LineEditRepetitionLoopRatio + 500;
+
+    /// <summary>
     /// Deserialize a serialized <see cref="LineEditResult"/>, run it through
     /// <see cref="NormalizeLineEditSuggestions"/>, and re-serialize. Applied to EVERY successful
     /// LineEdit parse/salvage path in <see cref="TryParseStructured"/> so the persisted
@@ -1384,8 +1421,13 @@ public class UnifiedAnalysisService
             var suggestion = suggestions[i];
             if (suggestion is null) continue;
 
-            // Pass 1: drop exact no-ops and surrounding-punctuation-only "noise" edits.
-            if (IsNoOpSuggestion(suggestion) || IsSurroundingPunctuationOnlyDiff(suggestion))
+            // Pass 1: drop exact no-ops, surrounding-punctuation-only "noise" edits, unanchorable/leaked-
+            // scaffolding entries, and incoherent clause->punctuation collapses (the "change a comma but
+            // remove a full line" garbage a repetition loop produces).
+            if (IsNoOpSuggestion(suggestion)
+                || IsSurroundingPunctuationOnlyDiff(suggestion)
+                || IsUnanchorableOrScaffoldingSuggestion(suggestion)
+                || IsIncoherentCollapseSuggestion(suggestion))
                 continue;
 
             // Pass 2: dedupe identical (Original, Suggested) pairs, first occurrence wins.
@@ -1435,6 +1477,68 @@ public class UnifiedAnalysisService
             return false;
 
         return string.Equals(originalCore, suggestedCore, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// True when a LineEdit suggestion cannot be safely anchored or carries leaked prompt scaffolding.
+    /// A blank <see cref="LineEditSuggestion.Original"/> has no text to locate in the document, so
+    /// <see cref="SuggestionDiffService.ComputeLineEditSuggestions"/> would anchor it via <c>IndexOf("")</c>
+    /// as a zero-width insertion at an arbitrary cursor — the exact vector by which a leaked few-shot
+    /// template fragment (bracketed JSON scaffolding) was inserted into the manuscript. Also drops any
+    /// suggestion whose Original or Suggested still contains our wrapping markers, which should never survive
+    /// into edit text.
+    /// </summary>
+    private static bool IsUnanchorableOrScaffoldingSuggestion(LineEditSuggestion suggestion)
+    {
+        if (string.IsNullOrWhiteSpace(suggestion.Original))
+            return true;
+        return ContainsScaffoldingMarker(suggestion.Original) || ContainsScaffoldingMarker(suggestion.Suggested);
+    }
+
+    private static bool ContainsScaffoldingMarker(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+        return text.Contains("[TEXT_TO_EDIT]", StringComparison.Ordinal)
+            || text.Contains("[/TEXT_TO_EDIT]", StringComparison.Ordinal)
+            || text.Contains("[TEXT_TO_CORRECT]", StringComparison.Ordinal)
+            || text.Contains("[/TEXT_TO_CORRECT]", StringComparison.Ordinal);
+    }
+
+    private static readonly char[] WhitespaceSeparators = [' ', '\t', '\n', '\r', ' '];
+
+    /// <summary>
+    /// True when a suggestion collapses a MULTI-WORD span down to bare, NON-EMPTY punctuation — e.g. a whole
+    /// clause "-> ,". Anchored verbatim, this deletes the entire clause while presenting as a trivial
+    /// punctuation change ("change a comma but remove a full line"), the signature garbage a repetition loop
+    /// emits (observed live as an over-broad "replace a clause with a comma" edit, never as an empty Suggested).
+    /// A coherent line edit that shortens text still leaves real words, so a Suggested containing ANY letter or
+    /// digit is always kept. Only a Suggested that is non-empty yet has no alphanumeric content is suspect, and
+    /// even then only when the Original is a multi-word span (&gt;= 3 whitespace-separated tokens) — a small
+    /// stray-word or doubled-word deletion is legitimate copyediting and is preserved.
+    /// <para>
+    /// An EMPTY Suggested (a clean full-clause DELETION, e.g. Original "בסופו של דבר" -> "") is deliberately
+    /// PRESERVED: it is a legitimate conciseness edit, not the "clause -> comma" garbage, and no observed loop
+    /// emits an empty Suggested for a multi-word Original. A genuinely runaway deletion is already backstopped
+    /// upstream by the chunk-level <see cref="IsLikelyLineEditRepetitionLoop"/> guard, which discards the whole
+    /// ballooned chunk before its suggestions are ever parsed — so this secondary guard need not (and must not)
+    /// catch empty deletions.
+    /// </para>
+    /// </summary>
+    private static bool IsIncoherentCollapseSuggestion(LineEditSuggestion suggestion)
+    {
+        var suggested = (suggestion.Suggested ?? string.Empty).Trim();
+
+        // An empty Suggested is a clean full deletion (a legitimate conciseness edit); preserve it.
+        // Runaway deletions are backstopped by the chunk-level IsLikelyLineEditRepetitionLoop guard.
+        if (suggested.Length == 0)
+            return false;
+
+        if (suggested.Any(char.IsLetterOrDigit))
+            return false; // a real rewrite with actual content
+
+        var original = (suggestion.Original ?? string.Empty).Trim();
+        var tokenCount = original.Split(WhitespaceSeparators, StringSplitOptions.RemoveEmptyEntries).Length;
+        return tokenCount >= 3;
     }
 
     /// <summary>
@@ -1571,6 +1675,26 @@ public class UnifiedAnalysisService
                     "LineEdit chunk {Index}/{Total} raw response: length={Len}, preview={Preview}",
                     chunkNumber, chunks.Count, raw.Length, TruncateForAudit(raw, 200));
                 var clean = SanitizeResponse(raw);
+
+                // Repetition-loop guard: a chunk whose output ballooned far past its input is looping and its
+                // parsed suggestions are garbage (over-broad "replace a clause with a comma" edits, leaked
+                // scaffolding). Discard the chunk entirely rather than feed the loop's output into the merge.
+                if (IsLikelyLineEditRepetitionLoop(text.Length, clean.Length))
+                {
+                    _logger.LogWarning(
+                        "LineEdit chunk {Index}/{Total} output is {OutLen} chars from a {InLen}-char input (~{Ratio:F1}x); likely repetition loop, discarding chunk.",
+                        chunkNumber, chunks.Count, clean.Length, text.Length, (double)clean.Length / text.Length);
+                    chunkResults[index] = new LineEditResult();
+                    chunkOutcomes.Add(CreateChunkOutcome(
+                        chunkIndex: index,
+                        inputText: text,
+                        outputText: clean,
+                        durationMs: chunkSw.ElapsedMilliseconds,
+                        outcome: "FallbackRepetition",
+                        note: $"{(double)clean.Length / text.Length:F1}x longer than input"));
+                    _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
+                    return;
+                }
 
                 var structuredJson = TryParseStructured(AnalysisType.LineEdit, clean);
 
@@ -3003,8 +3127,15 @@ public class UnifiedAnalysisService
     // pure deletions - scattered legit deletions never form such a run. Thresholds are conservative to avoid
     // flagging normal proofreads (which are mostly replacements, similar length).
     private const double ProofreadShortOutputRatio = 0.9;        // output < 90% of input length => possible omission
-    private const int    ProofreadMinContiguousDeletions = 6;    // a run of >= 6 adjacent pure deletions => a span was dropped
+    private const int    ProofreadMinContiguousDeletions = 6;    // a run of >= 6 adjacent pure deletions => candidate dropped span
     private const int    ProofreadMinDroppedSpanChars = 60;      // or a run spanning >= 60 input chars => a span was dropped
+    // A high-COUNT contiguous run only signals a dropped passage when it actually REMOVES a substantial
+    // amount of text. Hebrew proofreading (ktiv-male full-spelling + punctuation) legitimately produces many
+    // adjacent single-char deletions that cluster into a run of >= 6 while together deleting only a handful of
+    // characters - that is normal copyediting, NOT an omission. The count branch therefore also requires the
+    // run's total deleted characters to reach this floor; a genuinely dropped clause deletes well past it, a
+    // cluster of micro-edits does not. (Observed false positive: 8 adjacent deletions removing 19 chars total.)
+    private const int    ProofreadMinRunDeletedChars = 35;
     // Two pure deletions are "contiguous" when only a small gap (a space/comma) separates them in the input.
     private const int    ProofreadDeletionContiguityGap = 3;
     // Signal (a) fires only when reviewable suggestions account for LESS than this fraction of the missing
@@ -3012,7 +3143,7 @@ public class UnifiedAnalysisService
     // that accounts for the chars it removed, so however many there are they never trip the length backstop.
     private const double ProofreadAccountedShrinkRatio = 0.5;
 
-    private static bool ProofreadDroppedContent(string input, string output, ICollection<AnalysisSuggestion> suggestions)
+    internal static bool ProofreadDroppedContent(string input, string output, ICollection<AnalysisSuggestion> suggestions)
     {
         if (string.IsNullOrEmpty(input)) return false;
 
@@ -3052,37 +3183,44 @@ public class UnifiedAnalysisService
             .ToList();
         if (deletions.Count == 0) return false;
 
-        var longestRunCount = 0;
-        var longestRunChars = 0;
-
+        // Walk the ordered deletions, maintaining the CURRENT contiguous run's deletion count, its covered
+        // span (lastEnd - firstStart), and the total characters it actually deletes (sum of each deletion's
+        // length). A run signals a dropped passage when EITHER (i) it removes enough characters across enough
+        // adjacent deletions - many tiny micro-edits that together delete almost nothing do NOT qualify - OR
+        // (ii) a single/few deletions cover a wide span. Checked per-run so the count and the deleted-char
+        // total always describe the SAME run.
         var runCount = 0;
         var runFirstStart = 0;
+        var runDeletedChars = 0;
         var prevEnd = int.MinValue;
         foreach (var d in deletions)
         {
             var start = d.StartOffset!.Value;
             var end = d.EndOffset!.Value;
+            var deletedLen = Math.Max(0, end - start);
             if (runCount > 0 && start - prevEnd <= ProofreadDeletionContiguityGap)
             {
                 // contiguous with the previous deletion => extend the current run.
                 runCount++;
+                runDeletedChars += deletedLen;
             }
             else
             {
                 // gap too large (or first deletion) => start a fresh run.
                 runCount = 1;
                 runFirstStart = start;
+                runDeletedChars = deletedLen;
             }
 
-            if (runCount > longestRunCount) longestRunCount = runCount;
-            var runChars = end - runFirstStart;
-            if (runChars > longestRunChars) longestRunChars = runChars;
+            var runSpanChars = end - runFirstStart;
+            if ((runCount >= ProofreadMinContiguousDeletions && runDeletedChars >= ProofreadMinRunDeletedChars)
+                || runSpanChars >= ProofreadMinDroppedSpanChars)
+                return true;
 
             prevEnd = end;
         }
 
-        return longestRunCount >= ProofreadMinContiguousDeletions
-            || longestRunChars >= ProofreadMinDroppedSpanChars;
+        return false;
     }
 
     private static readonly char[] WordSplitSeparators =
