@@ -133,7 +133,15 @@ public class PromptFactory
             AnalysisType.Synopsis       => isHe ? SynopsisHe : SynopsisEn,
             AnalysisType.CharacterAnalysis => isHe ? CharacterAnalysisHe : CharacterAnalysisEn,
             AnalysisType.StoryAnalysis  => isHe ? StoryAnalysisHe : StoryAnalysisEn,
-            AnalysisType.QA             => isHe ? QAHe : QAEn,
+            // QA routes to AiTaskType.GenericChat, whose system message (HebrewAssistantSystem) is SHARED with
+            // Translation + Custom and therefore intentionally lacks HebrewNoEnglishTermsClause (Translation/Custom
+            // legitimately emit other languages). QA on a Hebrew book, however, should stay Hebrew-only and avoid
+            // parenthetical English term leaks like the analysis frame does. Append the clause to the QA INSTRUCTION
+            // (not the shared GenericChat system) so the Hebrew-only steer applies to Hebrew QA alone. f1-prompt-coverage.
+            // HebrewNoEnglishTermsClause targets PROSE VALUES only: the QAHe JSON keys (answer/citations/chapterNumber/
+            // chapterTitle/relevantExcerpt/confidence) and the confidence enum (high|medium|low) legitimately stay
+            // English and must not be Hebraised, so do not "tighten" this clause into forcing a Hebrew confidence value.
+            AnalysisType.QA             => isHe ? QAHe + HebrewNoEnglishTermsClause : QAEn,
             AnalysisType.Custom         => isHe ? "השב בעברית בלבד לפי ההנחיות שניתנו." : "Respond according to the instructions given.",
             _ => isHe ? "השב בעברית בלבד." : "Respond in English."
         };

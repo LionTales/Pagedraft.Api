@@ -1,8 +1,10 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
+using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 
 namespace Pagedraft.Api.Services.Analysis;
@@ -22,6 +24,7 @@ public class BookIntelligenceService
     private readonly AppDbContext _db;
     private readonly UnifiedAnalysisService _analysis;
     private readonly BookContextAssembler _bookContextAssembler;
+    private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<BookIntelligenceService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -34,11 +37,13 @@ public class BookIntelligenceService
         AppDbContext db,
         UnifiedAnalysisService analysis,
         BookContextAssembler bookContextAssembler,
+        IOptions<AiOptions> aiOptions,
         ILogger<BookIntelligenceService> logger)
     {
         _db = db;
         _analysis = analysis;
         _bookContextAssembler = bookContextAssembler;
+        _aiOptions = aiOptions;
         _logger = logger;
     }
 
@@ -164,8 +169,24 @@ public class BookIntelligenceService
         profile.LiteratureLevel = overview?.LiteratureLevel;
         profile.LanguageRegister = overview?.LanguageRegister;
         profile.Synopsis = synopsisTask.Result;
-        profile.CharactersJson = charsTask.Result;
-        profile.StoryStructureJson = storyTask.Result;
+
+        // f5-wire coverage fix: BuildBookProfileAsync is the ONLY producer of CharacterAnalysis / StoryAnalysis,
+        // and it runs them through UnifiedAnalysisService.RunRawAsync(structuredJson: null) — for those types
+        // ApplyAnalysisRepairAsync (and GlossaryRepairPass.Apply) is a STRICT NO-OP, so the shipped deterministic
+        // glossary that cleans leaked English in Hebrew prose never reached the persisted profile JSON. BookReview
+        // has the same "never reaches the RunAsync seam" property and solved it with an ENGINE HOOK
+        // (BookReviewService.ApplyGlossaryToFindings); mirror that here. Deserialize the (fence-tolerant) raw model
+        // JSON, run the SAME glossary over the whitelisted prose fields IN PLACE, and store CLEAN reserialized JSON.
+        // Gated on the repair layer (Enabled + PerType-allows the type) and Hebrew (enforced inside RepairFields);
+        // fail-safe — an off gate, an unparseable payload, or ANY repair fault stores the raw string unchanged, so
+        // a repair fault can NEVER break the profile build. BookOverview.Summary is not persisted here and Synopsis
+        // was not in the f5 wired set, so only CharactersJson + StoryStructureJson are repaired.
+        var repairCfg = _aiOptions.Value.AnalysisRepair;
+        profile.CharactersJson = RepairStructuredProfileJson<CharacterAnalysisResult>(
+            charsTask.Result, language, AnalysisType.CharacterAnalysis, repairCfg, RepairableFields.For, _logger);
+        profile.StoryStructureJson = RepairStructuredProfileJson<StoryAnalysisResult>(
+            storyTask.Result, language, AnalysisType.StoryAnalysis, repairCfg, RepairableFields.For, _logger);
+
         profile.Language = language;
         profile.UpdatedAt = DateTimeOffset.UtcNow;
 
@@ -241,6 +262,76 @@ public class BookIntelligenceService
             return JsonSerializer.Deserialize<T>(json, JsonOpts);
         }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// Deterministic English -> Hebrew glossary safety net for a book-level structured-Hebrew-prose analysis
+    /// produced on the profile path (CharacterAnalysis / StoryAnalysis). These types are generated via
+    /// <see cref="UnifiedAnalysisService.RunRawAsync"/> with <c>structuredJson: null</c>, so the shipped repair
+    /// layer (<c>ApplyAnalysisRepairAsync</c> -> <see cref="GlossaryRepairPass.Apply"/>) is a strict no-op for
+    /// them — this hook applies the SAME glossary to the persisted JSON, mirroring
+    /// <c>BookReviewService.ApplyGlossaryToFindings</c> (f5-wire JOB 2).
+    ///
+    /// Deserializes the raw model output with the SAME fence-tolerant reader <see cref="TryDeserialize{T}"/>
+    /// uses (<see cref="ExtractJson"/> brace-matching skips a leading ```json fence), runs
+    /// <see cref="GlossaryRepairPass.RepairFields"/> over the whitelisted prose accessors IN PLACE, then
+    /// reserializes to CLEAN JSON with the pipeline's camelCase <see cref="JsonOpts"/> (which also strips the
+    /// model's markdown fence — the FE parses <c>profile.charactersJson</c> with a bare <c>JSON.parse</c> that a
+    /// fenced string would break).
+    ///
+    /// GATE (mirrors <c>ApplyAnalysisRepairAsync</c> + <c>PerTypeAllows</c>): runs only when the repair layer is
+    /// <see cref="AnalysisRepairOptions.Enabled"/> AND <see cref="PerTypeAllows"/> allows the type; the Hebrew
+    /// check lives inside <see cref="GlossaryRepairPass.RepairFields"/>. FAIL-SAFE: an off gate, an unparseable
+    /// payload, or ANY repair/serialize fault returns the RAW string unchanged, so this can never break the
+    /// profile build (identical to the pre-fix behaviour on every non-repaired path). NO new LLM (glossary only).
+    /// </summary>
+    private static string RepairStructuredProfileJson<T>(
+        string rawResult,
+        string language,
+        AnalysisType type,
+        AnalysisRepairOptions? cfg,
+        Func<T, IReadOnlyList<RepairableField>> accessorsOf,
+        ILogger logger) where T : class
+    {
+        // Layer gate: a null block, Enabled=false, or a non-empty PerType map that excludes this type is a
+        // strict no-op -> store the raw model output verbatim (pre-fix behaviour).
+        if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, type))
+            return rawResult;
+
+        try
+        {
+            // Fence-tolerant deserialize (ExtractJson skips a leading ```json fence). Unparseable -> keep raw.
+            var parsed = TryDeserialize<T>(rawResult);
+            if (parsed is null)
+                return rawResult;
+
+            // Deterministic glossary over the whitelisted prose fields IN PLACE. RepairFields is itself
+            // Hebrew-gated + guard-gated (a clean field is byte-identical at zero cost; a null collection/element
+            // is never walked). NO new model call.
+            GlossaryRepairPass.RepairFields(accessorsOf(parsed), language);
+
+            // Reserialize to CLEAN JSON (also strips the model's markdown fence so the FE JSON.parse succeeds).
+            return JsonSerializer.Serialize(parsed, JsonOpts);
+        }
+        catch (Exception ex)
+        {
+            // FAIL-SAFE: a repair/serialize fault must NEVER break the profile build. Keep the raw string.
+            logger.LogWarning(ex,
+                "Book profile glossary repair threw for type={Type} ({Lang}); storing un-repaired raw JSON (fail-safe).",
+                type, language);
+            return rawResult;
+        }
+    }
+
+    /// <summary>
+    /// Mirror of <c>UnifiedAnalysisService.PerTypeAllows</c>: a null/empty <see cref="AnalysisRepairOptions.PerType"/>
+    /// map means NO per-type restriction (allowed); a non-empty map is a strict allowlist keyed by the
+    /// <see cref="AnalysisType"/> name, so the type must be present AND true.
+    /// </summary>
+    private static bool PerTypeAllows(AnalysisRepairOptions cfg, AnalysisType type)
+    {
+        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
+        return cfg.PerType.TryGetValue(type.ToString(), out var enabled) && enabled;
     }
 
     private static string? ExtractJson(string content)

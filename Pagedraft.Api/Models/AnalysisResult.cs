@@ -5,7 +5,11 @@ namespace Pagedraft.Api.Models;
 public class AnalysisResult
 {
     public Guid Id { get; set; } = Guid.NewGuid();
-    public Guid ChapterId { get; set; }
+
+    /// <summary>Owning chapter. NULL for book-scoped results (e.g. QA / ask), which have no chapter —
+    /// mirrors the already-nullable <see cref="BookId"/>/<see cref="SceneId"/>. A non-null value must be a
+    /// real Chapter (FK); persisting Guid.Empty here caused the book-scoped QA insert to fail the FK.</summary>
+    public Guid? ChapterId { get; set; }
     public Guid? TemplateId { get; set; }
     public Guid? JobId { get; set; }
 
@@ -45,7 +49,8 @@ public class AnalysisResult
     public bool ProofreadResultUnreliable { get; set; }
 
     // ── Navigation ──
-    public Chapter Chapter { get; set; } = null!;
+    /// <summary>Null for book-scoped results (see <see cref="ChapterId"/>).</summary>
+    public Chapter? Chapter { get; set; }
     public PromptTemplate? Template { get; set; }
     public ICollection<AnalysisSuggestion> Suggestions { get; set; } = new List<AnalysisSuggestion>();
 }

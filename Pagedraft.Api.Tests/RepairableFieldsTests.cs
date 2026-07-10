@@ -424,6 +424,201 @@ public class RepairableFieldsTests
         Assert.All(accessors, acc => Assert.NotNull(acc.Get())); // no throw reading any accessor
     }
 
+    // ─── BookOverviewResult (f5-wire) ───────────────────────────────────────
+
+    [Fact]
+    public void BookOverview_RepairTransform_ChangesOnlySummary_AndNothingElse()
+    {
+        var overview = new BookOverviewResult
+        {
+            Genre = "SENT_genre",
+            SubGenre = "SENT_subGenre",
+            TargetAudience = "SENT_targetAudience",
+            LiteratureLevel = 7,
+            EstimatedReadingTimeMinutes = 123,
+            LanguageRegister = "SENT_languageRegister",
+            Summary = "SENT_summary",
+        };
+
+        var accessors = RepairableFields.For(overview);
+
+        // ONLY summary is prose; genre/subGenre/targetAudience/languageRegister (labels) and
+        // literatureLevel/estimatedReadingTimeMinutes (numeric) are proven byte-identical.
+        AssertProseOnlyMutation(overview, accessors, new[] { "summary" });
+    }
+
+    // ─── CharacterAnalysisResult (f5-wire) ───────────────────────────────────
+
+    [Fact]
+    public void Character_RepairTransform_ChangesEveryProsePath_AndNothingElse()
+    {
+        var characters = new CharacterAnalysisResult
+        {
+            Summary = "SENT_summary",
+            Characters =
+            {
+                new CharacterEntry { Name = "SENT_char0_name", Role = "protagonist", Description = "SENT_char0_desc", Arc = "SENT_char0_arc", FirstAppearanceChapter = 1 },
+                new CharacterEntry { Name = "SENT_char1_name", Role = "antagonist", Description = "SENT_char1_desc", Arc = "SENT_char1_arc", FirstAppearanceChapter = null },
+            },
+            Relationships =
+            {
+                new CharacterRelationship { Character1 = "SENT_rel0_c1", Character2 = "SENT_rel0_c2", Relationship = "SENT_rel0_relationship" },
+                new CharacterRelationship { Character1 = "SENT_rel1_c1", Character2 = "SENT_rel1_c2", Relationship = "SENT_rel1_relationship" },
+            },
+        };
+
+        var accessors = RepairableFields.For(characters);
+
+        AssertProseOnlyMutation(characters, accessors, new[]
+        {
+            "summary",
+            "characters[0].description",
+            "characters[0].arc",
+            "characters[1].description",
+            "characters[1].arc",
+            "relationships[0].relationship",
+            "relationships[1].relationship",
+        });
+    }
+
+    [Fact]
+    public void Character_NullCharactersAndRelationships_For_ReturnsOnlySummaryAccessor_NoThrow()
+    {
+        var characters = new CharacterAnalysisResult
+        {
+            Summary = "SENT_summary",
+            Characters = null!,      // model emitted "characters": null
+            Relationships = null!,   // model emitted "relationships": null
+        };
+
+        var accessors = RepairableFields.For(characters); // must NOT throw
+
+        Assert.Single(accessors); // only summary
+        Assert.Equal("SENT_summary", accessors[0].Get());
+    }
+
+    [Fact]
+    public void Character_NullCharacterElement_IsSkipped_OnlyNonNullElementExposed_NoThrow()
+    {
+        var characters = new CharacterAnalysisResult
+        {
+            Summary = "SENT_summary",
+            Characters =
+            {
+                null!, // model emitted [null, {...}]
+                new CharacterEntry { Name = "שם", Role = "supporting", Description = "SENT_desc", Arc = "SENT_arc" },
+            },
+        };
+
+        var accessors = RepairableFields.For(characters); // must NOT throw
+
+        // summary + (description, arc) from the single non-null character = 3; the null element contributes nothing.
+        Assert.Equal(3, accessors.Count);
+        Assert.All(accessors, acc => Assert.NotNull(acc.Get()));
+    }
+
+    // ─── StoryAnalysisResult (f5-wire) ───────────────────────────────────────
+
+    [Fact]
+    public void Story_RepairTransform_ChangesEveryProsePath_AndNothingElse()
+    {
+        var story = new StoryAnalysisResult
+        {
+            PlotStructure = new PlotStructure
+            {
+                Setup = "SENT_setup",
+                RisingAction = "SENT_risingAction",
+                Climax = "SENT_climax",
+                FallingAction = "SENT_fallingAction",
+                Resolution = "SENT_resolution",
+            },
+            Pacing = "SENT_pacing",
+            Conflicts =
+            {
+                new ConflictEntry { Type = "internal", Description = "SENT_conflict0_desc", Status = "resolved" },
+                new ConflictEntry { Type = "external", Description = "SENT_conflict1_desc", Status = "ongoing" },
+            },
+            Summary = "SENT_summary",
+        };
+
+        var accessors = RepairableFields.For(story);
+
+        AssertProseOnlyMutation(story, accessors, new[]
+        {
+            "plotStructure.setup",
+            "plotStructure.risingAction",
+            "plotStructure.climax",
+            "plotStructure.fallingAction",
+            "plotStructure.resolution",
+            "pacing",
+            "summary",
+            "conflicts[0].description",
+            "conflicts[1].description",
+        });
+    }
+
+    [Fact]
+    public void Story_NullPlotStructureAndConflicts_For_ReturnsOnlyPacingAndSummary_NoThrow()
+    {
+        var story = new StoryAnalysisResult
+        {
+            PlotStructure = null!, // model emitted "plotStructure": null
+            Pacing = "SENT_pacing",
+            Summary = "SENT_summary",
+            Conflicts = null!,     // model emitted "conflicts": null
+        };
+
+        var accessors = RepairableFields.For(story); // must NOT throw
+
+        // plotStructure null => no subfield accessors; conflicts null => no walk; only pacing + summary remain.
+        Assert.Equal(2, accessors.Count);
+        foreach (var acc in accessors)
+        {
+            Assert.NotNull(acc.Get());
+            acc.Set(acc.Get() + Marker);
+        }
+        Assert.EndsWith(Marker, story.Pacing);
+        Assert.EndsWith(Marker, story.Summary);
+    }
+
+    // ─── QAResult (f5-wire) ──────────────────────────────────────────────────
+
+    [Fact]
+    public void QA_RepairTransform_ChangesOnlyAnswer_AndNothingElse()
+    {
+        var qa = new QAResult
+        {
+            Answer = "SENT_answer",
+            Citations =
+            {
+                new ChapterCitation { ChapterNumber = 3, ChapterTitle = "SENT_cit0_title", RelevantExcerpt = "SENT_cit0_excerpt" },
+                new ChapterCitation { ChapterNumber = 5, ChapterTitle = "SENT_cit1_title", RelevantExcerpt = "SENT_cit1_excerpt" },
+            },
+            Confidence = "high",
+        };
+
+        var accessors = RepairableFields.For(qa);
+
+        // ONLY answer is prose; citation numbers/titles/excerpts (anchors) and confidence (enum) are
+        // proven byte-identical.
+        AssertProseOnlyMutation(qa, accessors, new[] { "answer" });
+    }
+
+    [Fact]
+    public void QA_NullCitations_For_ReturnsOnlyAnswerAccessor_NoThrow()
+    {
+        var qa = new QAResult
+        {
+            Answer = "SENT_answer",
+            Citations = null!, // model emitted "citations": null — not walked, but must not disturb the answer accessor
+        };
+
+        var accessors = RepairableFields.For(qa); // must NOT throw
+
+        Assert.Single(accessors); // only answer
+        Assert.Equal("SENT_answer", accessors[0].Get());
+    }
+
     // ─── Invariant harness ──────────────────────────────────────────────────
 
     /// <summary>

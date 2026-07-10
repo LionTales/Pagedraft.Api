@@ -247,6 +247,20 @@ public class FeatureModelOptions
 /// the LLM stays off unless explicitly opted into). Production reads the explicit appsettings block, so
 /// these defaults only apply to programmatic/test construction. KEEP IN SYNC with the appsettings
 /// "Ai:AnalysisRepair" block.
+///
+/// PER-ENVIRONMENT POLICY: this block is one value per ASP.NET Core environment (base appsettings.json +
+/// an optional appsettings.{Environment}.json override, e.g. appsettings.Production.json). Each override
+/// encodes the repair POLICY for that environment's model tier — a cloud-capable tier that does not leak
+/// can go no-op (Enabled=false, or GuardOnly=true with an empty PerType), while a small-local tier stays
+/// guard-only glossary-on. See appsettings.Production.json for the current prod value and its KEEP-IN-SYNC
+/// note against "Ai:FeatureModels" (the model actually served).
+///
+/// EXTENSION POINT (documented here only — NOT implemented; do not add this until it is actually needed):
+/// a per-provider/per-model override ON THIS CLASS (e.g. a Dictionary&lt;string, AnalysisRepairOptions&gt;
+/// keyed by provider/model name, consulted instead of the single flat Enabled/GuardOnly/PerType above) is
+/// only needed if a SINGLE environment ever serves MULTIPLE model tiers at once (e.g. some requests routed
+/// to a cloud model, others to local Ollama, within the same deployment). Today each environment serves
+/// exactly one tier, so the flat per-environment block above is sufficient.
 /// </summary>
 public class AnalysisRepairOptions
 {
@@ -265,9 +279,12 @@ public class AnalysisRepairOptions
     public string Model { get; set; } = "gemma4:12b";
 
     /// <summary>Per-analysis-type gate, keyed by the <see cref="Contracts.AnalysisType"/> name
-    /// ("Summarization", "LiteraryAnalysis", "LinguisticAnalysis", "LineEdit" — the repairable types).
-    /// A type mapped to false, OR absent when the map is non-empty, is SKIPPED (both stages). A null/empty
-    /// map means NO per-type restriction (every repairable type is allowed). Proofread is never repaired
-    /// regardless of this map.</summary>
+    /// ("Summarization", "LiteraryAnalysis", "LinguisticAnalysis", "LineEdit", plus the f5-wire
+    /// book-level structured-Hebrew-prose types "BookOverview", "CharacterAnalysis", "StoryAnalysis",
+    /// "QA" and the whole-book "BookReview" engine hook — the repairable types).
+    /// A type mapped to false, OR absent when the map is non-empty, is SKIPPED. For the RunAsync/streaming
+    /// seam this skips both stages; the "BookReview" key gates the deterministic glossary hook in
+    /// BookReviewService (engine path; glossary-only, no LLM). A null/empty map means NO per-type
+    /// restriction (every repairable type is allowed). Proofread is never repaired regardless of this map.</summary>
     public Dictionary<string, bool>? PerType { get; set; }
 }

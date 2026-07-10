@@ -417,6 +417,163 @@ public class AnalysisRepairServiceTests
         Assert.Equal(json, structuredJson);
     }
 
+    // ─── (f5-wire) Scoping invariant for the newly-wired book-level types ────
+
+    [Fact]
+    public async Task Scoping_Character_RepairChangesEveryProseLeaf_AndNoStructuralLeaf()
+    {
+        // Every PROSE field carries a Latin leak (guard fires). Name/role/character refs also contain Latin
+        // but are NOT whitelisted, so they are never sent to the model nor changed — proving the whitelist
+        // (not merely the Latin guard) protects proper-noun references + the role enum.
+        var characters = new CharacterAnalysisResult
+        {
+            Summary = "תקציר summary Action",
+            Characters =
+            {
+                new CharacterEntry { Name = "שם Alpha", Role = "protagonist", Description = "תיאור description One", Arc = "קשת arc One", FirstAppearanceChapter = 1 },
+                new CharacterEntry { Name = "שם Beta", Role = "antagonist", Description = "תיאור description Two", Arc = "קשת arc Two", FirstAppearanceChapter = 2 },
+            },
+            Relationships =
+            {
+                new CharacterRelationship { Character1 = "שם Gamma", Character2 = "שם Delta", Relationship = "יחס relationship One" },
+            },
+        };
+
+        var beforeJson = Serialize(characters);
+        var router = ValidHebrewRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.CharacterAnalysis, beforeJson, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.NotNull(structuredJson);
+
+        var expectedProsePaths = new[]
+        {
+            "summary",
+            "characters[0].description", "characters[0].arc",
+            "characters[1].description", "characters[1].arc",
+            "relationships[0].relationship",
+        };
+
+        Assert.Equal(expectedProsePaths.Length, router.CallCount); // one call per flagged prose field only
+        AssertOnlyLeavesChanged(beforeJson, structuredJson!, expectedProsePaths);
+    }
+
+    [Fact]
+    public async Task Scoping_Story_RepairChangesEveryProseLeaf_AndNoStructuralLeaf()
+    {
+        // Conflict type/status carry Latin but are structural (not whitelisted): never sent nor changed.
+        var story = new StoryAnalysisResult
+        {
+            PlotStructure = new PlotStructure
+            {
+                Setup = "פתיחה setup Alpha",
+                RisingAction = "עלייה rising Beta",
+                Climax = "שיא climax Gamma",
+                FallingAction = "ירידה falling Delta",
+                Resolution = "סיום resolution Epsilon",
+            },
+            Pacing = "קצב pacing Zeta",
+            Conflicts =
+            {
+                new ConflictEntry { Type = "internal", Description = "קונפליקט description One", Status = "unresolved" },
+                new ConflictEntry { Type = "external", Description = "קונפליקט description Two", Status = "ongoing" },
+            },
+            Summary = "תקציר summary Eta",
+        };
+
+        var beforeJson = Serialize(story);
+        var router = ValidHebrewRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.StoryAnalysis, beforeJson, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.NotNull(structuredJson);
+
+        var expectedProsePaths = new[]
+        {
+            "plotStructure.setup", "plotStructure.risingAction", "plotStructure.climax",
+            "plotStructure.fallingAction", "plotStructure.resolution",
+            "pacing", "summary",
+            "conflicts[0].description", "conflicts[1].description",
+        };
+
+        Assert.Equal(expectedProsePaths.Length, router.CallCount);
+        AssertOnlyLeavesChanged(beforeJson, structuredJson!, expectedProsePaths);
+    }
+
+    [Fact]
+    public async Task GuardGating_CleanHebrew_BookOverview_MakesZeroModelCalls_ByteIdentical()
+    {
+        var overview = new BookOverviewResult
+        {
+            Genre = "פנטזיה",
+            SubGenre = "פנטזיה אפית",
+            TargetAudience = "מבוגרים",
+            LiteratureLevel = 5,
+            EstimatedReadingTimeMinutes = 120,
+            LanguageRegister = "ספרותי",
+            Summary = "הספר בונה עולם עשיר ומגיע לשיא מרשים.",
+        };
+
+        var beforeJson = Serialize(overview);
+        var router = NeverCalledRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.BookOverview, beforeJson, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.Equal(0, router.CallCount);        // clean Hebrew summary => guard skips (label/numeric never walked)
+        Assert.Equal(beforeJson, structuredJson); // byte-identical (never re-serialized)
+    }
+
+    [Fact]
+    public async Task GuardGating_CleanHebrew_QA_MakesZeroModelCalls_ByteIdentical()
+    {
+        var qa = new QAResult
+        {
+            Answer = "התשובה נמצאת בפרק השלישי ומסבירה את המניע של הדמות.",
+            Citations = { new ChapterCitation { ChapterNumber = 3, ChapterTitle = "הפרק השלישי", RelevantExcerpt = "ציטוט" } },
+            Confidence = "high",
+        };
+
+        var beforeJson = Serialize(qa);
+        var router = NeverCalledRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.QA, beforeJson, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.Equal(0, router.CallCount);        // clean Hebrew answer => guard skips (citations never walked)
+        Assert.Equal(beforeJson, structuredJson);
+    }
+
+    [Fact]
+    public async Task NullCollections_Character_CleanScalars_DoesNotThrow_MakesZeroModelCalls()
+    {
+        const string json =
+            "{\"characters\":null,\"relationships\":null,\"summary\":\"הפרק בונה מתח ומגיע לשיא.\"}";
+        var router = NeverCalledRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.CharacterAnalysis, json, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.Equal(0, router.CallCount);  // null lists + clean Hebrew => nothing flagged
+        Assert.Equal(json, structuredJson); // byte-identical (never re-serialized)
+    }
+
+    [Fact]
+    public async Task NullPlotStructure_Story_CleanScalars_DoesNotThrow_MakesZeroModelCalls()
+    {
+        const string json =
+            "{\"plotStructure\":null,\"pacing\":\"קצב מתון\",\"conflicts\":null,\"summary\":\"סיכום תקין.\"}";
+        var router = NeverCalledRouter();
+
+        var (structuredJson, _) = await NewService(router).RepairAnalysisAsync(
+            AnalysisType.StoryAnalysis, json, cleanContent: "", "he-IL", JsonOpts);
+
+        Assert.Equal(0, router.CallCount);  // null nested plotStructure + null conflicts + clean scalars => nothing flagged
+        Assert.Equal(json, structuredJson);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────
 
     /// <summary>The Hebrew letters (U+05D0–U+05EA); used to synthesize a pure-Hebrew replacement of an

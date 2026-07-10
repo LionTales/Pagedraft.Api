@@ -883,6 +883,35 @@ public class BookReviewService
         //         fully accumulated (all windows + reduce passes) set.
         var deduped = UnionAndDedup(perDimension, chaptersByOrder, builtWithModel, lang);
 
+        // 5b. f5-wire JOB 2 — DETERMINISTIC GLOSSARY SAFETY NET over the finalised findings, BEFORE persist.
+        //     BookReview runs on the SAME gemma4:12b as LiteraryAnalysis and emits the SAME structured Hebrew
+        //     prose (findings[].rationale / suggestedAction), which leaks English terms STOCHASTICALLY — yet it
+        //     never flows through UnifiedAnalysisService.ApplyAnalysisRepairAsync (that seam feeds RunAsync/
+        //     streaming, not this whole-book engine), so the glossary must be hooked HERE. It Hebraises each
+        //     finding's Rationale + (non-null) SuggestedAction IN PLACE, touching NOTHING else. Gated on the
+        //     repair layer (Enabled + PerType-allows "BookReview") and a Hebrew book; NO new LLM (glossary
+        //     only). Fail-safe: it can NEVER throw into the build — on any fault the un-repaired findings are
+        //     persisted. Placed AFTER UnionAndDedup deliberately: DedupKey is derived from the RAW model
+        //     rationale there, so leaving it untouched here keeps Status preservation stable across rebuilds
+        //     (the model re-emits the same leak, we re-derive the same key) — the repair is display-only.
+        try
+        {
+            var repairedFindings = ApplyGlossaryToFindings(
+                deduped, lang, _aiOptions.Value.AnalysisRepair, _logger);
+            if (repairedFindings > 0)
+                _logger.LogInformation(
+                    "Book review glossary repair: cleaned English leaks in {Count} of {Total} finding(s) for book {BookId} ({Lang}).",
+                    repairedFindings, deduped.Count, bookId, lang);
+        }
+        catch (Exception ex)
+        {
+            // Belt-and-braces: a repair fault must NOT fail persistence (the layer's "can never throw into the
+            // engine" invariant). ApplyGlossaryToFindings already guards per-finding; this also covers the gate.
+            _logger.LogWarning(ex,
+                "Book review glossary repair threw for book {BookId} ({Lang}); persisting un-repaired findings (fail-safe).",
+                bookId, lang);
+        }
+
         // 6. TOTAL FAILURE: the ENTIRE accumulated + reduced set deduped to ZERO fresh findings — every window
         //    AND both reduce passes produced nothing usable (errored/unparseable OR all-empty). This is the
         //    same guard as the single-combined path (wb2-c05), now over the whole windowed set: keying on the
@@ -1831,6 +1860,100 @@ public class BookReviewService
                 dimension);
             return null;
         }
+    }
+
+    // ─── Glossary safety net (f5-wire JOB 2) ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// DETERMINISTIC English -> Hebrew glossary safety net for the whole-book review ENGINE path. BookReview
+    /// runs on the SAME gemma4:12b as LiteraryAnalysis and emits the SAME structured Hebrew prose, which
+    /// leaks English terms stochastically, but it NEVER flows through the RunAsync/streaming repair seam
+    /// (<c>UnifiedAnalysisService.ApplyAnalysisRepairAsync</c>) — so it gets its own hook here. Each finalised
+    /// <see cref="BookFinding"/>'s Rationale + (non-null) SuggestedAction is Hebraised IN PLACE via
+    /// <see cref="RepairableFields.For(BookFinding)"/> + <see cref="GlossaryRepairPass.RepairFields"/> (the
+    /// SAME single glossary the seam uses; NO new LLM). Everything else on the entity — Dimension / Verdict /
+    /// Severity / EvidenceJson / ChapterAnchorsJson / DedupKey / Status / BuiltWithModel — is never exposed to
+    /// the glossary, so it stays byte-identical.
+    ///
+    /// GATE (mirrors ApplyAnalysisRepairAsync + UnifiedAnalysisService.PerTypeAllows): runs only when the
+    /// repair layer is <see cref="Ai.AnalysisRepairOptions.Enabled"/> AND PerType allows "BookReview" AND the
+    /// book language is Hebrew (the Hebrew check lives inside <see cref="GlossaryRepairPass.RepairFields"/>).
+    /// A null/off config, a PerType exclusion, or a non-Hebrew book is a strict no-op. NOTE: this hook is
+    /// deliberately glossary-ONLY and ignores <see cref="Ai.AnalysisRepairOptions.GuardOnly"/> — BookReview
+    /// never runs the value-scoped LLM stage (no new model call on the whole-book path).
+    ///
+    /// FAIL-SAFE: per-finding try/catch means a repair fault on one finding leaves THAT finding un-repaired
+    /// and continues (mirrors the engine's non-fatal reduce-pass pattern); combined with the caller's outer
+    /// try/catch, the pass can NEVER throw into the review build. Static + pure (config passed in) so it is
+    /// unit-testable WITHOUT the windowed engine or a GPU. Returns the count of findings whose prose changed.
+    /// </summary>
+    internal static int ApplyGlossaryToFindings(
+        IReadOnlyList<BookFinding> findings,
+        string language,
+        Ai.AnalysisRepairOptions? cfg,
+        ILogger? logger = null)
+    {
+        // final-r01 null-collection guard: a null/empty incoming set is a no-op (never throws).
+        if (findings is null || findings.Count == 0)
+            return 0;
+
+        // Layer gate: a null block or Enabled=false is a FULL no-op; a non-empty PerType map that excludes
+        // "BookReview" also skips. (The Hebrew-book gate is enforced inside GlossaryRepairPass.RepairFields.)
+        if (cfg is null || !cfg.Enabled || !PerTypeAllowsBookReview(cfg))
+            return 0;
+
+        var changedFindings = 0;
+
+        // OUTER FAIL-SAFE: the whole walk is wrapped so the method itself can NEVER throw — even an
+        // unexpected enumerator/gate fault swallows to a warning and returns the count-so-far. This makes the
+        // static method the self-contained "can never throw into the engine" unit (the call site adds one more
+        // belt-and-braces catch). On any fault the already-repaired findings stand and the rest are left as-is.
+        try
+        {
+            foreach (var finding in findings)
+            {
+                if (finding is null) continue; // NULL-GUARD: never walk a null element.
+                try
+                {
+                    // RepairableFields.For(BookFinding) exposes ONLY Rationale + (non-null) SuggestedAction, so
+                    // the glossary can touch nothing else. RepairFields is itself Hebrew-gated + guard-gated (a
+                    // clean field is byte-identical at zero cost; a null SuggestedAction is never exposed).
+                    var changed = GlossaryRepairPass.RepairFields(RepairableFields.For(finding), language);
+                    if (changed > 0)
+                        changedFindings++;
+                }
+                catch (Exception ex)
+                {
+                    // FAIL-SAFE per finding: a fault on ONE finding must not abort the others. Keep this finding
+                    // un-repaired and continue (GlossaryRepairResult.Fault observability idiom).
+                    logger?.LogWarning(ex,
+                        "Book review glossary repair threw for a finding (dimension={Dimension}); keeping it un-repaired (fail-safe).",
+                        finding.Dimension);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Belt-and-braces: any fault OUTSIDE a single finding's body (e.g. a throwing enumerator) is
+            // swallowed too, so persistence proceeds with whatever was repaired before the fault.
+            logger?.LogWarning(ex,
+                "Book review glossary repair pass faulted; persisting with {Count} finding(s) repaired so far (fail-safe).",
+                changedFindings);
+        }
+
+        return changedFindings;
+    }
+
+    /// <summary>
+    /// Mirror of <c>UnifiedAnalysisService.PerTypeAllows</c> for <see cref="AnalysisType.BookReview"/>: a
+    /// null/empty PerType map means NO restriction (allowed); a non-empty map is a strict allowlist, so
+    /// "BookReview" must be present AND true. Kept in step with that method — both key on the
+    /// <see cref="AnalysisType"/> name.
+    /// </summary>
+    private static bool PerTypeAllowsBookReview(Ai.AnalysisRepairOptions cfg)
+    {
+        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
+        return cfg.PerType.TryGetValue(AnalysisType.BookReview.ToString(), out var enabled) && enabled;
     }
 
     // ─── Union + dedup ────────────────────────────────────────────────────────────────────────────

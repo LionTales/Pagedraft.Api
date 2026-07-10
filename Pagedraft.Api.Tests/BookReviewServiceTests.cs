@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
@@ -243,6 +244,81 @@ public class BookReviewServiceTests
 
         // Total plot rows: 3 preserved acted-on + 1 regenerated + 1 new = 5 (the vanished-open one gone).
         Assert.Equal(5, afterBuild2.Count);
+    }
+
+    // ─── 3b. GLOSSARY REPAIR e2e: a leak-containing rationale is CLEANED on persist, yet its DedupKey (derived
+    //         from the RAW rationale in UnionAndDedup) stays STABLE across a rebuild — so the user's Status is
+    //         PRESERVED and the row is not duplicated. Drives the full build→UnionAndDedup→ApplyGlossaryToFindings
+    //         →persist→rebuild path (f5-wire JOB 2) that BookReviewGlossaryRepairTests only exercises in isolated
+    //         pieces (DedupKey byte-identity after ONE repair pass; rebuild status-preservation with CLEAN findings
+    //         where the repair is a no-op). This is the single test where a LEAK flows through the whole path. ──
+    [Fact]
+    public async Task BuildBookReviewAsync_LeakInRationale_CleanedOnPersist_DedupKeyStable_StatusSurvivesRebuild()
+    {
+        // The model emits, for a Hebrew book, a plot finding whose RAW rationale carries a closed-glossary English
+        // leak "(Action)". The build must (1) Hebraise the PERSISTED rationale to "(פעולה)" while (2) keeping its
+        // stored DedupKey derived from the RAW "(Action)" rationale — UnionAndDedup stamps the key from the raw
+        // model prose BEFORE ApplyGlossaryToFindings cleans it. That raw-derived key is what makes a REBUILD stable:
+        // the model re-emits the same leak, the same raw key recomputes, the persist matches the cached row on it,
+        // so the user's Status is PRESERVED and no duplicate row is inserted.
+        const int anchorOrder = 1; // chapter order 1 exists (chapterCount: 2) → the finding's primary anchor order
+        const string rawRationale = "הממצא מצביע על תיאור פעולה (Action) עז בפרק."; // closed-glossary "(Action)" leak
+        var byDim = FindingsPerDimension(perDimensionCount: 0);
+        byDim["plot"] = JsonFindings(new FindingSpec("improve", 2, rawRationale, anchorOrder));
+
+        using var provider = BuildProvider(out _, byDim);
+
+        // BuildProvider leaves AiOptions.AnalysisRepair null → the engine repair hook is a strict no-op. Turn it ON
+        // exactly as shipped (Enabled + PerType allowing "BookReview") by mutating the resolved singleton options
+        // before the build reads _aiOptions.Value.AnalysisRepair. Without this the "(Action)" leak is never cleaned.
+        var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+        aiOptions.AnalysisRepair = new AnalysisRepairOptions
+        {
+            Enabled = true,
+            GuardOnly = true, // BookReview ignores GuardOnly (glossary-only, no LLM) — set it to mirror the ship default
+            PerType = new Dictionary<string, bool> { ["BookReview"] = true },
+        };
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        // The DedupKey UnionAndDedup stamped: dimension stamped 'plot', primary anchor order = 1, and the RAW
+        // (un-cleaned) rationale — computed BEFORE the glossary Hebraised the prose. The cleaned "(פעולה)" rationale
+        // would hash to a DIFFERENT key, so this equality proves the key came from the raw text, not the clean text.
+        var rawDerivedKey = BookFinding.ComputeDedupKey("plot", anchorOrder, rawRationale);
+
+        var afterBuild1 = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        var finding = Assert.Single(afterBuild1);
+        // (1) PERSISTED rationale is Hebraised: the leak is gone.
+        Assert.Contains("(פעולה)", finding.Rationale);
+        Assert.DoesNotContain("Action", finding.Rationale);
+        // (2) ...yet the stored DedupKey is the RAW-derived one, NOT recomputed from the cleaned rationale. The
+        //     repair must leave the key untouched so it stays stable across rebuilds (the crux of this test).
+        Assert.Equal(rawDerivedKey, finding.DedupKey);
+        Assert.Equal("plot", finding.Dimension);
+
+        // The user acts on the finding (mirrors the SetStatus + SaveChanges pattern the rebuild tests above use).
+        var tracked = await db.BookFindings.SingleAsync(f => f.BookId == bookId);
+        tracked.Status = "acknowledged";
+        await db.SaveChangesAsync();
+        var persistedId = tracked.Id;
+
+        // REBUILD with the SAME fake output (the model re-emits the same "(Action)" leak) + a stale-vs-briefs bump so
+        // the rebuild is not a no-op. The raw-derived key recomputes identically → the persist matches the cached row.
+        await TouchSummaryBaselineAsync(db, bookId);
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var afterBuild2 = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        var preserved = Assert.Single(afterBuild2); // NOT duplicated — dedup matched on the stable raw-derived key
+        Assert.Equal(persistedId, preserved.Id);          // the SAME row, refreshed in place
+        Assert.Equal("acknowledged", preserved.Status);   // the user's Status SURVIVED the rebuild
+        Assert.Equal(rawDerivedKey, preserved.DedupKey);  // the key is still the raw-derived one
+        // Still Hebraised after the rebuild (the repair re-ran on the re-emitted leak).
+        Assert.Contains("(פעולה)", preserved.Rationale);
+        Assert.DoesNotContain("Action", preserved.Rationale);
     }
 
     // ─── 4. DimensionScore rollup counts ──────────────────────────────────────────────────────────

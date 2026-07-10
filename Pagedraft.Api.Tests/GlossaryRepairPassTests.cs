@@ -390,6 +390,198 @@ public class GlossaryRepairPassTests
         Assert.Null(clean.Fault);                // ...also faultless.
     }
 
+    // ─── BookOverview (f5-wire): summary leak repaired, labels/numerics untouched ─
+
+    [Fact]
+    public void BookOverview_SummaryLeakRepaired_LabelsAndNumericsByteIdentical()
+    {
+        var overview = new BookOverviewResult
+        {
+            Genre = "פנטזיה",
+            SubGenre = "פנטזיה אפית",
+            TargetAudience = "מבוגרים צעירים",
+            LiteratureLevel = 7,
+            EstimatedReadingTimeMinutes = 240,
+            LanguageRegister = "ספרותי",
+            Summary = "הספר מציג תיאורי פעולה (Action) עזים לאורך העלילה.",
+        };
+
+        var before = Serialize(overview);
+        var result = GlossaryRepairPass.Apply(AnalysisType.BookOverview, before, "", "he", JsonOpts);
+
+        var after = JsonSerializer.Deserialize<BookOverviewResult>(result.StructuredJson!, JsonOpts)!;
+        Assert.Contains("(פעולה)", after.Summary);
+        Assert.DoesNotContain("Action", after.Summary);
+        Assert.Equal(1, result.FieldsChanged);
+
+        // Label + numeric fields never exposed => byte-identical (only summary changed).
+        AssertOnlyLeavesChanged(before, result.StructuredJson!, "summary");
+    }
+
+    [Fact]
+    public void BookOverview_UnparsableJson_IsNoOp_NoThrow()
+    {
+        const string garbage = "{not valid json at all";
+
+        var result = GlossaryRepairPass.Apply(AnalysisType.BookOverview, garbage, "", "he", JsonOpts);
+
+        // Fail-safe: unparsable structuredJson => returned byte-identical, nothing changed, no throw.
+        Assert.Equal(garbage, result.StructuredJson);
+        Assert.Equal(0, result.FieldsChanged);
+        Assert.Empty(result.ResidualLatinRuns);
+    }
+
+    // ─── CharacterAnalysis (f5-wire): description leak repaired, names/role/refs untouched ─
+
+    [Fact]
+    public void Character_DescriptionLeakRepaired_NamesRoleAndRelationshipRefsByteIdentical()
+    {
+        var characters = new CharacterAnalysisResult
+        {
+            Summary = "סיכום הדמויות בפרק.",
+            Characters =
+            {
+                new CharacterEntry { Name = "יונתן", Role = "protagonist", Description = "דמות עם הרבה (Action) לאורך הסיפור.", Arc = "מתפתחת לאורך העלילה", FirstAppearanceChapter = 1 },
+            },
+            Relationships =
+            {
+                new CharacterRelationship { Character1 = "יונתן", Character2 = "שרה", Relationship = "יחסים מורכבים" },
+            },
+        };
+
+        var before = Serialize(characters);
+        var result = GlossaryRepairPass.Apply(AnalysisType.CharacterAnalysis, before, "", "he", JsonOpts);
+
+        var after = JsonSerializer.Deserialize<CharacterAnalysisResult>(result.StructuredJson!, JsonOpts)!;
+        Assert.Contains("(פעולה)", after.Characters[0].Description);
+        Assert.DoesNotContain("Action", after.Characters[0].Description);
+
+        // Names, role enum, and relationship character refs are untouched.
+        Assert.Equal("יונתן", after.Characters[0].Name);
+        Assert.Equal("protagonist", after.Characters[0].Role);
+        Assert.Equal("יונתן", after.Relationships[0].Character1);
+        Assert.Equal("שרה", after.Relationships[0].Character2);
+
+        AssertOnlyLeavesChanged(before, result.StructuredJson!, "characters[0].description");
+    }
+
+    [Fact]
+    public void Character_NullCollections_WithSummaryLeak_RepairsSummary_NoThrow_NullPreserved()
+    {
+        const string json =
+            "{\"characters\":null,\"relationships\":null,\"summary\":\"תיאור פעולה (Action) עז.\"}";
+
+        var result = GlossaryRepairPass.Apply(AnalysisType.CharacterAnalysis, json, "", "he", JsonOpts);
+
+        Assert.NotNull(result.StructuredJson);
+        Assert.Equal(1, result.FieldsChanged);
+
+        var after = JsonSerializer.Deserialize<CharacterAnalysisResult>(result.StructuredJson!, JsonOpts)!;
+        Assert.Contains("(פעולה)", after.Summary);
+        Assert.DoesNotContain("Action", after.Summary);
+        // The null collections were neither dereferenced nor synthesized into lists.
+        Assert.Null(after.Characters);
+        Assert.Null(after.Relationships);
+    }
+
+    // ─── StoryAnalysis (f5-wire): plot/conflict leaks repaired, enums untouched ─
+
+    [Fact]
+    public void Story_PlotAndConflictLeaksRepaired_TypeStatusEnumsByteIdentical()
+    {
+        var story = new StoryAnalysisResult
+        {
+            PlotStructure = new PlotStructure
+            {
+                Setup = "פתיחה עם (Tension) גוברת.",
+                RisingAction = "העלילה מתפתחת",
+                Climax = "רגע השיא",
+                FallingAction = "התרה הדרגתית",
+                Resolution = "סיום",
+            },
+            Pacing = "קצב מהיר",
+            Conflicts =
+            {
+                new ConflictEntry { Type = "internal", Description = "קונפליקט עם (Action) רבה.", Status = "unresolved" },
+            },
+            Summary = "סיכום המבנה.",
+        };
+
+        var before = Serialize(story);
+        var result = GlossaryRepairPass.Apply(AnalysisType.StoryAnalysis, before, "", "he", JsonOpts);
+
+        var after = JsonSerializer.Deserialize<StoryAnalysisResult>(result.StructuredJson!, JsonOpts)!;
+        Assert.Contains("(מתח)", after.PlotStructure.Setup);
+        Assert.DoesNotContain("Tension", after.PlotStructure.Setup);
+        Assert.Contains("(פעולה)", after.Conflicts[0].Description);
+        Assert.DoesNotContain("Action", after.Conflicts[0].Description);
+
+        // Conflict type/status enums (Latin, but NOT whitelisted) are untouched.
+        Assert.Equal("internal", after.Conflicts[0].Type);
+        Assert.Equal("unresolved", after.Conflicts[0].Status);
+        Assert.Equal(2, result.FieldsChanged);
+
+        AssertOnlyLeavesChanged(before, result.StructuredJson!, "plotStructure.setup", "conflicts[0].description");
+    }
+
+    [Fact]
+    public void Story_NullPlotStructureAndConflicts_CleanScalars_DoesNotThrow_ReturnsInputByteIdentical()
+    {
+        const string json =
+            "{\"plotStructure\":null,\"pacing\":\"קצב מהיר\",\"conflicts\":null,\"summary\":\"סיכום תקין.\"}";
+
+        var result = GlossaryRepairPass.Apply(AnalysisType.StoryAnalysis, json, "", "he", JsonOpts);
+
+        // plotStructure null (nested object) + conflicts null (collection) walked safely; clean Hebrew
+        // scalars => nothing flagged => input byte-identical, no throw.
+        Assert.Equal(json, result.StructuredJson);
+        Assert.Equal(0, result.FieldsChanged);
+        Assert.Empty(result.ResidualLatinRuns);
+    }
+
+    // ─── QA (f5-wire): answer leak repaired, citations/confidence untouched ──
+
+    [Fact]
+    public void QA_AnswerLeakRepaired_CitationsAndConfidenceByteIdentical()
+    {
+        var qa = new QAResult
+        {
+            Answer = "התשובה כוללת תיאור (Action) מהעלילה.",
+            Citations =
+            {
+                new ChapterCitation { ChapterNumber = 3, ChapterTitle = "הפרק השלישי", RelevantExcerpt = "ציטוט מהטקסט" },
+            },
+            Confidence = "high",
+        };
+
+        var before = Serialize(qa);
+        var result = GlossaryRepairPass.Apply(AnalysisType.QA, before, "", "he", JsonOpts);
+
+        var after = JsonSerializer.Deserialize<QAResult>(result.StructuredJson!, JsonOpts)!;
+        Assert.Contains("(פעולה)", after.Answer);
+        Assert.DoesNotContain("Action", after.Answer);
+
+        // Citation anchors (number/title/excerpt) + confidence enum are untouched.
+        Assert.Equal(3, after.Citations[0].ChapterNumber);
+        Assert.Equal("הפרק השלישי", after.Citations[0].ChapterTitle);
+        Assert.Equal("ציטוט מהטקסט", after.Citations[0].RelevantExcerpt);
+        Assert.Equal("high", after.Confidence);
+
+        AssertOnlyLeavesChanged(before, result.StructuredJson!, "answer");
+    }
+
+    [Fact]
+    public void QA_UnparsableJson_IsNoOp_NoThrow()
+    {
+        const string garbage = "not even json";
+
+        var result = GlossaryRepairPass.Apply(AnalysisType.QA, garbage, "", "he", JsonOpts);
+
+        Assert.Equal(garbage, result.StructuredJson);
+        Assert.Equal(0, result.FieldsChanged);
+        Assert.Empty(result.ResidualLatinRuns);
+    }
+
     // ─── Serialization + leaf-diff helpers (mirror RepairableFieldsTests) ────
 
     private static string Serialize(object instance)
