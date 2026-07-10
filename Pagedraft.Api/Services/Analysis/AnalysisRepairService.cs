@@ -202,12 +202,13 @@ public class AnalysisRepairService
     /// key rewrite). Kept HERE (not in UnifiedAnalysisService) so it is unit-testable with a fake IAiRouter.
     ///
     /// Handles ONLY the repair-target types reachable at the analysis seams: Summarization (whole
-    /// <paramref name="cleanContent"/>), LiteraryAnalysis, LinguisticAnalysis, LineEdit. Proofread and every
-    /// other type — plus a non-Hebrew book, an unparsable payload, or any exception — return the inputs
-    /// UNCHANGED (fail-safe; never throws). For LineEdit the caller (UnifiedAnalysisService) refreshes
-    /// ResultText from the repaired overallFeedback; this method only repairs the structured value.
+    /// <paramref name="cleanContent"/>), LiteraryAnalysis, LinguisticAnalysis, LineEdit, BookOverview,
+    /// CharacterAnalysis, StoryAnalysis, QA. Proofread and every other type — plus a non-Hebrew book, an
+    /// unparsable payload, or any exception — return the inputs UNCHANGED (fail-safe; never throws). For
+    /// LineEdit the caller (UnifiedAnalysisService) refreshes ResultText from the repaired overallFeedback;
+    /// this method only repairs the structured value.
     /// </summary>
-    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit are repaired.</param>
+    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired.</param>
     /// <param name="structuredJson">Parsed-and-reserialised StructuredResult (null for Summarization / non-structured types).</param>
     /// <param name="cleanContent">Prose ResultText (the whole repairable text for Summarization).</param>
     /// <param name="language">BOOK language; the pass fires only when this starts with "he".</param>
@@ -282,6 +283,69 @@ public class AnalysisRepairService
                 {
                     var (json, flagged, repaired, failSafe) =
                         await RepairStructuredAsync<LineEditResult>(
+                            type, structuredJson, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false);
+                    return new AnalysisRepairResult
+                    {
+                        StructuredJson = json,
+                        CleanContent = cleanContent,
+                        LlmFlagged = flagged,
+                        LlmRepaired = repaired,
+                        LlmFailSafe = failSafe
+                    };
+                }
+
+                // Book-level structured-Hebrew-prose analyses (f5-wire): same seam + fail-safe contract as
+                // LiteraryAnalysis. GuardOnly is the shipped default, so this Stage-2 path is off by default;
+                // it is wired for symmetry with the Stage-1 glossary pass. QA reaches here with a parsed QAResult.
+                case AnalysisType.BookOverview:
+                {
+                    var (json, flagged, repaired, failSafe) =
+                        await RepairStructuredAsync<BookOverviewResult>(
+                            type, structuredJson, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false);
+                    return new AnalysisRepairResult
+                    {
+                        StructuredJson = json,
+                        CleanContent = cleanContent,
+                        LlmFlagged = flagged,
+                        LlmRepaired = repaired,
+                        LlmFailSafe = failSafe
+                    };
+                }
+
+                case AnalysisType.CharacterAnalysis:
+                {
+                    var (json, flagged, repaired, failSafe) =
+                        await RepairStructuredAsync<CharacterAnalysisResult>(
+                            type, structuredJson, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false);
+                    return new AnalysisRepairResult
+                    {
+                        StructuredJson = json,
+                        CleanContent = cleanContent,
+                        LlmFlagged = flagged,
+                        LlmRepaired = repaired,
+                        LlmFailSafe = failSafe
+                    };
+                }
+
+                case AnalysisType.StoryAnalysis:
+                {
+                    var (json, flagged, repaired, failSafe) =
+                        await RepairStructuredAsync<StoryAnalysisResult>(
+                            type, structuredJson, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false);
+                    return new AnalysisRepairResult
+                    {
+                        StructuredJson = json,
+                        CleanContent = cleanContent,
+                        LlmFlagged = flagged,
+                        LlmRepaired = repaired,
+                        LlmFailSafe = failSafe
+                    };
+                }
+
+                case AnalysisType.QA:
+                {
+                    var (json, flagged, repaired, failSafe) =
+                        await RepairStructuredAsync<QAResult>(
                             type, structuredJson, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false);
                     return new AnalysisRepairResult
                     {

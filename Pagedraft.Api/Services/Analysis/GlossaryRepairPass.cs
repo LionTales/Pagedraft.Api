@@ -28,11 +28,14 @@ namespace Pagedraft.Api.Services.Analysis;
 //     firing it on an English (or other) book would corrupt clean prose. A
 //     non-Hebrew language is a no-op.
 //   • Only the repair-target types reachable at these seams are handled
-//     (Summarization, LiteraryAnalysis, LinguisticAnalysis, LineEdit). Every
-//     other type — Proofread included — is returned UNCHANGED (byte-identical).
+//     (Summarization, LiteraryAnalysis, LinguisticAnalysis, LineEdit, BookOverview,
+//     CharacterAnalysis, StoryAnalysis, QA). Every other type — Proofread included —
+//     is returned UNCHANGED (byte-identical).
 //     BookReview flows through a DIFFERENT path (the whole-book review engine,
-//     not RunAsync/RunWithInput/streaming), so it is intentionally NOT handled
-//     here.
+//     not RunAsync/RunWithInput/streaming), so it is intentionally NOT handled by
+//     Apply. Its engine hook (BookReviewService.ApplyGlossaryToFindings, f5-wire)
+//     repairs the finalized BookFinding entities via the reusable RepairFields
+//     entry point below — the SAME glossary/detector, applied to entity fields.
 //   • A parse failure, a clean field, or a term not in the closed glossary all
 //     leave the value exactly as-is. The worst case is "left a leak for p3",
 //     never "made a field worse".
@@ -105,7 +108,7 @@ public static class GlossaryRepairPass
     /// plus the residual Latin runs for the p3 hand-off. Any non-target type, a non-Hebrew book,
     /// a parse failure, or a clean field is a no-op that returns the inputs byte-identical.
     /// </summary>
-    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit are repaired here.</param>
+    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired here.</param>
     /// <param name="structuredJson">The parsed-and-reserialised StructuredResult (null for Summarization / non-structured types).</param>
     /// <param name="cleanContent">The prose ResultText (the whole repairable text for Summarization).</param>
     /// <param name="language">BOOK language; the pass fires only when this starts with "he".</param>
@@ -138,10 +141,75 @@ public static class GlossaryRepairPass
             AnalysisType.LineEdit =>
                 RepairStructured<LineEditResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),
 
+            // Book-level structured-Hebrew-prose analyses on the SAME gemma4:12b as LiteraryAnalysis —
+            // susceptible to the same stochastic English-term leak, so wired through the identical seam
+            // (f5-wire). QA reaches this seam with a parsed QAResult (RunWithInputAsync -> TryParseStructured),
+            // so its answer prose is repaired too.
+            AnalysisType.BookOverview =>
+                RepairStructured<BookOverviewResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),
+            AnalysisType.CharacterAnalysis =>
+                RepairStructured<CharacterAnalysisResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),
+            AnalysisType.StoryAnalysis =>
+                RepairStructured<StoryAnalysisResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),
+            AnalysisType.QA =>
+                RepairStructured<QAResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),
+
             // Proofread and everything else: not a repair target at these seams. BookReview is
             // handled on its own path, never here. Return the inputs unchanged.
             _ => NoOp(structuredJson, cleanContent),
         };
+    }
+
+    /// <summary>
+    /// Deterministic glossary pass over an ALREADY-BUILT list of repairable prose fields, for callers that
+    /// own their own field list and write-back rather than a re-serialised structured result — specifically
+    /// the whole-book review ENGINE path (BookReviewService, f5-wire JOB 2), which repairs
+    /// <c>BookFinding</c> ENTITY fields directly IN PLACE and never flows through <see cref="Apply"/>'s
+    /// RunAsync/streaming seam. It runs the SAME substitution machinery <see cref="RepairStructured{T}"/>
+    /// uses — the guard (<see cref="LatinInHebrewContentDetector.HasNonAllowlistedLatin"/>) then the closed
+    /// glossary (<see cref="ApplyGlossary"/>) per field — so there is ONE glossary, never a second copy.
+    ///
+    /// Hebrew-gated exactly like <see cref="Apply"/>: the glossary is English -> Hebrew, so a blank or
+    /// non-Hebrew language is a strict no-op (returns 0, touches nothing). A clean field (no non-allowlisted
+    /// Latin) is skipped byte-identical at zero cost; only a field the glossary actually changes is written
+    /// back via its <see cref="RepairableField.Set"/>. Returns the number of fields whose value changed.
+    ///
+    /// This method does NOT catch: the caller owns the fail-safe try/catch (mirroring how
+    /// <c>ApplyAnalysisRepairAsync</c> wraps the always-on <see cref="Apply"/> seam). Byte-identity of
+    /// everything else is the CALLER's responsibility — pass only fields whose getters/setters touch
+    /// repairable prose (RepairableFields.For enforces that whitelist).
+    /// </summary>
+    internal static int RepairFields(IReadOnlyList<RepairableField> fields, string language)
+    {
+        // Hebrew-book gate (same contract as Apply): English -> Hebrew glossary must never fire on a
+        // non-Hebrew book, or it would translate legitimate English prose.
+        if (fields is null || fields.Count == 0 ||
+            string.IsNullOrWhiteSpace(language) ||
+            !language.StartsWith("he", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var changed = 0;
+        foreach (var field in fields)
+        {
+            var value = field.Get();
+
+            // GUARD: a field with no non-allowlisted Latin is left byte-identical (zero cost, zero risk).
+            if (!LatinInHebrewContentDetector.HasNonAllowlistedLatin(value))
+            {
+                continue;
+            }
+
+            var repaired = ApplyGlossary(value);
+            if (!string.Equals(repaired, value, StringComparison.Ordinal))
+            {
+                field.Set(repaired);
+                changed++;
+            }
+        }
+
+        return changed;
     }
 
     /// <summary>
