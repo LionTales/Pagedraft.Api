@@ -3,7 +3,7 @@ namespace Pagedraft.Api.Models.Dtos;
 /// <summary>Analysis result for API responses. Includes structured JSON and server-side suggestions when applicable.</summary>
 public record AnalysisResultDto(
     Guid Id,
-    Guid ChapterId,
+    Guid? ChapterId,
     Guid? JobId,
     string Type,
     string ResultText,

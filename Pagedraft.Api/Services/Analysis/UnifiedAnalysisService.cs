@@ -444,7 +444,7 @@ public class UnifiedAnalysisService
 
         var result = new AnalysisResult
         {
-            ChapterId = chapterId ?? Guid.Empty,
+            ChapterId = chapterId,
             BookId = bookId,
             SceneId = sceneId,
             Scope = scope,
@@ -577,9 +577,21 @@ public class UnifiedAnalysisService
         // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
         (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
 
+        // QA is answer-primary: the model returns an {answer, citations, confidence} JSON envelope, but the UI
+        // binds ResultText directly (book-dashboard "ask" card). Surface the parsed (and glossary-repaired)
+        // `answer` prose as ResultText so the ask box shows the answer, not the raw JSON. StructuredResult keeps
+        // the full envelope (its citations drive the "cited chapters" line). Fail-safe: an unparsable or empty
+        // answer leaves the raw text as-is (mirrors MaybeReplaceLineEditResultText's answer-primary handling).
+        if (analysisType == AnalysisType.QA && !string.IsNullOrWhiteSpace(structuredJson))
+        {
+            var qaAnswer = TryExtractQaAnswer(structuredJson);
+            if (!string.IsNullOrWhiteSpace(qaAnswer))
+                cleanContent = qaAnswer;
+        }
+
         var result = new AnalysisResult
         {
-            ChapterId = chapterId ?? Guid.Empty,
+            ChapterId = chapterId,
             BookId = bookId,
             SceneId = sceneId,
             Scope = scope,
@@ -643,6 +655,21 @@ public class UnifiedAnalysisService
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
+    }
+
+    /// <summary>Extract the QA <c>answer</c> prose from a parsed <see cref="QAResult"/> JSON envelope, so the
+    /// book-dashboard ask card can render the answer directly instead of the raw JSON. Returns null on any parse
+    /// failure or a missing answer, in which case the caller keeps the raw ResultText (fail-safe).</summary>
+    private string? TryExtractQaAnswer(string structuredJson)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<QAResult>(structuredJson, JsonOpts)?.Answer;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Stream an analysis, accumulate tokens, then persist. Chunking is not used; for long chapters use non-streaming proofread (chunked).</summary>
@@ -744,7 +771,7 @@ public class UnifiedAnalysisService
 
         var result = new AnalysisResult
         {
-            ChapterId = chapterId ?? Guid.Empty,
+            ChapterId = chapterId,
             BookId = bookId,
             SceneId = sceneId,
             Scope = scope,
@@ -1788,7 +1815,7 @@ public class UnifiedAnalysisService
 
         var result = new AnalysisResult
         {
-            ChapterId = chapterId ?? Guid.Empty,
+            ChapterId = chapterId,
             BookId = bookId,
             SceneId = sceneId,
             Scope = scope,
@@ -2045,7 +2072,7 @@ public class UnifiedAnalysisService
 
         var result = new AnalysisResult
         {
-            ChapterId = chapterId ?? Guid.Empty,
+            ChapterId = chapterId,
             BookId = bookId,
             SceneId = sceneId,
             Scope = scope,
@@ -3034,13 +3061,14 @@ public class UnifiedAnalysisService
         AnalysisType analysisType,
         CancellationToken ct)
     {
-        if (!chapterId.HasValue)
-            return;
-
+        // Chapter/scene-scoped runs archive the prior active run for the SAME chapter; a book-scoped run
+        // (QA / ask, chapterId == null) archives the prior active run for the SAME book+scope+type. The
+        // nullable equality below is null-safe (EF translates a null chapterId to `ChapterId IS NULL`), so
+        // book-scoped runs no longer accumulate unbounded Active rows (they used to early-return here).
         var previous = await _db.AnalysisResults
             .Include(a => a.Suggestions)
             .Where(a =>
-                a.ChapterId == chapterId.Value &&
+                a.ChapterId == chapterId &&
                 a.BookId == bookId &&
                 a.SceneId == sceneId &&
                 a.Scope == scope &&
