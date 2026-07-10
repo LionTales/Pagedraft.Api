@@ -180,23 +180,36 @@ public class OutputQualityDiagnostic
 
             // CharacterAnalysis — CONTENT: character description/arc, relationship prose, summary. STRUCTURAL:
             // character/relationship NAMES (proper nouns, may legitimately be Latin) + role enum + keys.
+            // NULL-GUARD (mirrors RepairableFields.For(CharacterAnalysisResult)): `characters`/`relationships`
+            // are `= new()` but System.Text.Json OVERWRITES them with null on `"characters": null` /
+            // `"relationships": null`; `?? Empty` keeps the extractor from NRE-ing and aborting the sweep.
             await CaptureAndSplitAsync(AnalysisType.CharacterAnalysis, passageText, raw =>
                 TryParse<CharacterAnalysisResult>(raw, out var r) && r != null
-                    ? (true, r.Characters.SelectMany(c => new[] { c.Description, c.Arc })
-                            .Concat(r.Relationships.Select(rel => rel.Relationship))
+                    ? (true, (r.Characters ?? Enumerable.Empty<CharacterEntry>())
+                            .SelectMany(c => new[] { c.Description, c.Arc })
+                            .Concat((r.Relationships ?? Enumerable.Empty<CharacterRelationship>())
+                                .Select(rel => rel.Relationship))
                             .Append(r.Summary).ToArray())
                     : (false, Array.Empty<string>()));
 
             // StoryAnalysis — CONTENT: plotStructure prose (setup/rising/climax/falling/resolution), pacing,
             // conflict descriptions, summary. STRUCTURAL: conflict type + status enums + keys.
             await CaptureAndSplitAsync(AnalysisType.StoryAnalysis, passageText, raw =>
-                TryParse<StoryAnalysisResult>(raw, out var r) && r != null
-                    ? (true, new[]
-                        {
-                            r.PlotStructure.Setup, r.PlotStructure.RisingAction, r.PlotStructure.Climax,
-                            r.PlotStructure.FallingAction, r.PlotStructure.Resolution, r.Pacing, r.Summary
-                        }.Concat(r.Conflicts.Select(c => c.Description)).ToArray())
-                    : (false, Array.Empty<string>()));
+            {
+                if (!TryParse<StoryAnalysisResult>(raw, out var r) || r == null)
+                    return (false, Array.Empty<string>());
+                // NULL-GUARD (mirrors RepairableFields.For(StoryAnalysisResult)): `plotStructure` and
+                // `conflicts` are `= new()` but System.Text.Json OVERWRITES them with null on
+                // `"plotStructure": null` / `"conflicts": null`; fall back to an empty PlotStructure /
+                // empty conflicts so a null does not NRE and abort the sweep.
+                var plot = r.PlotStructure ?? new PlotStructure();
+                var content = new[]
+                    {
+                        plot.Setup, plot.RisingAction, plot.Climax,
+                        plot.FallingAction, plot.Resolution, r.Pacing, r.Summary
+                    }.Concat((r.Conflicts ?? Enumerable.Empty<ConflictEntry>()).Select(c => c.Description)).ToArray();
+                return (true, content);
+            });
 
             // QA — CONTENT: answer only. STRUCTURAL: keys (answer/citations/chapterNumber/chapterTitle/
             // relevantExcerpt/confidence) + the confidence enum. QA runs OUTSIDE JsonMode and its body often
