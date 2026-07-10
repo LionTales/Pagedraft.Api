@@ -1,10 +1,18 @@
 # Analysis Output Repair Layer
 
 A scoped, guard-gated, measured "read-and-fix" pass over AI analysis PROSE (summaries, literary,
-linguistic, line-edit) that removes leaked English terms and garbled words from Hebrew output
-without touching anchored/structural fields. Built by plan
-`src/.cursor/plans/_todo/analysis-output-repair-2026-07-03.plan.md` - read it for the full phase-by-
-phase gate history and measurements; this doc is the durable design reference.
+linguistic, line-edit, book-overview, character, story, Q&A, and whole-book review) that removes
+leaked English terms and garbled words from Hebrew output without touching anchored/structural
+fields. Built by plan `src/.cursor/plans/_todo/analysis-output-repair-2026-07-03.plan.md` - read it
+for the full phase-by-phase gate history and measurements; this doc is the durable design reference.
+
+The coverage was later extended (BookOverview / CharacterAnalysis / StoryAnalysis / QA / BookReview)
+and made model-tier aware by the follow-up plan
+`src/.cursor/plans/_todo/analysis-repair-coverage-cloud-tiers-2026-07-06.plan.md` - see section 3's
+coverage table, section 4.1's per-environment/tier policy, and section 11's measured leak-by-tier
+table. The governing principle of that follow-up: **the English-into-Hebrew leak is a small-model
+artifact, so repair coverage should scale INVERSELY with model capability** - the cheap deterministic
+defenses ship on the small-local tier and go no-op on a capable cloud tier.
 
 Sibling docs: [./Hebrew-Proofread-Model.md](./Hebrew-Proofread-Model.md) (the model this layer does
 NOT touch), [./LINGUISTIC_MODEL_BAKEOFF.md](./LINGUISTIC_MODEL_BAKEOFF.md) (the model this layer's
@@ -93,34 +101,80 @@ Single source of truth: `Services/Analysis/RepairableFields.cs`. One `For(...)` 
 structured result type returns an ordered list of `(get, set)` accessors over PROSE fields only;
 nothing else is ever exposed to either repair stage.
 
-| Analysis type | AiTaskType | Model | Repairable prose fields |
-|---|---|---|---|
-| Summarization | Summarization | qwen3.5:9b | Entire `ResultText` (`RepairableFields.ForPlainText`) |
-| LiteraryAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `tone`, `toneDescription`, `narrativeVoice`(+`Description`), `themes[].name`/`description`, `rhetoricalDevices[].name`/`example`/`effect`, `moodProgression` |
-| LinguisticAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `deviations[].note`, `consistencyIssues[].description` |
-| Proofread | Proofread | Dicta-3.0-Nemotron-12B | **None** - `RepairableFields.For(AnalysisSuggestion)` returns an empty list; never repaired |
-| LineEdit | LineEdit | Dicta-3.0-Nemotron-12B | `overallFeedback`, `suggestions[].reason` |
-| BookReview | BookReview | gemma4:12b | `findings[].rationale`, `findings[].suggestedAction` (whitelist exists in `RepairableFields.For(BookReviewResult)`, but see the note below) |
+| Analysis type | AiTaskType | Model | Repairable prose fields | Reached via |
+|---|---|---|---|---|
+| Summarization | Summarization | qwen3.5:9b | Entire `ResultText` (`RepairableFields.ForPlainText`) | analysis seam |
+| LiteraryAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `tone`, `toneDescription`, `narrativeVoice`(+`Description`), `themes[].name`/`description`, `rhetoricalDevices[].name`/`example`/`effect`, `moodProgression` | analysis seam |
+| LinguisticAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `deviations[].note`, `consistencyIssues[].description` | analysis seam |
+| Proofread | Proofread | Dicta-3.0-Nemotron-12B | **None** - `RepairableFields.For(AnalysisSuggestion)` returns an empty list; never repaired | n/a (never repaired) |
+| LineEdit | LineEdit | Dicta-3.0-Nemotron-12B | `overallFeedback`, `suggestions[].reason` | analysis seam |
+| BookOverview | LinguisticAnalysis | gemma4:12b | `summary` only | analysis seam |
+| CharacterAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `characters[].description`/`arc`, `relationships[].relationship` | analysis seam |
+| StoryAnalysis | LinguisticAnalysis | gemma4:12b | `plotStructure.{setup,risingAction,climax,fallingAction,resolution}`, `pacing`, `conflicts[].description`, `summary` | analysis seam |
+| QA | GenericChat | qwen3.5:9b | `answer` only | analysis seam (parsed via `TryExtractAndReserialize<QAResult>`) |
+| BookReview | BookReview | gemma4:12b | `findings[].rationale`, `findings[].suggestedAction` (on the persisted `BookFinding` ENTITY) | **engine hook** (`BookReviewService.ApplyGlossaryToFindings`) |
 
-> **BookReview is whitelisted but not yet wired.** `RepairableFields.For(BookReviewResult)` was built
-> in Phase 1 per the plan's routing table, but neither `GlossaryRepairPass.Apply` nor
-> `AnalysisRepairService.RepairAnalysisAsync` dispatch on `AnalysisType.BookReview` today - both fall
-> through to their `default` (no-op) case, with an explicit comment that BookReview "flows through a
-> DIFFERENT path (the whole-book review engine, not RunAsync/RunWithInput/streaming)". Wiring
-> BookReview's rationale/suggestedAction into a repair pass on its own engine path is future work, not
-> shipped behavior.
+"**Analysis seam**" = the three finalize points (`RunAsync` / `RunWithInputAsync` / `RunStreamingAsync`)
+that call `UnifiedAnalysisService.ApplyAnalysisRepairAsync` after parse/sanitize, before persistence.
+QA reaches the seam with a NON-null structured result because `TryParseStructured` routes
+`AnalysisType.QA` through `TryExtractAndReserialize<QAResult>` (`UnifiedAnalysisService.cs:2185`); if the
+QA output is not parseable into that shape the structured JSON is null and repair is a fail-safe no-op
+for that run.
+
+> **BookReview coverage extension (f5-wire).** BookReview is now wired, but NOT through the analysis
+> seam - it flows through the whole-book review ENGINE (`BookReviewService`), a windowed map-reduce path
+> that never calls `ApplyAnalysisRepairAsync`. So `GlossaryRepairPass.Apply` and
+> `AnalysisRepairService.RepairAnalysisAsync` still deliberately return no-op on `AnalysisType.BookReview`
+> (both keep their `default` case + the "flows through a DIFFERENT path" comment). Instead, the engine
+> hook `BookReviewService.ApplyGlossaryToFindings` runs the SAME deterministic glossary
+> (`GlossaryRepairPass.RepairFields`) directly over the FINALIZED, unioned/deduped `List<BookFinding>`
+> ENTITIES right after `UnionAndDedup` and BEFORE `PersistPreservingStatusAsync`, repairing each
+> finding's `Rationale` + (non-null) `SuggestedAction` IN PLACE. It is glossary-ONLY (no LLM stage, ever,
+> regardless of `GuardOnly`), triple fail-safe (per-finding try/catch inside the walk, an outer walk
+> try/catch, and a belt-and-braces try/catch at the call site), and skipped entirely on a total-failure
+> build (empty finding set -> no-op). See section 3.1 for why the `DedupKey` is left untouched.
+>
+> The parsed-DTO overload `RepairableFields.For(BookReviewResult)` (targeting `BookFindingItem`) still
+> exists but is **test-only** - the engine projects the model's raw JSON straight to `BookFinding`
+> entities before repair, so the live path uses the sibling `RepairableFields.For(BookFinding)` overload,
+> not the DTO one.
+
+### 3.1 BookReview: why repairing `Rationale` never disturbs `DedupKey`/`Status`
+
+BookReview findings are deduped and status-preserved across rebuilds by a `DedupKey`
+(`BookFinding.ComputeDedupKey(dimension, primaryChapterOrder, rationale)`). The glossary hook is placed
+**after** `UnionAndDedup` computes and stamps that key from the **RAW model rationale**, and it mutates
+ONLY `Rationale`/`SuggestedAction` - never `DedupKey`. `PersistPreservingStatusAsync` matches incoming
+vs cached findings on the STORED `DedupKey`, never on a recomputation from the (now-repaired) rationale.
+So on the next rebuild the model re-emits the same (possibly re-leaked) rationale, `UnionAndDedup`
+re-derives the identical key, and the user's `Status` (acknowledged/dismissed/done) is preserved. The
+repair is therefore a **display-time cleanup only, never a dedup input** - the persisted row's
+`Rationale` (cleaned) and `DedupKey` (from raw) are intentionally derived from different strings, and no
+code path may recompute the key from the persisted rationale without breaking status preservation
+(covered by `BookReviewGlossaryRepairTests`).
 
 **Must-not-touch (enforced by the whitelist + the invariant test, never exposed as an accessor):**
 
 - All JSON property keys (structure is held by code / re-serialization, never renamed).
 - Enums: `ThemeEntry.Significance`, `ConsistencyIssue.Type`, `LineEditSuggestion.Category`,
-  `BookFindingItem.Dimension`/`Verdict`, `DimensionScore.Score`.
+  `BookFindingItem.Dimension`/`Verdict`, `DimensionScore.Score`, `CharacterEntry.Role`,
+  `ConflictEntry.Type`/`Status`, `QAResult.Confidence`.
 - `StyleDeviation.Metric` (FE label-lookup key) and its numeric `SceneValue`/`ChapterBaseline`.
 - `ConsistencyIssue.Span` (manuscript-quote anchor - Hebrew by construction, left verbatim).
 - `LineEditSuggestion.Original`/`Suggested` (verbatim anchors).
 - `AnalysisSuggestion.OriginalText`/`SuggestedText`/`StartOffset`/`EndOffset` (Proofread's offset
   anchors - the reason Proofread has zero repairable fields at all).
 - `BookFindingItem.Severity`/`Evidence`/`ChapterAnchors`; all numeric metrics everywhere.
+- **BookOverview:** `Genre`/`SubGenre`/`TargetAudience`/`LanguageRegister` (short label/register fields,
+  not free prose), `LiteratureLevel`/`EstimatedReadingTimeMinutes` (numeric).
+- **CharacterAnalysis:** `CharacterEntry.Name`, `CharacterRelationship.Character1`/`Character2`
+  (proper-noun character references), `CharacterEntry.FirstAppearanceChapter` (numeric).
+- **QA:** `ChapterCitation.ChapterNumber` (numeric), `ChapterTitle` (chapter-title reference),
+  `RelevantExcerpt` (a manuscript-quote excerpt, left verbatim like `ConsistencyIssue.Span`).
+- **BookReview ENTITY path** (`RepairableFields.For(BookFinding)`): `Dimension`/`Verdict` (enum-like
+  labels), `Severity` (numeric), `EvidenceJson`/`ChapterAnchorsJson` (manuscript anchors + structural
+  JSON), `DedupKey`/`Status`/`BuiltWithModel`/`CreatedAt`/`UpdatedAt` - only `Rationale` +
+  (non-null) `SuggestedAction` are ever exposed.
 
 The scoping contract is centralized in the header comment of `RepairableFields.cs` and enforced by
 `RepairableFieldsTests` (`Pagedraft.Api.Tests/RepairableFieldsTests.cs`) - a byte-identity invariant
@@ -141,10 +195,22 @@ test that runs a transform mutating every prose accessor and asserts every non-w
     "Summarization": true,
     "LiteraryAnalysis": true,
     "LinguisticAnalysis": true,
-    "LineEdit": true
+    "LineEdit": true,
+    "BookOverview": true,      // f5-wire (analysis seam)
+    "CharacterAnalysis": true, // f5-wire (analysis seam)
+    "StoryAnalysis": true,     // f5-wire (analysis seam)
+    "QA": true,                // f5-wire (analysis seam)
+    "BookReview": true         // f5-wire (engine hook - gates BookReviewService.ApplyGlossaryToFindings)
   }
 }
 ```
+
+> **The 5 f5-wire types MUST be listed here or their wiring is silently dead.** `PerType` is a strict
+> allowlist when non-empty (see the paragraph below): a type ABSENT from a populated map is skipped. The
+> base map already listed only the four original types, so adding the new-type switch arms + overloads
+> WITHOUT adding these five keys would have left the runtime gate closed - the code path present but never
+> reached. The `"BookReview"` key gates the engine hook via `BookReviewService.PerTypeAllowsBookReview`,
+> which mirrors the seam's `UnifiedAnalysisService.PerTypeAllows`.
 
 Three states:
 
@@ -164,6 +230,40 @@ skipped. Proofread is never repaired regardless of `PerType`.
 its tuning block `Ai:ProviderSettings:Ollama_AnalysisRepair`
 (`{ "Temperature": 0.2, "NumPredict": 2048, "NumCtx": 16384 }`) - those two keys do the actual
 routing; `Ai:AnalysisRepair.Model` only documents/asserts the intended model at the config surface.
+
+> **`GuardOnly` asymmetry (intentional).** Flipping `GuardOnly=false` opts the FOUR analysis-seam
+> f5-wire types (BookOverview/Character/Story/QA) into the value-scoped LLM Stage-2 alongside the
+> original repairable types. **BookReview is the exception:** its engine hook is glossary-ONLY and
+> ignores `GuardOnly` entirely - the whole-book path never makes a per-field LLM repair call. This is
+> deliberate (no extra billed/latency cost on the already-expensive whole-book pass), so do not expect
+> `GuardOnly=false` to add LLM repair to BookReview.
+
+### 4.1 Per-environment / model-tier policy
+
+The repair block is **one value per ASP.NET Core environment**: base `appsettings.json` plus an optional
+`appsettings.{Environment}.json` override. The follow-up plan added `appsettings.Production.json`
+carrying an `Ai:AnalysisRepair` block whose value ENCODES the policy for that environment's served model
+tier. The governing principle (leak = small-model artifact) makes this a clean lever:
+
+| Served tier (via `Ai:FeatureModels`) | Repair policy | How to express it |
+|---|---|---|
+| **Small-local** (Ollama gemma4:12b / qwen3.5:9b / Dicta-3.0) - a LEAKY tier | guard-only glossary ON | `Enabled:true`, `GuardOnly:true`, PerType glossary-on for every type (the shipped base + current Production value) |
+| **Capable cloud** (a tier that does not leak) | true no-op | `Enabled:false` (full no-op), or `GuardOnly:true` with an empty `PerType` |
+
+**Current state:** BOTH `appsettings.json` and `appsettings.Production.json` are glossary-on with a
+BYTE-IDENTICAL `PerType` (all nine types `true`) because **prod still serves the Ollama-LOCAL tier** -
+where the deterministic guard earns its keep. The Production block carries an explicit KEEP-IN-SYNC note
+tying it to `Ai:FeatureModels` and instructs: **flip `Enabled` to `false` ONLY when prod actually moves
+`Ai:FeatureModels` to a cloud model that does not leak** - do NOT flip it preemptively; verify the served
+model first. Do NOT assume prod is already cloud.
+
+**Documented extension point (NOT implemented).** A per-provider/per-model override ON
+`AnalysisRepairOptions` (e.g. a dictionary keyed by provider/model, consulted instead of the flat
+`Enabled`/`GuardOnly`/`PerType`) is only warranted if a SINGLE environment ever serves MULTIPLE tiers at
+once (e.g. free users -> local, paid -> cloud, in the same deployment). Today each environment serves
+exactly one tier, so the per-environment appsettings block is sufficient. This is called out in the
+`AnalysisRepairOptions` xmldoc (`Services/Ai/AiOptions.cs`) and the Production block comment - do not
+build it speculatively.
 
 ## 5. Structural fixes (Phase 4)
 
@@ -210,6 +310,21 @@ Literary/Summarization insight quality. This means the deterministic guard and b
 fire less often in practice - the prompt fix is the cheapest lever and was measured before deciding
 the repair-layer default.
 
+### 6.1 QA disposition (f1-prompt-coverage)
+
+QA did NOT originally get the Hebrew-only clause. QA resolves to `AiTaskType.GenericChat`
+(`AnalysisTaskMapping.cs:28`), whose neutral system frame (`PromptFactory.cs:98`) is SHARED with
+Translation + Custom - which legitimately emit other languages - so the clause could not be appended to
+that shared system without wrongly forcing Hebrew on Translation/Custom.
+
+f1 resolves this by appending `HebrewNoEnglishTermsClause` to the QA INSTRUCTION only, Hebrew-gated:
+`AnalysisType.QA => isHe ? QAHe + HebrewNoEnglishTermsClause : QAEn` (`PromptFactory.cs:141`). The clause
+constant begins with a leading space, so the concatenation is well-formed; English QA (`QAEn`),
+Translation, Custom, and the `HebrewSystemBase` Proofreader frame are all untouched. QA is therefore now
+covered on BOTH ends: the prompt steer (Hebrew-only, no parenthetical English) AND the repair wiring (it
+reaches the analysis seam as a parsed `QAResult`, so its `answer` prose gets the deterministic glossary
+safety net - section 3).
+
 ## 7. Observability
 
 **Per-field (Debug, high-volume):** `AnalysisRepairService.LogRepairedField` emits one line per field
@@ -238,7 +353,8 @@ layer.
 | `RepairableFieldsTests` (`Pagedraft.Api.Tests/RepairableFieldsTests.cs`) | Scoping invariant: every structural field byte-identical after a transform that mutates every prose accessor | No |
 | `GlossaryRepairPassTests` (`Pagedraft.Api.Tests/GlossaryRepairPassTests.cs`) | Stage 1 deterministic replacement, byte-identity of structural fields, Hebrew/English book gating, Proofread never touched | No |
 | `LatinInHebrewContentDetectorTests` | Guard run-detection semantics, allowlist behavior | No |
-| `AnalysisRepairServiceTests` (`Pagedraft.Api.Tests/AnalysisRepairServiceTests.cs`) + `AnalysisRepairSmokeTests` (`.../LanguageEngine/`) | Stage 2 fail-safe validation, guard-gating (fake router sees zero calls on clean input), re-serialization fidelity | No (fake `IAiRouter`) |
+| `AnalysisRepairServiceTests` (`Pagedraft.Api.Tests/AnalysisRepairServiceTests.cs`) + `AnalysisRepairSmokeTests` (`.../LanguageEngine/`) | Stage 2 fail-safe validation, guard-gating (fake router sees zero calls on clean input), re-serialization fidelity; the new-type (BookOverview/Character/Story/QA) seam cases | No (fake `IAiRouter`) |
+| `BookReviewGlossaryRepairTests` (`Pagedraft.Api.Tests/BookReviewGlossaryRepairTests.cs`) | BookReview ENGINE-hook `ApplyGlossaryToFindings`: Rationale/SuggestedAction Hebraised while Dimension/Verdict/Severity/Evidence/ChapterAnchors/**DedupKey**/Status stay byte-identical; layer/PerType/Hebrew gating; null-list, null-element, null-SuggestedAction, faulting-enumerator fail-safes; `For(BookFinding)` scoping | No |
 | `RepairQualityTests` (`Pagedraft.Api.Tests/LanguageEngine/RepairQualityTests.cs`) | The repair-gold scorer: latin-removed %, structure-preserved % (must be 100), no-new-latin, length-ratio bound, must-preserve %, clean-control no-op, advisory LLM-judge meaning-preserved | Yes (skip-gated) |
 | `OutputQualityDiagnostic` (`.../LanguageEngine/OutputQualityDiagnostic.cs`) | Real-output capture: per-task Latin-leak scan split STRUCTURAL vs CONTENT, re-run at every phase gate | Yes (skip-gated) |
 | `ProofreadQualityTests` / `LinguisticQualityTests` | The non-regression yardsticks this layer must not move | Yes (skip-gated) |
@@ -301,3 +417,64 @@ Every phase's gate is recorded in full (with source logs) in the plan file itsel
 **Shipped state:** `Ai:AnalysisRepair.Enabled = true`, `GuardOnly = true` - the deterministic glossary
 pass runs always-on, the LLM repair stage is built, tested, and gated but ships off by default per the
 Phase-3 gate's data-driven decision (section 4).
+
+## 11. Coverage-extension measurement (leak-by-tier)
+
+The follow-up plan (`analysis-repair-coverage-cloud-tiers-2026-07-06`) is **measurement-first**: nothing
+was wired without a diagnostic showing it leaks on the tier it serves. The extended `OutputQualityDiagnostic`
+(with `DIAG_MODELS` per-tier + `DIAG_INPUTS` multi-passage overrides + a robust QA answer-extractor) was run
+against the **local-small tier** on 3 real Hebrew manuscript passages (P1 narrative ~373 w, P2 dialogue
+~375 w, P3 descriptive ~382 w). CONTENT-value leak = a Latin run leaked into Hebrew PROSE; STRUCTURAL
+(json keys + enum labels) is expected and is NOT a leak.
+
+| Type (local tier) | Model | P1 | P2 | P3 | Verdict |
+|---|---|---|---|---|---|
+| BookOverview / CharacterAnalysis / StoryAnalysis / QA / BookReview | gemma4:12b (QA: qwen3.5:9b) | clean | clean | clean | CONTENT-clean 3/3 |
+| Summarization / LinguisticAnalysis / LineEdit | qwen3.5:9b / gemma4:12b / Dicta-3.0 | clean | clean | clean | structural-only (keys/enums) |
+| **LiteraryAnalysis** | gemma4:12b | clean | **LEAK "confusion" in `narrativeVoiceDescription`** | clean | **1 real prose leak / 3** |
+| Proofread | Dicta-3.0 | clean | clean | instruction-echo of `[TEXT_TO_CORRECT]` scaffold (prompt-bleed, NOT a leak; never repaired) | n/a |
+
+**Why the 5 new types were wired despite measuring 3/3 clean.** LiteraryAnalysis - a `gemma4:12b`
+structured-Hebrew-prose type, the SAME model + output shape as BookOverview/Character/Story/BookReview -
+leaked an English word ("confusion") into prose on 1 of 3 samples EVEN WITH the shipped Phase-5 prompt
+clause. The leak is therefore **real and stochastic on this tier, not eliminated by prompting**. Three
+clean samples for a sibling type is not immunity when a same-model sibling demonstrably leaks, so the
+deterministic glossary (cheap, fail-safe, no-op when clean) was wired as a same-tier safety net. QA is
+`qwen3.5:9b` (weaker leak evidence - no leak seen on any Summarization/QA sample) but the glossary is a
+uniform fail-safe no-op there regardless.
+
+**Mechanism reminder:** only the DETERMINISTIC glossary (Stage 1) is wired for these types; the LLM
+Stage 2 stays OFF by default (`GuardOnly=true`), unchanged from the predecessor's decision. A controlled
+English-scrambled probe confirmed both that the models CAN leak and that the glossary repairs it to 0 -
+and that feeding raw JSON to the LLM Hebraises schema KEYS (`themes`->`נושאים`), which is exactly why the
+LLM stage is never on by default and structure is always held by code.
+
+**Cloud tier: NOT measured here.** DNS resolves but all outbound HTTPS egress is blocked in this
+environment (HTTP 000), so the configured `AI_OPENROUTER_APIKEY` was unreachable - the cloud columns are
+deliberately left unmeasured rather than fabricated. The documented bake-offs stand as the cloud
+"best-editing-abilities" reference and confirm the inverse-scaling premise (a bigger tier leaks LESS and
+edits BETTER): LinguisticAnalysis cloud `gemma-4-31b-it` **0.900** vs local `gemma4:12b` 0.750
+(`docs/LINGUISTIC_MODEL_BAKEOFF.md`); Proofread cloud `gemma-4-31b-it` **88/100 / overreach 0-2**
+(`docs/PROOFREAD_LINEEDIT_CLOUD_BAKEOFF.md`). Moving to a cloud tier is the separate quality lever AND
+would let repair go no-op (section 4.1) - a hosting decision orthogonal to this local guard.
+
+### 11.1 Residual deferred (type x tier) + follow-ups
+
+- **Cloud-tier leak measurement (every type):** deferred - blocked by no outbound egress in this
+  environment. Re-run the extended diagnostic with `DIAG_MODELS` pointed at the cloud tier once a network
+  path exists; expected result per inverse-scaling is fewer/zero CONTENT leaks -> cloud repair stays the
+  documented no-op (section 4.1). Not fabricated.
+- **QA leak evidence is weaker (`qwen3.5:9b`):** QA showed no leak on any sample; it is wired as a uniform
+  fail-safe no-op for symmetry, not on measured evidence. If QA is ever re-tiered onto a leakier model,
+  re-measure.
+- **Editing-quality side-notes surfaced by the sweep (SEPARATE from leak repair, NOT addressed here):**
+  1. **Proofread** echoed its `[TEXT_TO_CORRECT]` instruction scaffold + input preamble into the output on
+     P3 instead of returning only the corrected text - a prompt/parse-bleed bug worth its own follow-up
+     (Proofread is never touched by this repair layer, so it is out of scope here).
+  2. **LineEdit** on P3 ballooned to 14282 raw chars / 333 s (possible repetition loop) - watch the
+     `NormalizeLineEditSuggestions` cap/dedupe path (section 5) and the `RepeatPenalty` decoding lever.
+- **Hebrew glossary/equivalents for the new types** need native-speaker validation (mirror the
+  proofread/repair-gold `c04` deferral in section 9).
+
+Full measured detail (both sweeps + the f6 gate blockquote) lives in the plan file's `## f4 leak-by-tier`,
+`### f4b multi-sample`, and `## f6 gate` sections.
