@@ -36,6 +36,7 @@ public class UnifiedAnalysisService
     private readonly SuggestionDiffService _suggestionDiff;
     private readonly Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker _ktivMaleChecker;
     private readonly AnalysisRepairService _analysisRepair;
+    private readonly DynamicTermRepairService _dynamicTermRepair;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -54,7 +55,8 @@ public class UnifiedAnalysisService
         IAnalysisContextService contextService,
         SuggestionDiffService suggestionDiff,
         Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker ktivMaleChecker,
-        AnalysisRepairService analysisRepair)
+        AnalysisRepairService analysisRepair,
+        DynamicTermRepairService dynamicTermRepair)
     {
         _db = db;
         _router = router;
@@ -67,6 +69,7 @@ public class UnifiedAnalysisService
         _suggestionDiff = suggestionDiff;
         _ktivMaleChecker = ktivMaleChecker;
         _analysisRepair = analysisRepair;
+        _dynamicTermRepair = dynamicTermRepair;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -2761,25 +2764,32 @@ public class UnifiedAnalysisService
     /// The single, shared insertion point for the analysis-output repair layer. Called at all three
     /// non-Proofread seams (RunAsync, RunWithInputAsync, streaming) right after structuredJson +
     /// cleanContent are finalised and before the <see cref="AnalysisResult"/> is built. Governed end-to-end
-    /// by <c>Ai:AnalysisRepair</c> (<see cref="Ai.AnalysisRepairOptions"/>) with three-way semantics:
+    /// by <c>Ai:AnalysisRepair</c> (<see cref="Ai.AnalysisRepairOptions"/>):
     ///
-    ///   • block null OR <c>Enabled=false</c> → FULL no-op: NEITHER stage runs; inputs returned unchanged.
-    ///   • <c>Enabled=true</c> + a <c>PerType</c> gate that excludes this type → skipped (both stages).
-    ///   • <c>Enabled=true</c> + type allowed → Stage 1 runs; Stage 2 runs only when <c>GuardOnly=false</c>.
+    ///   • block null OR <c>Enabled=false</c> → FULL no-op: NO stage runs; inputs returned unchanged.
+    ///   • <c>Enabled=true</c> + a <c>PerType</c> gate that excludes this type → skipped (every stage).
+    ///   • <c>Enabled=true</c> + type allowed → <see cref="Ai.AnalysisRepairOptions.Mode"/> (d4) then selects
+    ///     WHICH of the glossary / dynamic stages run (see <see cref="Ai.AnalysisRepairMode"/>); the
+    ///     value-scoped LLM stage below is a further, orthogonal knob (<c>GuardOnly</c>).
     ///
-    ///   Stage 1 — DETERMINISTIC glossary pass (<see cref="GlossaryRepairPass"/>): English-&gt;Hebrew
+    ///   Glossary stage — DETERMINISTIC glossary pass (<see cref="GlossaryRepairPass"/>): English-&gt;Hebrew
     ///   substitution over the whitelisted PROSE fields, itself guard-gated + fail-safe (a no-op for
-    ///   Proofread, a non-Hebrew book, or any term the closed glossary does not cover).
-    ///   Stage 2 — VALUE-SCOPED LLM repair (<see cref="AnalysisRepairService.RepairAnalysisAsync"/>): runs
-    ///   ONLY when <c>GuardOnly=false</c>. Guard-gated inside the service (a clean field makes ZERO model
-    ///   calls) and fail-safe (can only ever leave a field cleaner). Never runs for Proofread.
+    ///   Proofread, a non-Hebrew book, or any term the closed glossary does not cover). Runs when
+    ///   Mode is <c>Glossary</c> or <c>GlossaryThenDynamic</c>.
+    ///   Dynamic stage (d4) — SPAN-SCOPED dynamic repair (<see cref="DynamicTermRepairService.ApplyAsync"/>):
+    ///   bidirectional detect-classify-repair, itself fail-safe. Runs when Mode is <c>Dynamic</c> or
+    ///   <c>GlossaryThenDynamic</c> (in which case it runs AFTER the glossary, over whatever residual it left).
+    ///   Value-scoped LLM stage — <see cref="AnalysisRepairService.RepairAnalysisAsync"/>: runs ONLY when
+    ///   <c>GuardOnly=false</c>, independent of Mode. Guard-gated inside the service (a clean field makes
+    ///   ZERO model calls) and fail-safe (can only ever leave a field cleaner). Never runs for Proofread.
     ///
-    /// The SHIPPED appsettings default is { Enabled:true, GuardOnly:true } = Stage-1-only (the p3-gate
-    /// GUARD-ONLY decision), which reproduces the pre-p6 behaviour (always-on glossary, LLM off). Setting
-    /// Enabled=false makes the whole layer a strict no-op per the plan.
+    /// The SHIPPED appsettings default is { Enabled:true, GuardOnly:true, Mode:Glossary } — the glossary
+    /// stage only (the p3-gate GUARD-ONLY decision + the d4 Mode default), which reproduces the pre-d4/pre-p6
+    /// behaviour (always-on glossary, dynamic + LLM both off) EXACTLY. Setting Enabled=false, or Mode=Off,
+    /// makes the whole layer (or just the glossary/dynamic half) a strict no-op per the plan.
     ///
-    /// For LineEdit the prose-primary ResultText is refreshed from the repaired overallFeedback AFTER both
-    /// stages; for Literary/Linguistic only StructuredResult changes (the FE renders it); for Summarization
+    /// For LineEdit the prose-primary ResultText is refreshed from the repaired overallFeedback AFTER every
+    /// stage; for Literary/Linguistic only StructuredResult changes (the FE renders it); for Summarization
     /// the passes return the repaired whole text.
     /// </summary>
     private async Task<(string? structuredJson, string cleanContent)> ApplyAnalysisRepairAsync(
@@ -2792,58 +2802,101 @@ public class UnifiedAnalysisService
         var cfg = _aiOptions.Value.AnalysisRepair;
 
         // FULL no-op when the layer is disabled. A null block (no Ai:AnalysisRepair in config) or
-        // Enabled=false BOTH mean off — neither the deterministic glossary (Stage 1) nor the LLM pass
-        // (Stage 2) runs, and the inputs are returned byte-identical. The shipped appsettings block sets
-        // Enabled=true, so production runs Stage 1 (glossary), preserving the pre-p6 behaviour. Also skip
-        // when a non-empty PerType map excludes this analysis type (a type absent/false is skipped).
+        // Enabled=false BOTH mean off — no stage runs, and the inputs are returned byte-identical. The
+        // shipped appsettings block sets Enabled=true, so production runs the Mode-selected stage(s),
+        // preserving the pre-p6/pre-d4 behaviour. Also skip when a non-empty PerType map excludes this
+        // analysis type (a type absent/false is skipped).
         if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, analysisType))
         {
             return (structuredJson, cleanContent);
         }
 
-        // Observability (p6-observability): time the whole repair layer and tally what each stage did, then
-        // emit ONE aggregate line per run. It goes out at INFO only when the layer actually flagged/changed
-        // something (glossaryChanged > 0 || llmFlagged > 0); a clean analysis logs a single Debug no-op line
-        // so a healthy run produces no INFO noise. The Stopwatch/logging is wrapped so it can never throw or
-        // alter the repair control flow.
+        // d4: Mode gates WHICH of the glossary/dynamic stages run, layered UNDER the Enabled/PerType gate
+        // above. Off is an ADDITIONAL strict no-op scoped to stage selection. The shipped default (Glossary)
+        // takes the IDENTICAL code path the pre-d4 layer always took, so this branch changes nothing today.
+        var mode = cfg.Mode;
+        if (mode == Ai.AnalysisRepairMode.Off)
+        {
+            return (structuredJson, cleanContent);
+        }
+
+        // Observability (p6-observability, extended d4): time the whole repair layer and tally what each
+        // stage did, then emit ONE aggregate line per run. It goes out at INFO only when the layer actually
+        // flagged/changed something; a clean analysis logs a single Debug no-op line so a healthy run
+        // produces no INFO noise. The Stopwatch/logging is wrapped so it can never throw or alter control flow.
         var repairSw = Stopwatch.StartNew();
 
-        // Stage 1 — deterministic glossary pass. Runs for every enabled + PerType-allowed type; fail-safe
+        // Glossary stage — deterministic glossary pass. Runs when Mode is Glossary or GlossaryThenDynamic
+        // (the shipped default is Glossary, so THIS is the only stage active in production today); fail-safe
         // (a no-op for Proofread, a non-Hebrew book, or an out-of-glossary term). GlossaryRepairPass is
         // itself catch-all fail-safe, but the layer's load-bearing invariant is "the repair layer can
-        // NEVER throw into RunAsync", so wrap this always-on seam too (belt-and-braces): on ANY exception
-        // log and keep the un-repaired inputs. Without this, a fault here (e.g. a model-emitted null JSON
-        // array walked unguarded) would propagate through RunAsync and crash the entire analysis.
+        // NEVER throw into RunAsync", so wrap this seam too (belt-and-braces): on ANY exception log and
+        // keep the un-repaired inputs. Without this, a fault here (e.g. a model-emitted null JSON array
+        // walked unguarded) would propagate through RunAsync and crash the entire analysis.
         var glossaryChanged = 0;
-        try
+        if (mode == Ai.AnalysisRepairMode.Glossary || mode == Ai.AnalysisRepairMode.GlossaryThenDynamic)
         {
-            var repair = GlossaryRepairPass.Apply(analysisType, structuredJson, cleanContent, language, JsonOpts);
-            structuredJson = repair.StructuredJson;
-            cleanContent = repair.CleanContent;
-            glossaryChanged = repair.FieldsChanged;
-
-            // The glossary pass is itself fail-safe: an accessor-walk / re-serialize fault is CAUGHT
-            // INSIDE Apply, which returns the inputs unchanged rather than throwing — so it never reaches
-            // the catch below. Surface that swallowed fault here (via repair.Fault) and log it, otherwise
-            // a repair that silently no-op'd would leave leaked English in the output with no warning.
-            if (repair.Fault is not null)
+            try
             {
-                _logger.LogWarning(repair.Fault,
-                    "AnalysisRepair Stage 1 (glossary) swallowed a fault for type={Type}; keeping un-repaired inputs (fail-safe)",
+                var repair = GlossaryRepairPass.Apply(analysisType, structuredJson, cleanContent, language, JsonOpts);
+                structuredJson = repair.StructuredJson;
+                cleanContent = repair.CleanContent;
+                glossaryChanged = repair.FieldsChanged;
+
+                // The glossary pass is itself fail-safe: an accessor-walk / re-serialize fault is CAUGHT
+                // INSIDE Apply, which returns the inputs unchanged rather than throwing — so it never reaches
+                // the catch below. Surface that swallowed fault here (via repair.Fault) and log it, otherwise
+                // a repair that silently no-op'd would leave leaked English in the output with no warning.
+                if (repair.Fault is not null)
+                {
+                    _logger.LogWarning(repair.Fault,
+                        "AnalysisRepair Stage 1 (glossary) swallowed a fault for type={Type}; keeping un-repaired inputs (fail-safe)",
+                        analysisType);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "AnalysisRepair Stage 1 (glossary) threw for type={Type}; keeping un-repaired inputs (fail-safe)",
                     analysisType);
             }
         }
-        catch (Exception ex)
+
+        // Dynamic stage (d4) — span-scoped dynamic detect-and-repair. Runs when Mode is Dynamic (replacing
+        // the glossary substitution entirely) or GlossaryThenDynamic (running AFTER the glossary, over
+        // whatever residual foreign text it left). Never runs under the shipped default (Mode=Glossary).
+        // DynamicTermRepairService.ApplyAsync is itself catch-all fail-safe; wrap again here (belt-and-braces,
+        // mirrors the glossary stage above) so a fault here can never propagate into RunAsync.
+        var dynamicChanged = 0;
+        if (mode == Ai.AnalysisRepairMode.Dynamic || mode == Ai.AnalysisRepairMode.GlossaryThenDynamic)
         {
-            _logger.LogWarning(ex,
-                "AnalysisRepair Stage 1 (glossary) threw for type={Type}; keeping un-repaired inputs (fail-safe)",
-                analysisType);
+            try
+            {
+                var dynamicResult = await _dynamicTermRepair.ApplyAsync(
+                    analysisType, structuredJson, cleanContent, language, JsonOpts, ct).ConfigureAwait(false);
+                structuredJson = dynamicResult.structuredJson;
+                cleanContent = dynamicResult.cleanContent;
+                dynamicChanged = dynamicResult.fieldsChanged;
+
+                if (dynamicResult.fault is not null)
+                {
+                    _logger.LogWarning(dynamicResult.fault,
+                        "AnalysisRepair Stage dynamic (span-scoped) swallowed a fault for type={Type}; keeping un-repaired inputs (fail-safe)",
+                        analysisType);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "AnalysisRepair Stage dynamic (span-scoped) threw for type={Type}; keeping un-repaired inputs (fail-safe)",
+                    analysisType);
+            }
         }
 
-        // Stage 2 — value-scoped LLM repair. Runs ONLY when NOT GuardOnly. The shipped default is
-        // GuardOnly=true, so this is skipped by default (glossary-only, no model calls). Guard-gated +
-        // fail-safe inside the service (a clean field makes ZERO model calls; Proofread is never routed).
-        // Counters (N/M/K) stay 0 while the LLM stage is skipped.
+        // Value-scoped LLM stage — runs ONLY when NOT GuardOnly, independent of Mode. The shipped default is
+        // GuardOnly=true, so this is skipped by default (no model calls beyond whatever Mode already ran).
+        // Guard-gated + fail-safe inside the service (a clean field makes ZERO model calls; Proofread is
+        // never routed). Counters (N/M/K) stay 0 while this stage is skipped.
         var llmFlagged = 0;
         var llmRepaired = 0;
         var llmFailSafe = 0;
@@ -2859,7 +2912,7 @@ public class UnifiedAnalysisService
         }
 
         // LineEdit is prose-primary via overallFeedback: re-derive ResultText from the repaired structured
-        // feedback AFTER both passes (mirrors the pre-repair MaybeReplaceLineEditResultText call above).
+        // feedback AFTER every stage (mirrors the pre-repair MaybeReplaceLineEditResultText call above).
         if (analysisType == AnalysisType.LineEdit)
         {
             cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
@@ -2867,19 +2920,20 @@ public class UnifiedAnalysisService
 
         repairSw.Stop();
 
-        // One aggregate line per run. G = glossary fields changed; N/M/K = LLM fields flagged / accepted-and-
-        // changed / fail-safe-discarded. Structured placeholders (no interpolation) so the fields are queryable.
-        if (glossaryChanged > 0 || llmFlagged > 0)
+        // One aggregate line per run. G = glossary fields changed; D = dynamic fields changed; N/M/K = LLM
+        // fields flagged / accepted-and-changed / fail-safe-discarded. Structured placeholders (no
+        // interpolation) so the fields are queryable.
+        if (glossaryChanged > 0 || dynamicChanged > 0 || llmFlagged > 0)
         {
             _logger.LogInformation(
-                "AnalysisRepair: type={Type} glossaryChanged={G} llmFlagged={N} llmRepaired={M} llmFailSafe={K} totalMs={Ms}",
-                analysisType, glossaryChanged, llmFlagged, llmRepaired, llmFailSafe, repairSw.ElapsedMilliseconds);
+                "AnalysisRepair: type={Type} mode={Mode} glossaryChanged={G} dynamicChanged={D} llmFlagged={N} llmRepaired={M} llmFailSafe={K} totalMs={Ms}",
+                analysisType, mode, glossaryChanged, dynamicChanged, llmFlagged, llmRepaired, llmFailSafe, repairSw.ElapsedMilliseconds);
         }
         else
         {
             _logger.LogDebug(
-                "AnalysisRepair: type={Type} no-op (glossaryChanged=0 llmFlagged=0) totalMs={Ms}",
-                analysisType, repairSw.ElapsedMilliseconds);
+                "AnalysisRepair: type={Type} mode={Mode} no-op (glossaryChanged=0 dynamicChanged=0 llmFlagged=0) totalMs={Ms}",
+                analysisType, mode, repairSw.ElapsedMilliseconds);
         }
 
         return (structuredJson, cleanContent);

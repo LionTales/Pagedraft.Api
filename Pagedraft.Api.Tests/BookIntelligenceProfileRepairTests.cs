@@ -138,6 +138,7 @@ public class BookIntelligenceProfileRepairTests
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
         services.AddScoped<AnalysisRepairService>();
+        services.AddScoped<DynamicTermRepairService>();
         services.AddScoped<UnifiedAnalysisService>();
         services.AddScoped<BookIntelligenceService>();
 

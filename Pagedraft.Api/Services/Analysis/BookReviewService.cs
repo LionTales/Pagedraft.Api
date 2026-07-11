@@ -229,6 +229,7 @@ public class BookReviewService
     private readonly BookReviewBuildRegistry _buildRegistry;
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<BookReviewService> _logger;
+    private readonly DynamicTermRepairService _dynamicTermRepair;
 
     public BookReviewService(
         AppDbContext db,
@@ -238,7 +239,8 @@ public class BookReviewService
         AnalysisProgressTracker progress,
         BookReviewBuildRegistry buildRegistry,
         IOptions<AiOptions> aiOptions,
-        ILogger<BookReviewService> logger)
+        ILogger<BookReviewService> logger,
+        DynamicTermRepairService dynamicTermRepair)
     {
         _db = db;
         _contextAssembler = contextAssembler;
@@ -248,6 +250,7 @@ public class BookReviewService
         _buildRegistry = buildRegistry;
         _aiOptions = aiOptions;
         _logger = logger;
+        _dynamicTermRepair = dynamicTermRepair;
     }
 
     /// <summary>The resolved active BookReview model id — the cross-model staleness target and the row's
@@ -883,6 +886,13 @@ public class BookReviewService
         //         fully accumulated (all windows + reduce passes) set.
         var deduped = UnionAndDedup(perDimension, chaptersByOrder, builtWithModel, lang);
 
+        // Shared repair config + Mode for BOTH the glossary (5b) and dynamic (5c) stages below. Hoisted here so
+        // the two seams read the SAME Mode and mirror UnifiedAnalysisService.ApplyAnalysisRepairAsync, where Mode
+        // selects WHICH deterministic/dynamic stage runs under the Enabled/PerType gate. repairMode defaults to
+        // Off when the block is null (a null block is a full no-op, exactly like Enabled=false).
+        var repairCfg = _aiOptions.Value.AnalysisRepair;
+        var repairMode = repairCfg?.Mode ?? Ai.AnalysisRepairMode.Off;
+
         // 5b. f5-wire JOB 2 — DETERMINISTIC GLOSSARY SAFETY NET over the finalised findings, BEFORE persist.
         //     BookReview runs on the SAME gemma4:12b as LiteraryAnalysis and emits the SAME structured Hebrew
         //     prose (findings[].rationale / suggestedAction), which leaks English terms STOCHASTICALLY — yet it
@@ -894,22 +904,63 @@ public class BookReviewService
         //     persisted. Placed AFTER UnionAndDedup deliberately: DedupKey is derived from the RAW model
         //     rationale there, so leaving it untouched here keeps Status preservation stable across rebuilds
         //     (the model re-emits the same leak, we re-derive the same key) — the repair is display-only.
-        try
+        //     MODE GATE: runs ONLY when Mode is Glossary or GlossaryThenDynamic, mirroring the glossary stage in
+        //     UnifiedAnalysisService.ApplyAnalysisRepairAsync EXACTLY. Under the SHIPPED default (Mode=Glossary)
+        //     this still runs, so today's behaviour is unchanged; Mode=Off / Dynamic now correctly SKIP it here
+        //     just as they do on the RunAsync seam (was previously un-gated, a Mode contract violation).
+        //     ApplyGlossaryToFindings keeps its own Enabled/PerType gate (belt-and-braces).
+        if (repairMode is Ai.AnalysisRepairMode.Glossary or Ai.AnalysisRepairMode.GlossaryThenDynamic)
         {
-            var repairedFindings = ApplyGlossaryToFindings(
-                deduped, lang, _aiOptions.Value.AnalysisRepair, _logger);
-            if (repairedFindings > 0)
-                _logger.LogInformation(
-                    "Book review glossary repair: cleaned English leaks in {Count} of {Total} finding(s) for book {BookId} ({Lang}).",
-                    repairedFindings, deduped.Count, bookId, lang);
+            try
+            {
+                var repairedFindings = ApplyGlossaryToFindings(
+                    deduped, lang, repairCfg, _logger);
+                if (repairedFindings > 0)
+                    _logger.LogInformation(
+                        "Book review glossary repair: cleaned English leaks in {Count} of {Total} finding(s) for book {BookId} ({Lang}).",
+                        repairedFindings, deduped.Count, bookId, lang);
+            }
+            catch (Exception ex)
+            {
+                // Belt-and-braces: a repair fault must NOT fail persistence (the layer's "can never throw into the
+                // engine" invariant). ApplyGlossaryToFindings already guards per-finding; this also covers the gate.
+                _logger.LogWarning(ex,
+                    "Book review glossary repair threw for book {BookId} ({Lang}); persisting un-repaired findings (fail-safe).",
+                    bookId, lang);
+            }
         }
-        catch (Exception ex)
+
+        // 5c. d4-wire — DYNAMIC span-scoped repair, layered AFTER the glossary above per Ai:AnalysisRepair.Mode
+        //     (AnalysisRepairMode). GATED exactly like ApplyGlossaryToFindings above (Enabled + PerType-allows
+        //     "BookReview") PLUS Mode — Mode is an ADDITIONAL knob layered UNDER Enabled/PerType, never a
+        //     substitute for them, so a null block / Enabled=false / a PerType exclusion must disable this
+        //     block too, regardless of Mode. Runs ONLY when that gate passes AND Mode is Dynamic or
+        //     GlossaryThenDynamic — under the SHIPPED default (Mode=Glossary) this block never executes, so
+        //     today's behaviour is unchanged. When it does run, it repairs the SAME finalised findings'
+        //     Rationale + (non-null) SuggestedAction IN PLACE via DynamicTermRepairService.RepairFindingsAsync
+        //     (bidirectional, unlike the Hebrew-only glossary), touching nothing else. Fail-safe: can NEVER
+        //     throw into the build; on any fault the un-repaired (or glossary-only-repaired) findings persist.
+        var dynamicGateOpen = repairCfg is not null && repairCfg.Enabled && PerTypeAllowsBookReview(repairCfg) &&
+            (repairMode == Ai.AnalysisRepairMode.Dynamic || repairMode == Ai.AnalysisRepairMode.GlossaryThenDynamic);
+        if (dynamicGateOpen)
         {
-            // Belt-and-braces: a repair fault must NOT fail persistence (the layer's "can never throw into the
-            // engine" invariant). ApplyGlossaryToFindings already guards per-finding; this also covers the gate.
-            _logger.LogWarning(ex,
-                "Book review glossary repair threw for book {BookId} ({Lang}); persisting un-repaired findings (fail-safe).",
-                bookId, lang);
+            try
+            {
+                var dynamicRepairedFindings = await _dynamicTermRepair.RepairFindingsAsync(deduped, lang, ct)
+                    .ConfigureAwait(false);
+                if (dynamicRepairedFindings > 0)
+                    _logger.LogInformation(
+                        "Book review dynamic repair: cleaned foreign-script leaks in {Count} of {Total} finding(s) for book {BookId} ({Lang}).",
+                        dynamicRepairedFindings, deduped.Count, bookId, lang);
+            }
+            catch (Exception ex)
+            {
+                // Belt-and-braces: mirrors the glossary catch above — a dynamic-repair fault must NOT fail
+                // persistence. RepairFindingsAsync already guards per-finding; this also covers the gate.
+                _logger.LogWarning(ex,
+                    "Book review dynamic repair threw for book {BookId} ({Lang}); persisting un-repaired findings (fail-safe).",
+                    bookId, lang);
+            }
         }
 
         // 6. TOTAL FAILURE: the ENTIRE accumulated + reduced set deduped to ZERO fresh findings — every window

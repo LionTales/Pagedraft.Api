@@ -227,13 +227,41 @@ public class FeatureModelOptions
 }
 
 /// <summary>
-/// Config for the analysis-output repair layer (analysis-output-repair plan, p6-config), read by
-/// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. There are two repair stages —
-/// a DETERMINISTIC glossary substitution (<see cref="Analysis.GlossaryRepairPass"/>) and a value-scoped
-/// LLM repair (<see cref="Analysis.AnalysisRepairService"/>) — and this block governs BOTH via three
-/// knobs:
+/// Repair-layer operating mode (dynamic-term-repair-design plan, d4). Selects WHICH repair stage(s) run at
+/// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/> and the BookReview engine hook
+/// (<see cref="Analysis.BookReviewService"/>), layered UNDER the existing <see cref="AnalysisRepairOptions.Enabled"/>
+/// / <see cref="AnalysisRepairOptions.PerType"/> gate — both of those still apply FIRST; <see cref="Mode"/> only
+/// decides what runs once a type/book has cleared that gate:
+///   • <see cref="Off"/> — an ADDITIONAL strict no-op on top of <see cref="AnalysisRepairOptions.Enabled"/>:
+///     neither the deterministic glossary nor the dynamic detect-and-repair stage runs.
+///   • <see cref="Glossary"/> — the SHIPPED DEFAULT. Only the closed, deterministic English&lt;-&gt;Hebrew
+///     glossary (<see cref="Analysis.GlossaryRepairPass"/>) runs; the dynamic span-scoped stage
+///     (<see cref="Analysis.DynamicTermRepairService"/>) never runs. Selecting this mode reproduces the EXACT
+///     pre-d4 stage-1/stage-2 sequence — introducing this enum changes NOTHING about what ships today.
+///   • <see cref="Dynamic"/> — the glossary Stage-1 substitution is SKIPPED entirely; the span-scoped
+///     detect-classify-repair pass (d1-d3) runs instead, directly over the original (un-glossaried) prose.
+///   • <see cref="GlossaryThenDynamic"/> — the glossary fast-path cache runs FIRST (cheap, deterministic,
+///     catches the closed ~35-term vocabulary at zero model cost), THEN the dynamic pass runs over whatever
+///     residual foreign text the glossary left — the two stages compose rather than compete.
+/// </summary>
+public enum AnalysisRepairMode
+{
+    Off,
+    Glossary,
+    Dynamic,
+    GlossaryThenDynamic
+}
+
+/// <summary>
+/// Config for the analysis-output repair layer (analysis-output-repair plan, p6-config; extended by the
+/// dynamic-term-repair-design plan, d4), read by
+/// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. There are now THREE repair
+/// stages — a DETERMINISTIC glossary substitution (<see cref="Analysis.GlossaryRepairPass"/>), a
+/// value-scoped LLM repair (<see cref="Analysis.AnalysisRepairService"/>), and a span-scoped dynamic
+/// detect-and-repair pass (<see cref="Analysis.DynamicTermRepairService"/>) — and this block governs them
+/// via four knobs:
 ///
-///   • <see cref="Enabled"/> = false (or a null block) → FULL no-op: NEITHER stage runs; inputs returned
+///   • <see cref="Enabled"/> = false (or a null block) → FULL no-op: NO stage runs; inputs returned
 ///     byte-identical. This is the strict off switch.
 ///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = true → deterministic glossary ONLY (no
 ///     LLM, no model calls). This is the SHIPPED DEFAULT (appsettings "Ai:AnalysisRepair") per the
@@ -242,6 +270,9 @@ public class FeatureModelOptions
 ///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = false → glossary + value-scoped LLM repair
 ///     (guard-gated + fail-safe inside the service; a clean field still makes ZERO model calls).
 ///   • <see cref="PerType"/> → gates repair per analysis-type name (see below).
+///   • <see cref="Mode"/> → (d4) selects WHICH of the glossary / dynamic stages run, layered under the
+///     three knobs above; see <see cref="AnalysisRepairMode"/>. The shipped default
+///     (<see cref="AnalysisRepairMode.Glossary"/>) reproduces the pre-d4 behaviour exactly.
 ///
 /// The class-level defaults are the SAFE posture (Enabled=false = off; if turned on, GuardOnly=true so
 /// the LLM stays off unless explicitly opted into). Production reads the explicit appsettings block, so
@@ -277,6 +308,17 @@ public class AnalysisRepairOptions
     /// "Ai:FeatureModels:AnalysisRepair" (and "Ai:ProviderSettings:Ollama_AnalysisRepair") — those keys do
     /// the actual routing; this field documents/asserts the intended model at the config surface.</summary>
     public string Model { get; set; } = "gemma4:12b";
+
+    /// <summary>
+    /// Which repair stage(s) run (dynamic-term-repair-design plan, d4); see <see cref="AnalysisRepairMode"/>
+    /// for the four-way semantics. The class default AND the SHIPPED appsettings default are BOTH
+    /// <see cref="AnalysisRepairMode.Glossary"/> — deterministic glossary fast-path ONLY, dynamic span-scoped
+    /// repair OFF — so introducing this knob changes NOTHING about today's behaviour. Only consulted once
+    /// <see cref="Enabled"/> is true and <see cref="PerType"/> allows the type; <see cref="AnalysisRepairMode.Off"/>
+    /// is an ADDITIONAL off-switch scoped to stage selection (on top of <see cref="Enabled"/>=false). KEEP IN
+    /// SYNC with the appsettings "Ai:AnalysisRepair.Mode" value (both appsettings.json and
+    /// appsettings.Production.json).</summary>
+    public AnalysisRepairMode Mode { get; set; } = AnalysisRepairMode.Glossary;
 
     /// <summary>Per-analysis-type gate, keyed by the <see cref="Contracts.AnalysisType"/> name
     /// ("Summarization", "LiteraryAnalysis", "LinguisticAnalysis", "LineEdit", plus the f5-wire

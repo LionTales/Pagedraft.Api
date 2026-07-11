@@ -321,6 +321,74 @@ public class BookReviewServiceTests
         Assert.DoesNotContain("Action", preserved.Rationale);
     }
 
+    // ─── 3c. GLOSSARY MODE GATE (P1): the step-5b deterministic glossary must obey Ai:AnalysisRepair.Mode,
+    //         mirroring UnifiedAnalysisService.ApplyAnalysisRepairAsync — Mode is a stage-selection knob layered
+    //         UNDER the Enabled/PerType gate. With Mode=Off (Enabled=true, PerType allowing "BookReview") the
+    //         glossary is SKIPPED even though Enabled/PerType would open the gate, so a closed-glossary English
+    //         leak ("(Action)") stays un-Hebraised. With Mode=Glossary (the SHIPPED default) the SAME leak IS
+    //         Hebraised, so the shipped behaviour is unchanged. Regression guard for the P1 where step 5b ignored
+    //         Mode and ran the glossary regardless (Off did not disable it; Dynamic ran glossary+dynamic). ──
+    [Fact]
+    public async Task BuildBookReviewAsync_Step5bGlossary_ObeysAnalysisRepairMode()
+    {
+        const int anchorOrder = 1; // chapter order 1 exists (chapterCount: 2) → the finding's primary anchor order
+        const string rawRationale = "הממצא מצביע על תיאור פעולה (Action) עז בפרק."; // closed-glossary "(Action)" leak
+
+        // (A) Mode=Off: Enabled + PerType would open the gate, but Mode=Off is an ADDITIONAL strict no-op scoped
+        //     to stage selection, so the glossary must NOT run — the "(Action)" leak survives un-Hebraised.
+        {
+            var byDim = FindingsPerDimension(perDimensionCount: 0);
+            byDim["plot"] = JsonFindings(new FindingSpec("improve", 2, rawRationale, anchorOrder));
+
+            using var provider = BuildProvider(out _, byDim);
+            var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+            aiOptions.AnalysisRepair = new AnalysisRepairOptions
+            {
+                Enabled = true, // layer ON
+                Mode = AnalysisRepairMode.Off, // ...but Mode=Off must skip every stage
+                PerType = new Dictionary<string, bool> { ["BookReview"] = true }, // PerType allows BookReview
+            };
+
+            var db = provider.GetRequiredService<AppDbContext>();
+            var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+            var svc = provider.GetRequiredService<BookReviewService>();
+            await svc.BuildBookReviewAsync(bookId, "he");
+
+            var finding = Assert.Single(
+                await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync());
+            // Mode=Off ⇒ step 5b skipped ⇒ the English leak is NOT Hebraised (glossary never ran).
+            Assert.Contains("(Action)", finding.Rationale);
+            Assert.DoesNotContain("(פעולה)", finding.Rationale);
+        }
+
+        // (B) Mode=Glossary (the SHIPPED default): the SAME gate is open AND the glossary stage runs, so the
+        //     leak IS Hebraised. This pins the shipped-default behaviour unchanged by the Mode gate.
+        {
+            var byDim = FindingsPerDimension(perDimensionCount: 0);
+            byDim["plot"] = JsonFindings(new FindingSpec("improve", 2, rawRationale, anchorOrder));
+
+            using var provider = BuildProvider(out _, byDim);
+            var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+            aiOptions.AnalysisRepair = new AnalysisRepairOptions
+            {
+                Enabled = true,
+                Mode = AnalysisRepairMode.Glossary, // shipped default → glossary stage runs
+                PerType = new Dictionary<string, bool> { ["BookReview"] = true },
+            };
+
+            var db = provider.GetRequiredService<AppDbContext>();
+            var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+            var svc = provider.GetRequiredService<BookReviewService>();
+            await svc.BuildBookReviewAsync(bookId, "he");
+
+            var finding = Assert.Single(
+                await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync());
+            // Mode=Glossary ⇒ step 5b runs ⇒ the leak is Hebraised to "(פעולה)".
+            Assert.Contains("(פעולה)", finding.Rationale);
+            Assert.DoesNotContain("Action", finding.Rationale);
+        }
+    }
+
     // ─── 4. DimensionScore rollup counts ──────────────────────────────────────────────────────────
 
     [Fact]
@@ -2600,6 +2668,7 @@ public class BookReviewServiceTests
         services.AddScoped<BookSummaryService>();
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<BookReviewService>();
+        services.AddScoped<DynamicTermRepairService>();
         services.AddSingleton<AnalysisProgressTracker>();
         services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddSingleton<BookReviewBuildRegistry>();
@@ -2659,6 +2728,7 @@ public class BookReviewServiceTests
         services.AddScoped<BookSummaryService>();
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<BookReviewService>();
+        services.AddScoped<DynamicTermRepairService>();
         services.AddSingleton<AnalysisProgressTracker>();
         services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddSingleton<BookReviewBuildRegistry>();
@@ -2779,6 +2849,7 @@ public class BookReviewServiceTests
         services.AddScoped<BookSummaryService>();
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<BookReviewService>();
+        services.AddScoped<DynamicTermRepairService>();
         services.AddSingleton<AnalysisProgressTracker>();
         services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddSingleton<BookReviewBuildRegistry>();
