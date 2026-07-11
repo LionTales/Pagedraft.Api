@@ -58,7 +58,8 @@ public class AsyncSingleShotJobTests
             Options.Create(new AiOptions()), NullLogger<UnifiedAnalysisService>.Instance,
             tracker, contextMock.Object, new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
-            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
     }
 
     [Fact]

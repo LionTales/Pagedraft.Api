@@ -47,7 +47,8 @@ public class RunRawAnalysisRepairTests
             new Mock<IAnalysisContextService>().Object,
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
-            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance));
+            new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
 
     private static AppDbContext NewDb()
         => new(new DbContextOptionsBuilder<AppDbContext>()

@@ -31,5 +31,19 @@ public enum AiTaskType
     /// Ollama_AnalysisRepair tuning block (low temperature, 16k ctx). The repair pass is FAIL-SAFE: the
     /// service validates the model output and keeps the ORIGINAL value on any doubt.
     /// </summary>
-    AnalysisRepair
+    AnalysisRepair,
+
+    /// <summary>
+    /// Span-scoped dynamic term repair (dynamic-term-repair-design plan, d3). DynamicTermRepairService tags
+    /// its per-run cleanup AiRequest with this task type so the router (a) resolves the
+    /// Ai:FeatureModels:TermRepair key -> a local (and/or documented cloud) model (the "routes to itself";
+    /// there is NO AnalysisType.TermRepair, so AnalysisTaskMapping is untouched), (b) sends the marked-span
+    /// repair instruction VERBATIM (see AiRouter.ShouldUseUnifiedInstructionVerbatim), and (c) picks up the
+    /// (d4) Ollama_TermRepair tuning block (low temperature, small ctx). Unlike the value/whole-JSON-scoped
+    /// AnalysisRepair (whose LLM Stage-2 was turned off because it could Hebraize keys / restructure JSON),
+    /// each TermRepair call marks ONE foreign run and asks the model to return only a replacement token —
+    /// that tiny blast radius is the whole point. The pass is FAIL-SAFE: the service validates the model
+    /// output (re-detects the foreign script) and keeps the ORIGINAL span on any doubt.
+    /// </summary>
+    TermRepair
 }

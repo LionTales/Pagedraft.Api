@@ -44,9 +44,15 @@ builder.Services.AddScoped<BookAssemblyService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
 // Value-scoped, fail-safe analysis-output repair (analysis-output-repair plan, p3). Scoped to match its
-// future consumer UnifiedAnalysisService (p3-wire); depends only on the singleton IAiRouter + a logger, so
-// it has no captive-dependency concern. Not yet wired into any analysis path.
+// consumer UnifiedAnalysisService; depends only on the singleton IAiRouter + a logger, so it has no
+// captive-dependency concern. Wired in as the GuardOnly-gated Stage 2 of ApplyAnalysisRepairAsync (off by
+// default; GuardOnly=true ships).
 builder.Services.AddScoped<AnalysisRepairService>();
+// Span-scoped, fail-safe DYNAMIC term repair (dynamic-term-repair-design plan, d4). Scoped like
+// AnalysisRepairService (same IAiRouter + logger shape, no captive-dependency concern); consumed by
+// UnifiedAnalysisService.ApplyAnalysisRepairAsync and BookReviewService's finalize->persist hook, both
+// gated by Ai:AnalysisRepair.Mode (shipped default Glossary = this service is never called).
+builder.Services.AddScoped<DynamicTermRepairService>();
 builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
