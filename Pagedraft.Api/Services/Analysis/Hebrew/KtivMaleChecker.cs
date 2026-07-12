@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Microsoft.Extensions.Options;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services;
+using static Pagedraft.Api.Services.Analysis.ScriptTokenPredicates;
 
 namespace Pagedraft.Api.Services.Analysis.Hebrew;
 
@@ -139,7 +140,4 @@ public class KtivMaleChecker
 
         return false;
     }
-
-    /// <summary>True for Hebrew block letters (U+05D0..U+05EA). Niqqud/punctuation are not letters here.</summary>
-    private static bool IsHebrewLetter(char c) => c >= 'א' && c <= 'ת';
 }
