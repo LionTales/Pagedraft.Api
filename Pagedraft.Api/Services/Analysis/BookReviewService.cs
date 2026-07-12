@@ -230,6 +230,7 @@ public class BookReviewService
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<BookReviewService> _logger;
     private readonly DynamicTermRepairService _dynamicTermRepair;
+    private readonly IBookEntityProvider _bookEntityProvider;
 
     public BookReviewService(
         AppDbContext db,
@@ -240,7 +241,8 @@ public class BookReviewService
         BookReviewBuildRegistry buildRegistry,
         IOptions<AiOptions> aiOptions,
         ILogger<BookReviewService> logger,
-        DynamicTermRepairService dynamicTermRepair)
+        DynamicTermRepairService dynamicTermRepair,
+        IBookEntityProvider bookEntityProvider)
     {
         _db = db;
         _contextAssembler = contextAssembler;
@@ -251,6 +253,7 @@ public class BookReviewService
         _aiOptions = aiOptions;
         _logger = logger;
         _dynamicTermRepair = dynamicTermRepair;
+        _bookEntityProvider = bookEntityProvider;
     }
 
     /// <summary>The resolved active BookReview model id — the cross-model staleness target and the row's
@@ -905,11 +908,14 @@ public class BookReviewService
         //     rationale there, so leaving it untouched here keeps Status preservation stable across rebuilds
         //     (the model re-emits the same leak, we re-derive the same key) — the repair is display-only.
         //     MODE GATE: runs ONLY when Mode is Glossary or GlossaryThenDynamic, mirroring the glossary stage in
-        //     UnifiedAnalysisService.ApplyAnalysisRepairAsync EXACTLY. Under the SHIPPED default (Mode=Glossary)
-        //     this still runs, so today's behaviour is unchanged; Mode=Off / Dynamic now correctly SKIP it here
+        //     UnifiedAnalysisService.ApplyAnalysisRepairAsync EXACTLY. Under the SHIPPED default (Mode=GlossaryThenDynamic)
+        //     this glossary stage still runs; Mode=Off / Dynamic now correctly SKIP it here
         //     just as they do on the RunAsync seam (was previously un-gated, a Mode contract violation).
         //     ApplyGlossaryToFindings keeps its own Enabled/PerType gate (belt-and-braces).
-        if (repairMode is Ai.AnalysisRepairMode.Glossary or Ai.AnalysisRepairMode.GlossaryThenDynamic)
+        //     be-c06: the predicate itself lives ONCE, on the enum (AnalysisRepairModeExtensions.RunsGlossary) —
+        //     the "mirrors UnifiedAnalysisService EXACTLY" claim above is now enforced by construction (one
+        //     shared predicate) rather than by two longhand copies that had to be kept in step by hand.
+        if (repairMode.RunsGlossary())
         {
             try
             {
@@ -935,18 +941,32 @@ public class BookReviewService
         //     "BookReview") PLUS Mode — Mode is an ADDITIONAL knob layered UNDER Enabled/PerType, never a
         //     substitute for them, so a null block / Enabled=false / a PerType exclusion must disable this
         //     block too, regardless of Mode. Runs ONLY when that gate passes AND Mode is Dynamic or
-        //     GlossaryThenDynamic — under the SHIPPED default (Mode=Glossary) this block never executes, so
-        //     today's behaviour is unchanged. When it does run, it repairs the SAME finalised findings'
+        //     GlossaryThenDynamic — under the SHIPPED default (Mode=GlossaryThenDynamic) this block DOES run
+        //     (after the glossary above); Mode=Glossary/Off is the rollback that skips it. When it runs, it repairs the SAME finalised findings'
         //     Rationale + (non-null) SuggestedAction IN PLACE via DynamicTermRepairService.RepairFindingsAsync
         //     (bidirectional, unlike the Hebrew-only glossary), touching nothing else. Fail-safe: can NEVER
         //     throw into the build; on any fault the un-repaired (or glossary-only-repaired) findings persist.
+        //     be-c06: the Mode half of this gate is the SHARED predicate (AnalysisRepairModeExtensions.RunsDynamic),
+        //     the same one UnifiedAnalysisService.ApplyAnalysisRepairAsync's dynamic stage calls. Enabled/PerType
+        //     still gate FIRST and independently — RunsDynamic() answers ONLY "does this Mode select the stage".
         var dynamicGateOpen = repairCfg is not null && repairCfg.Enabled && PerTypeAllowsBookReview(repairCfg) &&
-            (repairMode == Ai.AnalysisRepairMode.Dynamic || repairMode == Ai.AnalysisRepairMode.GlossaryThenDynamic);
+            repairMode.RunsDynamic();
         if (dynamicGateOpen)
         {
             try
             {
-                var dynamicRepairedFindings = await _dynamicTermRepair.RepairFindingsAsync(deduped, lang, ct)
+                // e3: fetch the per-book proper-noun LEAVE set LAZILY, ONLY inside this dynamic gate — under
+                // the rollback Mode=Glossary/Off this gate never opens, so it never hits the DbContext. Deterministic +
+                // fail-safe (empty set on any fault / missing book = current behavior); the outer try/catch below
+                // also covers an unforeseen throw, so a fetch fault can never fail persistence.
+                //
+                // final-r02: pass the SAME `lang` handed to RepairFindingsAsync below — the review language this
+                // build is scoped to. The repair layer resolves the classifier's expected script from it, and the
+                // provider resolves its HARVEST direction from it through the same helper, so harvest and classify
+                // agree BY CONSTRUCTION. (The provider used to key the harvest on the book's STORED language, which
+                // could disagree with `lang` and leave the entity lever inert in the disagreeing direction.)
+                var bookEntities = await _bookEntityProvider.GetEntitiesAsync(bookId, lang, ct).ConfigureAwait(false);
+                var dynamicRepairedFindings = await _dynamicTermRepair.RepairFindingsAsync(deduped, lang, bookEntities, ct)
                     .ConfigureAwait(false);
                 if (dynamicRepairedFindings > 0)
                     _logger.LogInformation(
@@ -1931,7 +1951,8 @@ public class BookReviewService
     /// book language is Hebrew (the Hebrew check lives inside <see cref="GlossaryRepairPass.RepairFields"/>).
     /// A null/off config, a PerType exclusion, or a non-Hebrew book is a strict no-op. NOTE: this hook is
     /// deliberately glossary-ONLY and ignores <see cref="Ai.AnalysisRepairOptions.GuardOnly"/> — BookReview
-    /// never runs the value-scoped LLM stage (no new model call on the whole-book path).
+    /// never runs the value-scoped LLM stage (this glossary hook itself makes no model call; the separate
+    /// dynamic span-scoped stage, gated by Mode=Dynamic/GlossaryThenDynamic, is the only model-calling repair on this path).
     ///
     /// FAIL-SAFE: per-finding try/catch means a repair fault on one finding leaves THAT finding un-repaired
     /// and continues (mirrors the engine's non-fatal reduce-pass pattern); combined with the caller's outer

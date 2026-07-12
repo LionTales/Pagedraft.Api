@@ -24,7 +24,8 @@ public class AiOptions
     /// <see cref="AnalysisRepairOptions"/> for the three-way semantics (Enabled / GuardOnly / PerType).
     /// A null block OR Enabled=false is a FULL no-op (neither the deterministic glossary nor the LLM
     /// pass runs). The SHIPPED default (appsettings "Ai:AnalysisRepair") is { Enabled:true,
-    /// GuardOnly:true } = deterministic glossary ONLY, LLM off — the p3-gate GUARD-ONLY decision.
+    /// GuardOnly:true, Mode:GlossaryThenDynamic } = glossary fast-path THEN the dynamic span-scoped stage,
+    /// value-scoped LLM off (the p3-gate GUARD-ONLY decision; Mode selects the term-repair stages).
     /// KEEP IN SYNC with the appsettings "Ai:AnalysisRepair" block (and its Model with
     /// "Ai:FeatureModels:AnalysisRepair").
     /// </summary>
@@ -234,15 +235,30 @@ public class FeatureModelOptions
 /// decides what runs once a type/book has cleared that gate:
 ///   • <see cref="Off"/> — an ADDITIONAL strict no-op on top of <see cref="AnalysisRepairOptions.Enabled"/>:
 ///     neither the deterministic glossary nor the dynamic detect-and-repair stage runs.
-///   • <see cref="Glossary"/> — the SHIPPED DEFAULT. Only the closed, deterministic English&lt;-&gt;Hebrew
-///     glossary (<see cref="Analysis.GlossaryRepairPass"/>) runs; the dynamic span-scoped stage
-///     (<see cref="Analysis.DynamicTermRepairService"/>) never runs. Selecting this mode reproduces the EXACT
-///     pre-d4 stage-1/stage-2 sequence — introducing this enum changes NOTHING about what ships today.
+///   • <see cref="Glossary"/> — the ROLLBACK / kill-switch for the dynamic stage (it was the shipped default
+///     until 2026-07-11, and is now superseded by <see cref="GlossaryThenDynamic"/>). Only the closed, deterministic
+///     English&lt;-&gt;Hebrew glossary (<see cref="Analysis.GlossaryRepairPass"/>) runs; the dynamic span-scoped
+///     stage (<see cref="Analysis.DynamicTermRepairService"/>) never runs. Selecting this mode reproduces the
+///     EXACT pre-d4 glossary-only sequence, so it is the one-knob way to turn the dynamic stage off without
+///     also disabling the glossary guard (<see cref="AnalysisRepairOptions.Enabled"/>=false does both).
 ///   • <see cref="Dynamic"/> — the glossary Stage-1 substitution is SKIPPED entirely; the span-scoped
 ///     detect-classify-repair pass (d1-d3) runs instead, directly over the original (un-glossaried) prose.
-///   • <see cref="GlossaryThenDynamic"/> — the glossary fast-path cache runs FIRST (cheap, deterministic,
-///     catches the closed ~35-term vocabulary at zero model cost), THEN the dynamic pass runs over whatever
-///     residual foreign text the glossary left — the two stages compose rather than compete.
+///   • <see cref="GlossaryThenDynamic"/> — the SHIPPED DEFAULT (appsettings.json + appsettings.Production.json).
+///     The glossary fast-path cache runs FIRST (cheap, deterministic, catches the closed ~35-term vocabulary at
+///     zero model cost), THEN the dynamic pass runs over whatever residual foreign text the glossary left; the two
+///     stages compose rather than compete.
+///
+/// PROVENANCE of the ON default: first shipped 2026-07-11 on the e4 gate, reverted to <see cref="Glossary"/> on
+/// 2026-07-12 as a safety measure once review found that gate had measured a HAND-BUILT entity set (so the harvest
+/// logic and the bookId threading that actually ship were never on the measured path), and RE-FLIPPED the same day
+/// after be-c08 re-measured both gates through the REAL <see cref="Analysis.IBookEntityProvider"/> path on the
+/// shipped LOCAL tier: out-of-glossary cleaning 100% (unchanged by an adversarial per-book entity set),
+/// legitimate-term preservation 100% with 0 false positives, over-rewrite 0, and 0 legitimate values reaching the
+/// model. See docs/ANALYSIS_OUTPUT_REPAIR.md section 18.
+///
+/// NOTE the CLASS default on <see cref="AnalysisRepairOptions.Mode"/> deliberately stays <see cref="Glossary"/>:
+/// that is the safe posture for programmatic/test construction and is NOT a contradiction of the shipped value.
+/// AnalysisRepairConfigParityTests binds the real appsettings.json to prove which stages actually ship.
 /// </summary>
 public enum AnalysisRepairMode
 {
@@ -250,6 +266,50 @@ public enum AnalysisRepairMode
     Glossary,
     Dynamic,
     GlossaryThenDynamic
+}
+
+/// <summary>
+/// The SINGLE source of truth for "which repair stage(s) does this <see cref="AnalysisRepairMode"/> select?"
+/// (be-c06). Every stage gate in the codebase MUST call these — do NOT re-write the predicate longhand.
+///
+/// WHY THIS EXISTS: the two predicates below were previously spelled out at FOUR independent call sites (the
+/// glossary + dynamic stages in <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/> and the
+/// glossary + dynamic hooks in <see cref="Analysis.BookReviewService"/>). Four copies of a predicate that MUST
+/// agree is a replicated gate: add a fifth mode, or change one mode's semantics, and a copy silently diverges
+/// while every site still looks locally correct. Centralising them means a mode change is a ONE-line edit here
+/// and every seam moves together.
+///
+/// SEMANTICS (mirrors the <see cref="AnalysisRepairMode"/> xmldoc):
+///   • <see cref="AnalysisRepairMode.Off"/> → runs NEITHER stage (both predicates false).
+///   • <see cref="AnalysisRepairMode.Glossary"/> → glossary only.
+///   • <see cref="AnalysisRepairMode.Dynamic"/> → dynamic only (the glossary substitution is skipped entirely).
+///   • <see cref="AnalysisRepairMode.GlossaryThenDynamic"/> → BOTH, glossary first (the two compose).
+///
+/// NOTE: these predicates answer ONLY the stage-selection question. They are layered UNDER
+/// <see cref="AnalysisRepairOptions.Enabled"/> / <see cref="AnalysisRepairOptions.PerType"/>, which every call
+/// site must still check FIRST — a true here never overrides a disabled layer or an excluded analysis type.
+/// </summary>
+public static class AnalysisRepairModeExtensions
+{
+    /// <summary>
+    /// True when <paramref name="mode"/> selects the DETERMINISTIC glossary stage
+    /// (<see cref="Analysis.GlossaryRepairPass"/> on the RunAsync seam; <c>ApplyGlossaryToFindings</c> on the
+    /// BookReview engine seam). True for <see cref="AnalysisRepairMode.Glossary"/> and
+    /// <see cref="AnalysisRepairMode.GlossaryThenDynamic"/>; false for <see cref="AnalysisRepairMode.Off"/>
+    /// (which runs neither stage) and <see cref="AnalysisRepairMode.Dynamic"/> (which skips the glossary).
+    /// </summary>
+    public static bool RunsGlossary(this AnalysisRepairMode mode) =>
+        mode is AnalysisRepairMode.Glossary or AnalysisRepairMode.GlossaryThenDynamic;
+
+    /// <summary>
+    /// True when <paramref name="mode"/> selects the span-scoped DYNAMIC detect-and-repair stage
+    /// (<see cref="Analysis.DynamicTermRepairService"/>). True for <see cref="AnalysisRepairMode.Dynamic"/> and
+    /// <see cref="AnalysisRepairMode.GlossaryThenDynamic"/>; false for <see cref="AnalysisRepairMode.Off"/>
+    /// (which runs neither stage) and <see cref="AnalysisRepairMode.Glossary"/> (the rollback/kill-switch that
+    /// reproduces the pre-d4 glossary-only sequence).
+    /// </summary>
+    public static bool RunsDynamic(this AnalysisRepairMode mode) =>
+        mode is AnalysisRepairMode.Dynamic or AnalysisRepairMode.GlossaryThenDynamic;
 }
 
 /// <summary>
@@ -263,21 +323,27 @@ public enum AnalysisRepairMode
 ///
 ///   • <see cref="Enabled"/> = false (or a null block) → FULL no-op: NO stage runs; inputs returned
 ///     byte-identical. This is the strict off switch.
-///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = true → deterministic glossary ONLY (no
-///     LLM, no model calls). This is the SHIPPED DEFAULT (appsettings "Ai:AnalysisRepair") per the
-///     p3-gate GUARD-ONLY decision: the glossary is deterministic + fail-safe + validated, while the LLM
-///     pass showed an over-rewrite tendency on mixed leak+prose fields, so it stays opt-in.
+///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = true → the value-scoped LLM repair stays
+///     OFF; only the Mode-selected term-repair stage(s) run. GuardOnly=true is the SHIPPED DEFAULT
+///     (appsettings "Ai:AnalysisRepair") per the p3-gate GUARD-ONLY decision: the glossary is deterministic
+///     + fail-safe + validated, while the LLM pass showed an over-rewrite tendency on mixed leak+prose
+///     fields, so it stays opt-in.
 ///   • <see cref="Enabled"/> = true, <see cref="GuardOnly"/> = false → glossary + value-scoped LLM repair
 ///     (guard-gated + fail-safe inside the service; a clean field still makes ZERO model calls).
 ///   • <see cref="PerType"/> → gates repair per analysis-type name (see below).
 ///   • <see cref="Mode"/> → (d4) selects WHICH of the glossary / dynamic stages run, layered under the
 ///     three knobs above; see <see cref="AnalysisRepairMode"/>. The shipped default
-///     (<see cref="AnalysisRepairMode.Glossary"/>) reproduces the pre-d4 behaviour exactly.
+///     (<see cref="AnalysisRepairMode.GlossaryThenDynamic"/>) runs the glossary fast-path THEN the dynamic
+///     span-scoped stage; Mode=Glossary (or Off) is the rollback that reproduces the pre-d4 behaviour.
 ///
 /// The class-level defaults are the SAFE posture (Enabled=false = off; if turned on, GuardOnly=true so
-/// the LLM stays off unless explicitly opted into). Production reads the explicit appsettings block, so
-/// these defaults only apply to programmatic/test construction. KEEP IN SYNC with the appsettings
-/// "Ai:AnalysisRepair" block.
+/// the LLM stays off unless explicitly opted into; and <see cref="Mode"/> = <see cref="AnalysisRepairMode.Glossary"/>
+/// so a hand-constructed options object never silently starts calling the repair model). Production reads the
+/// explicit appsettings block, whose Mode is <see cref="AnalysisRepairMode.GlossaryThenDynamic"/>, so these
+/// class defaults only apply to programmatic/test construction and the DIFFERENCE IS DELIBERATE, not a drift
+/// to be "fixed" (AnalysisRepairConfigParityTests binds the real appsettings.json and asserts the bound Mode
+/// drives the stage selection, which is what covers the value that actually ships). KEEP IN SYNC with the
+/// appsettings "Ai:AnalysisRepair" block.
 ///
 /// PER-ENVIRONMENT POLICY: this block is one value per ASP.NET Core environment (base appsettings.json +
 /// an optional appsettings.{Environment}.json override, e.g. appsettings.Production.json). Each override
@@ -299,9 +365,10 @@ public class AnalysisRepairOptions
     /// the deterministic glossary nor the LLM pass runs. The shipped appsettings value is true.</summary>
     public bool Enabled { get; set; } = false;
 
-    /// <summary>When true (the class default and the SHIPPED default), only the deterministic glossary
-    /// pass runs — the value-scoped LLM repair is skipped entirely (no model calls). Set false to also run
-    /// the LLM repair. Only consulted when <see cref="Enabled"/> is true.</summary>
+    /// <summary>When true (the class default and the SHIPPED default), the value-scoped LLM repair pass is
+    /// skipped entirely (that stage makes no model calls); the deterministic glossary and, per Mode, the
+    /// dynamic span-scoped stage still run. Set false to also run the LLM repair. Only consulted when
+    /// <see cref="Enabled"/> is true.</summary>
     public bool GuardOnly { get; set; } = true;
 
     /// <summary>The model the value-scoped LLM repair routes to. KEEP IN SYNC with
@@ -311,9 +378,10 @@ public class AnalysisRepairOptions
 
     /// <summary>
     /// Which repair stage(s) run (dynamic-term-repair-design plan, d4); see <see cref="AnalysisRepairMode"/>
-    /// for the four-way semantics. The class default AND the SHIPPED appsettings default are BOTH
-    /// <see cref="AnalysisRepairMode.Glossary"/> — deterministic glossary fast-path ONLY, dynamic span-scoped
-    /// repair OFF — so introducing this knob changes NOTHING about today's behaviour. Only consulted once
+    /// for the four-way semantics. The class default is <see cref="AnalysisRepairMode.Glossary"/> (safe,
+    /// glossary-only, for programmatic/test construction), while the SHIPPED appsettings default is now
+    /// <see cref="AnalysisRepairMode.GlossaryThenDynamic"/> (glossary fast-path THEN the dynamic span-scoped
+    /// stage); Mode=Glossary (or Off) is the rollback/kill-switch that disables the dynamic stage. Only consulted once
     /// <see cref="Enabled"/> is true and <see cref="PerType"/> allows the type; <see cref="AnalysisRepairMode.Off"/>
     /// is an ADDITIONAL off-switch scoped to stage selection (on top of <see cref="Enabled"/>=false). KEEP IN
     /// SYNC with the appsettings "Ai:AnalysisRepair.Mode" value (both appsettings.json and

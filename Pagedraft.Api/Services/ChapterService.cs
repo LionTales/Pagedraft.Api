@@ -5,6 +5,7 @@ using Pagedraft.Api.Hubs;
 using Pagedraft.Api.Hubs.Events;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services;
+using Pagedraft.Api.Services.Analysis;
 
 namespace Pagedraft.Api.Services;
 
@@ -14,11 +15,26 @@ public class ChapterService
     private readonly IHubContext<BookSyncHub> _hubContext;
     private readonly SfdtConversionService _sfdtConversion;
 
-    public ChapterService(AppDbContext db, IHubContext<BookSyncHub> hubContext, SfdtConversionService sfdtConversion)
+    /// <summary>
+    /// be-c03: the per-book proper-noun LEAVE set is harvested partly FROM <c>Chapter.ContentText</c>, so every
+    /// write below changes a harvest source and must drop the cached set (a stale set that MISSES a name lets the
+    /// repair model rewrite that name — not cosmetic). OPTIONAL only so the direct-construction test fakes that
+    /// pass <c>null!</c> for the DbContext keep compiling; DI always supplies the real singleton, and
+    /// <see cref="IBookEntityProvider.Invalidate"/> is non-throwing by contract, so the invalidation can never
+    /// break a chapter save.
+    /// </summary>
+    private readonly IBookEntityProvider? _bookEntities;
+
+    public ChapterService(
+        AppDbContext db,
+        IHubContext<BookSyncHub> hubContext,
+        SfdtConversionService sfdtConversion,
+        IBookEntityProvider? bookEntities = null)
     {
         _db = db;
         _hubContext = hubContext;
         _sfdtConversion = sfdtConversion;
+        _bookEntities = bookEntities;
     }
 
     public async Task<List<Chapter>> GetAllByBookAsync(Guid bookId, CancellationToken ct = default)
@@ -63,6 +79,7 @@ public class ChapterService
         };
         _db.Chapters.Add(chapter);
         await _db.SaveChangesAsync(ct);
+        _bookEntities?.Invalidate(bookId); // be-c03: Chapter.ContentText is a harvest source
 
         await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, chapter.Id, chapter.Title, chapter.Order), ct);
         return chapter;
@@ -87,6 +104,7 @@ public class ChapterService
             _db.Chapters.Add(ch);
         }
         await _db.SaveChangesAsync(ct);
+        _bookEntities?.Invalidate(bookId); // be-c03: Chapter.ContentText is a harvest source
         foreach (var ch in await _db.Chapters.Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync(ct))
             await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, ch.Id, ch.Title, ch.Order), ct);
     }
@@ -96,6 +114,7 @@ public class ChapterService
         var chapter = await _db.Chapters.FirstOrDefaultAsync(c => c.BookId == bookId && c.Id == chapterId, ct);
         if (chapter == null) return null;
 
+        var contentChanged = contentSfdt != null;
         if (contentSfdt != null)
         {
             chapter.ContentSfdt = contentSfdt;
@@ -108,6 +127,13 @@ public class ChapterService
         if (order.HasValue) chapter.Order = order.Value;
         await _db.SaveChangesAsync(ct);
 
+        // be-c03: only a CONTENT write changes the manuscript harvest source (a title/order-only save does not
+        // change any token or the chapter's presence, so it cannot change the harvested set).
+        if (contentChanged)
+        {
+            _bookEntities?.Invalidate(bookId);
+        }
+
         await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterUpdated", new ChapterUpdatedEvent(bookId, chapter.Id, chapter.WordCount, chapter.UpdatedAt), ct);
         return chapter;
     }
@@ -118,6 +144,7 @@ public class ChapterService
         if (chapter == null) return false;
         _db.Chapters.Remove(chapter);
         await _db.SaveChangesAsync(ct);
+        _bookEntities?.Invalidate(bookId); // be-c03: removing a chapter removes its prose from the harvest
         await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterDeleted", new ChapterDeletedEvent(bookId, chapterId), ct);
         return true;
     }
@@ -206,6 +233,7 @@ public class ChapterService
             }
 
             await _db.SaveChangesAsync(ct);
+            _bookEntities?.Invalidate(bookId); // be-c03: an import rewrites the manuscript harvest source wholesale
 
             foreach (var ch in created.OrderBy(c => c.Order))
             {

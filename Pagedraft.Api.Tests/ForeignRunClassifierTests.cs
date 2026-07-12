@@ -14,12 +14,14 @@ namespace Pagedraft.Api.Tests;
 ///   • TARGETED [Fact]/[Theory] tests document each heuristic in isolation (proper-noun
 ///     Title-Case mid-sentence, sentence-initial capitalization, ALL-CAPS acronym,
 ///     URL/email/code, number+unit, book-entity, single-letter guard, Hebrew-in-Latin,
-///     the list conveniences).
+///     name spans — one particle (van / da / de) AND two adjacent ones (van der / de la /
+///     of the) — plus the bound that keeps a leaked English clause out, quoted foreign
+///     idioms, the list conveniences).
 ///   • A LABELED FIXTURE (<see cref="Fixture"/>) of real-shaped analysis prose — both
-///     genuine leaks (REPAIR) and legitimately-foreign tokens (LEAVE), including two
-///     deliberately-hard cases (a Title-Case literary term the gate LEAVEs, and a
-///     lowercase name particle the gate REPAIRs) — over which the test computes the
-///     REPAIR-class precision &amp; recall and asserts they clear a stated bar.
+///     genuine leaks (REPAIR) and legitimately-foreign tokens (LEAVE), including a
+///     deliberately-hard Title-Case literary term the gate LEAVEs (a retained
+///     false-negative) — over which the test computes the REPAIR-class precision &amp;
+///     recall and asserts they clear a stated bar.
 ///
 /// NO Ollama / no model / no I/O — pure deterministic, runs in CI always. The class name
 /// matches the ~ForeignRun test filter.
@@ -152,6 +154,220 @@ public class ForeignRunClassifierTests
         Assert.Equal(ForeignRunDecision.Leave, decision);
     }
 
+    // ── Name-particle lever ──────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("הצייר Vincent van Gogh היה מפורסם.", "van")]              // van of Vincent van Gogh
+    [InlineData("הצייר Leonardo da Vinci צייר את המונה ליזה.", "da")]      // da of Leonardo da Vinci
+    [InlineData("הסופרת Simone de Beauvoir כתבה רבות על חירות.", "de")]    // de of Simone de Beauvoir
+    public void NameParticle_LowercaseBetweenTwoTitleCaseLatinRuns_IsLeave(string value, string particle)
+    {
+        // A lowercase Latin connective wedged between two Title-Case Latin names is part of the
+        // name (not a leak) => LEAVE. Context-derived from the immediate neighbours, no word list.
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        var run = runs.Single(r => r.Text == particle);
+        Assert.Equal(ForeignRunDecision.Leave, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
+    [Theory]
+    // TWO adjacent lowercase particles inside one Title-Case name span. Runs are WORD-level (a space
+    // ends a run), so the old immediate-adjacency rule had each particle disqualify the OTHER and
+    // classified BOTH as leaks — d3 then spliced Hebrew into a book title / surname, and
+    // validation-by-re-detect could not see it (substituting Hebrew for "of" REDUCES the Latin-run
+    // count, so the corruption read as a successful repair). Every run here must LEAVE.
+    [InlineData("הוא קרא את The Lord of the Rings בשנית.")]        // "of the" — The/Lord/of/the/Rings
+    [InlineData("האדריכל Mies van der Rohe עיצב את הביתן.")]        // "van der" — Mies/van/der/Rohe
+    [InlineData("הסופר Charles de la Rue פרסם ספר חדש.")]           // "de la"  — Charles/de/la/Rue
+    [InlineData("הרומן The Fall of the House of Usher נפתח כך.")]   // two chains in one span
+    public void NameSpan_TwoAdjacentLowercaseParticles_AllRunsAreLeave(string value)
+    {
+        AssertAllRuns(value, ExpectedScript.Hebrew, ForeignRunDecision.Leave);
+    }
+
+    [Theory]
+    [InlineData("היא נכנסה אל the van בחניון האחורי.", "van")]          // lowercase "the", then Hebrew => no anchor
+    [InlineData("היא נכנסה אל the van בחניון האחורי.", "the")]          // Hebrew on the left => no anchor
+    [InlineData("הדמות שקעה במצב של confusion מוחלט.", "confusion")]    // Hebrew neighbours => not a particle (a real leak)
+    public void LowercaseLatinWord_NotInsideTitleCaseNameSpan_StaysRepair(string value, string word)
+    {
+        // The name-span rule must be inert unless a Title-Case Latin ANCHOR is reachable on BOTH
+        // sides across lowercase Latin tokens only — a plain lowercase leak in ordinary Hebrew prose
+        // still REPAIRs. Generalizing the walk must NOT loosen this.
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        var run = runs.Single(r => r.Text == word);
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
+    [Fact]
+    public void LowercaseLatinWord_TitleCaseAnchorOnOneSideOnly_StaysRepair()
+    {
+        // "Sarah with confusion" — a Title-Case anchor exists to the LEFT, but the right side runs
+        // into Hebrew, so there is no enclosing name span. Both lowercase runs are leaks => REPAIR.
+        const string value = "הוא תיאר את Sarah with confusion רבה.";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+
+        Assert.Equal(ForeignRunDecision.Leave, ForeignRunClassifier.Classify(
+            runs.Single(r => r.Text == "Sarah"), value, ExpectedScript.Hebrew));
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(
+            runs.Single(r => r.Text == "with"), value, ExpectedScript.Hebrew));
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(
+            runs.Single(r => r.Text == "confusion"), value, ExpectedScript.Hebrew));
+    }
+
+    [Fact]
+    public void LeakedEnglishClause_BetweenTwoTitleCaseWords_ExceedsNameSpanBound_StaysRepair()
+    {
+        // The BOUND. A Title-Case token sits on both sides, but FOUR lowercase tokens lie between
+        // them — a leaked English clause, not a name span (the longest real particle chains are two:
+        // "van der", "de la", "of the"). The whole chain must REPAIR, and it must do so UNIFORMLY:
+        // a chain that came out half-LEAVE / half-REPAIR is exactly how a partial splice corrupts.
+        const string value = "הדמות Sarah walked into the empty Cathedral בבוקר.";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+
+        Assert.Equal(
+            new[] { "Sarah", "walked", "into", "the", "empty", "Cathedral" },
+            runs.Select(r => r.Text).ToArray());
+
+        Assert.Equal(
+            new[]
+            {
+                ForeignRunDecision.Leave,  // Sarah — Title-Case mid-sentence proper noun
+                ForeignRunDecision.Repair, // walked
+                ForeignRunDecision.Repair, // into
+                ForeignRunDecision.Repair, // the
+                ForeignRunDecision.Repair, // empty
+                ForeignRunDecision.Leave,  // Cathedral — Title-Case mid-sentence
+            },
+            runs.Select(r => ForeignRunClassifier.Classify(r, value, ExpectedScript.Hebrew)).ToArray());
+    }
+
+    [Fact]
+    public void NameSpan_AnchorSeparatedByPunctuation_IsNotASpan_StaysRepair()
+    {
+        // A comma between the anchor and the particle breaks the span: the walk aborts the moment it
+        // crosses a non-space separator, so "of" here has no left anchor and REPAIRs.
+        const string value = "הוא קרא את Lord, of the Rings בשנית.";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        var run = runs.Single(r => r.Text == "of");
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
+    // ── Quoted-span lever ────────────────────────────────────────────────────
+
+    [Fact]
+    public void QuotedForeignIdiom_MultiWord_AllPartsAreLeave()
+    {
+        // "carpe diem" — an intentional quoted foreign idiom (do-not-translate span). Both runs
+        // are inside the quotes with another word beside them => LEAVE.
+        AssertAllRuns("הביטוי \"carpe diem\" מסמל אומץ לחיות.", ExpectedScript.Hebrew, ForeignRunDecision.Leave);
+    }
+
+    [Fact]
+    public void SingleQuotedLowercaseWord_IsRepair_QuoteRuleNeedsMultiWordSpan()
+    {
+        // A LONE scare-quoted word is NOT a multi-word idiom, so the quote rule must NOT fire and
+        // the leak still REPAIRs. Guards against a too-greedy quote rule sparing real leaks.
+        AssertSingleRun("המילה \"confusion\" נשמעה מוזרה מאוד.", ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void LeakAdjacentToPossessiveApostrophe_StaysRepair()
+    {
+        // A stray English possessive apostrophe is not a quoted span (only one side carries a
+        // quote-like char and it hugs a letter), so the leaked "confusion" must still REPAIR.
+        const string value = "הוא תיאר את John's confusion בבירור.";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        var run = runs.Single(r => r.Text == "confusion");
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
+    [Theory]
+    [InlineData("הביטוי «carpe diem» מסמל אומץ לחיות.")]  // guillemets  « … »
+    [InlineData("הביטוי “carpe diem” מסמל אומץ לחיות.")]  // curly double “ … ”
+    [InlineData("הביטוי ‘carpe diem’ מסמל אומץ לחיות.")]  // curly single ‘ … ’
+    public void QuotedForeignIdiom_DirectionalQuotePairs_AllPartsAreLeave(string value)
+    {
+        // The be-c05 pairing table must recognise the DIRECTIONAL pairs, not just the ASCII quote:
+        // an opening form on the left and its matching closing form on the right => a genuine
+        // do-not-translate span => LEAVE both runs.
+        AssertAllRuns(value, ExpectedScript.Hebrew, ForeignRunDecision.Leave);
+    }
+
+    // ── be-c05: the quote gate must be safe BY CONSTRUCTION ──────────────────
+    //
+    // The gate used to accept ANY quote-ish char on each side, requiring only that it be
+    // "boundary-like" on its OUTER side (outward neighbour is a non-word char / the string edge).
+    // Two legitimate, plausible inputs satisfy that on the RIGHT without being quotes at all:
+    //
+    //   • a Hebrew ABBREVIATION geresh — וכו׳ (etc.), עמ׳ (page) — a trailing ׳ followed by a space;
+    //   • an English PLURAL POSSESSIVE apostrophe — "the girls' faces" — a trailing ' followed by a space.
+    //
+    // Put either one to the RIGHT of a leak while any ordinary opening quote sits to its LEFT within
+    // the 64-char window, and the leak was wrongly LEFT. No input in the reference corpus happened to
+    // have that shape, so a corpus A/B showed 0 diff — corpus luck, not a guarantee. The fix drops the
+    // geresh from the delimiter set entirely and requires the two bounds to be a MATCHING PAIR.
+
+    [Theory]
+    [InlineData("הדמות שקעה במצב של confusion וכו׳ והלאה בפרק.")]   // וכו׳ = "etc."
+    [InlineData("הוא תיאר confusion עמ׳ 42 בספר החדש.")]             // עמ׳ = "page"
+    public void HebrewAbbreviationGeresh_NearLeak_DoesNotSpareIt(string value)
+    {
+        // Baseline shape: a Hebrew abbreviation's trailing geresh sitting beside a real lowercase
+        // leak. The geresh is an ABBREVIATION mark, never a quote — it must not participate in the
+        // quoted-span gate at all.
+        AssertSingleRun(value, ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void AdversarialQuoteGate_OpeningQuoteLeft_AbbreviationGereshRight_LeakStillRepairs()
+    {
+        // THE ADVERSARIAL CONSTRUCTION (be-c05). Deliberately built to trip the old gate:
+        //   • LEFT  — an opening `"` preceded by a space (boundary-like), reachable across Hebrew
+        //             letters and spaces only, well inside the 64-char window;
+        //   • RIGHT — the trailing geresh of the abbreviation וכו׳, followed by a space (boundary-like).
+        // The old gate saw "a quote on both sides + another word inside" and returned LEAVE, sparing a
+        // genuine leak inside an ORDINARY Hebrew sentence. The new gate rejects it twice over: the
+        // geresh is no longer a delimiter (it TERMINATES the candidate span), and `"` could not pair
+        // with `׳` even if it were. This test is RED against the un-patched gate.
+        const string value = "היא אמרה: \"אני מרגישה confusion וכו׳ ואין לי מילים.\"";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+
+        var run = Assert.Single(runs);
+        Assert.Equal("confusion", run.Text);
+        Assert.Equal("confusion", value.Substring(run.Start, run.Length));
+
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
+    [Fact]
+    public void AdversarialQuoteGate_OpeningDoubleQuote_ClosedByPluralPossessive_LeakStillRepairs()
+    {
+        // The same hole in the OTHER direction (a Hebrew leak in an English book) and via the OTHER
+        // boundary-like non-quote: an English PLURAL POSSESSIVE apostrophe ("the girls' faces"). It is
+        // followed by a space, so it is boundary-like and reachable as a right-hand bound — but `'`
+        // cannot CLOSE a span opened by `"`. Mismatched pair => not a quoted span => the leaked מבוכה
+        // still REPAIRs. RED against the un-patched gate (which required no pairing at all).
+        const string value = "She said: \"I sensed מבוכה in the girls' faces.\"";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Latin);
+
+        var run = Assert.Single(runs);
+        Assert.Equal("מבוכה", run.Text);
+
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Latin));
+    }
+
+    [Fact]
+    public void HebrewAcronymGershayim_NearLeak_DoesNotSpareIt()
+    {
+        // The gershayim of צה״ל sits BETWEEN two Hebrew letters, so its outer neighbour is a word char
+        // and the boundary-like test already rejects it — defused BY CONSTRUCTION, unlike the trailing
+        // geresh. Pinned so a future widening of the delimiter set cannot quietly re-open it.
+        const string value = "הוא שירת ב צה״ל וחש confusion עמוק.";
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        var run = runs.Single(r => r.Text == "confusion");
+        Assert.Equal(ForeignRunDecision.Repair, ForeignRunClassifier.Classify(run, value, ExpectedScript.Hebrew));
+    }
+
     // ── Book-entity lever ────────────────────────────────────────────────────
 
     [Fact]
@@ -217,9 +433,10 @@ public class ForeignRunClassifierTests
 
         Assert.Equal(runs.Count, classified.Count);
         Assert.Equal(runs.Select(r => r.Text).ToArray(), classified.Select(c => c.Run.Text).ToArray());
-        // Vincent (proper noun) LEAVE, van (lowercase particle) REPAIR, Gogh (proper noun) LEAVE.
+        // Vincent (proper noun) LEAVE, van (name particle between two Title-Case runs) LEAVE,
+        // Gogh (proper noun) LEAVE — the whole personal name is preserved.
         Assert.Equal(
-            new[] { ForeignRunDecision.Leave, ForeignRunDecision.Repair, ForeignRunDecision.Leave },
+            new[] { ForeignRunDecision.Leave, ForeignRunDecision.Leave, ForeignRunDecision.Leave },
             classified.Select(c => c.Decision).ToArray());
     }
 
@@ -281,9 +498,10 @@ public class ForeignRunClassifierTests
             }
         }
 
-        // A meaningful fixture: real positives AND negatives, and at least one of each error type
-        // (a Title-Case literary-term false-negative and a lowercase name-particle false-positive)
-        // so the measured rates are not a trivial 1.0.
+        // A meaningful fixture: real positives AND negatives. The lowercase name-particle case that
+        // once produced a false-positive is now recovered by the name-particle rule (so REPAIR
+        // precision is clean); the retained honest error is a Title-Case literary-term false-negative
+        // ("Tension"), which keeps REPAIR recall an honest < 1.0 (the d3 model is the backstop there).
         Assert.True(tp + fn >= 12, $"Fixture too small: only {tp + fn} REPAIR-labeled runs.");
         Assert.True(tn + fp >= 12, $"Fixture too small: only {tn + fp} LEAVE-labeled runs.");
 
@@ -328,6 +546,16 @@ public class ForeignRunClassifierTests
         yield return new("The mood is one of מתח throughout the scene.", ExpectedScript.Latin, new[] { R });
         yield return new("She felt deep שמחה in that quiet moment.", ExpectedScript.Latin, new[] { R });
         yield return new("A sudden כעס overtook him without warning.", ExpectedScript.Latin, new[] { R });
+        // A Title-Case anchor on ONE side only: "Sarah" is a name (LEAVE) but "with confusion" runs
+        // into Hebrew, so there is no enclosing name span and both lowercase runs are leaks. Guards
+        // the generalized name-span walk against loosening into a one-sided rule.
+        yield return new("הוא תיאר את Sarah with confusion רבה.", ExpectedScript.Hebrew, new[] { L, R, R });
+        // be-c05 (quote gate safe by CONSTRUCTION): a real leak whose right-hand "closing quote" is
+        // actually a Hebrew abbreviation geresh (וכו׳), with a genuine opening `"` to its left. The
+        // un-patched gate LEFT this. Its twin, in the other script direction, is closed by an English
+        // PLURAL POSSESSIVE apostrophe — boundary-like, but it cannot pair with `"`.
+        yield return new("היא אמרה: \"אני מרגישה confusion וכו׳ ואין לי מילים.\"", ExpectedScript.Hebrew, new[] { R });
+        yield return new("She said: \"I sensed מבוכה in the girls' faces.\"", ExpectedScript.Latin, new[] { R });
         // HARD (false-negative): a Title-Case literary term the cheap gate LEAVEs; the human
         // label is REPAIR. Kept in to make recall an honest < 1.0 (the d3 model is the backstop
         // for the tokens the gate cannot recover).
@@ -348,9 +576,21 @@ public class ForeignRunClassifierTests
         yield return new("רזולוציה של 100px גבוהה מאוד.", ExpectedScript.Hebrew, new[] { L }); // number+unit
         // Book entity: a Hebrew character name in an English book — only the entity list spares it.
         yield return new("The hero דגן left the city gates.", ExpectedScript.Latin, new[] { L }, Dagan);
-        // HARD (false-positive): a lowercase name particle "van" the gate REPAIRs; the human label
-        // is LEAVE (part of "Vincent van Gogh"). Kept in to make precision an honest < 1.0.
-        yield return new("הצייר Vincent van Gogh היה מפורסם.", ExpectedScript.Hebrew, new[] { L, L, L });
+        // Name particles: a lowercase Latin connective sandwiched between two Title-Case Latin names
+        // is part of the name (LEAVE), recovered by the name-particle rule (previously a false-positive).
+        yield return new("הצייר Vincent van Gogh היה מפורסם.", ExpectedScript.Hebrew, new[] { L, L, L });   // van
+        yield return new("הצייר Leonardo da Vinci צייר את המונה ליזה.", ExpectedScript.Hebrew, new[] { L, L, L }); // da
+        yield return new("הסופרת Simone de Beauvoir כתבה על חירות.", ExpectedScript.Hebrew, new[] { L, L, L });   // de
+        // TWO ADJACENT particles inside one name span (the be-c01 P0). Under the old immediate-
+        // adjacency rule each particle disqualified the other and BOTH were false-positive REPAIRs,
+        // handing a book title / surname to the repair model. Every run must LEAVE.
+        yield return new("הוא קרא את The Lord of the Rings בשנית.", ExpectedScript.Hebrew, new[] { L, L, L, L, L }); // of the
+        yield return new("האדריכל Mies van der Rohe עיצב את הביתן.", ExpectedScript.Hebrew, new[] { L, L, L, L });   // van der
+        yield return new("הסופר Charles de la Rue פרסם ספר חדש.", ExpectedScript.Hebrew, new[] { L, L, L, L });      // de la
+        // Quoted foreign idiom: an intentional do-not-translate multi-word span => LEAVE both runs.
+        // Both the ASCII quote and a DIRECTIONAL pair (be-c05) must be recognised.
+        yield return new("הביטוי \"carpe diem\" מסמל אומץ לחיות.", ExpectedScript.Hebrew, new[] { L, L });
+        yield return new("הביטוי «carpe diem» מסמל אומץ לחיות.", ExpectedScript.Hebrew, new[] { L, L });
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

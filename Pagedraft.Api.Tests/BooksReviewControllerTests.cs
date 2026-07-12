@@ -440,6 +440,7 @@ public class BooksReviewControllerTests
         services.AddScoped<BookContextAssembler>();
         services.AddScoped<BookReviewService>();
         services.AddScoped<DynamicTermRepairService>();
+        services.AddSingleton<IBookEntityProvider, BookEntityProvider>();
         services.AddSingleton<AnalysisProgressTracker>();
         services.AddSingleton<BookSummaryBuildRegistry>();
         services.AddSingleton<BookReviewBuildRegistry>();

@@ -111,7 +111,10 @@ public class BookIntelligenceProfileRepairTests
         return mock;
     }
 
-    private static ServiceProvider BuildProvider(Mock<IAiRouter> router, AnalysisRepairOptions? repair)
+    private static ServiceProvider BuildProvider(
+        Mock<IAiRouter> router,
+        AnalysisRepairOptions? repair,
+        IBookEntityProvider? entityProvider = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -139,6 +142,14 @@ public class BookIntelligenceProfileRepairTests
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
         services.AddScoped<AnalysisRepairService>();
         services.AddScoped<DynamicTermRepairService>();
+        if (entityProvider is null)
+        {
+            services.AddSingleton<IBookEntityProvider, BookEntityProvider>();
+        }
+        else
+        {
+            services.AddSingleton(entityProvider); // be-c02: spy on WHICH bookId the raw seam asks for
+        }
         services.AddScoped<UnifiedAnalysisService>();
         services.AddScoped<BookIntelligenceService>();
 
@@ -262,5 +273,99 @@ public class BookIntelligenceProfileRepairTests
         var persisted = await db.AnalysisResults.FirstAsync(a => a.Id == result.Id);
         Assert.Null(persisted.ChapterId);
         Assert.Equal(AnalysisScope.Book, persisted.Scope);
+    }
+
+    // ── be-c02: the RunRawAsync bookId seam, asserted at the CALL SITES ──────────────────────────────────
+    // BookIntelligenceService is the only caller of UnifiedAnalysisService.RunRawAsync, and it HAS the bookId in
+    // scope at every one of those calls. RunRawAsync used to hard-code Guid.Empty into the repair layer, so the
+    // per-book proper-noun LEAVE set was always empty on this seam. These tests pin that both call sites now pass
+    // the REAL id: the spy provider records every bookId the repair layer asks it for, and Guid.Empty (the
+    // signature of a dropped id) must never appear.
+
+    /// <summary>The dynamic stage is what consults IBookEntityProvider, so the seam is only observable under a
+    /// Mode that runs it (the shipped default). Mode=Glossary/Off never asks the provider at all.</summary>
+    private static AnalysisRepairOptions DynamicRepairOptions() => new()
+    {
+        Enabled = true,
+        GuardOnly = true,
+        Mode = AnalysisRepairMode.GlossaryThenDynamic
+    };
+
+    /// <summary>Seeds a Hebrew book with one chapter and NO ChunkSummary, so SummarizeChaptersAsync actually runs
+    /// the chapter (the freshness / user-edited guards both skip a chapter that already has one).</summary>
+    private static async Task<Guid> SeedUnsummarizedHebrewBookAsync(AppDbContext db)
+    {
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "ספר בדיקה", Language = "he" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = Guid.NewGuid(), BookId = bookId, Order = 0, Title = "פרק 1",
+            ContentText = "הגיבורה יוצאת למסע ומתמודדת עם עימות מרכזי."
+        });
+        await db.SaveChangesAsync();
+        return bookId;
+    }
+
+    /// <summary>SummarizeChaptersAsync — the seam whose output is PERSISTED to ChunkSummary.SummaryText — passes
+    /// the real bookId, so the summary's character names are matched against THIS book's entity set.</summary>
+    [Fact]
+    public async Task SummarizeChaptersAsync_PassesRealBookId_ToBookEntityProvider()
+    {
+        var entities = new StubBookEntityProvider();
+        using var provider = BuildProvider(BuildRouter(), DynamicRepairOptions(), entities);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedUnsummarizedHebrewBookAsync(db);
+
+        await provider.GetRequiredService<BookIntelligenceService>()
+            .SummarizeChaptersAsync(bookId, "he", CancellationToken.None);
+
+        Assert.NotEmpty(entities.RequestedBookIds);                 // the repair layer reached the provider
+        Assert.All(entities.RequestedBookIds, id => Assert.Equal(bookId, id));
+        Assert.DoesNotContain(Guid.Empty, entities.RequestedBookIds); // ...never with the dropped-id sentinel
+    }
+
+    /// <summary>BuildBookProfileAsync makes four RunRawAsync calls (BookOverview / Synopsis / CharacterAnalysis /
+    /// StoryAnalysis); every one of them must carry the real bookId.</summary>
+    [Fact]
+    public async Task BuildBookProfileAsync_PassesRealBookId_ToBookEntityProvider()
+    {
+        var entities = new StubBookEntityProvider();
+        using var provider = BuildProvider(BuildRouter(), DynamicRepairOptions(), entities);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedHebrewBookAsync(db);
+
+        await provider.GetRequiredService<BookIntelligenceService>()
+            .BuildBookProfileAsync(bookId, "he", CancellationToken.None);
+
+        Assert.NotEmpty(entities.RequestedBookIds);
+        Assert.All(entities.RequestedBookIds, id => Assert.Equal(bookId, id));
+        Assert.DoesNotContain(Guid.Empty, entities.RequestedBookIds);
+    }
+
+    // ── be-c03: the profile build is a PRODUCER of a harvest source, so it must refresh the entity cache ──
+
+    /// <summary>
+    /// BuildBookProfileAsync persists BookProfile.CharactersJson — a serialized CharacterAnalysisResult, and one
+    /// of the two sources BookEntityProvider harvests its per-book proper-noun LEAVE set from. The provider caches
+    /// that set per book, so without an invalidation here the ordinary sequence (analyse a chapter on a fresh book
+    /// -> the set is built with no character names in it -> the profile build produces them -> nothing refreshes)
+    /// means this book's character names NEVER reach the classifier, and the repair model rewrites them.
+    /// Asserted at the CALL SITE with the spy: the real bookId is invalidated after the profile is persisted.
+    /// </summary>
+    [Fact]
+    public async Task BuildBookProfileAsync_InvalidatesTheBookEntityCache()
+    {
+        var entities = new StubBookEntityProvider();
+        using var provider = BuildProvider(BuildRouter(), DynamicRepairOptions(), entities);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedHebrewBookAsync(db);
+
+        Assert.Empty(entities.InvalidatedBookIds);
+
+        await provider.GetRequiredService<BookIntelligenceService>()
+            .BuildBookProfileAsync(bookId, "he", CancellationToken.None);
+
+        Assert.Contains(bookId, entities.InvalidatedBookIds);
+        Assert.DoesNotContain(Guid.Empty, entities.InvalidatedBookIds);
     }
 }

@@ -59,7 +59,8 @@ public class AsyncSingleShotJobTests
             tracker, contextMock.Object, new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
     }
 
     [Fact]

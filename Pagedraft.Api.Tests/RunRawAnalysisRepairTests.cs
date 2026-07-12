@@ -35,7 +35,12 @@ public class RunRawAnalysisRepairTests
         return mock.Object;
     }
 
-    private static UnifiedAnalysisService NewService(AppDbContext db, IAiRouter router, AnalysisRepairOptions? repair)
+    private static UnifiedAnalysisService NewService(
+        AppDbContext db,
+        IAiRouter router,
+        AnalysisRepairOptions? repair,
+        IAiRouter? termRepairRouter = null,
+        IBookEntityProvider? entityProvider = null)
         => new(
             db,
             router,
@@ -48,7 +53,9 @@ public class RunRawAnalysisRepairTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(
+                termRepairRouter ?? new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            entityProvider ?? new StubBookEntityProvider());
 
     private static AppDbContext NewDb()
         => new(new DbContextOptionsBuilder<AppDbContext>()
@@ -65,7 +72,7 @@ public class RunRawAnalysisRepairTests
         var svc = NewService(db, router, new AnalysisRepairOptions { Enabled = true, GuardOnly = true });
 
         var result = await svc.RunRawAsync(
-            "טקסט הפרק.", AnalysisType.Summarization, instruction: null, language: "he", CancellationToken.None);
+            "טקסט הפרק.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
 
         Assert.Contains("(פעולה)", result);
         Assert.DoesNotContain("Action", result);
@@ -82,7 +89,7 @@ public class RunRawAnalysisRepairTests
         var svc = NewService(db, router, new AnalysisRepairOptions { Enabled = true, GuardOnly = true });
 
         var result = await svc.RunRawAsync(
-            "טקסט.", AnalysisType.BookOverview, instruction: null, language: "he", CancellationToken.None);
+            "טקסט.", AnalysisType.BookOverview, instruction: null, language: "he", ct: CancellationToken.None);
 
         Assert.Contains("Action", result); // BookOverview is not a repair target → unchanged
     }
@@ -97,8 +104,106 @@ public class RunRawAnalysisRepairTests
         var svc = NewService(db, router, repair: null);
 
         var result = await svc.RunRawAsync(
-            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", CancellationToken.None);
+            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
 
         Assert.Contains("Action", result); // layer off → no glossary applied
+    }
+
+    // ── be-c02: the bookId SEAM. RunRawAsync used to hard-code Guid.Empty into ApplyAnalysisRepairAsync, so the
+    // per-book proper-noun LEAVE set (IBookEntityProvider) was ALWAYS empty on this seam while the four persisted
+    // seams passed the real id. Summarization is the one type this seam repairs and its output is persisted to
+    // ChunkSummary.SummaryText — chapter summaries name characters constantly, and a SENTENCE-INITIAL Latin name
+    // is not spared by the classifier's Title-Case-MID-sentence proper-noun rule (rule 7), so with an empty entity
+    // set there is nothing left to stop the dynamic stage rewriting the book's own character name. These tests
+    // drive the real classifier: an entity-set hit means ZERO term-repair model calls (LEAVE), a miss means one
+    // call and a spliced replacement (REPAIR) — so the model-call count is the proof the set reached the classifier.
+
+    /// <summary>A Hebrew summary opening with the book's own character name. "Daniel" is Title-Case but
+    /// SENTENCE-INITIAL, so ForeignRunClassifier rule 7 does NOT spare it — only the book-entity set (rule 2) can.</summary>
+    private const string HebrewSummaryWithSentenceInitialName =
+        "Daniel נכנס אל החדר האפל ומצא את המכתב.";
+
+    /// <summary>The term-repair model's reply for the marked «Daniel» span: a Hebrew replacement that PASSES
+    /// DynamicTermRepairService's validation (native script, one word, well under the length cap) — so if the
+    /// classifier says REPAIR, the name really is rewritten.</summary>
+    private static Mock<IAiRouter> TermRepairRouterReturningHebrewName()
+    {
+        var mock = new Mock<IAiRouter>();
+        mock.Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new AiResponse { Content = "{\"replacement\":\"דניאל\"}", Provider = "test", Model = "test" });
+        return mock;
+    }
+
+    /// <summary>The core seam fix: RunRawAsync WITH a bookId asks the provider for THAT EXACT book, and the
+    /// entity set it returns reaches the classifier — the book's own character name is LEFT byte-identical and
+    /// the term-repair model is never called. The provider is seeded FOR the real bookId only, so the pre-fix
+    /// hard-coded Guid.Empty would have returned the empty set and rewritten the name (revert-verify).</summary>
+    [Fact]
+    public async Task RunRawAsync_WithBookId_ThreadsBookEntitiesToClassifier_SparingTheBooksOwnName()
+    {
+        await using var db = NewDb();
+        var bookId = Guid.NewGuid();
+        var entities = StubBookEntityProvider.For(bookId, "Daniel");
+        var termRouter = TermRepairRouterReturningHebrewName();
+        var svc = NewService(
+            db,
+            RouterReturning(HebrewSummaryWithSentenceInitialName),
+            new AnalysisRepairOptions
+            {
+                Enabled = true,
+                GuardOnly = true,
+                Mode = AnalysisRepairMode.GlossaryThenDynamic // the shipped default: the dynamic stage runs
+            },
+            termRouter.Object,
+            entities);
+
+        var result = await svc.RunRawAsync(
+            "טקסט הפרק.", AnalysisType.Summarization, instruction: null, language: "he",
+            bookId: bookId, ct: CancellationToken.None);
+
+        // The provider was asked for the REAL book (not Guid.Empty) — the seam threads the id through.
+        Assert.Equal(new[] { bookId }, entities.RequestedBookIds);
+
+        // ...and the set it returned reached the classifier: the name is spared, so NO term-repair call was made.
+        Assert.Contains("Daniel", result);
+        Assert.DoesNotContain("דניאל", result);
+        termRouter.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>Fail-safe parity: a caller with NO book context (bookId omitted) behaves exactly as this seam did
+    /// before — Guid.Empty is passed, the provider returns the EMPTY set, and the dynamic stage repairs the run.
+    /// This is the control for the test above: same text, same routers, only the bookId differs, and the verdict
+    /// flips — which is what proves the entity set (not something else) drives the LEAVE.</summary>
+    [Fact]
+    public async Task RunRawAsync_WithoutBookId_UsesEmptyEntitySet_AndRepairsAsBefore()
+    {
+        await using var db = NewDb();
+        var otherBookId = Guid.NewGuid();
+        var entities = StubBookEntityProvider.For(otherBookId, "Daniel"); // seeded, but NOT for the id this call passes
+        var termRouter = TermRepairRouterReturningHebrewName();
+        var svc = NewService(
+            db,
+            RouterReturning(HebrewSummaryWithSentenceInitialName),
+            new AnalysisRepairOptions
+            {
+                Enabled = true,
+                GuardOnly = true,
+                Mode = AnalysisRepairMode.GlossaryThenDynamic
+            },
+            termRouter.Object,
+            entities);
+
+        var result = await svc.RunRawAsync(
+            "טקסט הפרק.", AnalysisType.Summarization, instruction: null, language: "he",
+            ct: CancellationToken.None); // no bookId → the fail-safe
+
+        Assert.Equal(new[] { Guid.Empty }, entities.RequestedBookIds); // null degrades to Guid.Empty (empty set)
+
+        // Empty set → the sentence-initial name is classified REPAIR → one span-scoped call → spliced back.
+        Assert.Contains("דניאל", result);
+        Assert.DoesNotContain("Daniel", result);
+        termRouter.Verify(
+            r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 }

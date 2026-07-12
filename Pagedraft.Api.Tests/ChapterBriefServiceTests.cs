@@ -820,6 +820,7 @@ public class ChapterBriefServiceTests
         services.AddScoped<IAnalysisContextService, AnalysisContextService>();
         services.AddScoped<AnalysisRepairService>();
         services.AddScoped<DynamicTermRepairService>();
+        services.AddSingleton<IBookEntityProvider, BookEntityProvider>();
         services.AddScoped<UnifiedAnalysisService>();
         services.AddScoped<BookIntelligenceService>();
 

@@ -25,6 +25,7 @@ public class BookIntelligenceService
     private readonly UnifiedAnalysisService _analysis;
     private readonly BookContextAssembler _bookContextAssembler;
     private readonly IOptions<AiOptions> _aiOptions;
+    private readonly IBookEntityProvider _bookEntities;
     private readonly ILogger<BookIntelligenceService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -38,12 +39,14 @@ public class BookIntelligenceService
         UnifiedAnalysisService analysis,
         BookContextAssembler bookContextAssembler,
         IOptions<AiOptions> aiOptions,
+        IBookEntityProvider bookEntities,
         ILogger<BookIntelligenceService> logger)
     {
         _db = db;
         _analysis = analysis;
         _bookContextAssembler = bookContextAssembler;
         _aiOptions = aiOptions;
+        _bookEntities = bookEntities;
         _logger = logger;
     }
 
@@ -100,8 +103,10 @@ public class BookIntelligenceService
             }
 
             _logger.LogInformation("Summarizing chapter {Title} ({Id})", chapter.Title, chapter.Id);
+            // be-c02: pass the REAL bookId — the raw seam feeds it to the repair layer's per-book proper-noun
+            // LEAVE set, so this book's own character/place names are spared in the summary we persist below.
             var summaryText = await _analysis.RunRawAsync(
-                text, AnalysisType.Summarization, null, language, ct);
+                text, AnalysisType.Summarization, null, language, bookId, ct);
 
             if (existing != null)
             {
@@ -153,10 +158,11 @@ public class BookIntelligenceService
             "Building book profile for {BookId} (structuredBriefs={Used}, dropped={Dropped}/{Budget}t)",
             bookId, assembly.UsedStructuredBriefs, assembly.DroppedCount, assembly.BudgetTokens);
 
-        var overviewTask = _analysis.RunRawAsync(concatenated, AnalysisType.BookOverview, null, language, ct);
-        var synopsisTask = _analysis.RunRawAsync(concatenated, AnalysisType.Synopsis, null, language, ct);
-        var charsTask = _analysis.RunRawAsync(concatenated, AnalysisType.CharacterAnalysis, null, language, ct);
-        var storyTask = _analysis.RunRawAsync(concatenated, AnalysisType.StoryAnalysis, null, language, ct);
+        // be-c02: pass the REAL bookId on every raw run (same seam parity as SummarizeChaptersAsync above).
+        var overviewTask = _analysis.RunRawAsync(concatenated, AnalysisType.BookOverview, null, language, bookId, ct);
+        var synopsisTask = _analysis.RunRawAsync(concatenated, AnalysisType.Synopsis, null, language, bookId, ct);
+        var charsTask = _analysis.RunRawAsync(concatenated, AnalysisType.CharacterAnalysis, null, language, bookId, ct);
+        var storyTask = _analysis.RunRawAsync(concatenated, AnalysisType.StoryAnalysis, null, language, bookId, ct);
 
         await Task.WhenAll(overviewTask, synopsisTask, charsTask, storyTask);
 
@@ -191,6 +197,16 @@ public class BookIntelligenceService
         profile.UpdatedAt = DateTimeOffset.UtcNow;
 
         await _db.SaveChangesAsync(ct);
+
+        // be-c03: this build just PRODUCED a harvest source for the per-book proper-noun LEAVE set —
+        // BookProfile.CharactersJson (a serialized CharacterAnalysisResult). Without this invalidation the
+        // ordinary production sequence defeats that source outright: the first chapter analysis on a fresh book
+        // builds the entity set from the manuscript alone (no character names exist yet), and the names this
+        // build persists would never enter the set. Drop the cached set so the NEXT analysis rebuilds it with
+        // this book's character names in it — a name the set fails to spare is a name the repair model rewrites.
+        // Invalidate is non-throwing by contract, so it can never break the profile persist above.
+        _bookEntities.Invalidate(bookId);
+
         _logger.LogInformation("Book profile built for {BookId}", bookId);
         return profile;
     }

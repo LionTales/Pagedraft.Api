@@ -418,28 +418,47 @@ public class OutputQualityDiagnostic
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════
-    // d5 DECISION GATE — MeasureDynamicTermRepair_LocalVsCloud
+    // d5 CLEANING (RECALL) GATE — MeasureDynamicTermRepair_LocalVsCloud
     //
     // Drives the SHIPPED DynamicTermRepairService (d1 detector + d2 classifier + d3 span-scoped IAiRouter
-    // TermRepair call) over a deterministic MEASUREMENT SET of leaking Hebrew literary prose, on BOTH tiers:
-    //   • LOCAL  — Ai:FeatureModels:TermRepair = Ollama|gemma4:12b
-    //   • CLOUD  — Ai:FeatureModels:TermRepair = OpenRouter|google/gemma-4-31b-it
-    // Each tier router is the PROD appsettings router with ONLY the TermRepair FeatureModel overridden
-    // (mirrors ResolveRouterForTask's in-memory-override idiom, keyed directly at the TermRepair task since
-    // TermRepair has no AnalysisType and so cannot be expressed via the AnalysisType-keyed DIAG_MODELS).
+    // TermRepair call) over a deterministic LEAK SET of Hebrew literary prose (PreservationFixtureBooks.LeakCases
+    // — 10 values, each leaking ONE lowercase English abstract noun the glossary cannot reach).
     //
-    // Per (value, tier) it MEASURES from the OUTPUT (RULE 0 — not from the service internals):
-    //   • CLEANED?  — re-run the d1 detector on the repaired value; the single Latin leak run must be gone.
-    //   • OVER-REWRITE? — reconstruct prefix/suffix around the flagged span from the ORIGINAL value; the
-    //     repaired value MUST still start with that exact prefix and end with that exact suffix (only the one
-    //     marked run may differ). Anything else changing = an over-rewrite. The bar is 0.
-    //   • LATENCY   — the model latency the service reports (summed per value).
-    // Also a small FIELD-VALUE-SCOPE contrast (whole value handed to the model, no span marking) on a couple
-    // of cases, to show the Stage-2 blast radius that span-scope avoids.
+    // TWO ARMS (be-c08 — THE reason this method changed):
+    //   • ARM A — ENTITY-FREE. Exactly what e4/d5 measured (its recorded table is labelled "entity-free"). The
+    //     CONTROL.
+    //   • ARM B — WITH THE REAL PER-BOOK ENTITY SET, from the REAL BookEntityProvider over a REAL DbContext,
+    //     for an ADVERSARIAL book (PreservationFixtureBooks.AdversarialBookId): a Hebrew manuscript whose ONE
+    //     English epigraph line shows `Confusion` / `Nostalgia` / `Tension` / `Catharsis` CAPITALIZED,
+    //     mid-sentence, once each — so the provider HARVESTS all four as MANUSCRIPT-tier entities. THE
+    //     PRODUCTION PATH.
     //
-    // GPU/CLOUD: needs a live Ollama (skip-gated, same as the sibling diagnostic) and, for the cloud tier,
-    // a reachable OpenRouter (AI_OPENROUTER_APIKEY). A per-tier preflight fails the cloud tier FAST (one call)
-    // rather than eating N timeouts; a tier that cannot be reached is reported BLOCKED, never faked.
+    // WHAT ARM B EXISTS TO CATCH. The entity lever is a LEAVE lever: anything in the set is spared. be-c04
+    // measured, on the real 80-chapter manuscript fixture, that with CASE-INSENSITIVE membership that single
+    // epigraph flipped 3 of the 10 leaks (confusion / nostalgia / catharsis) from REPAIR to LEAVE — a 30%
+    // recall regression bought with one sentence. be-c04's fix was to match MANUSCRIPT-harvested tokens
+    // CASE-SENSITIVELY (BookEntitySet) while stored DECLARED names stay case-insensitive: a leak is lowercase
+    // by construction, a name's manuscript evidence is capitalized by construction. THAT FIX HAS NEVER RUN
+    // AGAINST THE REAL LEAK SET THROUGH THE REAL MODEL. Arm B is that run.
+    //
+    // THE GATE: ARM B's cleaned% must MATCH ARM A's (~100%). If ARM B cleans FEWER leaks, the entity lever is
+    // sparing real leaks and be-c08 HALTs. The harness computes that comparison and the per-case diff itself —
+    // the parent does not eyeball two tables.
+    //
+    // Per (value, arm, tier) it MEASURES from the OUTPUT (RULE 0 — not from the service internals):
+    //   • CLEANED?  — re-run the d1 detector on the repaired value; the Latin leak run must be gone.
+    //   • OVER-REWRITE? — the change must be CONFINED to the classified REPAIR span(s); anything else changing
+    //     is an over-rewrite. The bar is 0. (A value the entity set GATED has zero repair spans, so ANY change
+    //     to it is an over-rewrite — which is correct: nothing was allowed to change.)
+    //   • MODEL CALLS — the count of REPAIR-classified runs (the service makes one marked-span call per run).
+    //     ZERO means the value never reached the model — for a LEAK that is the regression signal.
+    //   • LATENCY   — the model latency the service reports.
+    // Also a small FIELD-VALUE-SCOPE contrast (whole value handed to the model, no span marking), to show the
+    // Stage-2 blast radius that span-scope avoids.
+    //
+    // TIERS: LOCAL (Ollama|gemma4:12b) is the measured tier — the user scoped be-c08 to LOCAL. The CLOUD tier
+    // (OpenRouter|google/gemma-4-31b-it) stays in the table but SKIPS CLEANLY when no OpenRouter key is
+    // configured (checked BEFORE any call, so it costs nothing and never fails the run).
     // Report -> DIAG_OUT_DIR/d5-termrepair-measure.md (RULE 0 artifact the parent inspects).
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════
     [Fact]
@@ -459,44 +478,113 @@ public class OutputQualityDiagnostic
         var report = new StringBuilder();
         void Emit(string s) { _output.WriteLine(s); report.AppendLine(s); }
 
-        Emit("# d5 — Dynamic TermRepair measurement: LOCAL Ollama vs CLOUD OpenRouter");
+        Emit("# d5 — Dynamic TermRepair CLEANING (recall) measure: entity-free (ARM A) vs the REAL per-book entity set (ARM B)");
         Emit("");
         Emit($"Run: {DateTime.Now:yyyy-MM-dd HH:mm}  |  routing base: `{appSettingsPath}`");
         Emit("Instrument: `OutputQualityDiagnostic.MeasureDynamicTermRepair_LocalVsCloud` driving the shipped");
         Emit("`DynamicTermRepairService.RepairValueAsync` (d1 detect → d2 classify → d3 span-scoped TermRepair).");
         Emit("");
 
-        // ── MEASUREMENT SET ──────────────────────────────────────────────────────────────────────────────
-        // Each seed is short realistic Hebrew literary-analysis prose leaking EXACTLY ONE lowercase English
-        // abstract noun (a single Latin run the d2 classifier routes to REPAIR). The first two are the KNOWN
-        // real leaks (confusion / claustrophobia). The rest are the SEEDED OUT-OF-GLOSSARY set — general
-        // abstract nouns absent from the ~35-term literary glossary (verified: none appear in the glossary
-        // source), so the glossary fast-path could not catch them; only the dynamic pass can.
-        var seeds = new (string label, string leak, string value)[]
-        {
-            ("known-leak-confusion",       "confusion",      "הדמות הראשית שקעה בתחושת confusion עמוקה כשהתגלתה לה האמת על אביה."),
-            ("known-leak-claustrophobia",  "claustrophobia", "תיאור החדר האטום מעורר claustrophobia חונקת שאין ממנה מנוס לגיבור."),
-            ("oog-ambivalence",            "ambivalence",    "יחסה של הגיבורה אל אמה מלא ambivalence, בין אהבה עזה לכעס מר."),
-            ("oog-nostalgia",              "nostalgia",      "הפרק כולו ספוג nostalgia אל ימי הילדות בכפר הגלילי הישן."),
-            ("oog-alienation",            "alienation",     "המהגר חש alienation מתמדת בעיר הזרה והקרה שסביבו."),
-            ("oog-catharsis",              "catharsis",      "הסצנה האחרונה מביאה את הקורא אל catharsis רגשי משחרר וצלול."),
-            ("oog-disorientation",         "disorientation", "היקיצה הפתאומית הותירה בו disorientation מוחלטת למשך רגע ארוך."),
-            ("oog-vulnerability",          "vulnerability",  "הווידוי הכן חושף vulnerability נדירה של הגיבור הקשוח."),
-            ("oog-melancholy",             "melancholy",     "אווירת הסתיו בסיפור טעונה melancholy שקטה ומהורהרת לאורך כל הפרק."),
-            ("oog-foreboding",             "foreboding",     "הרמזים המוקדמים יוצרים תחושת foreboding המלווה את הקורא עד הסוף."),
-        };
-
-        Emit($"Measurement set: {seeds.Length} Hebrew prose values (2 known real leaks + {seeds.Length - 2} seeded out-of-glossary), each leaking one Latin run.");
+        // ── MEASUREMENT SET (shared with the deterministic BookEntityFixtureSeedTests) ────────────────────
+        var seeds = PreservationFixtureBooks.LeakCases;
+        Emit($"Measurement set: {seeds.Count} Hebrew prose values (2 known real leaks + {seeds.Count - 2} seeded out-of-glossary), each leaking one Latin run.");
         Emit("");
 
-        // ── Tiers ────────────────────────────────────────────────────────────────────────────────────────
+        // ── THE ADVERSARIAL BOOK + ITS REAL ENTITY SET (be-c08) ───────────────────────────────────────────
+        // The e4 d5 table was labelled "entity-free": the ENTITY lever — the one thing that can make the gate
+        // SPARE a real leak — was never on the measured path. It is now, and through the REAL provider, not a
+        // hand-built stand-in.
+        using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
+        var adversarialEntities = await fixtureBooks.AdversarialBookEntitiesAsync();
+        var advSet = adversarialEntities as BookEntitySet;
+
+        Emit("## The adversarial book (ARM B's entity source)");
+        Emit("");
+        Emit("A Hebrew-native book (`Language=he`) seeded into a REAL `AppDbContext`, read back through the REAL");
+        Emit("`BookEntityProvider.GetEntitiesAsync(bookId, language)`. Its ch0 carries ONE English epigraph line —");
+        Emit($"`{PreservationFixtureBooks.AdversarialEpigraph}` — whose Title-Case words are four of the leak words,");
+        Emit("each appearing EXACTLY ONCE, MID-SENTENCE, in the whole book (all the harvest condition needs).");
+        Emit("");
+        Emit($"Provider set: **{adversarialEntities.Count}** entities"
+             + (advSet is not null
+                 ? $" — {advSet.ManuscriptTokens.Count} manuscript-harvested (case-SENSITIVE), {advSet.DeclaredNames.Count} declared (case-insensitive)"
+                 : " (NOT a BookEntitySet — tiers unavailable)"));
+        Emit("");
+        Emit("| leak word (as it appears in the manuscript) | harvested by the provider? | tier |");
+        Emit("|---|---|---|");
+        foreach (var (word, harvested, tier) in PreservationFixtureBooks.AdversarialHarvestReport(adversarialEntities))
+        {
+            Emit($"| `{word}` | {(harvested ? "**yes**" : "NO")} | {tier} |");
+        }
+        Emit("");
+
+        var harvestedLeakWords = PreservationFixtureBooks.AdversarialHarvestReport(adversarialEntities)
+            .Where(r => r.Harvested && r.Tier == "manuscript").Select(r => r.Word).ToList();
+        if (harvestedLeakWords.Count == 0)
+        {
+            Emit("**WARNING — the adversarial book harvested NONE of the leak words.** ARM B is then not adversarial at");
+            Emit("all and this gate proves nothing about the entity lever. Fix the seeding before trusting the result.");
+            Emit("");
+        }
+        else
+        {
+            Emit($"**The lever is armed: {harvestedLeakWords.Count} leak word(s) ARE manuscript-tier entities "
+                 + $"(`{string.Join("`, `", harvestedLeakWords)}`).** Under the PRE-be-c04 case-INSENSITIVE membership each");
+            Emit("would have spared its LOWERCASE twin in the analysis prose. Whether they still get cleaned below IS the");
+            Emit("be-c04 two-tier fix, measured end to end.");
+            Emit("");
+        }
+
+        // ── Deterministic classification per arm (ZERO model calls) ───────────────────────────────────────
+        // What the entity set does to the LEAK set is decided by the CLASSIFIER, before any model is involved.
+        // Computing it up front means the entity-spared-leak regression is caught deterministically (and is
+        // reported below) rather than being inferred from a model output that could differ for other reasons.
+        var repairRunsA = new List<ForeignRun>[seeds.Count];
+        var repairRunsB = new List<ForeignRun>[seeds.Count];
+        var entitySparedLeaks = new List<string>();
+        for (var i = 0; i < seeds.Count; i++)
+        {
+            var runs = LatinInHebrewContentDetector.DetectForeignRuns(seeds[i].Value, ExpectedScript.Hebrew);
+            repairRunsA[i] = ForeignRunClassifier.RunsToRepair(runs, seeds[i].Value, ExpectedScript.Hebrew, null).ToList();
+            repairRunsB[i] = ForeignRunClassifier.RunsToRepair(runs, seeds[i].Value, ExpectedScript.Hebrew, adversarialEntities).ToList();
+            if (repairRunsA[i].Count > 0 && repairRunsB[i].Count == 0)
+            {
+                entitySparedLeaks.Add(seeds[i].Leak);
+            }
+        }
+
+        Emit("### Deterministic classification (no model): does the entity set SPARE any leak?");
+        Emit("");
+        if (entitySparedLeaks.Count == 0)
+        {
+            Emit("**NO leak is spared by the entity set.** Every one of the "
+                 + $"{seeds.Count} leaks is still classified REPAIR with the adversarial book's REAL entity set — "
+                 + "including the lowercase twins of the harvested words. The be-c04 case-SENSITIVE manuscript tier holds.");
+        }
+        else
+        {
+            Emit($"**REGRESSION — the entity set spares {entitySparedLeaks.Count} REAL leak(s): "
+                 + $"`{string.Join("`, `", entitySparedLeaks)}`.** These never reach the model in ARM B, so they cannot be");
+            Emit("cleaned. This is the be-c04 failure mode; be-c08 HALTs.");
+        }
+        Emit("");
+
+        // ── Tiers × arms ─────────────────────────────────────────────────────────────────────────────────
         var tiers = new (string name, string provider, string model)[]
         {
             ("LOCAL",  "Ollama",     "gemma4:12b"),
             ("CLOUD",  "OpenRouter", "google/gemma-4-31b-it"),
         };
 
+        var arms = new (string name, IReadOnlySet<string>? entities, string desc)[]
+        {
+            ("A", null,                "ENTITY-FREE (the e4 control — no per-book entity lever)"),
+            ("B", adversarialEntities, "REAL BookEntityProvider set for the ADVERSARIAL book (the production path)"),
+        };
+
         var perTier = new List<TierMeasurement>();
+        // (tier, arm) -> per-case outcomes, so the cross-arm diff below is computed, not eyeballed.
+        var armOutcomes = new Dictionary<(string tier, string arm), LeakOutcome[]>();
 
         foreach (var (tierName, provider, model) in tiers)
         {
@@ -504,6 +592,23 @@ public class OutputQualityDiagnostic
             Emit("");
             Emit($"## Tier {tierName}: `{provider}|{model}`");
             Emit("");
+
+            // CLOUD is OUT OF SCOPE for be-c08 (the user scoped the run to LOCAL). Skip it BEFORE any call when
+            // no OpenRouter key is configured, so it costs nothing and never fails the run.
+            if (provider == "OpenRouter" && !CloudKeyAvailable())
+            {
+                Emit("SKIPPED: no OpenRouter API key configured (env `AI_OPENROUTER_APIKEY`). be-c08 is scoped to the");
+                Emit("LOCAL tier; the cloud tier stays routing-only and is not measured here.");
+                Emit("");
+                perTier.Add(new TierMeasurement
+                {
+                    Name = tierName,
+                    Model = $"{provider}|{model}",
+                    Blocked = true,
+                    BlockReason = "SKIPPED (no OpenRouter key; be-c08 is LOCAL-only)",
+                });
+                continue;
+            }
 
             var router = BuildTermRepairTierRouter(appSettingsPath, provider, model);
             var service = new DynamicTermRepairService(router, NullLogger<DynamicTermRepairService>.Instance);
@@ -523,59 +628,104 @@ public class OutputQualityDiagnostic
             Emit($"preflight OK → served by `{preInfo}`");
             Emit("");
 
-            var m = new TierMeasurement { Name = tierName, Model = $"{provider}|{model}" };
-
-            Emit("| seed | leak (Latin) | cleaned? | over-rewrite? | before→after span | latency ms |");
-            Emit("|---|---|---|---|---|---|");
-
-            foreach (var (label, leak, value) in seeds)
+            foreach (var (armName, armEntities, armDesc) in arms)
             {
-                var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
-                // Seeds are authored single-leak; guard anyway so an authoring slip is visible, not silent.
-                if (runs.Count != 1)
+                Emit($"### ARM {armName} — {armDesc}");
+                Emit("");
+
+                var m = new TierMeasurement { Name = $"{tierName}/ARM {armName}", Model = $"{provider}|{model}" };
+                var outcomes = new LeakOutcome[seeds.Count];
+
+                Emit("| seed | leak (Latin) | model calls | cleaned? | over-rewrite? | before→after span | latency ms |");
+                Emit("|---|---|---|---|---|---|---|");
+
+                for (var i = 0; i < seeds.Count; i++)
                 {
-                    Emit($"| {label} | {leak} | SEED-ERR | runs={runs.Count} | (expected exactly 1 Latin run) | - |");
-                    continue;
+                    var (label, leak, value) = (seeds[i].Label, seeds[i].Leak, seeds[i].Value);
+                    var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+                    // Seeds are authored single-leak; guard anyway so an authoring slip is visible, not silent.
+                    if (runs.Count != 1)
+                    {
+                        Emit($"| {label} | {leak} | - | SEED-ERR | runs={runs.Count} | (expected exactly 1 Latin run) | - |");
+                        outcomes[i] = new LeakOutcome { SeedError = true };
+                        continue;
+                    }
+                    var run = runs[0];
+
+                    // The REPAIR spans THIS arm's entity set produces = the number of marked-span model calls the
+                    // service will make. 0 => the value never reaches the model (for a LEAK, that is the regression).
+                    var repairRuns = armName == "A" ? repairRunsA[i] : repairRunsB[i];
+                    var entitySpared = repairRunsA[i].Count > 0 && repairRuns.Count == 0;
+
+                    var result = await service.RepairValueAsync(value, ExpectedScript.Hebrew, "he-IL", armEntities);
+
+                    if (result.Fault is not null)
+                    {
+                        // A surfaced fault on a preflight-OK tier = a genuine per-call failure; record it honestly.
+                        Emit($"| {label} | {leak} | {repairRuns.Count} | FAULT | - | {FirstLine(result.Fault.Message)} | {result.LatencyMs} |");
+                        m.Faults++;
+                        outcomes[i] = new LeakOutcome { Fault = true, ModelCalls = repairRuns.Count, EntitySpared = entitySpared };
+                        continue;
+                    }
+
+                    var cleaned = !LatinInHebrewContentDetector.HasForeignRuns(result.Value, ExpectedScript.Hebrew);
+                    var changed = !string.Equals(value, result.Value, StringComparison.Ordinal);
+                    // Generalised over-rewrite check: the change must be CONFINED to THIS ARM's repair spans. With
+                    // zero repair spans nothing was allowed to change, so any change is an over-rewrite.
+                    var overRewrite = changed && !ChangeConfinedToRepairSpans(value, repairRuns, result.Value);
+                    var (spanScoped, replacement) = SpanScopeCheck(value, run.Start, run.Length, result.Value);
+
+                    m.Total++;
+                    if (cleaned) m.Cleaned++;
+                    if (overRewrite) m.OverRewrite++;
+                    m.ModelCalls += repairRuns.Count;
+                    if (repairRuns.Count > 0) m.Latencies.Add(result.LatencyMs);
+
+                    outcomes[i] = new LeakOutcome
+                    {
+                        Cleaned = cleaned,
+                        OverRewrite = overRewrite,
+                        ModelCalls = repairRuns.Count,
+                        EntitySpared = entitySpared,
+                        Repaired = result.Value,
+                        LatencyMs = result.LatencyMs,
+                    };
+
+                    string beforeAfter;
+                    if (repairRuns.Count == 0)
+                    {
+                        beforeAfter = entitySpared
+                            ? $"`{leak}` → **UNCHANGED (spared by the ENTITY SET — 0 model calls)**"
+                            : $"`{leak}` → UNCHANGED (classifier LEAVE — 0 model calls)";
+                    }
+                    else if (overRewrite)
+                    {
+                        beforeAfter = $"`{leak}` → OVER-REWRITE (full: {Trunc(result.Value, 60)})";
+                    }
+                    else
+                    {
+                        beforeAfter = $"`{leak}` → `{(spanScoped ? replacement.Trim() : Trunc(result.Value, 40))}`";
+                    }
+
+                    Emit($"| {label} | {leak} | {repairRuns.Count} | {(cleaned ? "yes" : "**NO**")} | {(overRewrite ? "**YES**" : "no")} | {beforeAfter} | {(repairRuns.Count > 0 ? result.LatencyMs.ToString() : "-")} |");
                 }
-                var run = runs[0];
 
-                var wall = System.Diagnostics.Stopwatch.StartNew();
-                var result = await service.RepairValueAsync(value, ExpectedScript.Hebrew, "he-IL");
-                wall.Stop();
-
-                if (result.Fault is not null)
-                {
-                    // A surfaced fault on a preflight-OK tier = a genuine per-call failure; record it honestly.
-                    Emit($"| {label} | {leak} | FAULT | - | {FirstLine(result.Fault.Message)} | {result.LatencyMs} |");
-                    m.Faults++;
-                    continue;
-                }
-
-                var cleaned = !LatinInHebrewContentDetector.HasForeignRuns(result.Value, ExpectedScript.Hebrew);
-                var (spanScoped, replacement) = SpanScopeCheck(value, run.Start, run.Length, result.Value);
-                var overRewrite = !spanScoped;
-
-                m.Total++;
-                if (cleaned) m.Cleaned++;
-                if (overRewrite) m.OverRewrite++;
-                m.Latencies.Add(result.LatencyMs);
-
-                var beforeAfter = spanScoped
-                    ? $"`{leak}` → `{replacement.Trim()}`"
-                    : $"`{leak}` → OVER-REWRITE (full: {Trunc(result.Value, 60)})";
-                Emit($"| {label} | {leak} | {(cleaned ? "yes" : "NO")} | {(overRewrite ? "**YES**" : "no")} | {beforeAfter} | {result.LatencyMs} |");
+                Emit("");
+                var (med, p90) = LatencyStats(m.Latencies);
+                m.MedianMs = med; m.P90Ms = p90;
+                Emit($"**{tierName} / ARM {armName} summary:** measured {m.Total}/{seeds.Count}"
+                     + (m.Faults > 0 ? $" ({m.Faults} per-call fault(s))" : "")
+                     + $"  |  cleaned {m.Cleaned}/{m.Total}"
+                     + (m.Total > 0 ? $" ({100.0 * m.Cleaned / m.Total:F0}%)" : "")
+                     + $"  |  over-rewrite {m.OverRewrite}  |  model calls {m.ModelCalls}"
+                     + $"  |  latency median {med} ms / p90 {p90} ms");
+                Emit("");
+                perTier.Add(m);
+                armOutcomes[(tierName, armName)] = outcomes;
             }
 
-            Emit("");
-            var (med, p90) = LatencyStats(m.Latencies);
-            m.MedianMs = med; m.P90Ms = p90;
-            Emit($"**{tierName} summary:** measured {m.Total}/{seeds.Length}"
-                 + (m.Faults > 0 ? $" ({m.Faults} per-call fault(s))" : "")
-                 + $"  |  cleaned {m.Cleaned}/{m.Total}"
-                 + (m.Total > 0 ? $" ({100.0 * m.Cleaned / m.Total:F0}%)" : "")
-                 + $"  |  over-rewrite {m.OverRewrite}  |  latency median {med} ms / p90 {p90} ms");
-            Emit("");
-            perTier.Add(m);
+            // ── ARM A vs ARM B — THE be-c08 GATE (computed here, not eyeballed) ──────────────────────────
+            EmitArmComparison(Emit, tierName, seeds, armOutcomes, harvestedLeakWords);
         }
 
         // ── FIELD-VALUE-SCOPE CONTRAST (blast-radius) — LOCAL only, 2 cases ────────────────────────────────
@@ -613,41 +763,78 @@ public class OutputQualityDiagnostic
             }
         }
 
-        // ── DECISION TABLE ─────────────────────────────────────────────────────────────────────────────────
+        // ── DECISION TABLE (one row per tier × arm) ────────────────────────────────────────────────────────
         Emit("---");
         Emit("");
         Emit("## Decision table");
         Emit("");
-        Emit("| tier | model | cleaned % | over-rewrite (bar=0) | latency median / p90 (ms) | status |");
-        Emit("|---|---|---|---|---|---|");
+        Emit("| tier / arm | model | cleaned % | over-rewrite (bar=0) | model calls | latency median / p90 (ms) | status |");
+        Emit("|---|---|---|---|---|---|---|");
         foreach (var t in perTier)
         {
             if (t.Blocked)
             {
-                Emit($"| {t.Name} | {t.Model} | - | - | - | BLOCKED: {FirstLine(t.BlockReason ?? "")} |");
+                Emit($"| {t.Name} | {t.Model} | - | - | - | - | {FirstLine(t.BlockReason ?? "BLOCKED")} |");
                 continue;
             }
             var pct = t.Total > 0 ? $"{100.0 * t.Cleaned / t.Total:F0}% ({t.Cleaned}/{t.Total})" : "n/a";
             var status = t.OverRewrite == 0 ? "over-rewrite gate PASS" : "over-rewrite gate FAIL";
-            Emit($"| {t.Name} | {t.Model} | {pct} | {t.OverRewrite} | {t.MedianMs} / {t.P90Ms} | {status} |");
+            Emit($"| {t.Name} | {t.Model} | {pct} | {t.OverRewrite} | {t.ModelCalls} | {t.MedianMs} / {t.P90Ms} | {status} |");
         }
         Emit("");
 
-        var local = perTier.FirstOrDefault(x => x.Name == "LOCAL");
-        var cloud = perTier.FirstOrDefault(x => x.Name == "CLOUD");
         var overRewriteGateHeld = perTier.Where(x => !x.Blocked).All(x => x.OverRewrite == 0);
-        Emit($"**Over-rewrite HARD gate (must be 0 on every measured tier): {(overRewriteGateHeld ? "HELD" : "VIOLATED")}.**");
+        Emit($"**Over-rewrite HARD gate (must be 0 on every measured tier/arm): {(overRewriteGateHeld ? "HELD" : "VIOLATED")}.**");
+        Emit("");
+
+        // ── THE be-c08 CLEANING VERDICT (ARM B vs ARM A on the measured tier) ─────────────────────────────
+        var localA = perTier.FirstOrDefault(x => x.Name == "LOCAL/ARM A" && !x.Blocked);
+        var localB = perTier.FirstOrDefault(x => x.Name == "LOCAL/ARM B" && !x.Blocked);
+        Emit("### be-c08 verdict — does the entity lever spare a REAL leak?");
+        Emit("");
+        if (localA is null || localB is null)
+        {
+            Emit("**INCONCLUSIVE** — the LOCAL tier did not produce both arms (see BLOCKED above). No verdict.");
+        }
+        else
+        {
+            var pctA = localA.Total > 0 ? 100.0 * localA.Cleaned / localA.Total : 0;
+            var pctB = localB.Total > 0 ? 100.0 * localB.Cleaned / localB.Total : 0;
+            var cleaningHeld = localB.Cleaned >= localA.Cleaned;
+            var leverSafe = entitySparedLeaks.Count == 0;
+            var pass = cleaningHeld && leverSafe && localB.OverRewrite == 0;
+
+            Emit($"- ARM A (entity-free, the e4 control): cleaned **{pctA:F0}%** ({localA.Cleaned}/{localA.Total}), {localA.ModelCalls} model calls");
+            Emit($"- ARM B (REAL provider set, adversarial book): cleaned **{pctB:F0}%** ({localB.Cleaned}/{localB.Total}), {localB.ModelCalls} model calls");
+            Emit($"- leaks SPARED by the entity set (deterministic, 0 model calls): **{entitySparedLeaks.Count}**"
+                 + (entitySparedLeaks.Count > 0 ? $" — `{string.Join("`, `", entitySparedLeaks)}`" : ""));
+            Emit($"- ARM B over-rewrite: **{localB.OverRewrite}** (bar = 0)");
+            Emit("");
+            Emit($"**d5 CLEANING GATE: {(pass ? "PASS" : "HALT")}.** "
+                 + (pass
+                     ? "ARM B matches ARM A: the per-book entity lever, sourced from the REAL BookEntityProvider over an "
+                       + "ADVERSARIAL manuscript that harvested the leak words themselves, spares NO real leak. The be-c04 "
+                       + "case-SENSITIVE manuscript tier holds on the production path."
+                     : "ARM B cleans FEWER leaks than ARM A (or the lever spared a leak / over-rewrote). The entity lever is "
+                       + "eating real leaks on the production path — be-c08 HALTs and the shipped default STAYS `Mode=Glossary`."));
+            if (harvestedLeakWords.Count > 0 && pass)
+            {
+                Emit("");
+                Emit($"**The be-c04 fix, end to end:** `{string.Join("`, `", harvestedLeakWords)}` ARE manuscript-tier entities in "
+                     + "the provider's set, and their LOWERCASE forms were still classified REPAIR and cleaned. A capitalized "
+                     + "observation no longer spares the lowercase leak.");
+            }
+        }
         Emit("");
         Emit("### Decision (grounded in the numbers above)");
         Emit("- The dynamic span-scoped pass is what CLEANS out-of-glossary leaks the closed glossary cannot reach.");
         Emit("- Span-scope keeps over-rewrite at 0 by construction (prefix/suffix byte-identical) — the field-scope");
         Emit("  contrast shows the Stage-2 blast radius that this design avoids.");
-        Emit("- LOCAL (gemma4:12b) is free/offline/private and already the loaded TermRepair model; CLOUD");
-        Emit("  (gemma-4-31b-it) is the quality-ceiling alternative but costs latency + $ per call and network.");
-        Emit("- RECOMMENDATION carried to the parent + d6: default engine = the tier whose cleaned% is high AND");
-        Emit("  over-rewrite==0 at the lower cost (LOCAL if it holds), Mode = GlossaryThenDynamic (glossary");
-        Emit("  zero-cost fast-path for its ~35 known terms, dynamic for the residual tail). d6 (precision/FP");
-        Emit("  gate on a legitimate-term set) MUST also pass before the shipped default Mode is flipped.");
+        Emit("- LOCAL (gemma4:12b) is free/offline/private and already the loaded TermRepair model. CLOUD is out of");
+        Emit("  scope for be-c08 (user decision): routing-only, skipped when no OpenRouter key is configured.");
+        Emit("- RECOMMENDATION carried to the parent + d6: Mode = GlossaryThenDynamic (glossary zero-cost fast-path");
+        Emit("  for its ~35 known terms, dynamic for the residual tail) ONLY IF this cleaning gate PASSES **and** d6");
+        Emit("  (precision/FP gate on the legitimate-term set) passes. Either one HALTing keeps `Mode=Glossary`.");
         Emit("");
 
         // ── Persist the RULE-0 artifact ──
@@ -657,6 +844,99 @@ public class OutputQualityDiagnostic
         var outPath = Path.Combine(outDir, "d5-termrepair-measure.md");
         File.WriteAllText(outPath, report.ToString(), new UTF8Encoding(false));
         _output.WriteLine("REPORT WRITTEN: " + outPath);
+
+        // The ONE hard assertion, and it is DETERMINISTIC (classifier-level, GPU-independent): the per-book
+        // entity lever must not spare a REAL leak. A model that cleans poorly is REPORTED, never asserted (a
+        // model result must not fail the harness) — but a leak the gate refuses to send to the model at all is
+        // a code defect, and it is exactly the be-c04 regression this arm exists to catch.
+        Assert.True(entitySparedLeaks.Count == 0,
+            $"ENTITY LEVER ATE A REAL LEAK: the adversarial book's REAL BookEntityProvider set spares "
+            + $"[{string.Join(", ", entitySparedLeaks)}] — they are classified LEAVE and never reach the repair model. "
+            + "This is the be-c04 recall regression (a capitalized manuscript occurrence sparing the lowercase leak). "
+            + "See d5-termrepair-measure.md.");
+    }
+
+    /// <summary>True when an OpenRouter API key is reachable (env <c>AI_OPENROUTER_APIKEY</c>). Checked BEFORE any
+    /// call so the CLOUD tier — out of scope for be-c08 — skips cleanly instead of burning a failing preflight.</summary>
+    private static bool CloudKeyAvailable()
+        => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AI_OPENROUTER_APIKEY"));
+
+    /// <summary>
+    /// THE be-c08 GATE, computed rather than eyeballed: ARM B (the REAL per-book entity set) vs ARM A
+    /// (entity-free) on one tier. Emits the cleaning-percentage comparison and a PER-CASE DIFF of every case
+    /// where the two arms disagree — on cleaned, on over-rewrite, or on model-call count — so the parent reads a
+    /// verdict, not two tables.
+    /// </summary>
+    private static void EmitArmComparison(
+        Action<string> emit,
+        string tierName,
+        IReadOnlyList<LeakCase> seeds,
+        IReadOnlyDictionary<(string tier, string arm), LeakOutcome[]> armOutcomes,
+        IReadOnlyList<string> harvestedLeakWords)
+    {
+        if (!armOutcomes.TryGetValue((tierName, "A"), out var a) ||
+            !armOutcomes.TryGetValue((tierName, "B"), out var b))
+        {
+            return; // a tier that was blocked/skipped produced no arms — nothing to compare.
+        }
+
+        emit($"### ARM A vs ARM B on {tierName} — the be-c08 cleaning comparison");
+        emit("");
+
+        var measuredA = a.Count(o => !o.SeedError && !o.Fault);
+        var measuredB = b.Count(o => !o.SeedError && !o.Fault);
+        var cleanedA = a.Count(o => o.Cleaned);
+        var cleanedB = b.Count(o => o.Cleaned);
+        var pctA = measuredA > 0 ? 100.0 * cleanedA / measuredA : 0;
+        var pctB = measuredB > 0 ? 100.0 * cleanedB / measuredB : 0;
+
+        emit($"- ARM A (entity-free): cleaned **{cleanedA}/{measuredA} ({pctA:F0}%)**, {a.Sum(o => o.ModelCalls)} model calls");
+        emit($"- ARM B (real entity set): cleaned **{cleanedB}/{measuredB} ({pctB:F0}%)**, {b.Sum(o => o.ModelCalls)} model calls");
+        emit($"- delta (B - A): **{pctB - pctA:F0} percentage points** (must be >= 0 — ARM B may not clean fewer)");
+        emit("");
+
+        var diffs = Enumerable.Range(0, seeds.Count)
+            .Where(i => a[i].Cleaned != b[i].Cleaned
+                     || a[i].OverRewrite != b[i].OverRewrite
+                     || a[i].ModelCalls != b[i].ModelCalls)
+            .ToList();
+
+        if (diffs.Count == 0)
+        {
+            emit("**The two arms AGREE on every case** (same cleaned / over-rewrite / model-call count). The per-book");
+            emit("entity set changes NOTHING about the leak set — which is the whole point: it spares the book's own");
+            emit("proper nouns without sparing a single real leak.");
+        }
+        else
+        {
+            emit("**PER-CASE DIFF — the arms disagree on the following cases:**");
+            emit("");
+            emit("| seed | leak | A cleaned | B cleaned | A calls | B calls | entity-spared in B? | reading |");
+            emit("|---|---|---|---|---|---|---|---|");
+            foreach (var i in diffs)
+            {
+                var reading = a[i].Cleaned && !b[i].Cleaned
+                    ? (b[i].EntitySpared
+                        ? "**REGRESSION — the ENTITY SET spared a real leak (be-c04 failure mode)**"
+                        : "**REGRESSION — B failed to clean a leak A cleaned**")
+                    : (!a[i].Cleaned && b[i].Cleaned
+                        ? "B cleaned a leak A missed (model variance — not a gate change)"
+                        : "same cleaning outcome; model-call / over-rewrite difference only");
+                emit($"| {seeds[i].Label} | `{seeds[i].Leak}` | {(a[i].Cleaned ? "yes" : "NO")} | {(b[i].Cleaned ? "yes" : "NO")} "
+                     + $"| {a[i].ModelCalls} | {b[i].ModelCalls} | {(b[i].EntitySpared ? "**YES**" : "no")} | {reading} |");
+            }
+        }
+        emit("");
+
+        var regressed = diffs.Where(i => a[i].Cleaned && !b[i].Cleaned).ToList();
+        var leverAte = Enumerable.Range(0, seeds.Count).Where(i => b[i].EntitySpared).ToList();
+        var pass = regressed.Count == 0 && leverAte.Count == 0;
+        emit($"**{tierName} cleaning gate: {(pass ? "PASS — ARM B matches ARM A" : "HALT")}.** "
+             + (pass
+                 ? $"The entity lever is armed ({harvestedLeakWords.Count} leak word(s) harvested as manuscript-tier "
+                   + "entities) and STILL spares no leak."
+                 : $"{regressed.Count} leak(s) regressed, {leverAte.Count} spared by the entity set."));
+        emit("");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -713,84 +993,131 @@ public class OutputQualityDiagnostic
         Emit("Expected outcome for EVERY value = UNCHANGED (byte-identical). FP = any byte changed.");
         Emit("");
 
+        // ── PER-BOOK ENTITY SETS — SOURCED FROM THE REAL BookEntityProvider (be-c07) ────────────────────────
+        // This harness used to HAND-AUTHOR two literal HashSets and describe them as "exactly what a
+        // deterministic BookEntityProvider WOULD surface". That was an ASSUMPTION, not a measurement: it never
+        // constructed the provider, never threaded a bookId, and never touched the DB path that ships — so the
+        // SCRIPT-AWARE harvest and the bookId threading (the entire e2/e3 contribution) were precisely the parts
+        // this gate did NOT measure, and this gate is what flipped the production default ON.
+        //
+        // Now the sets come from the SHIPPED provider reading a REAL DbContext over two synthetic books
+        // (PreservationFixtureBooks — a Hebrew-native book whose chapters carry the Latin names, and a
+        // Latin-native book whose chapters carry the recurring Hebrew names plus a stored CharacterAnalysis).
+        // A regression in the harvest therefore surfaces HERE as a GATE FAILURE, not as a silently-still-passing
+        // hard-coded set. The seeding itself has deterministic coverage in BookEntityFixtureSeedTests.
+        using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
+        var hebrewBookEntities = await fixtureBooks.HebrewBookEntitiesAsync();
+        var englishBookEntities = await fixtureBooks.EnglishBookEntitiesAsync();
+
+        // Per-case entities = the entity set of the case's BOOK, straight from the provider. No hand-fed union,
+        // no per-case override: if a case needs an entity the provider cannot produce, that is a FINDING and the
+        // report says so (see the "Entity-lever provenance" section below).
+        IReadOnlySet<string> EntitiesFor(LegitCase c)
+            => c.Expected == ExpectedScript.Hebrew ? hebrewBookEntities : englishBookEntities;
+
         // ── LEGITIMATE-TERM SET ────────────────────────────────────────────────────────────────────────────
         // Each value is realistic Hebrew (or, for the last three, English) analysis prose that contains a
-        // foreign token which MUST survive byte-identical. Cls = the class it stresses; Note records whether the
-        // d2 classifier is expected to GATE it (LEAVE) or whether it reaches the model (the model's UNCHANGED
-        // instruction is the backstop). The five markers are near-absent from prose, so nothing here contains «».
-        var jerusalem = (IReadOnlySet<string>)new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ירושלים" };
-        var cases = new[]
-        {
-            // ── Foreign PROPER NOUNS, Title-Case mid-sentence → classifier LEAVEs (gated) ──
-            new LegitCase("proper-noun (Title-Case)", "Kafka", ExpectedScript.Hebrew, "he-IL",
-                "הרומן מזכיר את סגנונו של Kafka במבנה הסיוטי שלו.", "classifier LEAVE (Title-Case mid-sentence)"),
-            new LegitCase("proper-noun (Title-Case)", "Paris", ExpectedScript.Hebrew, "he-IL",
-                "העלילה מתרחשת ברובע ההיסטורי של Paris בשלהי המאה.", "classifier LEAVE (Title-Case mid-sentence)"),
-            new LegitCase("proper-noun (Title-Case)", "Orwell", ExpectedScript.Hebrew, "he-IL",
-                "הביקורת השוותה את הדיסטופיה לזו של Orwell בספרו הידוע.", "classifier LEAVE (Title-Case mid-sentence)"),
+        // foreign token which MUST survive byte-identical. Cls = the class it stresses; Note records the expected
+        // gate. The REPAIR/LEAVE expectations are UNCHANGED from the e4 fixture — only the SOURCE of the entity
+        // set changed. The set lives in PreservationFixtureBooks.Cases so the deterministic seed test and this
+        // live gate measure the SAME cases against the SAME books.
 
-            // ── Foreign PROPER NOUNS with a LOWERCASE particle → the particle REACHES the model (hard case) ──
-            new LegitCase("proper-noun (lowercase particle)", "van", ExpectedScript.Hebrew, "he-IL",
-                "הצייר Vincent van Gogh מוזכר כמקור השראה חזותי לפרק.", "reaches model — «van» lowercase (Vincent/Gogh gated)"),
-            new LegitCase("proper-noun (lowercase particle)", "da", ExpectedScript.Hebrew, "he-IL",
-                "יצירתו של Leonardo da Vinci משמשת דימוי מרכזי בסצנה.", "reaches model — «da» lowercase (Leonardo/Vinci gated)"),
-            new LegitCase("proper-noun (lowercase particle)", "de", ExpectedScript.Hebrew, "he-IL",
-                "הדמות מצטטת את Simone de Beauvoir בעניין החירות.", "reaches model — «de» lowercase (Simone/Beauvoir gated)"),
+        var cases = PreservationFixtureBooks.Cases;
 
-            // ── BRANDS / products ──
-            new LegitCase("brand", "Kindle", ExpectedScript.Hebrew, "he-IL",
-                "היא קראה את הרומן במכשיר Kindle במהלך הטיסה הארוכה.", "classifier LEAVE (Title-Case mid-sentence)"),
-            new LegitCase("brand", "Photoshop", ExpectedScript.Hebrew, "he-IL",
-                "העורך עיבד את התמונה בתוכנת Photoshop לפני ההדפסה.", "classifier LEAVE (Title-Case mid-sentence)"),
-            new LegitCase("brand", "Google", ExpectedScript.Hebrew, "he-IL",
-                "הגיבור חיפש את התשובה במנוע החיפוש Google בלילה ההוא.", "detector allowlist (never even a run)"),
-
-            // ── ALL-CAPS acronyms ──
-            new LegitCase("acronym", "NASA", ExpectedScript.Hebrew, "he-IL",
-                "הסוכנת עבדה שנים בסוכנות NASA לפני שפרשה לכתיבה.", "classifier LEAVE (ALL-CAPS)"),
-            new LegitCase("acronym", "PDF", ExpectedScript.Hebrew, "he-IL",
-                "הקובץ הופץ בפורמט PDF כדי לשמור על העימוד.", "classifier LEAVE (ALL-CAPS)"),
-
-            // ── INTENTIONAL English phrase inside Hebrew ──
-            new LegitCase("intentional phrase (Title-Case title)", "Brave New World", ExpectedScript.Hebrew, "he-IL",
-                "הסופר קרא לספרו \"Brave New World\" כמחווה עתידנית.", "classifier LEAVE (all Title-Case mid-sentence)"),
-            new LegitCase("intentional phrase (lowercase code-switch)", "carpe diem", ExpectedScript.Hebrew, "he-IL",
-                "הדמות לוחשת \"carpe diem\" ברגע המכריע של הפרק.", "reaches model — 2 lowercase Latin runs (idiom)"),
-
-            // ── URL / email ──
-            new LegitCase("url", "example.com", ExpectedScript.Hebrew, "he-IL",
-                "רשימת המקורות המלאה זמינה באתר example.com של המחבר.", "classifier LEAVE (dotted host)"),
-            new LegitCase("email", "info@publisher.com", ExpectedScript.Hebrew, "he-IL",
-                "לשאלות ניתן לפנות אל הכתובת info@publisher.com בכל עת.", "classifier LEAVE (email borders)"),
-
-            // ── HEBREW-IN-ENGLISH-BOOK (ExpectedScript.Latin) — lower-frequency / possibly under-measured ──
-            new LegitCase("hebrew-in-english (name)", "שרה", ExpectedScript.Latin, "en-US",
-                "The protagonist's name, שרה, deliberately echoes the biblical matriarch.", "reaches model — Hebrew run, no case signal"),
-            new LegitCase("hebrew-in-english (name)", "דוד", ExpectedScript.Latin, "en-US",
-                "The character דוד serves as the moral center of the third act.", "reaches model — Hebrew run, no case signal"),
-            new LegitCase("hebrew-in-english (entity)", "ירושלים", ExpectedScript.Latin, "en-US",
-                "The city of ירושלים anchors the entire narrative arc.", "classifier LEAVE (supplied book-entity)", jerusalem),
-        };
-
-        Emit($"Legitimate-term set: {cases.Length} values (15 Hebrew-native + 3 English-native).");
+        var hebrewSet = hebrewBookEntities as BookEntitySet;
+        var englishSet = englishBookEntities as BookEntitySet;
+        var hebrewCaseCount = cases.Count(c => c.Expected == ExpectedScript.Hebrew);
+        Emit($"Legitimate-term set: {cases.Count} values ({hebrewCaseCount} Hebrew-native + "
+             + $"{cases.Count - hebrewCaseCount} English-native).");
+        Emit("Per-book entity gate ACTIVE, and sourced from the REAL `BookEntityProvider.GetEntitiesAsync(bookId,");
+        Emit("language)` over a REAL DbContext (be-c07 — the e4 run hand-authored these sets, so the harvest logic");
+        Emit("and the bookId threading were never on the measured path). The language passed is each case's own");
+        Emit("ANALYSIS language, so the harvest direction matches the classifier's expected script BY CONSTRUCTION");
+        Emit("(final-r02):");
+        Emit($"- HEBREW-native book (`Language=he`, foreign script = Latin): **{hebrewBookEntities.Count}** entities"
+             + (hebrewSet is not null
+                 ? $" — {hebrewSet.ManuscriptTokens.Count} manuscript-harvested (case-SENSITIVE), {hebrewSet.DeclaredNames.Count} declared (case-insensitive)"
+                 : ""));
+        Emit($"- LATIN-native book (`Language=en`, foreign script = Hebrew): **{englishBookEntities.Count}** entities"
+             + (englishSet is not null
+                 ? $" — {englishSet.ManuscriptTokens.Count} manuscript-harvested, {englishSet.DeclaredNames.Count} declared"
+                 : ""));
+        Emit("Lowercase name particles (van/da/de, and the adjacent pairs der/la/of/the) are NOT harvestable (they are");
+        Emit("not Title-Case), so the be-c01 name-particle rule is still the thing being exercised on those cases —");
+        Emit("the entity set cannot mask it.");
+        Emit("");
+        Emit("**The three be-c01 P0 shapes are in the set (be-c08):** `The Lord of the Rings`, `Mies van der Rohe`,");
+        Emit("`Charles de la Rue` — the values that CORRUPTED under the un-patched rule, which recognized only a");
+        Emit("SINGLE lowercase particle, so two ADJACENT particles disqualified each other and BOTH went to the repair");
+        Emit("model (`of`+`the`, `van`+`der`, `de`+`la`), which spliced Hebrew into a book title / surname. NONE of");
+        Emit("their tokens is seeded into ANY book's manuscript, so the provider CANNOT harvest them and the entity");
+        Emit("lever is inert for them BY CONSTRUCTION: they can only be gated by the deterministic classifier rule (8)");
+        Emit("name-span walk, at ZERO model calls. That is the invariant this rollout decision rests on — read it off");
+        Emit("the provenance table below (`gated by` = classifier/detector rule) and off the preservation table");
+        Emit("(`runs / repair` = N / 0). Deterministically pinned in `BookEntityFixtureSeedTests`.");
         Emit("");
 
-        // ── Deterministic per-case gate prediction (tier-independent) ────────────────────────────────────────
-        // Runs d1 detect + d2 classify OFF-LINE so the report can attribute WHERE the safety comes from
-        // (detector allowlist / classifier LEAVE / reaches-model) BEFORE any model call.
-        var predicted = new (int runs, int repairRuns, string gate, bool reachesModel)[cases.Length];
-        for (var i = 0; i < cases.Length; i++)
+        // ── Deterministic per-case gate prediction (tier-independent, ZERO model calls) ──────────────────────
+        // Runs d1 detect + d2 classify OFF-LINE so the report can attribute WHERE the safety comes from, and —
+        // new in be-c07 — WHETHER the entity that gated a case was actually HARVESTED by the provider. Each case
+        // is classified TWICE: with the provider's set and with NO set. A run that flips REPAIR -> LEAVE is one
+        // the ENTITY LEVER spared (it exercises BookEntityProvider and regresses if the harvest breaks); a run
+        // that is LEAVE either way was spared by a CLASSIFIER RULE (Title-Case / ALL-CAPS / name-span / quote /
+        // URL) and the entity set is inert for it.
+        var predicted = new GateAttribution[cases.Count];
+        for (var i = 0; i < cases.Count; i++)
+        {
+            predicted[i] = PreservationFixtureBooks.AttributeGate(cases[i], EntitiesFor(cases[i]));
+        }
+
+        // ── ENTITY-LEVER PROVENANCE — the be-c07 measurement (deterministic, no model) ───────────────────────
+        Emit("## Entity-lever provenance (which cases the REAL provider actually gates)");
+        Emit("");
+        Emit("| # | class | token | gated by | provider entity | tier |");
+        Emit("|---|---|---|---|---|---|");
+        for (var i = 0; i < cases.Count; i++)
         {
             var c = cases[i];
-            var runs = LatinInHebrewContentDetector.DetectForeignRuns(c.Value, c.Expected);
-            var repairRuns = ForeignRunClassifier.RunsToRepair(runs, c.Value, c.Expected, c.Entities);
-            string gate = runs.Count == 0
-                ? "detector-gated (allowlist/none)"
-                : repairRuns.Count == 0
-                    ? "classifier-gated (LEAVE)"
-                    : $"reaches model ({repairRuns.Count} run)";
-            predicted[i] = (runs.Count, repairRuns.Count, gate, repairRuns.Count > 0);
+            var p = predicted[i];
+            var gatedBy = p.ReachesModel
+                ? "REACHES MODEL"
+                : p.EntityLoadBearing ? "**entity (provider-harvested)**" : "classifier/detector rule";
+            var ent = p.EntityLoadBearing ? "`" + string.Join("`, `", p.EntitySparedRuns.Distinct()) + "`" : "—";
+            var tier = p.EntityLoadBearing ? string.Join(", ", p.EntitySparedTiers.Distinct()) : "—";
+            Emit($"| {i + 1} | {c.Cls} | `{Trunc(c.Token, 22)}` | {gatedBy} | {ent} | {tier} |");
         }
+        Emit("");
+
+        var entityGatedCount = predicted.Count(p => p.EntityLoadBearing);
+        var ruleGatedCount = predicted.Count(p => !p.ReachesModel && !p.EntityLoadBearing);
+        var modelReachedCount = predicted.Count(p => p.ReachesModel);
+        Emit($"**Gate attribution: {entityGatedCount} case(s) gated by a PROVIDER-HARVESTED entity, "
+             + $"{ruleGatedCount} by a classifier/detector rule, {modelReachedCount} reach the model.**");
+        Emit("");
+
+        // FINDINGS: a case that DECLARES a required entity the provider could NOT produce could only ever have
+        // passed with a hand-fed entity. Record it plainly — never paper over it with a hard-coded fallback.
+        var missingEntityCases = Enumerable.Range(0, cases.Count).Where(i => predicted[i].RequiredEntityMissing).ToList();
+        if (missingEntityCases.Count == 0)
+        {
+            Emit("FINDINGS: none — every case that requires a per-book entity is gated by an entity the REAL "
+                 + "`BookEntityProvider` actually harvested. No hand-fed entity is needed anywhere in this fixture.");
+        }
+        else
+        {
+            Emit("**FINDINGS — cases that can ONLY pass with a HAND-FED entity the provider cannot produce:**");
+            foreach (var i in missingEntityCases)
+            {
+                Emit($"- [{cases[i].Cls}] `{cases[i].Token}` requires entity `{cases[i].GatingEntity}` — NOT harvested. "
+                     + "The provider cannot gate this case; it reaches the repair model in production.");
+            }
+        }
+        Emit("");
+        Emit("Recorded, not a finding: the ALL-CAPS acronyms (`NASA`, `PDF`) are present in the seeded manuscript but");
+        Emit("are NOT harvestable — the manuscript scan records only TITLE-CASE Latin tokens. They do not need the");
+        Emit("entity lever: classifier rule (6) (ALL-CAPS) gates them with zero model calls. The e4 hand-built set");
+        Emit("listed them as entities, which OVERSTATED what the provider can produce.");
+        Emit("");
 
         // ── Tiers (reuse the d5 tier router + preflight) ─────────────────────────────────────────────────────
         var tiers = new (string name, string provider, string model)[]
@@ -809,6 +1136,17 @@ public class OutputQualityDiagnostic
             Emit($"## Tier {tierName}: `{provider}|{model}`");
             Emit("");
 
+            // CLOUD is OUT OF SCOPE for be-c08 (the user scoped the re-measure to LOCAL). Skip it BEFORE any call
+            // when no OpenRouter key is configured, so it costs nothing and never fails the run.
+            if (provider == "OpenRouter" && !CloudKeyAvailable())
+            {
+                Emit("SKIPPED: no OpenRouter API key configured (env `AI_OPENROUTER_APIKEY`). be-c08 is scoped to the");
+                Emit("LOCAL tier; the cloud tier stays routing-only and is not measured here.");
+                Emit("");
+                blocked[tierName] = "SKIPPED (no OpenRouter key; be-c08 is LOCAL-only)";
+                continue;
+            }
+
             var router = BuildTermRepairTierRouter(appSettingsPath, provider, model);
             var service = new DynamicTermRepairService(router, NullLogger<DynamicTermRepairService>.Instance);
 
@@ -824,14 +1162,14 @@ public class OutputQualityDiagnostic
             Emit($"preflight OK → served by `{preInfo}`");
             Emit("");
 
-            var tierOutcomes = new LegitOutcome[cases.Length];
-            for (var i = 0; i < cases.Length; i++)
+            var tierOutcomes = new LegitOutcome[cases.Count];
+            for (var i = 0; i < cases.Count; i++)
             {
                 var c = cases[i];
                 var runs = LatinInHebrewContentDetector.DetectForeignRuns(c.Value, c.Expected);
-                var repairRuns = ForeignRunClassifier.RunsToRepair(runs, c.Value, c.Expected, c.Entities);
+                var repairRuns = ForeignRunClassifier.RunsToRepair(runs, c.Value, c.Expected, EntitiesFor(c));
 
-                var result = await service.RepairValueAsync(c.Value, c.Expected, c.Language, c.Entities);
+                var result = await service.RepairValueAsync(c.Value, c.Expected, c.Language, EntitiesFor(c));
                 var preserved = string.Equals(c.Value, result.Value, StringComparison.Ordinal);
                 var overRewrite = !preserved && !ChangeConfinedToRepairSpans(c.Value, repairRuns, result.Value);
 
@@ -855,11 +1193,11 @@ public class OutputQualityDiagnostic
         Emit("");
         Emit("| # | class | token | runs / repair | predicted gate | LOCAL | CLOUD |");
         Emit("|---|---|---|---|---|---|---|");
-        for (var i = 0; i < cases.Length; i++)
+        for (var i = 0; i < cases.Count; i++)
         {
             var c = cases[i];
             var p = predicted[i];
-            Emit($"| {i + 1} | {c.Cls} | `{Trunc(c.Token, 22)}` | {p.runs} / {p.repairRuns} | {p.gate} | {CellFor("LOCAL", outcomes, blocked, i)} | {CellFor("CLOUD", outcomes, blocked, i)} |");
+            Emit($"| {i + 1} | {c.Cls} | `{Trunc(c.Token, 22)}` | {p.Runs} / {p.RepairRuns} | {p.Gate} | {CellFor("LOCAL", outcomes, blocked, i)} | {CellFor("CLOUD", outcomes, blocked, i)} |");
         }
         Emit("");
 
@@ -1023,23 +1361,29 @@ public class OutputQualityDiagnostic
         // ── RESIDUAL WEAKNESSES / DEFERRALS (honest limits of this measure) ──────────────────────────────────
         Emit("## Residual weaknesses / deferrals");
         Emit("");
-        Emit("- **Lowercase foreign IDIOM is shape-indistinguishable from a leak.** The one case CLOUD also");
-        Emit("  misses (`carpe diem`) is a deliberately-quoted lowercase Latin idiom — it looks EXACTLY like the");
-        Emit("  lowercase out-of-glossary leaks d5 wants cleaned, so neither the d2 classifier nor the model");
-        Emit("  reliably spares it. This is an inherent precision floor of the dynamic pass, not a tier defect");
-        Emit("  (LOCAL mis-handles it too). Mitigation lives elsewhere: quote-aware gating or a book-entity /");
-        Emit("  do-not-translate allowlist for intentional foreign phrases — a plan deferral, not solved here.");
-        Emit("- **LOCAL's misses are the d5 caveat, confirmed.** LOCAL transliterated/translated the lowercase");
-        Emit("  name particles (`van`→וואן, `da`→דא, `de`→'סימון בבור') — the same non-idiomatic behaviour d5");
-        Emit("  flagged (claustrophobia→'פוחדה מסגרים'). CLOUD preserved all three, which is why the precision");
-        Emit("  gate moves the recommended tier to CLOUD.");
-        Emit("- **Hebrew-in-English direction is UNDER-MEASURED (deferral).** Only 3 Latin-native values (2 reach");
-        Emit("  the model). Both model-reached names (שרה, דוד) were preserved on both tiers, but this direction");
-        Emit("  is lower-frequency in the product and was not stress-tested with Hebrew common-concept words");
-        Emit("  (where 'translate' is arguably correct) — treat its high preservation as indicative, not proven.");
-        Emit("- **Safety is overwhelmingly from the deterministic GATE.** 12/18 values never reached the model");
-        Emit("  (detector allowlist + d2 classifier LEAVE), preserved identically on BOTH tiers. The tier choice");
-        Emit("  only affects the 6 model-reached values — the classifier is carrying the precision load.");
+        Emit($"- **Safety is carried by the DETERMINISTIC GATE, not by the tier.** {cases.Count - modelReachedCount}/{cases.Count} values never");
+        Emit($"  reach the model (detector allowlist + d2 classifier LEAVE + the per-book entity lever), so they are");
+        Emit($"  preserved identically on EVERY tier and cost 0 model calls. Only {modelReachedCount} value(s) are tier-sensitive.");
+        Emit("  Read the preservation % accordingly: when the gate catches everything it is a property of the GATE,");
+        Emit("  and this measure stops discriminating between LOCAL and CLOUD (that is the intended invariant — but");
+        Emit("  it also means d6 no longer stresses the MODEL's preserve-a-proper-noun behaviour).");
+        Emit($"- **The entity lever load-bears on only {entityGatedCount} of {cases.Count} cases — ALL of them Latin-native.** For the");
+        Emit("  HEBREW-native book every legit token is spared by a CLASSIFIER RULE (Title-Case mid-sentence,");
+        Emit("  ALL-CAPS, the be-c01 name-span walk, the be-c05 quote pair, URL/email), so the Latin harvest is");
+        Emit("  belt-and-braces there, not load-bearing. In the LATIN-native direction there is NO case signal at");
+        Emit("  all, so the provider's set is the ONLY thing standing between a Hebrew name and the repair model —");
+        Emit("  which is exactly why hand-authoring it (as e4 did) hid the only place it actually matters.");
+        Emit("- **Hebrew-in-English direction is UNDER-MEASURED (deferral, unchanged).** Only 3 Latin-native values,");
+        Emit("  all synthetic, and it was not stress-tested with Hebrew common-concept words (where 'translate' is");
+        Emit("  arguably correct) — treat its preservation as indicative, not proven.");
+        Emit("- **Lowercase foreign IDIOM is shape-indistinguishable from a leak.** `carpe diem` is now spared by the");
+        Emit("  be-c05 matched-quote-pair rule, but an UNQUOTED lowercase idiom still looks EXACTLY like the");
+        Emit("  lowercase out-of-glossary leaks d5 wants cleaned, and neither the classifier nor the model reliably");
+        Emit("  spares it. An inherent precision floor of the dynamic pass; the do-not-translate allowlist for");
+        Emit("  intentional foreign phrases remains a plan deferral.");
+        Emit("- **The entity set is SYNTHETIC-book-sourced.** It is the REAL provider over a REAL DbContext (be-c07),");
+        Emit("  but the books are seeded fixtures, not a real manuscript. What is now measured is the harvest LOGIC");
+        Emit("  and the two-tier matching; the DENSITY of a real book's harvest is still unmeasured here.");
         Emit("");
 
         // ── Persist the RULE-0 artifact ──
@@ -1058,12 +1402,10 @@ public class OutputQualityDiagnostic
             "or the dynamic stage undid a glossary substitution. See d6-precision-fp-measure.md.");
     }
 
-    /// <summary>A single legitimate-term test case: the class it stresses, the token that must survive, the
-    /// book's expected script + language, the prose value, an authoring note (gate expectation), and an
-    /// optional book-entity set (the one lever that spares a foreign Hebrew run in a Latin-script book).</summary>
-    private sealed record LegitCase(
-        string Cls, string Token, ExpectedScript Expected, string Language, string Value,
-        string Note, IReadOnlySet<string>? Entities = null);
+    // NOTE (be-c07): the LegitCase record and the legit-term fixture itself now live in
+    // PreservationFixtureBooks, alongside the two synthetic books whose entity sets the REAL
+    // BookEntityProvider harvests. They are shared with the DETERMINISTIC BookEntityFixtureSeedTests, so the
+    // seeding and the gate attribution this live gate depends on are pinned without a GPU.
 
     /// <summary>Per-case, per-tier preservation outcome for the d6 measure.</summary>
     private sealed class LegitOutcome
@@ -1148,9 +1490,30 @@ public class OutputQualityDiagnostic
         public int Cleaned;
         public int OverRewrite;
         public int Faults;
+
+        /// <summary>Marked-span model calls this tier/arm made (the service makes ONE per REPAIR-classified run).
+        /// For a LEAK set, a call count BELOW the case count means the gate kept a leak away from the model —
+        /// the be-c08 regression signal, not an efficiency win.</summary>
+        public int ModelCalls;
+
         public long MedianMs;
         public long P90Ms;
         public List<long> Latencies { get; } = new();
+    }
+
+    /// <summary>Per-case, per-ARM cleaning outcome for the d5 measure (be-c08). <see cref="EntitySpared"/> is the
+    /// one that matters: the value has ZERO repair spans in this arm but WOULD have had them entity-free — i.e.
+    /// the per-book entity set ate a real leak.</summary>
+    private sealed class LeakOutcome
+    {
+        public bool Cleaned;
+        public bool OverRewrite;
+        public bool Fault;
+        public bool SeedError;
+        public bool EntitySpared;
+        public int ModelCalls;
+        public string Repaired = "";
+        public long LatencyMs;
     }
 
     /// <summary>

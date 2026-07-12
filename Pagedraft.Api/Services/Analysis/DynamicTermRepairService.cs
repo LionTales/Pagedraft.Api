@@ -48,7 +48,8 @@ namespace Pagedraft.Api.Services.Analysis;
 // [d4] ApplyAsync / RepairFindingsAsync (below) are the per-type / per-entity dispatch that wires this
 //      service into UnifiedAnalysisService.ApplyAnalysisRepairAsync and the BookReview engine hook
 //      (BookReviewService), gated by the NEW Ai:AnalysisRepair.Mode knob (AnalysisRepairMode). The SHIPPED
-//      default (Mode=Glossary) never reaches this service — Dynamic/GlossaryThenDynamic are opt-in.
+//      default (Mode=GlossaryThenDynamic) reaches this service after the glossary; Mode=Glossary/Off is the
+//      rollback that skips it.
 //
 // OBSERVABILITY (fail-safe-swallow lesson): a non-deterministic repairer needs auditing. Every span logs
 // (Debug) its offset/length, accepted/reverted, model+provider, and latency; every fault is LOGGED (never
@@ -469,6 +470,11 @@ public class DynamicTermRepairService
     /// FAIL-SAFE: the whole dispatch is wrapped in one try/catch; on ANY exception (deserialize, accessor
     /// walk, reserialize) the ORIGINAL inputs are returned unchanged and the exception is surfaced as
     /// <c>fault</c> — this method NEVER throws.
+    ///
+    /// <paramref name="bookEntities"/> is the per-book proper-noun LEAVE set (e3), threaded verbatim to
+    /// <see cref="RepairFieldsAsync"/> -&gt; <see cref="RepairValueAsync"/> -&gt; <see cref="ForeignRunClassifier"/>
+    /// so the book's own names are spared. A null/empty set is exactly today's behaviour (the classifier's
+    /// entity check is simply skipped), keeping the pre-e3 dynamic path byte-identical.
     /// </summary>
     public async Task<(string? structuredJson, string cleanContent, int fieldsChanged, Exception? fault)> ApplyAsync(
         AnalysisType type,
@@ -476,6 +482,7 @@ public class DynamicTermRepairService
         string cleanContent,
         string language,
         JsonSerializerOptions jsonOptions,
+        IReadOnlySet<string>? bookEntities,
         CancellationToken ct)
     {
         try
@@ -484,23 +491,23 @@ public class DynamicTermRepairService
             {
                 // Summarization: the ENTIRE cleanContent is the repairable prose (mirrors GlossaryRepairPass).
                 AnalysisType.Summarization =>
-                    await ApplyPlainTextAsync(structuredJson, cleanContent, language, ct).ConfigureAwait(false),
+                    await ApplyPlainTextAsync(structuredJson, cleanContent, language, bookEntities, ct).ConfigureAwait(false),
 
                 AnalysisType.LiteraryAnalysis =>
-                    await ApplyStructuredAsync<LiteraryAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<LiteraryAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.LinguisticAnalysis =>
-                    await ApplyStructuredAsync<LinguisticAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<LinguisticAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.LineEdit =>
-                    await ApplyStructuredAsync<LineEditResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<LineEditResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
 
                 AnalysisType.BookOverview =>
-                    await ApplyStructuredAsync<BookOverviewResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<BookOverviewResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.CharacterAnalysis =>
-                    await ApplyStructuredAsync<CharacterAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<CharacterAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.StoryAnalysis =>
-                    await ApplyStructuredAsync<StoryAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<StoryAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.QA =>
-                    await ApplyStructuredAsync<QAResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, ct).ConfigureAwait(false),
+                    await ApplyStructuredAsync<QAResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
 
                 // Proofread and everything else (incl. BookReview, handled on its own entity path via
                 // RepairFindingsAsync): not a dispatch target here. Return the inputs unchanged.
@@ -524,13 +531,14 @@ public class DynamicTermRepairService
         string? structuredJson,
         string cleanContent,
         string language,
+        IReadOnlySet<string>? bookEntities,
         CancellationToken ct)
     {
         string? written = null;
         var field = RepairableFields.ForPlainText(cleanContent, v => written = v)[0];
 
         var result = await RepairFieldsAsync(
-            new[] { field }, ExpectedScriptForLanguage(language), language, ct: ct).ConfigureAwait(false);
+            new[] { field }, ExpectedScriptForLanguage(language), language, bookEntities, ct).ConfigureAwait(false);
 
         if (result.FieldsChanged == 0)
         {
@@ -554,6 +562,7 @@ public class DynamicTermRepairService
         string language,
         JsonSerializerOptions jsonOptions,
         Func<T, IReadOnlyList<RepairableField>> accessorsOf,
+        IReadOnlySet<string>? bookEntities,
         CancellationToken ct) where T : class
     {
         if (string.IsNullOrWhiteSpace(structuredJson))
@@ -578,7 +587,7 @@ public class DynamicTermRepairService
 
         var fields = accessorsOf(parsed);
         var result = await RepairFieldsAsync(
-            fields, ExpectedScriptForLanguage(language), language, ct: ct).ConfigureAwait(false);
+            fields, ExpectedScriptForLanguage(language), language, bookEntities, ct).ConfigureAwait(false);
 
         if (result.FieldsChanged == 0)
         {
@@ -602,10 +611,15 @@ public class DynamicTermRepairService
     /// FAIL-SAFE exactly like <c>ApplyGlossaryToFindings</c>: a per-finding try/catch means a fault on ONE
     /// finding leaves THAT finding un-repaired and continues; an outer try/catch means the whole pass can never
     /// throw into the review build. Returns the count of findings whose prose changed.
+    ///
+    /// <paramref name="bookEntities"/> is the per-book proper-noun LEAVE set (e3), threaded verbatim to
+    /// <see cref="RepairFieldsAsync"/> -&gt; <see cref="ForeignRunClassifier"/> so the book's own names are spared.
+    /// A null/empty set is exactly today's behaviour (the entity check is simply skipped).
     /// </summary>
     public async Task<int> RepairFindingsAsync(
         IReadOnlyList<BookFinding> findings,
         string language,
+        IReadOnlySet<string>? bookEntities = null,
         CancellationToken ct = default)
     {
         if (findings is null || findings.Count == 0)
@@ -624,7 +638,7 @@ public class DynamicTermRepairService
                 try
                 {
                     var result = await RepairFieldsAsync(
-                        RepairableFields.For(finding), expected, language, ct: ct).ConfigureAwait(false);
+                        RepairableFields.For(finding), expected, language, bookEntities, ct).ConfigureAwait(false);
                     if (result.FieldsChanged > 0)
                         changedFindings++;
 

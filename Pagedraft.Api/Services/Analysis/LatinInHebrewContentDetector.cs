@@ -1,3 +1,5 @@
+using static Pagedraft.Api.Services.Analysis.ScriptTokenPredicates;
+
 namespace Pagedraft.Api.Services.Analysis;
 
 // ---------------------------------------------------------------------------
@@ -107,15 +109,6 @@ public static class LatinInHebrewContentDetector
         "Google",
         "Facebook",
     };
-
-    /// <summary>Latin ASCII letter test ([A-Za-z]); accented Latin-1 letters are
-    /// deliberately excluded to match the original regex semantics.</summary>
-    private static bool IsLatinLetter(char c) => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-
-    /// <summary>Hebrew letter test — the base letter block U+05D0..U+05EA (aleph..tav,
-    /// including the five final forms). Niqqud / cantillation / punctuation are NOT
-    /// letters and therefore act as run boundaries.</summary>
-    private static bool IsHebrewLetter(char c) => c >= 'א' && c <= 'ת';
 
     private static bool IsForeign(char c, bool foreignIsLatin)
         => foreignIsLatin ? IsLatinLetter(c) : IsHebrewLetter(c);
