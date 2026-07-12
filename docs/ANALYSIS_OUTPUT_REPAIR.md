@@ -17,10 +17,18 @@ defenses ship on the small-local tier and go no-op on a capable cloud tier.
 A THIRD follow-up plan (`src/.cursor/plans/_todo/dynamic-term-repair-design-2026-07-10.plan.md`, todos
 d1-d7) then added a **span-scoped dynamic detect-and-repair stage** that generalises the closed glossary
 to the open-ended tail of foreign-vocabulary leaks the ~35-term glossary cannot reach - see sections 12
-(architecture), 13 (Mode config + TermRepair routing), 14 (measured decision + precision gates), 15
-(rollout + kill-switch), and 16 (residual deferrals + review-retro candidates). It is **shipped wired but
-OFF by default** (`Ai:AnalysisRepair.Mode = Glossary`): the d6 precision gate HALTED the flip because
-neither the local nor the cloud tier reliably preserves legitimate foreign terms at the agreed >= 90% bar.
+(architecture), 13 (Mode config + TermRepair routing), 14 (the original measured decision + precision
+gates), 15 (rollout + kill-switch), and 16 (residual deferrals + review-retro candidates). That stage
+first shipped wired but OFF because the d6 precision gate HALTED the flip (neither the local nor the cloud
+tier reliably preserved legitimate foreign terms at the agreed >= 90% bar).
+
+A FOURTH follow-up (`src/.cursor/plans/_todo/dynamic-term-repair-precision-followup-2026-07-11.plan.md`,
+todos e1-e6) then sharpened the DETERMINISTIC skip-gate (quote-aware + name-particle LEAVE rules and an
+auto per-book entity list), re-measured both tiers at 100% legitimate-term preservation, 100% out-of-glossary
+cleaning, and 0 over-rewrite, and **flipped the shipped default to
+`Ai:AnalysisRepair.Mode = GlossaryThenDynamic` on the LOCAL tier** (`Ollama / gemma4:12b`), so the dynamic
+stage now runs by default. See **section 17** for the sharpened gate, the re-measured tables, and the rollout
+decision; sections 14-16 are retained as the original HALT record.
 
 Sibling docs: [./Hebrew-Proofread-Model.md](./Hebrew-Proofread-Model.md) (the model this layer does
 NOT touch), [./LINGUISTIC_MODEL_BAKEOFF.md](./LINGUISTIC_MODEL_BAKEOFF.md) (the model this layer's
@@ -57,10 +65,12 @@ Three non-regression guarantees are enforced end-to-end:
 
 ## 2. Two-stage repair architecture
 
-> **A THIRD stage was added later (sections 12-16), shipped OFF.** The dynamic-term-repair follow-up added
-> a span-scoped detect-classify-repair stage (`DynamicTermRepairService`) selectable via the
-> `Ai:AnalysisRepair.Mode` knob. Under the SHIPPED default (`Mode=Glossary`) it never runs, so the two
-> stages below are exactly what ships today; the dynamic stage is documented in section 12 onward.
+> **A THIRD stage was added later (sections 12-17).** The dynamic-term-repair follow-up added a span-scoped
+> detect-classify-repair stage (`DynamicTermRepairService`) selectable via the `Ai:AnalysisRepair.Mode` knob.
+> It first shipped OFF (`Mode=Glossary`), but the precision follow-up (section 17) flipped the shipped default
+> to `Mode=GlossaryThenDynamic` on the LOCAL tier, so the dynamic stage now runs AFTER the glossary by default.
+> The two deterministic stages below are still the glossary fast-path; the dynamic stage is documented in
+> section 12 onward.
 
 Two independent stages, run in order, both guard-gated and Hebrew-book-gated:
 
@@ -504,8 +514,9 @@ The closed glossary (Stage 1) only cleans its ~35 curated craft terms; real leak
 vocabulary (`confusion`, `claustrophobia`, `ambivalence`, `nostalgia`, ...) that the glossary can never
 reach. The dynamic-term-repair follow-up (plan `dynamic-term-repair-design-2026-07-10`, todos d1-d3) adds a
 **bidirectional, span-scoped, fail-safe LLM stage** that handles that open tail, selectable via
-`Ai:AnalysisRepair.Mode` (section 13). It is **shipped wired but OFF** (`Mode=Glossary`); the measured
-decision that kept it off is section 14.
+`Ai:AnalysisRepair.Mode` (section 13). It first shipped OFF (`Mode=Glossary`) per the original section-14
+measurement, but the precision follow-up re-measured a PASS and flipped the shipped default to
+`Mode=GlossaryThenDynamic` on the LOCAL tier (section 17), so it now runs by default.
 
 ### 12.1 The d1 -> d2 -> d3 pipeline
 
@@ -613,9 +624,9 @@ type has cleared that gate:
 | `Mode` | Behavior |
 |---|---|
 | `Off` | An ADDITIONAL strict no-op on top of `Enabled` - neither the glossary nor the dynamic stage runs. |
-| `Glossary` (**shipped default**) | The deterministic closed English<->Hebrew glossary ONLY; the dynamic span-scoped stage never runs. Reproduces the EXACT pre-follow-up behaviour - introducing the knob changes nothing about what ships today. |
+| `Glossary` | The deterministic closed English<->Hebrew glossary ONLY; the dynamic span-scoped stage never runs. Reproduces the EXACT pre-follow-up behaviour. Was the original shipped default; the precision follow-up (section 17) moved the default to `GlossaryThenDynamic`. |
 | `Dynamic` | The glossary substitution is SKIPPED entirely; the span-scoped detect-classify-repair pass (d1-d3) runs over the original (un-glossaried) prose. |
-| `GlossaryThenDynamic` | The glossary fast-path cache runs FIRST (cheap, deterministic, catches the closed ~35-term vocabulary at zero model cost), THEN the dynamic pass runs over whatever residual foreign text the glossary left - the two stages compose rather than compete. |
+| `GlossaryThenDynamic` (**shipped default**) | The glossary fast-path cache runs FIRST (cheap, deterministic, catches the closed ~35-term vocabulary at zero model cost), THEN the dynamic pass runs over whatever residual foreign text the glossary left - the two stages compose rather than compete. This is the shipped default on the LOCAL tier after the section-17 precision follow-up cleared the bar. |
 
 **Glossary demoted to a fast-path cache.** With the dynamic stage available, the closed glossary's role
 under `GlossaryThenDynamic` is a zero-cost deterministic CACHE for its ~35 known 1:1 terms (`narrator`,
@@ -634,9 +645,10 @@ and the dynamic stage does not undo them.
   `NumPredict` because the output is one `{"replacement":"..."}` token; a large `NumCtx` comfortably fits the
   whole marked value + the verbatim instruction; the low temperature keeps the substitution conservative.
 - **KEEP IN SYNC:** both the FeatureModel and the tuning block; both `appsettings.json` and
-  `appsettings.Production.json` carry `Mode: Glossary`. Production inherits `FeatureModels` /
-  `ProviderSettings` from the base by convention, so only the `Ai:AnalysisRepair` block is duplicated across
-  the two files.
+  `appsettings.Production.json` carry `Mode: GlossaryThenDynamic` (flipped from `Glossary` by the section-17
+  precision follow-up). Production inherits `FeatureModels` / `ProviderSettings` from the base by convention,
+  so only the `Ai:AnalysisRepair` block is duplicated across the two files. `AnalysisRepairConfigParityTests`
+  now asserts BOTH the `Mode` value and the `PerType` map are identical across the two files.
 
 ## 14. Measured decision + precision gates (d5, d6)
 
@@ -725,26 +737,36 @@ draw (mirror the proofread bake-off: report raw counts, never cherry-pick):
   every single run, both tiers) and the lowercase name-particle `de` in "Simone de Beauvoir" (FP 3/5 runs).
 - **Over-rewrite = 0 on every tier in every run** - the span-scoped design's hard gate held throughout.
 
-### 14.4 Verdict: HALT
+### 14.4 Verdict: HALT (later OVERTURNED by the section-17 precision follow-up)
+
+> **SUPERSEDED.** This HALT was the ORIGINAL d5/d6 outcome. The section-17 precision follow-up sharpened the
+> deterministic gate so the four failing cases (`van` / `da` / `de` / `carpe diem`) no longer reach the model,
+> re-measured both tiers at 100% preservation, and flipped the shipped default to `GlossaryThenDynamic`. Read
+> 14.1-14.4 as the historical record that MOTIVATED the follow-up, not the current shipped state.
 
 Neither tier RELIABLY meets the agreed bar (LOCAL 78% stable FAIL; CLOUD median 89%, fails in the majority
 (3/5) of runs and cannot be certified >= 90%). d5 had recommended default engine LOCAL + `Mode` =
-`GlossaryThenDynamic`, but that was SUBJECT to d6, and the d6 precision gate overturned it. **=> Keep the
-shipped default `Ai:AnalysisRepair.Mode = Glossary`** (deterministic glossary fast-path only). The dynamic
-span-scoped stage stays wired and available (`Dynamic` / `GlossaryThenDynamic`) but OFF by default. The
-precision floor is two narrow, addressable cases (section 16): (1) quoted lowercase foreign IDIOMS
-(`carpe diem`) that are shape-indistinguishable from a leak, and (2) lowercase name PARTICLES (`de` / `da` /
-`van`). 12/18 legit cases were preserved by the deterministic gate.
+`GlossaryThenDynamic`, but that was SUBJECT to d6, and the d6 precision gate overturned it. At the time this
+kept the shipped default `Ai:AnalysisRepair.Mode = Glossary` (deterministic glossary fast-path only), with the
+dynamic span-scoped stage wired and available (`Dynamic` / `GlossaryThenDynamic`) but OFF. The precision floor
+was two narrow, addressable cases: (1) quoted lowercase foreign IDIOMS (`carpe diem`) that are
+shape-indistinguishable from a leak, and (2) lowercase name PARTICLES (`de` / `da` / `van`). 12/18 legit cases
+were preserved by the deterministic gate; the follow-up (section 17) closed the remaining 6 by sharpening that
+gate rather than by trusting the model.
 
 ## 15. Rollout + kill-switch
 
-**Default (the HALT outcome):** `Ai:AnalysisRepair.Mode = Glossary` in BOTH `appsettings.json` and
-`appsettings.Production.json`. The dynamic span-scoped stage is shipped, DI-registered, wired at both seams
-(the analysis seam via `ApplyAnalysisRepairAsync`, and the BookReview engine hook), and fully tested - but it
-never executes at the default, so today's runtime behaviour is byte-identical to before the follow-up.
+**Default (updated by the section-17 precision follow-up):** `Ai:AnalysisRepair.Mode = GlossaryThenDynamic`
+in BOTH `appsettings.json` and `appsettings.Production.json`, with `Ai:FeatureModels:TermRepair` on the LOCAL
+tier (`Ollama / gemma4:12b`, already the shipped local TermRepair model, so no FeatureModels change was
+needed). The glossary fast-path cache runs first, then the span-scoped dynamic stage runs over whatever
+residual foreign text it left. This REPLACES the original HALT default (`Mode=Glossary`) after the sharpened
+deterministic gate cleared the precision bar on both tiers (section 17). The value-scoped LLM Stage-2 stays
+OFF (`GuardOnly=true`); the dynamic stage is span-scoped and fail-safe, structurally distinct from the
+field-scoped Stage-2 that ships off. `Enabled/GuardOnly/PerType` and the kill-switch below are all unchanged.
 
-**To ENABLE dynamic repair per environment / tier** (only after the section-16 deferrals close, or on a tier
-you have yourself measured at >= 90% preservation):
+**To ENABLE dynamic repair on ANOTHER environment / tier** (LOCAL is already on by default; use this for a
+tier you have yourself measured at >= 90% preservation, e.g. the cloud `google/gemma-4-31b-it` fallback):
 
 1. Set `Ai:AnalysisRepair.Mode` = `GlossaryThenDynamic` (recommended - keep the zero-cost glossary cache in
    front) or `Dynamic` (glossary skipped) in that environment's appsettings.
@@ -757,30 +779,35 @@ you have yourself measured at >= 90% preservation):
 **Kill-switch (fastest to broadest):**
 
 - Set `Mode = Glossary` (or `Off`) - drops back to the deterministic glossary (or no stage) with zero model
-  calls. This is the shipped posture.
+  calls. This reverts to the pre-follow-up deterministic-glossary-only posture (the original HALT default).
 - Set `Enabled = false` (or remove the `Ai:AnalysisRepair` block) - FULL no-op: neither glossary nor dynamic
   nor LLM runs; inputs byte-identical.
 - Narrow the blast radius: remove a type from `PerType` to disable repair for just that analysis type.
 
 Because the dynamic stage is fail-safe by construction (it can only leave a value cleaner or byte-identical,
-never worse) AND is OFF at the default, enabling it is low-risk to trial and instantly reversible via `Mode`.
+never worse), the flip to it as the default is low-risk and instantly reversible via `Mode` (set it back to
+`Glossary` or `Off`).
 
 ## 16. Residual deferrals + review-retro candidates
 
-### 16.1 Deferrals (from the d6 gate - close these before flipping the default)
+### 16.1 Deferrals (from the d6 gate)
 
-- **Quote-aware / do-not-translate gating for intentional foreign idioms.** A deliberately-quoted lowercase
-  Latin idiom (`carpe diem`) is shape-indistinguishable from a lowercase out-of-glossary leak, so neither the
-  d2 classifier nor the model reliably spares it (FP on BOTH tiers every run). Mitigation: quote-aware gating
-  or a book-scoped do-not-translate / foreign-phrase allowlist. Not solved here - it is an inherent precision
-  floor of the dynamic pass, not a tier defect.
-- **Name-particle context rule in d2.** Lowercase name particles (`de` / `da` / `van`) sandwiched between two
-  Title-Case runs ("Simone de Beauvoir", "Vincent van Gogh") reach the model and get transliterated /
-  translated. A d2 rule to LEAVE a lowercase run that sits BETWEEN two Title-Case runs (a name-context
-  signal) would spare them.
-- **Book-scoped entity list.** The classifier already accepts an optional `bookEntities` set (always LEAVE)
-  but no live entity list is wired yet; supplying real character / place names would sharpen the proper-noun
-  skip and is the one lever that can spare a foreign HEBREW run (which has no case signal).
+The first three deferrals below were **CLOSED by the section-17 precision follow-up** (retained here as the
+gap they addressed); the rest remain open.
+
+- **[CLOSED - section 17] Quote-aware / do-not-translate gating for intentional foreign idioms.** A
+  deliberately-quoted lowercase Latin idiom (`carpe diem`) is shape-indistinguishable from a lowercase
+  out-of-glossary leak, so neither the d2 classifier nor the model reliably spared it (FP on BOTH tiers every
+  run). e1 added a deterministic quote-aware LEAVE rule (multi-word span bordered by quote characters) that
+  now gates it.
+- **[CLOSED - section 17] Name-particle context rule in d2.** Lowercase name particles (`de` / `da` / `van`)
+  sandwiched between two Title-Case runs ("Simone de Beauvoir", "Vincent van Gogh") reached the model and got
+  transliterated / translated. e1 added a deterministic name-particle LEAVE rule (a lowercase Latin run
+  between two Title-Case Latin runs) that now spares them.
+- **[CLOSED - section 17] Book-scoped entity list.** The classifier accepted an optional `bookEntities` set
+  but no live list was wired. e2 added `BookEntityProvider` (deterministic harvest of stored CharacterAnalysis
+  names + a manuscript Title-Case / cross-chapter scan) and e3 threaded it through both repair seams; it is
+  the one lever that can spare a foreign HEBREW run (which has no case signal).
 - **English-book (Hebrew-in-English) direction is under-measured.** Only 3 Latin-native values (2 reach the
   model); both model-reached Hebrew names (שרה, דוד) were preserved on both tiers, but the direction was not
   stress-tested with Hebrew common-concept words (where "translate" is arguably correct). Treat the high
@@ -807,3 +834,400 @@ never worse) AND is OFF at the default, enabling it is low-risk to trial and ins
   over-rewriting LLM stage was the wrong final conclusion; shrinking its blast radius to one marked token
   (structure held by code, prefix/suffix spliced verbatim by offset) was the right one. Generalise: when an
   LLM edit over-reaches, narrow the scope before abandoning the model.
+
+## 17. Precision follow-up: sharpened deterministic skip-gate + rollout (dynamic-term-repair-precision-followup plan)
+
+The section-14 HALT diagnosed the problem precisely: over-rewrite was 0 on both tiers (the span-scope design is
+structurally safe), so precision is a SKIP decision, not a replacement. 12 of 18 legitimate cases were already
+preserved by the deterministic gate with ZERO model calls; the six failures were two narrow, known classes -
+lowercase name PARTICLES (`van` / `da` / `de`) and a quoted foreign IDIOM (`carpe diem`). The precision
+follow-up (plan `dynamic-term-repair-precision-followup-2026-07-11`, todos e1-e6) sharpened that DETERMINISTIC
+gate with two cheap, NO-NEW-MODEL-COST levers, re-measured both tiers, and flipped the default. The result:
+all 18 legitimate cases are now gated deterministically (0 model calls), so preservation is 100% and
+tier-independent, and the LOCAL tier now clears the bar the original d6 HALTed on.
+
+### 17.1 The sharpened deterministic skip-gate
+
+Two levers, both in the `d1 -> d2 -> d3` pipeline (section 12.1), both adding ZERO model calls:
+
+- **e1 - two deterministic LEAVE rules in `ForeignRunClassifier` (`Services/Analysis/ForeignRunClassifier.cs`),
+  both context-derived from the surrounding value, never a word list:**
+  - **Quote-aware LEAVE.** A run inside a MULTI-word quoted span (an opening-like quote reachable to the left
+    and a closing-like quote to the right, with at least one other word inside) is a do-not-translate citation
+    (`"carpe diem"`) and is LEFT. Guarded tightly: a LONE scare-quoted word does NOT qualify (the span must be
+    multi-word), so a single quoted leak still REPAIRs and a stray apostrophe / abbreviation geresh in ordinary
+    prose cannot spare a leak. The quote set is ASCII, guillemets, curly typographic quotes, and the Hebrew
+    gershayim / geresh; the scan is script-agnostic and bounded (64-char window, stops at any sentence
+    terminator / other punctuation).
+  - **Name-particle LEAVE.** An all-lowercase Latin run sandwiched between two Title-Case Latin runs (the "van"
+    of "Vincent van Gogh", "da" of "Leonardo da Vinci", "de" of "Simone de Beauvoir") is a name connective and
+    is LEFT. It requires the IMMEDIATELY-adjacent token on BOTH sides across a single space to be a Title-Case
+    Latin run; a lowercase or non-Latin neighbour disqualifies it, so an ordinary lowercase leak (`confusion`
+    flanked by Hebrew) still REPAIRs.
+    > **SUPERSEDED by section 18.1 (2026-07-12).** The immediate-adjacency requirement described here is a P0
+    > gate hole: two ADJACENT lowercase particles disqualify each other, so `of the` / `van der` / `de la` BOTH
+    > reached the repair model. The rule is now a bounded "within a Title-Case Latin name span" walk.
+- **e2 - the auto per-book entity list (`Services/Analysis/BookEntityProvider.cs`).** The classifier already
+  accepted an optional `bookEntities` set (always LEAVE); e2 supplies it deterministically, with no NER model
+  call, from two sources: (a) the book's already-stored `CharacterAnalysis` character + relationship names
+  (from `AnalysisResult.StructuredResult` and the cached `BookProfile.CharactersJson`), and (b) a manuscript
+  scan of the chapter prose for Latin Title-Case tokens that either recur across >= 2 chapters OR appear
+  mid-sentence at least once (both proper-noun signals a leaked common word does not exhibit). A tiny stop-list
+  of capitalized common words is the only word list, applied to the manuscript scan only (a declared name is
+  authoritative even when it looks like a common word). Case-insensitive; cached per book (a stale set only
+  changes which tokens are spared, never correctness). This is the one lever that can spare a foreign HEBREW
+  run in a Latin-script book, which has no letter-case signal. **Fail-safe:** no book context / any fault
+  yields an EMPTY set, which is exactly the pre-follow-up behaviour; the swallowed fault is logged (never
+  silently hidden), per the fail-safe-swallow-observability lesson.
+- **e3 - threading the set to the classifier.** `UnifiedAnalysisService.ApplyAnalysisRepairAsync` gained a
+  `bookId` param (all callers pass it; the raw seam passes `Guid.Empty` = empty set), fetches the entity set
+  LAZILY only on the dynamic path (so a run that never reaches the dynamic stage never hits the DbContext), and
+  threads it through `DynamicTermRepairService.ApplyAsync` -> `RepairFieldsAsync` -> `RepairValueAsync` ->
+  `ForeignRunClassifier`. The BookReview engine hook (`BookReviewService`) is wired the same way via
+  `RepairFindingsAsync`. `BookEntityProvider` is a singleton (its per-book cache persists across requests) that
+  reads the DbContext through a short-lived scope, so it never captures a scoped DbContext.
+
+### 17.2 Re-measured preservation + cleaning (both tiers, e4; RULE 0, real outputs)
+
+> **SUPERSEDED by section 18.2 (be-c08, 2026-07-12). The tables below are KEPT as the historical record, not as
+> the current gate.** They are retained deliberately (an overwritten measurement hides the reason the second one
+> was needed), but they must not be cited as the evidence for the shipped default. Two reasons, both structural:
+> **(1)** e4 HAND-AUTHORED its entity sets and described them as what a deterministic `BookEntityProvider` "would
+> surface". That was an assumption, never a measurement: the e4 harness never constructed the provider, never
+> threaded a `bookId`, and never touched the DB path that ships, so the harvest logic and the `bookId` threading
+> (the entire e2/e3 contribution) are exactly the parts of the feature its gate did NOT exercise. **(2)** e4's
+> CLEANING table (below) was measured ENTITY-FREE, so the one regression the entity lever was known to risk (an
+> over-harvested entity SPARING a real leak) was never measured at all. Section 18.2 re-runs both gates through
+> the REAL provider, with an ADVERSARIAL book chosen to trigger exactly that regression.
+
+Re-run via the same instruments as d5/d6 (`OutputQualityDiagnostic.MeasureLegitimateTermPreservation_LocalVsCloud`
++ `.MeasureDynamicTermRepair_LocalVsCloud`) with the sharpened gate + a representative per-book entity set
+active. The lowercase name particles (`van` / `da` / `de`) were DELIBERATELY EXCLUDED from the entity set so
+the e1 name-particle rule is still exercised rather than masked.
+
+**Preservation (false-positive gate) - legitimate-term set, 18 values that must come back byte-identical:**
+
+| tier | preservation | over-rewrite | model calls | meets bar (>= 90% & over-rewrite 0) |
+|---|---|---|---|---|
+| LOCAL (`Ollama / gemma4:12b`) | **100% (18/18)** | **0** | 0 (all gated) | **YES** |
+| CLOUD (`OpenRouter / google/gemma-4-31b-it`) | **100% (18/18)** | **0** | 0 (all gated) | **YES** |
+
+All 18 legitimate cases were preserved by the DETERMINISTIC gate with ZERO model calls: `van` / `da` / `de`
+by the e1 name-particle rule (3 runs / 0 repair), `carpe diem` by the e1 quote rule (2 / 0),
+Kafka / Paris / Orwell / Kindle / Photoshop / Google / NASA / PDF / "Brave New World" by the entity /
+Title-Case / allowlist gates, `example.com` / `info@publisher.com` by the URL / email gates, and the
+Hebrew-in-English names שרה / דוד / ירושלים by the supplied book-entity set. Because gating is pure and
+deterministic, **preservation is tier-independent** - LOCAL is 100% precisely because those four
+previously-failing tokens no longer reach the model, which retires the original d6 HALT cause (LOCAL 78% was
+BECAUSE `van` / `da` / `de` / `carpe diem` reached the model). This is why LOCAL now clears the >= 90% bar it
+stably failed before (78% -> 100%).
+
+**Cleaning (recall gate) - 10 real out-of-glossary leaks, entity-free:**
+
+| tier | cleaned | over-rewrite | latency median / p90 (ms) |
+|---|---|---|---|
+| LOCAL (`Ollama / gemma4:12b`) | **100% (10/10)** | **0** | 2646 / 3245 |
+| CLOUD (`OpenRouter / google/gemma-4-31b-it`) | **100% (10/10)** | **0** | 972 / 4926 |
+
+Both tiers cleaned all 10 leaks, span-scoped, with over-rewrite 0 (the HARD gate HELD): `confusion` -> `בלבול`,
+`nostalgia` -> `נוסטלגיה` (CLOUD `געגועים`), `alienation` -> `ניכור`, `catharsis` -> `קתריסיס` (CLOUD
+`קתארזיס`), `vulnerability` -> `פגיעות`, `melancholy` -> `מלנכוליה`, and so on. The new LEAVE rules did NOT
+regress cleaning - the leak set stayed 100% cleaned. **Non-regression (deterministic):** the shipped glossary
+still cleans `narrator` / `tension` / `irony` under `GlossaryThenDynamic` and the dynamic stage does not undo
+them.
+
+> LOCAL produced two non-standard transliteration spellings (`claustrophobia` -> `קפוסטרופוביה`,
+> `catharsis` -> `קתריסיס`); both were still CLEANED (no Latin residual) and span-scoped, so they are a
+> Hebrew-spelling-quality note for native-speaker validation (section 16.1 / repair-gold `c04`), NOT a gate
+> failure.
+
+> **SCOPE OF THE 100% CLEANING NUMBER (read this before trusting it).** All 10 leaks in the d5 set are
+> CONTENT NOUNS (`confusion`, `nostalgia`, `catharsis`, `melancholy`, ...), i.e. abstract nouns with a clean
+> 1:1 Hebrew equivalent. The set contains **ZERO function words**. A leaked FUNCTION word (`the`, `of`, `and`,
+> `to`) has NO standalone Hebrew equivalent (Hebrew's definite article is the PREFIX ה־, not a word), so the
+> span-scoped pass structurally CANNOT fix it and it survives - section 17.5 reproduces exactly that on a real
+> end-to-end run. So "100% cleaned" means 100% of the CONTENT-noun class: the class the closed glossary could
+> not reach, and the class this feature was built for. It is NOT 100% of all conceivable leaks, and the gold
+> set should not be read as if it were.
+
+### 17.3 Rollout decision (user-chosen 2026-07-11): SHIP LOCAL
+
+Both tiers cleared the bar (>= 90% preservation + 100% cleaning + over-rewrite 0 on REAL outputs), so the
+conditional model-judge escalation (e5) was CANCELLED. **The shipped default `Ai:AnalysisRepair.Mode` was
+flipped from `Glossary` to `GlossaryThenDynamic`** in BOTH `appsettings.json` and `appsettings.Production.json`,
+with `TermRepair` on the **LOCAL** tier (`Ollama / gemma4:12b`, already the shipped local TermRepair model, so
+no `Ai:FeatureModels:TermRepair` change was needed - only the `Mode` flip). LOCAL was chosen because it is the
+cheapest, offline, and private option and it meets the bar; CLOUD (`OpenRouter / google/gemma-4-31b-it`)
+remains the measured fallback (section 15). The precision win is carried by the DETERMINISTIC gate (all 18
+legit cases gated, 0 model calls, tier-independent), not by trusting the LOCAL model on the reached-model
+tokens - which is why LOCAL clears the bar it originally HALTed on. The kill-switch (`Mode=Glossary` / `Off`,
+`Enabled=false`, or narrowing `PerType`) is unchanged (section 15).
+
+### 17.4 Residual deferrals + review-retro candidates (this follow-up)
+
+- **Item 5 (its own later plan):** the self-adjusting feedback loop - surface repairs in the editor as
+  accept/reject, feed rejections into a per-book do-not-touch store the gate consults; integrate with editor
+  roles / the base editor character. Highest build cost, out of scope here (section 16 / the design plan's
+  Deferred section).
+- **English-book (Hebrew-in-English) direction is still under-measured.** Only 3 Latin-native cases, and all
+  three are now entity-gated, so the reached-model behaviour of that direction was not stress-tested (section
+  16.1). Re-measure with Hebrew common-concept words before enabling on English books.
+- **Native-speaker spot-validation of the LOCAL Hebrew transliteration spellings** (`claustrophobia` ->
+  `קפוסטרופוביה`, `catharsis` -> `קתריסיס` were cleaned but spelled non-standard), mirroring repair-gold `c04`.
+- **FUNCTION-WORD leaks are structurally out of reach of span-scope (an ACCEPTED LIMIT, not a bug).** A leaked
+  closed-class function word cannot be repaired by swapping ONE token: fixing `מתוך the שמיים` requires
+  DELETING the token AND prefixing ה־ to the next word, i.e. a phrase RESTRUCTURE - precisely the field-scope
+  blast radius the span-scope design forbids in order to hold over-rewrite at 0 (section 12.4). The fail-safe
+  behaves correctly here: it leaves the text untouched rather than corrupting the sentence. Observed live in
+  section 17.5. **FOLLOW-UP (cheap, ZERO recall cost):** add a FUNCTION-WORD LEAVE rule to
+  `ForeignRunClassifier` so a closed-class English function word (`the`, `of`, `and`, `to`, `in`, ...) is gated
+  deterministically. Today every leaked `the` costs a WASTED TermRepair model call (~2.6s LOCAL) and still
+  fails; gating it up front costs nothing in recall (it was never fixable) and saves the call. It also belongs
+  in the d5 gold set as an EXPECTED-SURVIVOR case, so the taxonomy gap above cannot silently reappear.
+- **The d5 leak taxonomy is incomplete (measurement gap).** The gold set is all content nouns; extend it with
+  a function-word case (expected: LEAVE / survive) and ideally a multi-word phrase leak, so the headline
+  cleaning number states WHICH class it covers.
+- **review-retro candidate - config-parity coverage gap.** `AnalysisRepairConfigParityTests` originally
+  guarded only the `PerType` map between base and Production; the `Mode` value could drift silently (the exact
+  value this follow-up had to hand-sync across both files). The test now also asserts `Mode` parity. Lesson: a
+  parity test should cover EVERY independently-overridable key in a duplicated config block, not just the map
+  that motivated it.
+- **review-retro candidate - default-flip comment drift.** Flipping a single shipped-default value
+  (`Mode: Glossary` -> `GlossaryThenDynamic`) leaves a trail of now-stale "shipped default = Glossary" /
+  "never runs by default" inline comments and xmldoc across the codebase (appsettings comments, `Program.cs`,
+  the `AnalysisRepairMode` / `AnalysisRepairOptions` xmldoc in `Services/Ai/AiOptions.cs`, several
+  `UnifiedAnalysisService` / `BookReviewService` / `DynamicTermRepairService` comments). A default flip should
+  be paired with a sweep of the "shipped default" assertions that describe it.
+- **review-retro candidate - a gold set that only contains the class you expected.** The d5 leak set was all
+  content nouns, so "100% cleaned" read as complete coverage until a real end-to-end run surfaced a class the
+  set never contained (function words). A recall gold set should enumerate the TAXONOMY of the failure it
+  measures (and include expected-SURVIVOR cases), not just the instances that motivated the feature.
+
+### 17.5 End-to-end validation through the real API (2026-07-12)
+
+The d5/d6 instruments drive `DynamicTermRepairService.RepairValueAsync` **directly**; they never exercise the
+shipped seam (`UnifiedAnalysisService.RunAsync` -> `ApplyAnalysisRepairAsync` -> `BookEntityProvider` ->
+repair). That seam was covered by deterministic tests ONLY, so it was validated once against the RUNNING API
+and the REAL database before the PR (RULE 0: inspect the artifact the user actually receives).
+
+Two live `LiteraryAnalysis` runs (Hebrew, LOCAL `gemma4:12b`, shipped default `Mode=GlossaryThenDynamic`):
+
+| run | input | result |
+|---|---|---|
+| 1 | Hebrew book, Hebrew chapter (the NORMAL flow) | 116s, OK. Every prose value pure Hebrew, ZERO leaks. `themes[].significance` = `major` / `minor` preserved BYTE-IDENTICAL (the enum / structural-field invariant held). |
+| 2 | Hebrew analysis of an ENGLISH chapter (deliberate stress case) | 114s, OK. Character names `Daniel` / `Mara` NOT corrupted. ONE leaked FUNCTION word survived: `rhetoricalDevices[0].example` = `"...מתוך the שמיים"`. |
+
+**On the names (run 2).** The output reads `דניאל` / `מרה`, but that is the MODEL's own Hebrew transliteration,
+not a repair. The repair provably never saw those runs: `Daniel` is Title-Case mid-sentence AND a harvested
+book entity, so the classifier gates it LEAVE on two independent rules. A repair-induced name corruption would
+have been a P0; it did not happen.
+
+**On the survivor (run 2), root-caused rather than assumed:**
+- `RhetoricalDevice.Example` IS in the `RepairableFields` whitelist, so the field WAS in scope for repair.
+- Entity over-harvest is RULED OUT: `the` sits in `BookEntityProvider.CommonWordStopList` (case-insensitive)
+  and is therefore never harvested, so the entity gate did not spare it.
+- The classifier therefore correctly routed `the` to REPAIR; the MODEL declined (there is no standalone Hebrew
+  word for the English definite article) and the fail-safe kept the original value.
+- => a STRUCTURAL limit of span-scope, NOT a defect, and NOT a regression (under the previous default
+  `Mode=Glossary` the same `the` survived, since the closed glossary holds ~35 craft terms). Follow-up in 17.4.
+
+**What the seam validation confirms:** `bookId` threading, the singleton `BookEntityProvider` reading the
+DbContext through a short-lived scope, and the dynamic stage all ran in production config without fault, and no
+structural field was altered. Note the two runs exercised DIFFERENT provider paths: run 1's book has no Latin
+manuscript tokens and no stored `CharacterAnalysis`, so the provider legitimately returned an EMPTY set (its
+FAIL-SAFE path, identical to pre-follow-up behaviour); run 2's book supplied REAL harvested entities
+(`Daniel` / `Mara`, via Title-Case + cross-chapter recurrence).
+
+## 18. Precision fixes + re-measure through the REAL provider path (dynamic-term-repair-precision-fixes plan, 2026-07-12)
+
+The pre-PR review of the section-17 follow-up found that the gate itself had a hole, and that the measurement
+which justified the rollout had not run the code that ships. The shipped default was therefore REVERTED to
+`Mode=Glossary` first (a safety measure, nothing was committed yet), every precision fix was landed, both gates
+were RE-MEASURED on the LOCAL tier through the real `BookEntityProvider`, and only then was the default
+re-flipped to `GlossaryThenDynamic`. This section records that cycle. Where it disagrees with section 17, THIS
+section is current.
+
+### 18.1 The P0 gate hole: two adjacent lowercase particles disqualified each other
+
+The e1 name-particle LEAVE rule (section 17.1) recognised only a SINGLE lowercase particle between two
+Title-Case Latin names: it required the IMMEDIATELY adjacent token on BOTH sides, across exactly one space, to
+be a Title-Case Latin run. Runs are word-level (a space ends a run), so the moment TWO lowercase runs sit side
+by side, each one is the other's disqualifying neighbour and BOTH are classified REPAIR. Confirmed empirically
+against the un-patched rule:
+
+| value | runs sent to the repair model (un-patched) |
+|---|---|
+| `The Lord of the Rings` | `of`, `the` |
+| `Mies van der Rohe` | `van`, `der` |
+| `Charles de la Rue` | `de`, `la` |
+
+The single-particle cases the fixture DID contain (`Vincent van Gogh`, `A Tale of Two Cities`) gated correctly,
+which is why the hole survived e4: the fixture only ever exercised the shape the rule handled.
+
+**Why this is a P0 and not a cosmetic miss.** Once a fragment reaches the model, `DynamicTermRepairService`
+splices the Hebrew substitution back SPAN-SCOPED, and validation-by-re-detect CANNOT catch it: substituting
+Hebrew for `of` REDUCES the Latin-run count in the value, so the repair validates as SUCCESSFUL. The layer's
+whole safety story (fail-safe, revert-on-doubt) is blind here by construction. The output is a corrupted book
+title or surname in persisted analysis prose, exactly the class of damage the gate exists to prevent.
+
+**The fix (be-c01).** The rule is generalised from "immediately sandwiched between two Title-Case Latin runs" to
+"lies WITHIN a Title-Case Latin name span": scanning OUTWARD from the run across space-separated Latin tokens,
+a Title-Case Latin token must exist on BOTH sides with only all-lowercase Latin tokens in between. The walk is
+BOUNDED (`ForeignRunClassifier.MaxNameSpanLowercaseTokens = 3`, and it crosses no non-Latin / non-space
+character), so it has a defined found-nothing answer and cannot run away over a whole paragraph. The tight
+negatives still hold: a plain lowercase leak flanked by Hebrew (`confusion`) still REPAIRs, and `van` preceded
+by a lowercase `the` with NO Title-Case anchor beyond it (`היא נכנסה אל the van בחניון האחורי`) still REPAIRs.
+All three shapes above are now LEAVE-for-every-run regression tests, each proven RED against the un-patched
+rule before the fix was accepted.
+
+### 18.2 The be-c08 re-measure (SUPERSEDES the e4 tables in section 17.2)
+
+Same instruments as d5/d6 (`OutputQualityDiagnostic.MeasureDynamicTermRepair_LocalVsCloud` and
+`.MeasureLegitimateTermPreservation_LocalVsCloud`), live run 2026-07-12, LOCAL tier (`Ollama / gemma4:12b`),
+every fix in this plan active. The ONE thing that changed about the harness is the thing that matters: the
+entity set is now obtained by CALLING `BookEntityProvider.GetEntitiesAsync(bookId)` against a real
+`AppDbContext` over seeded books (be-c07), instead of being hand-authored in the test file.
+
+**Why the e4 tables cannot stand.** e4 hand-built its entity sets and only ASSUMED they were what the provider
+would surface. The harness never constructed the provider, never threaded a `bookId`, and never touched the DB
+path that ships, so the harvest logic and the `bookId` threading (all of e2/e3) were never on the measured path
+that flipped the production default ON. Separately, e4's d5 CLEANING gate ran ENTITY-FREE, so the entity
+lever's recall risk (an over-harvested entity SPARING a real leak) was not measured at all. Both gaps are
+closed below. The e4 tables are kept in section 17.2 as the historical record, marked superseded.
+
+**d5 CLEANING (recall gate), two arms.** ARM A is e4's entity-free control. ARM B is the production path: the
+REAL provider set for an ADVERSARIAL Hebrew book whose manuscript carries ONE English epigraph line
+(`הוא ציטט את הפתגם האנגלי: "A story of Confusion and Nostalgia, of Tension without Catharsis."`), which makes
+the provider harvest `Confusion`, `Nostalgia`, `Tension` and `Catharsis` as manuscript-tier entities. Those are
+the leak words themselves. Under the pre-be-c04 case-INSENSITIVE membership, each would have spared its
+lowercase twin.
+
+| arm | entity source | cleaned | over-rewrite | model calls | latency median / p90 (ms) |
+|---|---|---|---|---|---|
+| ARM A (control) | entity-free (e4's setup) | **10/10 (100%)** | **0** | 10 | 2410 / 2665 |
+| ARM B (production path) | REAL provider set, adversarial book | **10/10 (100%)** | **0** | 10 | 2358 / 2494 |
+
+- delta (B minus A): **0 percentage points**. The two arms agree on EVERY case (same cleaned, same
+  over-rewrite, same model-call count).
+- leaks SPARED by the entity lever (deterministic, 0 model calls): **0**.
+- The lever is genuinely armed (4 leak words ARE in the provider's set) and still spares nothing, because
+  be-c04 made manuscript-harvested tokens match CASE-SENSITIVELY. The regression it prevents is quantified in
+  the plan's investigation: with case-insensitive membership, 3 of the 10 leaks (30%) flip REPAIR to LEAVE,
+  bought with a single sentence of English in an 80-chapter manuscript.
+
+**d6 PRESERVATION (false-positive gate), 21 legitimate values that must come back byte-identical:**
+
+| tier | preservation | false positives | over-rewrite | values reaching the model | meets bar (>= 90% and over-rewrite 0) |
+|---|---|---|---|---|---|
+| LOCAL (`Ollama / gemma4:12b`) | **100% (21/21)** | **0** | **0** | **0 (all gated)** | **YES** |
+
+- Gate attribution: **3** cases gated by a PROVIDER-HARVESTED entity, **18** by a classifier or detector rule.
+  The 3 entity-gated cases are the Hebrew-in-English direction (`שרה`, `דוד`, `ירושלים`), where no case signal
+  exists and the entity set is the ONLY possible lever. That is precisely the place e4's hand-authored set hid.
+- The three be-c01 P0 shapes are in the fixture and are CLASSIFIER-gated with ZERO repair runs:
+  `The Lord of the Rings` (5 runs / 0 repair), `Mies van der Rohe` (4 / 0), `Charles de la Rue` (4 / 0). None
+  of their tokens is seeded into any book's manuscript, so the entity lever is inert for them BY CONSTRUCTION
+  and they can ONLY be gated by the name-span rule. That invariant is what the rollout rests on, and it is
+  pinned deterministically in `BookEntityFixtureSeedTests`.
+- Non-regression (deterministic): the shipped glossary still cleans `narrator` / `tension` / `irony` under
+  `GlossaryThenDynamic`, and the dynamic stage does not undo it.
+
+> **HOW TO READ THE 100% PRESERVATION NUMBER.** Because 0 of the 21 values reach the model, this figure is now
+> a property of the DETERMINISTIC GATE, not of the model tier. It no longer discriminates LOCAL from CLOUD, and
+> it must not be read as a model-quality result: 100% means the gate catches everything, not that the model
+> preserves well. It also means d6 has stopped stressing the model's preserve-a-proper-noun behaviour, which is
+> the intended design (a token that never reaches the model cannot be corrupted by it) but is worth stating.
+
+### 18.3 The cross-script harvest and the cache-refresh contract (be-c03, be-c04)
+
+The entity lever was largely inert in production before these fixes. Two independent causes, both fixed:
+
+**Script-aware harvest.** The manuscript scan was LATIN-ONLY, so it could never emit a Hebrew token, even
+though the provider's own reason for existing is that in a Latin-script book the entity check is the ONLY lever
+that can spare a Hebrew run (Hebrew has no case, so no Title-Case, ALL-CAPS or name-particle signal is
+available there). The scan is now SCRIPT-AWARE: it harvests the FOREIGN script relative to the book's language,
+so a Hebrew-native book harvests recurring Latin Title-Case tokens (as before) and a Latin-native book harvests
+recurring HEBREW tokens. In the Hebrew direction there is no case signal, so cross-chapter recurrence
+(`MinChaptersForRecurrence = 2`) is the whole gate, backed by a small Hebrew function-word stop-list so the
+recurrence rule does not harvest ordinary prose.
+
+**Two-tier, case-asymmetric membership (be-c04).** Manuscript-harvested tokens match CASE-SENSITIVELY; declared
+`CharacterAnalysis` names match case-insensitively. The asymmetry is deliberate and is the fix for the recall
+regression measured above: a leak is LOWERCASE by construction, while a name's manuscript evidence is
+CAPITALIZED by construction. Matching the manuscript tier case-sensitively spares `Confusion` (the exact
+surface form the book showed) without sparing the lowercase `confusion` that is a leak. A declared name is
+authoritative, so it keeps the looser match. The carrier type is `Services/Analysis/BookEntitySet.cs`, an
+`IReadOnlySet<string>` so the classifier signature is unchanged; `ForeignRunClassifier` treats its `Contains`
+as authoritative rather than widening a miss back into a case-insensitive scan.
+
+**Cache-refresh contract.** The per-book cache was a process-lifetime dictionary that also cached the EMPTY
+set, and `Invalidate` had NO callers. The ordinary production sequence therefore defeated the stored-names
+source outright: the first chapter analysis on a fresh book cached an empty set (no `CharacterAnalysis` exists
+yet), `BuildBookProfileAsync` later PRODUCED the `CharacterAnalysis` the provider wanted, nothing invalidated,
+and the character names never entered the set for the life of the process. The contract is now:
+
+- **BOUNDED.** A private `MemoryCache` (owned, not the app-wide `IMemoryCache`, so a `SizeLimit` here does not
+  force every other cache entry in the process to declare a `Size`), `SizeLimit = 128` books at 1 entry each,
+  a 30-minute sliding expiry, and a 2-hour absolute expiry as the backstop behind the explicit invalidations.
+- **NEVER CACHES THE EMPTY SET.** An empty build means "no harvest source exists yet", which is the state of a
+  fresh book. Rebuilding it is three indexed reads that return nothing, so it is cheaper to retry than to pin.
+- **INVALIDATED BY EVERY PRODUCER OF A HARVEST SOURCE.** `BookIntelligenceService.BuildBookProfileAsync` (the
+  `CharacterAnalysis` / `BookProfile` producer), `UnifiedAnalysisService`'s persisting seam, and
+  `ChapterService`'s content writes (save, create, delete, and DOCX import, since `Chapter.ContentText` is a
+  harvest source).
+- **Staleness is NOT correctness-neutral.** The old header claimed a stale set "only changes which tokens are
+  spared, never correctness". Under this feature's governing principle that is FALSE: a name the gate fails to
+  spare is a name the repair model corrupts. The header now says so.
+
+### 18.4 Rollout decision and the kill-switch (unchanged)
+
+**Both gates PASS on LOCAL, so the shipped default is re-flipped to `GlossaryThenDynamic`** in BOTH
+`appsettings.json` and `appsettings.Production.json` (they must move together;
+`AnalysisRepairConfigParityTests.Mode_BaseAndProduction_AreEqual` guards exactly this). The tier is LOCAL
+(`Ollama / gemma4:12b`), already the shipped `Ai:FeatureModels:TermRepair` model, so the `Mode` flip is the
+only config change. LOCAL is chosen because it is free, offline and private, and because precision is now
+carried by the deterministic gate rather than by the model tier (18.2), so the cheapest tier meets the bar.
+CLOUD (`OpenRouter / google/gemma-4-31b-it`) stays ROUTING-ONLY by decision, not because it fails a bar.
+
+The kill-switch is UNCHANGED from section 15:
+
+- **`Ai:AnalysisRepair.Mode = "Glossary"`** rolls back to the deterministic glossary only, reproducing the exact
+  pre-d4 sequence. This is the one-knob way to disable the dynamic stage while KEEPING the glossary guard.
+- **`Mode = "Off"`** additionally skips the glossary.
+- **`Enabled = false`** remains the MASTER off-switch for the whole repair layer (every stage, a strict no-op).
+- **`PerType`** is unchanged and still gates repair per analysis type; `Proofread` is never repaired regardless.
+
+Note that the CLASS default on `AnalysisRepairOptions.Mode` (in `Services/Ai/AiOptions.cs`) deliberately stays
+`Glossary`. That is the safe posture for programmatic and test construction (a hand-built options object never
+silently starts calling the repair model); it is NOT a drift from the shipped value. The gap is covered by
+`AnalysisRepairConfigParityTests.ShippedMode_BindsIntoAiOptions_AndDrivesTheStageSelection`, which binds the
+REAL `appsettings.json` and asserts the bound `Mode` drives the stage predicates (`RunsGlossary()` /
+`RunsDynamic()`, the single shared pair every gate now calls).
+
+### 18.5 Residual deferrals (stated honestly)
+
+- **Native-speaker validation of the emitted Hebrew is still OPEN.** LOCAL produces non-standard
+  transliterations and paraphrases: `catharsis` becomes `קתרזיס`, and `claustrophobia` came back as
+  `חרדת מרחב סגור` in one arm and `פחד מסביב` in the other. Every one was CLEANED (no Latin residual) and
+  span-scoped (over-rewrite 0), so this is not a gate failure, but the SPELLING and idiomatic quality of the
+  Hebrew is unvalidated. Mirrors the repair-gold `c04` deferral.
+- **The Hebrew-in-English direction now HARVESTS (be-c03), but is still measured on only 3 synthetic
+  Latin-native cases.** All three are entity-gated, and the direction was not stress-tested with Hebrew
+  common-concept words (where translating is arguably correct). Treat its preservation as indicative, not
+  proven, before enabling on English books at scale.
+- **The entity set measured in be-c08 is SYNTHETIC-book-sourced.** It is the real provider over a real
+  `DbContext`, but the books are seeded fixtures. What is now measured is the harvest LOGIC and the two-tier
+  matching; the harvest DENSITY of a real book is still unmeasured. The one real data point comes from be-c04's
+  investigation, which ran the harvest over the real 80-chapter Hebrew manuscript fixture: it yields **0**
+  tokens as-is (the manuscript is effectively pure Hebrew), and **4** once a single English epigraph line is
+  added. So on a real Hebrew book the harvest is driven by INCIDENTAL Latin (epigraphs, quoted lines, brand
+  mentions), not by the recurrence signal.
+- **An UNQUOTED lowercase foreign idiom is shape-indistinguishable from a leak.** be-c05's matched-quote-pair
+  rule spares a QUOTED `carpe diem`, but an unquoted lowercase idiom looks EXACTLY like the lowercase
+  out-of-glossary leaks d5 cleans, and neither the classifier nor the model reliably spares it. This is an
+  inherent precision FLOOR of the dynamic pass, not a bug to be fixed at the margin. A do-not-translate
+  allowlist for intentional foreign phrases remains a deferral.
+- **Item 5 (the accept/reject feedback loop) remains its own plan.** Surface repairs in the editor as
+  accept/reject and feed rejections into a per-book do-not-touch store the gate consults. Highest build cost,
+  out of scope here.
+- **Function-word leaks stay structurally out of reach of span-scope** (section 17.4), unchanged by this plan.
