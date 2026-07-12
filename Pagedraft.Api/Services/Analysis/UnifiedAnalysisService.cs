@@ -37,6 +37,7 @@ public class UnifiedAnalysisService
     private readonly Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker _ktivMaleChecker;
     private readonly AnalysisRepairService _analysisRepair;
     private readonly DynamicTermRepairService _dynamicTermRepair;
+    private readonly IBookEntityProvider _bookEntityProvider;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -56,7 +57,8 @@ public class UnifiedAnalysisService
         SuggestionDiffService suggestionDiff,
         Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker ktivMaleChecker,
         AnalysisRepairService analysisRepair,
-        DynamicTermRepairService dynamicTermRepair)
+        DynamicTermRepairService dynamicTermRepair,
+        IBookEntityProvider bookEntityProvider)
     {
         _db = db;
         _router = router;
@@ -70,6 +72,7 @@ public class UnifiedAnalysisService
         _ktivMaleChecker = ktivMaleChecker;
         _analysisRepair = analysisRepair;
         _dynamicTermRepair = dynamicTermRepair;
+        _bookEntityProvider = bookEntityProvider;
     }
 
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
@@ -442,8 +445,8 @@ public class UnifiedAnalysisService
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         // Analysis-output repair (RunAsync seam), all gated by Ai:AnalysisRepair. Shipped default
-        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
-        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
+        // { Enabled:true, GuardOnly:true, Mode:GlossaryThenDynamic } = glossary fast-path THEN dynamic span-scoped repair, value-scoped LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, bookId ?? Guid.Empty, ct);
 
         var result = new AnalysisResult
         {
@@ -519,6 +522,9 @@ public class UnifiedAnalysisService
 
         await _db.SaveChangesAsync(ct);
 
+        // be-c03: a persisted CharacterAnalysis is a harvest source for the per-book proper-noun LEAVE set.
+        InvalidateBookEntitiesIfNameSource(analysisType, bookId);
+
         // Async-job dispatch: the row is now persisted with JobId set, so the poller's GetAnalysisByJobId
         // will find it. Mark the job Succeeded to end the FE progress poll. No-op for the sync path.
         if (jobId.HasValue)
@@ -577,8 +583,8 @@ public class UnifiedAnalysisService
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         // Analysis-output repair (RunWithInputAsync seam), all gated by Ai:AnalysisRepair. Shipped default
-        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
-        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
+        // { Enabled:true, GuardOnly:true, Mode:GlossaryThenDynamic } = glossary fast-path THEN dynamic span-scoped repair, value-scoped LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, bookId ?? Guid.Empty, ct);
 
         // QA is answer-primary: the model returns an {answer, citations, confidence} JSON envelope, but the UI
         // binds ResultText directly (book-dashboard "ask" card). Surface the parsed (and glossary-repaired)
@@ -656,8 +662,31 @@ public class UnifiedAnalysisService
 
         await _db.SaveChangesAsync(ct);
 
+        // be-c03: a persisted CharacterAnalysis is a harvest source for the per-book proper-noun LEAVE set.
+        InvalidateBookEntitiesIfNameSource(analysisType, bookId);
+
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
+    }
+
+    /// <summary>
+    /// be-c03 cache-refresh trigger: <see cref="IBookEntityProvider"/> harvests its per-book proper-noun LEAVE
+    /// set partly from the book's stored ACTIVE <see cref="AnalysisType.CharacterAnalysis"/> results, so every
+    /// seam that PERSISTS one (and archives the previous one) has just changed a harvest source. Drop the cached
+    /// set here so the next analysis rebuilds it with the new names — a stale set that MISSES a name is not
+    /// cosmetic: the repair model rewrites the name it was supposed to spare.
+    ///
+    /// A no-op for every other analysis type and for a run with no book (Guid.Empty / null is never cached).
+    /// <see cref="IBookEntityProvider.Invalidate"/> is non-throwing by contract, so this can never break a save.
+    /// </summary>
+    private void InvalidateBookEntitiesIfNameSource(AnalysisType analysisType, Guid? bookId)
+    {
+        if (analysisType != AnalysisType.CharacterAnalysis || bookId is not { } id || id == Guid.Empty)
+        {
+            return;
+        }
+
+        _bookEntityProvider.Invalidate(id);
     }
 
     /// <summary>Extract the QA <c>answer</c> prose from a parsed <see cref="QAResult"/> JSON envelope, so the
@@ -769,8 +798,8 @@ public class UnifiedAnalysisService
         cleanContent = MaybeReplaceLineEditResultText(analysisType, structuredJson, cleanContent);
 
         // Analysis-output repair (streaming seam), all gated by Ai:AnalysisRepair. Shipped default
-        // { Enabled:true, GuardOnly:true } = deterministic glossary only, LLM off; never for Proofread.
-        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, ct);
+        // { Enabled:true, GuardOnly:true, Mode:GlossaryThenDynamic } = glossary fast-path THEN dynamic span-scoped repair, value-scoped LLM off; never for Proofread.
+        (structuredJson, cleanContent) = await ApplyAnalysisRepairAsync(structuredJson, cleanContent, analysisType, language, bookId ?? Guid.Empty, ct);
 
         var result = new AnalysisResult
         {
@@ -837,17 +866,27 @@ public class UnifiedAnalysisService
         }
 
         await _db.SaveChangesAsync(ct);
+
+        // be-c03: a persisted CharacterAnalysis is a harvest source for the per-book proper-noun LEAVE set.
+        InvalidateBookEntitiesIfNameSource(analysisType, bookId);
     }
 
     /// <summary>
     /// Run analysis without persistence - used internally by BookIntelligenceService
     /// for chapter summarization where the result feeds into a larger pipeline.
     /// </summary>
+    /// <param name="bookId">
+    /// The book this raw run belongs to, threaded from the caller (BookIntelligenceService knows it) so the
+    /// repair layer can fetch the per-book proper-noun LEAVE set — the SAME id the persisted seams pass. It is
+    /// optional ONLY as the fail-safe for a caller with genuinely no book context: null degrades to Guid.Empty,
+    /// i.e. an empty entity set (the pre-e3 behaviour), never a crash.
+    /// </param>
     public async Task<string> RunRawAsync(
         string inputText,
         AnalysisType analysisType,
         string? instruction,
         string language,
+        Guid? bookId = null,
         CancellationToken ct = default)
     {
         var taskType = MapToTaskType(analysisType);
@@ -873,8 +912,21 @@ public class UnifiedAnalysisService
         // serves (BookOverview / Synopsis / CharacterAnalysis / StoryAnalysis) it is a strict no-op that
         // returns the text byte-identical. Summarization has no structured payload, so the whole text is the
         // repairable prose (structuredJson: null).
+        // SEAM PARITY (be-c02): the bookId is THREADED FROM THE CALLER, exactly like the persisted seams
+        // (RunAsync / RunWithInputAsync / streaming / chunked LineEdit) do — RunRawAsync takes raw inputText
+        // rather than a book/chapter target, but every real caller (BookIntelligenceService's
+        // SummarizeChaptersAsync + BuildBookProfileAsync) HAS the book in scope and passes it. That gives the
+        // dynamic stage the per-book proper-noun LEAVE set, so a character/place name of THIS book is spared
+        // here too. It matters most for Summarization — the one type this seam actually repairs, whose output
+        // is persisted to ChunkSummary.SummaryText and names characters constantly (a sentence-initial Latin
+        // name is NOT spared by the classifier's Title-Case-mid-sentence proper-noun rule, so the entity set is
+        // the only thing standing between it and a rewrite).
+        // A null bookId is the FAIL-SAFE for a caller with no book context: it degrades to Guid.Empty, and
+        // BookEntityProvider.GetEntitiesAsync(Guid.Empty) returns an empty set — the pre-e3 behaviour, byte-
+        // identical to what this seam did before. Under the rollback Mode=Glossary/Off the dynamic stage does
+        // not run here at all (and the provider is never consulted).
         var (_, repaired) = await ApplyAnalysisRepairAsync(
-            structuredJson: null, cleanContent: sanitized, analysisType, language, ct);
+            structuredJson: null, cleanContent: sanitized, analysisType, language, bookId ?? Guid.Empty, ct);
         return repaired;
     }
 
@@ -1808,11 +1860,11 @@ public class UnifiedAnalysisService
 
         // Analysis-output repair (chunked LineEdit seam) — mirror the three non-chunked seams (:435, :560,
         // :725) so LONG Hebrew chapters (which route here) get the same glossary/repair layer as short ones.
-        // Gated by Ai:AnalysisRepair (shipped default { Enabled:true, GuardOnly:true } = deterministic
-        // glossary only, LLM off). ApplyAnalysisRepairAsync re-derives ResultText from the repaired
+        // Gated by Ai:AnalysisRepair (shipped default { Enabled:true, GuardOnly:true, Mode:GlossaryThenDynamic }
+        // = glossary fast-path THEN dynamic span-scoped repair, value-scoped LLM off). ApplyAnalysisRepairAsync re-derives ResultText from the repaired
         // overallFeedback for LineEdit, preserving the MaybeReplaceLineEditResultText behaviour above.
         var (repairedJson, repairedText) = await ApplyAnalysisRepairAsync(
-            mergedJson, cleanContent, AnalysisType.LineEdit, language, ct);
+            mergedJson, cleanContent, AnalysisType.LineEdit, language, bookId ?? Guid.Empty, ct);
         mergedJson = repairedJson ?? mergedJson;
         cleanContent = repairedText;
 
@@ -2783,9 +2835,10 @@ public class UnifiedAnalysisService
     ///   <c>GuardOnly=false</c>, independent of Mode. Guard-gated inside the service (a clean field makes
     ///   ZERO model calls) and fail-safe (can only ever leave a field cleaner). Never runs for Proofread.
     ///
-    /// The SHIPPED appsettings default is { Enabled:true, GuardOnly:true, Mode:Glossary } — the glossary
-    /// stage only (the p3-gate GUARD-ONLY decision + the d4 Mode default), which reproduces the pre-d4/pre-p6
-    /// behaviour (always-on glossary, dynamic + LLM both off) EXACTLY. Setting Enabled=false, or Mode=Off,
+    /// The SHIPPED appsettings default is { Enabled:true, GuardOnly:true, Mode:GlossaryThenDynamic } - the
+    /// glossary fast-path THEN the dynamic span-scoped stage (the p3-gate GUARD-ONLY decision keeps the
+    /// value-scoped LLM off; the d4 Mode default now layers the dynamic stage on). Mode=Glossary (or Off) is
+    /// the rollback/kill-switch that reproduces the pre-d4/pre-p6 glossary-only behaviour. Setting Enabled=false, or Mode=Off,
     /// makes the whole layer (or just the glossary/dynamic half) a strict no-op per the plan.
     ///
     /// For LineEdit the prose-primary ResultText is refreshed from the repaired overallFeedback AFTER every
@@ -2797,14 +2850,15 @@ public class UnifiedAnalysisService
         string cleanContent,
         AnalysisType analysisType,
         string language,
+        Guid bookId,
         CancellationToken ct)
     {
         var cfg = _aiOptions.Value.AnalysisRepair;
 
         // FULL no-op when the layer is disabled. A null block (no Ai:AnalysisRepair in config) or
         // Enabled=false BOTH mean off — no stage runs, and the inputs are returned byte-identical. The
-        // shipped appsettings block sets Enabled=true, so production runs the Mode-selected stage(s),
-        // preserving the pre-p6/pre-d4 behaviour. Also skip when a non-empty PerType map excludes this
+        // shipped appsettings block sets Enabled=true, so production runs the Mode-selected stage(s)
+        // (glossary + dynamic under the shipped Mode=GlossaryThenDynamic). Also skip when a non-empty PerType map excludes this
         // analysis type (a type absent/false is skipped).
         if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, analysisType))
         {
@@ -2812,10 +2866,16 @@ public class UnifiedAnalysisService
         }
 
         // d4: Mode gates WHICH of the glossary/dynamic stages run, layered UNDER the Enabled/PerType gate
-        // above. Off is an ADDITIONAL strict no-op scoped to stage selection. The shipped default (Glossary)
-        // takes the IDENTICAL code path the pre-d4 layer always took, so this branch changes nothing today.
+        // above. Off is an ADDITIONAL strict no-op scoped to stage selection. The shipped default
+        // (GlossaryThenDynamic) runs the glossary fast-path THEN the dynamic stage; Mode=Glossary (or Off) is
+        // the rollback that takes the IDENTICAL code path the pre-d4 layer always took.
+        //
+        // be-c06: expressed via the SHARED stage predicates rather than a longhand `mode == Off`, so this
+        // early-out means exactly "no stage is selected -> strict no-op" and stays correct for any future
+        // mode (and for a config-bound value outside the enum, which selects nothing). For Mode=Off this is
+        // byte-identical to the previous check.
         var mode = cfg.Mode;
-        if (mode == Ai.AnalysisRepairMode.Off)
+        if (!mode.RunsGlossary() && !mode.RunsDynamic())
         {
             return (structuredJson, cleanContent);
         }
@@ -2827,14 +2887,16 @@ public class UnifiedAnalysisService
         var repairSw = Stopwatch.StartNew();
 
         // Glossary stage — deterministic glossary pass. Runs when Mode is Glossary or GlossaryThenDynamic
-        // (the shipped default is Glossary, so THIS is the only stage active in production today); fail-safe
+        // (the shipped default is GlossaryThenDynamic, so this glossary stage runs FIRST, then the dynamic stage below); fail-safe
         // (a no-op for Proofread, a non-Hebrew book, or an out-of-glossary term). GlossaryRepairPass is
         // itself catch-all fail-safe, but the layer's load-bearing invariant is "the repair layer can
         // NEVER throw into RunAsync", so wrap this seam too (belt-and-braces): on ANY exception log and
         // keep the un-repaired inputs. Without this, a fault here (e.g. a model-emitted null JSON array
         // walked unguarded) would propagate through RunAsync and crash the entire analysis.
+        // be-c06: the stage predicate lives ONCE, on the enum (AnalysisRepairModeExtensions.RunsGlossary) — the
+        // BookReview engine hook calls the SAME predicate, so the two seams cannot drift apart.
         var glossaryChanged = 0;
-        if (mode == Ai.AnalysisRepairMode.Glossary || mode == Ai.AnalysisRepairMode.GlossaryThenDynamic)
+        if (mode.RunsGlossary())
         {
             try
             {
@@ -2864,16 +2926,32 @@ public class UnifiedAnalysisService
 
         // Dynamic stage (d4) — span-scoped dynamic detect-and-repair. Runs when Mode is Dynamic (replacing
         // the glossary substitution entirely) or GlossaryThenDynamic (running AFTER the glossary, over
-        // whatever residual foreign text it left). Never runs under the shipped default (Mode=Glossary).
+        // whatever residual foreign text it left). Runs under the shipped default (Mode=GlossaryThenDynamic), after the glossary; Mode=Glossary/Off is the rollback that skips it.
         // DynamicTermRepairService.ApplyAsync is itself catch-all fail-safe; wrap again here (belt-and-braces,
         // mirrors the glossary stage above) so a fault here can never propagate into RunAsync.
+        // be-c06: shared stage predicate (AnalysisRepairModeExtensions.RunsDynamic) — same predicate the
+        // BookReview engine hook's dynamic gate calls.
         var dynamicChanged = 0;
-        if (mode == Ai.AnalysisRepairMode.Dynamic || mode == Ai.AnalysisRepairMode.GlossaryThenDynamic)
+        if (mode.RunsDynamic())
         {
             try
             {
+                // e3: fetch the per-book proper-noun LEAVE set LAZILY, ONLY on this dynamic path — under the
+                // rollback Mode=Glossary/Off the dynamic path does not run, so it never hits the DbContext (the
+                // lazy fetch avoids a needless per-analysis read on the non-dynamic modes). BookEntityProvider is deterministic and
+                // returns an empty set on any fault / missing book / Guid.Empty (fail-safe = current behavior);
+                // it is awaited INSIDE this try/catch, so even an unforeseen throw keeps the un-repaired inputs.
+                //
+                // final-r02: pass the SAME `language` that is handed to _dynamicTermRepair.ApplyAsync one line
+                // below. The repair layer resolves the classifier's expected script from it, and the provider
+                // resolves its HARVEST direction from it through the same helper — so the script harvested is
+                // by construction the script the classifier looks up. (Keying the harvest on the book's STORED
+                // language instead let an English-language analysis of a Hebrew book harvest LATIN tokens while
+                // the classifier looked up HEBREW runs, silently disarming the entity lever; `language` here is
+                // caller-overridable via RunAnalysisRequest.Language, so the two really can differ.)
+                var bookEntities = await _bookEntityProvider.GetEntitiesAsync(bookId, language, ct).ConfigureAwait(false);
                 var dynamicResult = await _dynamicTermRepair.ApplyAsync(
-                    analysisType, structuredJson, cleanContent, language, JsonOpts, ct).ConfigureAwait(false);
+                    analysisType, structuredJson, cleanContent, language, JsonOpts, bookEntities, ct).ConfigureAwait(false);
                 structuredJson = dynamicResult.structuredJson;
                 cleanContent = dynamicResult.cleanContent;
                 dynamicChanged = dynamicResult.fieldsChanged;

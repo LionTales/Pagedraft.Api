@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
@@ -517,5 +519,131 @@ public class DynamicTermRepairServiceTests
         Assert.Equal(
             value.Replace("confusion", "בלבול").Replace("panic", "בהלה").Replace("anxiety", "חרדה"),
             result.Value);
+    }
+
+    // ─── (k) e3: per-book entity LEAVE lever threads through the ApplyAsync / RepairFindingsAsync seams ─
+    //
+    // e3 adds a bookEntities param to ApplyAsync (-> RepairFieldsAsync/RepairValueAsync) and to
+    // RepairFindingsAsync (-> RepairFieldsAsync), each threaded verbatim to ForeignRunClassifier. These tests
+    // prove a SEEDED entity set reaches the classifier and SPARES those tokens through the seam (case-
+    // insensitively), while an out-of-entity leak in the same value still repairs; and that a NULL set is inert
+    // (exactly the pre-e3 behavior — the shipped Mode=Glossary default never even fetches one).
+
+    private static readonly JsonSerializerOptions CamelCase = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    [Fact]
+    public async Task ApplyAsync_SeededBookEntity_ReachesClassifier_SparesEntity_RepairsRealLeak()
+    {
+        // A leak-shaped lowercase token ("gogh") that WOULD repair by default is spared because it is in the
+        // per-book entity set (seeded case-differently as "Gogh" to prove case-insensitive membership through
+        // the seam), while an out-of-entity leak ("confusion") is still sent to the model. This exercises the
+        // full e3 thread: ApplyAsync -> ApplyStructuredAsync -> RepairFieldsAsync -> RepairValueAsync ->
+        // ForeignRunClassifier.RunsToRepair(bookEntities).
+        var input = new LiteraryAnalysisResult
+        {
+            Summary = "הצייר gogh תיאר confusion עמוק.",
+            Tone = "נוגה",
+        };
+        var json = JsonSerializer.Serialize(input, CamelCase);
+        var router = KeyedRouter(new Dictionary<string, string> { ["confusion"] = "בלבול" });
+        var entities = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Gogh" };
+
+        var (outJson, _, changed, fault) = await NewService(router).ApplyAsync(
+            AnalysisType.LiteraryAnalysis, json, string.Empty, "he-IL", CamelCase, entities, default);
+
+        Assert.Null(fault);
+        Assert.Equal(1, router.CallCount); // ONLY the real leak reached the model; the entity was never sent
+        Assert.Equal(1, changed);
+        var parsed = JsonSerializer.Deserialize<LiteraryAnalysisResult>(outJson!, CamelCase)!;
+        Assert.Contains("gogh", parsed.Summary);            // the book's own name spared (byte-identical)
+        Assert.DoesNotContain("confusion", parsed.Summary); // the real leak repaired
+        Assert.Contains("בלבול", parsed.Summary);
+    }
+
+    [Fact]
+    public async Task ApplyAsync_NullBookEntities_WiringInert_BothLeaksReachModel()
+    {
+        // The SAME value with NO entity set: the entity lever is INERT (exactly the pre-e3 behavior), so BOTH
+        // tokens are classified REPAIR and sent to the model. The contrast with the seeded test above proves it
+        // is the entity set — not luck / another classifier rule — that spares "gogh", and that a null set is a
+        // strict no-op (the shipped Mode=Glossary default never fetches one).
+        var input = new LiteraryAnalysisResult
+        {
+            Summary = "הצייר gogh תיאר confusion עמוק.",
+            Tone = "נוגה",
+        };
+        var json = JsonSerializer.Serialize(input, CamelCase);
+        var router = KeyedRouter(new Dictionary<string, string>
+        {
+            ["gogh"] = "גוך",
+            ["confusion"] = "בלבול",
+        });
+
+        var (outJson, _, changed, fault) = await NewService(router).ApplyAsync(
+            AnalysisType.LiteraryAnalysis, json, string.Empty, "he-IL", CamelCase, bookEntities: null, default);
+
+        Assert.Null(fault);
+        Assert.Equal(2, router.CallCount); // WITHOUT the entity set BOTH tokens are sent to the model
+        Assert.Equal(1, changed);
+        var parsed = JsonSerializer.Deserialize<LiteraryAnalysisResult>(outJson!, CamelCase)!;
+        Assert.DoesNotContain("gogh", parsed.Summary);       // repaired away — no entity to spare it
+        Assert.DoesNotContain("confusion", parsed.Summary);
+    }
+
+    [Fact]
+    public async Task RepairFindingsAsync_SeededBookEntity_ReachesClassifier_SparesEntity_RepairsLeak()
+    {
+        // BookReview entity path (the second e3 seam): the per-book entity set threads RepairFindingsAsync ->
+        // RepairFieldsAsync -> classifier, so a finding's Rationale keeps the book's own name ("gogh") while a
+        // real leak ("confusion") is repaired in place.
+        var finding = new BookFinding
+        {
+            Dimension = "character",
+            Verdict = "improve",
+            Severity = 2,
+            Rationale = "הדמות מזכירה את gogh ומשרה confusion אצל הקורא.",
+            SuggestedAction = null,
+        };
+        var router = KeyedRouter(new Dictionary<string, string> { ["confusion"] = "בלבול" });
+        var entities = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Gogh" };
+
+        var changedFindings = await NewService(router).RepairFindingsAsync(new[] { finding }, "he-IL", entities);
+
+        Assert.Equal(1, router.CallCount); // only the leak reached the model; the entity was spared
+        Assert.Equal(1, changedFindings);
+        Assert.Contains("gogh", finding.Rationale);            // the book's own name spared
+        Assert.DoesNotContain("confusion", finding.Rationale); // the real leak repaired
+        Assert.Contains("בלבול", finding.Rationale);
+    }
+
+    [Fact]
+    public async Task RepairFindingsAsync_NullBookEntities_WiringInert_LeakReachesModel()
+    {
+        // Fail-safe / regression: with NO entity set the BookReview seam is inert (pre-e3 behavior) — the same
+        // "gogh" token is classified REPAIR and sent to the model alongside the real leak.
+        var finding = new BookFinding
+        {
+            Dimension = "character",
+            Verdict = "improve",
+            Severity = 2,
+            Rationale = "הדמות מזכירה את gogh ומשרה confusion אצל הקורא.",
+            SuggestedAction = null,
+        };
+        var router = KeyedRouter(new Dictionary<string, string>
+        {
+            ["gogh"] = "גוך",
+            ["confusion"] = "בלבול",
+        });
+
+        var changedFindings = await NewService(router).RepairFindingsAsync(new[] { finding }, "he-IL", bookEntities: null);
+
+        Assert.Equal(2, router.CallCount); // WITHOUT the entity set BOTH tokens are sent
+        Assert.Equal(1, changedFindings);
+        Assert.DoesNotContain("gogh", finding.Rationale);
+        Assert.DoesNotContain("confusion", finding.Rationale);
     }
 }

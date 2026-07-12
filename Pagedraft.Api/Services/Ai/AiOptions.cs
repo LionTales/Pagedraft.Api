@@ -253,6 +253,50 @@ public enum AnalysisRepairMode
 }
 
 /// <summary>
+/// The SINGLE source of truth for "which repair stage(s) does this <see cref="AnalysisRepairMode"/> select?"
+/// (be-c06). Every stage gate in the codebase MUST call these — do NOT re-write the predicate longhand.
+///
+/// WHY THIS EXISTS: the two predicates below were previously spelled out at FOUR independent call sites (the
+/// glossary + dynamic stages in <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/> and the
+/// glossary + dynamic hooks in <see cref="Analysis.BookReviewService"/>). Four copies of a predicate that MUST
+/// agree is a replicated gate: add a fifth mode, or change one mode's semantics, and a copy silently diverges
+/// while every site still looks locally correct. Centralising them means a mode change is a ONE-line edit here
+/// and every seam moves together.
+///
+/// SEMANTICS (mirrors the <see cref="AnalysisRepairMode"/> xmldoc):
+///   • <see cref="AnalysisRepairMode.Off"/> → runs NEITHER stage (both predicates false).
+///   • <see cref="AnalysisRepairMode.Glossary"/> → glossary only.
+///   • <see cref="AnalysisRepairMode.Dynamic"/> → dynamic only (the glossary substitution is skipped entirely).
+///   • <see cref="AnalysisRepairMode.GlossaryThenDynamic"/> → BOTH, glossary first (the two compose).
+///
+/// NOTE: these predicates answer ONLY the stage-selection question. They are layered UNDER
+/// <see cref="AnalysisRepairOptions.Enabled"/> / <see cref="AnalysisRepairOptions.PerType"/>, which every call
+/// site must still check FIRST — a true here never overrides a disabled layer or an excluded analysis type.
+/// </summary>
+public static class AnalysisRepairModeExtensions
+{
+    /// <summary>
+    /// True when <paramref name="mode"/> selects the DETERMINISTIC glossary stage
+    /// (<see cref="Analysis.GlossaryRepairPass"/> on the RunAsync seam; <c>ApplyGlossaryToFindings</c> on the
+    /// BookReview engine seam). True for <see cref="AnalysisRepairMode.Glossary"/> and
+    /// <see cref="AnalysisRepairMode.GlossaryThenDynamic"/>; false for <see cref="AnalysisRepairMode.Off"/>
+    /// (which runs neither stage) and <see cref="AnalysisRepairMode.Dynamic"/> (which skips the glossary).
+    /// </summary>
+    public static bool RunsGlossary(this AnalysisRepairMode mode) =>
+        mode is AnalysisRepairMode.Glossary or AnalysisRepairMode.GlossaryThenDynamic;
+
+    /// <summary>
+    /// True when <paramref name="mode"/> selects the span-scoped DYNAMIC detect-and-repair stage
+    /// (<see cref="Analysis.DynamicTermRepairService"/>). True for <see cref="AnalysisRepairMode.Dynamic"/> and
+    /// <see cref="AnalysisRepairMode.GlossaryThenDynamic"/>; false for <see cref="AnalysisRepairMode.Off"/>
+    /// (which runs neither stage) and <see cref="AnalysisRepairMode.Glossary"/> (the rollback/kill-switch that
+    /// reproduces the pre-d4 glossary-only sequence).
+    /// </summary>
+    public static bool RunsDynamic(this AnalysisRepairMode mode) =>
+        mode is AnalysisRepairMode.Dynamic or AnalysisRepairMode.GlossaryThenDynamic;
+}
+
+/// <summary>
 /// Config for the analysis-output repair layer (analysis-output-repair plan, p6-config; extended by the
 /// dynamic-term-repair-design plan, d4), read by
 /// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. There are now THREE repair

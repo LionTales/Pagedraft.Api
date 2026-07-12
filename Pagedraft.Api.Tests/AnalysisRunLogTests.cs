@@ -76,7 +76,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -161,7 +162,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -254,7 +256,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -346,7 +349,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -441,7 +445,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
@@ -512,7 +517,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunWithInputAsync(
             AnalysisScope.Book,
@@ -565,7 +571,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -672,7 +679,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunProofreadChunkedAsync",
@@ -748,7 +756,8 @@ public class AnalysisRunLogTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions()),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var method = typeof(UnifiedAnalysisService).GetMethod(
             "RunLineEditChunkedAsync",

@@ -73,7 +73,8 @@ public class ProofreadUnreliableSignalTests
             // suggestions and these tests exercise ONLY the proofread-unreliable signal in isolation.
             new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
     }
 
     [Fact]
@@ -626,7 +627,8 @@ public class ProofreadUnreliableSignalTests
             new SuggestionDiffService(),
             new KtivMaleChecker(new HebrewStyleOptions { EnforceKtivMale = false }),
             new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
-            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance));
+            new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
+            new StubBookEntityProvider());
 
         var result = await svc.RunAsync(
             AnalysisScope.Chapter,
