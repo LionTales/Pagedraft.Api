@@ -51,7 +51,7 @@ builder.Services.AddScoped<AnalysisRepairService>();
 // Span-scoped, fail-safe DYNAMIC term repair (dynamic-term-repair-design plan, d4). Scoped like
 // AnalysisRepairService (same IAiRouter + logger shape, no captive-dependency concern); consumed by
 // UnifiedAnalysisService.ApplyAnalysisRepairAsync and BookReviewService's finalize->persist hook, both
-// gated by Ai:AnalysisRepair.Mode (shipped default Glossary = this service is never called).
+// gated by Ai:AnalysisRepair.Mode (shipped default GlossaryThenDynamic = this service runs after the glossary; Mode=Glossary/Off is the rollback that skips it).
 builder.Services.AddScoped<DynamicTermRepairService>();
 // Per-book proper-noun list feeding the classifier's bookEntities LEAVE lever (dynamic-term-repair precision
 // follow-up, e2). Deterministic (no model/GPU): harvests stored CharacterAnalysis names + a SCRIPT-AWARE
