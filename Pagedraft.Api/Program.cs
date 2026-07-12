@@ -53,6 +53,21 @@ builder.Services.AddScoped<AnalysisRepairService>();
 // UnifiedAnalysisService.ApplyAnalysisRepairAsync and BookReviewService's finalize->persist hook, both
 // gated by Ai:AnalysisRepair.Mode (shipped default Glossary = this service is never called).
 builder.Services.AddScoped<DynamicTermRepairService>();
+// Per-book proper-noun list feeding the classifier's bookEntities LEAVE lever (dynamic-term-repair precision
+// follow-up, e2). Deterministic (no model/GPU): harvests stored CharacterAnalysis names + a SCRIPT-AWARE
+// manuscript scan whose DIRECTION follows the ANALYSIS LANGUAGE the caller passes to GetEntitiesAsync - the
+// same value the repair layer resolves the classifier's expected script from, so the script HARVESTED is by
+// construction the script the classifier LOOKS UP (be-c03 + final-r02: a Hebrew-expected analysis harvests
+// Latin names, a Latin-expected one harvests recurring Hebrew names - and the analysis language is
+// caller-overridable, so it is NOT always the book's stored language).
+// SINGLETON so its cache persists across analysis requests (slow-changing data); it reads the
+// DbContext through a short-lived scope per build (IServiceScopeFactory), so it never captures a scoped
+// DbContext. The cache is BOUNDED (owned MemoryCache: size limit + sliding/absolute expiry), keyed per
+// (book, direction), and REFRESHED - every producer of a harvest source calls Invalidate(bookId), which drops
+// every direction: BookIntelligenceService.BuildBookProfileAsync, UnifiedAnalysisService's persisting seams
+// (CharacterAnalysis), and ChapterService's content writes.
+// Fail-safe: any fault/missing context -> empty set = current behavior.
+builder.Services.AddSingleton<IBookEntityProvider, BookEntityProvider>();
 builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
