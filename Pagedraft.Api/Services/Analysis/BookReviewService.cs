@@ -209,13 +209,13 @@ public class BookReviewService
     private static readonly string[] Dimensions =
         { "plot", "character", "pacing", "tone", "theme", "continuity" };
 
-    private static readonly JsonSerializerOptions DeserializeOpts = new()
+    internal static readonly JsonSerializerOptions DeserializeOpts = new()
     {
         PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private static readonly JsonSerializerOptions SerializeOpts = new()
+    internal static readonly JsonSerializerOptions SerializeOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
