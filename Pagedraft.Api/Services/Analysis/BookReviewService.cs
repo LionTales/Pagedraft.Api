@@ -201,6 +201,35 @@ public sealed class BookReviewFindings
 /// endpoints. This service only adds + tags AiTaskType.BookReview on its AiRequest so the router resolves
 /// that (future) key and the call is correctly labelled/capped. Until c03 sets the key, routing falls back
 /// to the default model — fine (no real model call happens in c02's tests; they mock IAiRouter).
+///
+/// FILE-SIZE WAIVER (CLAUDE.md's ~700-line soft ceiling) — STATED HONESTLY, BECAUSE THE LAST ONE WAS NOT.
+/// This file is STILL OVER the ceiling and there is no version of this note that makes that acceptable by
+/// assertion. The b1-b8 review recorded a "pre-existing waiver" for this file; be-c09 (P2-7) went looking for it
+/// and IT DID NOT EXIST — a claimed waiver is exactly the false-invariant-comment class this subsystem has now
+/// shipped five times, so what follows is a measurement, not a defence.
+///
+/// WHAT WAS EXTRACTED (be-c09, a pure MOVE — no behavior change, same test count before and after):
+///   • <see cref="BookReviewDigests"/> — the two REDUCE digests + their rationale caps and no-anchor token. They
+///     decide what a reduce pass SEES, which is the same thing as deciding its anchor allowlist; they belong with
+///     each other (the two must AGREE) far more than with the orchestration.
+///   • <see cref="BookFindingReconciler"/> — the persist-time MATCH TIERS, the scoped-delete predicate, and the
+///     anchor-scope tri-state they both read. Pure, static, and the only part of the persist step that decides
+///     anything; the service keeps the EF work.
+///   • <c>ChapterAnchorResolver.LogResolution</c> — observability over the resolver's OWN counters, moved to the
+///     class that owns them.
+/// Also already extracted by the b1-b8 change set itself, for the same reason: <see cref="ChapterAnchorResolver"/>,
+/// <see cref="NearDuplicateCollapser"/> (its own, separately-argued waiver), <see cref="SynthesisMergeMap"/>,
+/// <see cref="DigestAnchorGate"/>, <see cref="BookReviewResponseParser"/>, <see cref="WindowOutcome"/>.
+///
+/// WHAT REMAINS, AND WHY IT IS STILL TOO BIG: one sequenced build pipeline (assemble → window MAP → synthesis
+/// reduce → continuity reduce → union/dedup → repair → persist → roll up) plus the status/coverage probes, all
+/// sharing this class's injected state (_db, _router, _progress, _contextAssembler). Every remaining member is
+/// either a step of that one flow or a private helper of a step, so a further split would cut the pipeline in the
+/// middle and thread this class's fields through the seam — buying a line count, not a boundary. The honest next
+/// cut, if this grows again, is the four public result/status DTOs at the top of this file (they are not part of
+/// the service at all) and then the continuity-reduce PLANNING (grouping/packing), which is genuinely a separate
+/// algorithm. Neither was done here: be-c09's charter was the members the review NAMED, and a refactor that
+/// wanders is a refactor that hides a behavior change.
 /// </summary>
 public class BookReviewService
 {
@@ -209,6 +238,10 @@ public class BookReviewService
     private static readonly string[] Dimensions =
         { "plot", "character", "pacing", "tone", "theme", "continuity" };
 
+    // NIT-5: internal (not private) so SynthesisMergeMap.cs — which round-trips the SAME BookFinding.ChapterAnchorsJson
+    // field via the SAME shape (List&lt;FindingChapterAnchor&gt;) — can reference these directly instead of
+    // re-declaring an identical pair of its own. Two independently-maintained option sets for the same wire shape
+    // is drift waiting to happen; single-sourcing them here removes the possibility rather than documenting it.
     internal static readonly JsonSerializerOptions DeserializeOpts = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -602,15 +635,59 @@ public class BookReviewService
         var chaptersReviewedCount = 0;     // distinct PRIMARY chapter orders SUCCESSFULLY reviewed across windows
         var chaptersTotalCount = 0;        // distinct PRIMARY chapter orders across ALL windows (the reviewable set)
         var windowCountForResult = 0;      // number of windows mapped over
+        // be-c01: windows that PARSED but returned ZERO findings — a SUSPECTED TRUNCATION (see WindowOutcome).
+        // Kept SEPARATE from failedUnits on purpose: a failed window is an OBSERVED failure (error/unparseable) and
+        // the FE renders it as "N window(s) failed"; an empty window is an UNPROVEN one. It is surfaced instead
+        // where it is honest and already first-class — the coverage claim (reviewed < total) — plus a WARNING log.
+        var emptyWindowCount = 0;
         var ranSynthesis = false;          // synthesis reduce pass executed
         var ranContinuityReduce = false;   // continuity reduce pass executed
 
-        // wb4-c06 HONEST COVERAGE — the SUCCESS-only reviewed set. Declared in the OUTER scope (not inside the
-        // windowed block) for two reasons: (1) it is populated only on the success branch of each window's model
-        // call, so a FAILED window never inflates the numerator; (2) a downstream persist step (be-c02) reuses
-        // this exact set at the PersistPreservingStatusAsync call site below, which lives outside the windowed
-        // block. Keep it in scope there — do not collapse it to a local count.
+        // b8 — the synthesis MERGE MAP, declared out here because it is PRODUCED by the synthesis pass inside the
+        // windowed block and CONSUMED by UnionAndDedup below it. NULL means "the synthesis pass did not run"
+        // (the legacy per-dimension path, or a book with no BookBrief): there is then no merge channel and nothing
+        // to report, which is a different thing from "it ran and proposed no merges" (an instance with 0 groups).
+        SynthesisMergeMap.Resolution? synthesisMerges = null;
+
+        // wb4-c06 HONEST COVERAGE — the REVIEWED set, and the licence for the DESTRUCTIVE delete. Declared in the
+        // OUTER scope (not inside the windowed block) for two reasons: (1) it is populated ONLY by a window whose
+        // call produced findings (WindowOutcome.Reviewed), so neither a FAILED window nor an EMPTY (suspected
+        // truncation) one inflates the numerator; (2) a downstream persist step (be-c02) reuses this exact set at
+        // the PersistPreservingStatusAsync call site below, which lives outside the windowed block, where it scopes
+        // the delete-vanished-open pass. Keep it in scope there — do not collapse it to a local count.
         var reviewedPrimaryOrders = new HashSet<int>();
+
+        // be-c03 (P1-2) — THE REVIEWABLE ORDER SET. The destructive delete reasons over THREE chapter-order sets,
+        // and this is the middle one: reviewed ⊆ reviewable ⊆ real. It is the set of orders this build actually PUT
+        // IN FRONT OF THE MODEL (windowed: the union of every window's PRIMARY orders; legacy: every chapter, since
+        // that path concatenates the whole book into ONE context — see each branch below).
+        //
+        // It is NOT chaptersByOrder.Keys on the windowed path, and that distinction is the whole fix. A GENUINELY
+        // EMPTY chapter (a title-only "Part I" divider, a DOCX artefact) produces a NULL block in
+        // BookContextAssembler.BuildChapterBlock and is SKIPPED by the windower, so it is never a primary of any
+        // window and can NEVER enter reviewedPrimaryOrders — on ANY build, by ANY model, forever. b3's book-wide
+        // (no-anchor) delete rule asks "did this build review the finding's WHOLE scope?"; measuring that against the
+        // RAW chapter set made the question PERMANENTLY unanswerable on such a book (reviewed ⊇ real could never be
+        // true), so every vanished-open BOOK-WIDE finding was preserved on every rebuild = unbounded accumulation:
+        // the exact immortal-orphan class b2 was written to kill, resurrected through a different set. The honest
+        // question is "did this build review everything it COULD review?" — and that is what this set answers.
+        //
+        // It must stay SEPARATE from realChapterOrders (do not collapse them): the phantom-anchor half of
+        // BookFindingReconciler.IsVanishedOpenDeletable needs the REAL set to tell "this anchor order is no chapter of this book at all"
+        // (a phantom → no preservation weight) from "a REAL chapter that was not reviewed this build" (→ PRESERVE,
+        // the be-c02 rule that keeps a multi-chapter continuity finding alive when a LATER anchor's window failed).
+        // Merging the sets would either resurrect the immortal orphan or start deleting findings we never re-read.
+        var totalReviewableOrders = new HashSet<int>();
+
+        // be-c02 (P1-1) — THE DIGEST ANCHOR GATE. The two REDUCE passes anchor from a DIGEST of what the earlier
+        // passes found, and b7 derives their allowlist AND their shown-set from the orders that digest prints. So a
+        // digest rendered from the windows' RAW anchors would hand the reduce the windows' HALLUCINATIONS as an
+        // allowlist, and the resolver — seeing a real order inside the reduce's own shown-set — would then accept
+        // them. The gate resolves each finding's anchors against the REAL chapters AND the finding's OWN shown-set
+        // BEFORE they can become either. Built once here (it is a pure function of the book's chapters) and threaded
+        // into both reduce passes; it is a SEPARATE ChapterAnchorResolver instance from the build's, on purpose —
+        // this one only PREVIEWS, and must not add its answers to the drop counters the build warns on.
+        var digestAnchorGate = new DigestAnchorGate(chaptersByOrder);
 
         if (singleCombined)
         {
@@ -626,15 +703,16 @@ public class BookReviewService
             totalUnits = windowCount;
             windowCountForResult = windowCount;
 
-            // wb4-c06 HONEST COVERAGE — the DENOMINATOR (total reviewable set): union of EVERY window's PRIMARY
-            // chapter orders (IncludedChapterOrders minus OverlapChapterOrders), regardless of whether that
+            // wb4-c06 HONEST COVERAGE — the DENOMINATOR (total reviewable set, `totalReviewableOrders`, declared in
+            // the OUTER scope above because be-c03 also feeds it to the persist step): union of EVERY window's
+            // PRIMARY chapter orders (IncludedChapterOrders minus OverlapChapterOrders), regardless of whether that
             // window's model call later succeeds. This is the full set the build is RESPONSIBLE for reviewing,
             // deduped by construction (a chapter is a primary in exactly one window). It replaces the old
             // orderedChapterBriefs.Count denominator, which counted only chapters with a FRESH structured brief
             // and therefore undercounted flat/raw-fallback chapters — letting the SUCCESS-based numerator EXCEED
             // it (the >100% "Reviewed 64/40" regression). `reviewedPrimaryOrders` (the numerator) is a SUBSET of
-            // this set by construction, so the reviewed <= total invariant holds ALWAYS.
-            var totalReviewableOrders = new HashSet<int>();
+            // this set by construction, so the reviewed <= total invariant holds ALWAYS. It is populated in the
+            // window loop below (unconditionally, BEFORE each model call).
 
             // The FULL (untrimmed) BookBrief is shared by every window (each charges a TRIMMED copy to its own
             // budget but keeps the untrimmed object). Both reduce passes read it for their [BOOK_CONTEXT].
@@ -706,35 +784,104 @@ public class BookReviewService
                 var windowContext = BuildBookContextSection(window.Text);
                 var frame = new WindowFrame(windowIndex1Based, windowCount, firstOrder, lastOrder);
 
-                var windowFindings = await RunCombinedCallAsync(lang, windowContext, ct, frame);
-                if (windowFindings == null)
-                {
-                    // A null return is a window-level failure (model error / unparseable). It does NOT abort
-                    // the build — the other windows still contribute. An EMPTY (parsed but zero) window is NOT
-                    // a failure here: with N windows a legitimately clean window is expected, unlike the single
-                    // whole-book combined call where an empty result is the truncation symptom. Overall total
-                    // failure is decided below on the fully accumulated + reduced + deduped set.
-                    failedWindows++;
-                }
-                else
-                {
-                    // wb4-c06 NUMERATOR: only a window whose call SUCCEEDED (windowFindings != null, i.e. the
-                    // model returned a parseable result) counts its primaries as REVIEWED. This runs on the
-                    // success branch ONLY, so a failed/unparseable window never inflates ChaptersReviewed. An
-                    // EMPTY (parsed, zero-finding) window is still a SUCCESS here — those chapters were reviewed
-                    // and legitimately clean. reviewedPrimaryOrders is a subset of totalReviewableOrders by
-                    // construction (same primaryOrders source), so reviewed <= total holds always.
-                    foreach (var order in primaryOrders)
-                        reviewedPrimaryOrders.Add(order);
+                // b7 SHOWN-SET for this window: every chapter whose block its [BOOK_CONTEXT] actually prints —
+                // its PRIMARIES *plus* the leading OVERLAP chapters repeated from the previous window. The overlap
+                // belongs in here even though the window is not RESPONSIBLE for reporting on it (that is what the
+                // firstOrder..lastOrder frame says): the overlap exists precisely so a boundary-straddling issue is
+                // visible to one window intact, so an anchor onto it is grounded in text the model was given, not a
+                // guess. Coverage (reviewedPrimaryOrders) stays primaries-only — the two sets answer different
+                // questions ("what did it SEE" vs "what is it ACCOUNTABLE for") and must not be conflated.
+                var shownOrders = window.IncludedChapterOrders.Distinct().OrderBy(o => o).ToArray();
 
-                    foreach (var item in windowFindings)
-                        item.Dimension = NormalizeDimension(item.Dimension);
-                    accumulated.AddRange(windowFindings);
+                var windowFindings = await RunCombinedCallAsync(lang, windowContext, ct, frame, shownOrders);
+                var outcome = WindowOutcomes.Classify(windowFindings);
+
+                // final-r01: the DESTRUCTIVE licence is asked EXACTLY ONCE, of the ONE predicate that owns the
+                // contract — WindowOutcomes.CountsAsReviewed. It was written for precisely this decision and had NO
+                // production caller: the loop below switched on the enum directly, so the helper (and its green unit
+                // test) DOCUMENTED a safety contract that nothing enforced, which reads as a guarantee and is not one.
+                // Worse, the switch's catch-all `default:` arm was FAIL-OPEN: a future WindowOutcome member would land
+                // there, have its primaries added to reviewedPrimaryOrders, and thereby LICENSE the delete-vanished-open
+                // pass — the exact P0 be-c01 exists to close — while CountsAsReviewed said false. Asking the predicate
+                // here makes a new member NOT-reviewed until someone deliberately adds it to CountsAsReviewed.
+                var countsAsReviewed = outcome.CountsAsReviewed();
+
+                switch (outcome)
+                {
+                    case WindowOutcome.Failed:
+                        // A null return is a window-level failure (model error / unparseable). It does NOT abort
+                        // the build — the other windows still contribute. Overall total failure is decided below
+                        // on the fully accumulated + reduced + deduped set.
+                        failedWindows++;
+                        break;
+
+                    case WindowOutcome.EmptySuspectedTruncation:
+                        // be-c01 (P0, DATA LOSS). The call parsed but carried ZERO findings. The old code counted
+                        // this as a SUCCESS and marked these chapters REVIEWED — which is exactly what licensed
+                        // b3's book-wide delete rule (reviewed ⊇ real) to fire, wiping still-open findings on a
+                        // build that produced NOTHING for them. The model has no way to say "these chapters are
+                        // clean" that differs by even one byte from a truncated/short-circuited response (see
+                        // WindowOutcome), so we take the pessimistic reading: these chapters were NOT reviewed.
+                        // Nothing is accumulated (there is nothing to accumulate) and nothing is deleted for them.
+                        // NOT counted as a failed window: we did not OBSERVE a failure, and "N window(s) failed"
+                        // is a claim we cannot make. The honest surface is the coverage gap (reviewed < total),
+                        // which is already first-class on the result, the persisted coverage row and the FE.
+                        emptyWindowCount++;
+                        _logger.LogWarning(
+                            "Book review (window {Index}/{Count}, chapters {First}-{Last}): the model returned ZERO " +
+                            "findings. An empty result is INDISTINGUISHABLE from a silent truncation (the schema has " +
+                            "no 'clean' verdict), so these chapters are NOT counted as reviewed and NO still-open " +
+                            "finding anchored in them will be deleted by this build. Book {BookId} ({Lang}).",
+                            windowIndex1Based, windowCount, firstOrder, lastOrder, bookId, lang);
+                        break;
+
+                    case WindowOutcome.Reviewed:
+                        // wb4-c06 NUMERATOR, be-c01 TIGHTENED: only a window that actually PRODUCED findings counts
+                        // its primaries as REVIEWED — the one outcome that proves the model really reviewed them.
+                        // reviewedPrimaryOrders stays a subset of totalReviewableOrders by construction (same
+                        // primaryOrders source), so reviewed <= total holds always. Gated on CountsAsReviewed, not on
+                        // reaching this arm, so the licence and the predicate that documents it cannot drift apart.
+                        if (countsAsReviewed)
+                        {
+                            foreach (var order in primaryOrders)
+                                reviewedPrimaryOrders.Add(order);
+                        }
+
+                        foreach (var item in windowFindings!)
+                            item.Dimension = NormalizeDimension(item.Dimension);
+                        accumulated.AddRange(windowFindings!);
+                        break;
+
+                    default:
+                        // FAIL-CLOSED. A WindowOutcome this loop does not know about: it has NOT been shown to be a
+                        // review, so its chapters do NOT join reviewedPrimaryOrders and nothing is deleted for them.
+                        // Counted with the failures (the honest surface: we cannot vouch for this window) rather than
+                        // silently treated as a success, which is what the old `default:` arm did.
+                        failedWindows++;
+                        _logger.LogWarning(
+                            "Book review (window {Index}/{Count}): unhandled WindowOutcome '{Outcome}'. Treating it as " +
+                            "NOT reviewed (fail-closed): its chapters are excluded from the reviewed set and no " +
+                            "still-open finding anchored in them will be deleted. Book {BookId} ({Lang}).",
+                            windowIndex1Based, windowCount, outcome, bookId, lang);
+                        break;
                 }
 
                 if (jobId.HasValue)
                     _progress.ChunkCompleted(jobId.Value, windowIndex1Based, totalChunks);
             }
+
+            // be-c01 WINDOW COVERAGE — ONE UNCONDITIONAL line per build. A guard that logs only its POSITIVE count
+            // is indistinguishable from a guard that never ran (the lesson the collapser generated: 136 green tests,
+            // zero live effect), and this one gates a DESTRUCTIVE pass, so its ZERO must be visible too. It states
+            // the whole universe: every window is exactly one of produced / empty / failed, and reviewed+unreviewed
+            // partition the reviewable chapters.
+            _logger.LogInformation(
+                "Book review (window coverage): book {BookId} ({Lang}) - {WindowCount} window(s): {Produced} produced " +
+                "findings, {Empty} returned ZERO findings (suspected truncation, NOT counted as reviewed), {Failed} " +
+                "failed (error/unparseable). Chapters reviewed {Reviewed}/{Total}. Only reviewed chapters can have a " +
+                "vanished still-open finding deleted this build.",
+                bookId, lang, windowCount, windowCount - emptyWindowCount - failedWindows, emptyWindowCount,
+                failedWindows, reviewedPrimaryOrders.Count, totalReviewableOrders.Count);
 
             // ── wb4-c04/c05 reduce passes append here ──
             // The synthesis (wb4-c04) and continuity (wb4-c05) reduce passes run AFTER the window loop and
@@ -760,14 +907,36 @@ public class BookReviewService
 
                 try
                 {
-                    var synthesisFindings = await RunSynthesisAsync(fullBookBrief, accumulated, lang, jobId, ct);
-                    if (synthesisFindings is { Count: > 0 })
+                    var synthesis = await RunSynthesisAsync(
+                        fullBookBrief, accumulated, lang, jobId, digestAnchorGate, ct);
+                    if (synthesis != null)
                     {
-                        foreach (var item in synthesisFindings)
-                            item.Dimension = NormalizeDimension(item.Dimension);
-                        // Append BEFORE UnionAndDedup so a synthesis finding that duplicates a window finding
-                        // dedups away by key (dimension + primary order + rationale) — reconciliation is free.
-                        accumulated.AddRange(synthesisFindings);
+                        // b8 THE MERGE MAP — the reduce's DELETE channel. Captured here and applied as PASS 0 of
+                        // UnionAndDedup (SynthesisMergeMap.Apply), before the near-duplicate collapser's passes. It
+                        // names findings in `accumulated` BY REFERENCE, so it must be resolved against the list as it
+                        // stood when the digest was built — which is exactly now, before anything is appended below.
+                        synthesisMerges = synthesis.Merges;
+
+                        if (synthesis.Findings is { Count: > 0 })
+                        {
+                            foreach (var item in synthesis.Findings)
+                                item.Dimension = NormalizeDimension(item.Dimension);
+
+                            // Append the synthesis's OWN new findings (the book-level observations no window could
+                            // see). They flow through the same dedup/collapse as everything else.
+                            //
+                            // b8 — WHAT THIS APPEND DOES *NOT* DO, corrected. The old comment here claimed a synthesis
+                            // finding that duplicates a window finding "dedups away by key, so reconciliation is free".
+                            // That was FALSE BY CONSTRUCTION and it is why the reduce never reconciled anything:
+                            //   • the dedup key is a SHA-256 of the exact prose, and a finding the model MERGED is new
+                            //     prose by definition, so it can never hash-match either original; and
+                            //   • the key folds the primary chapter order in, so even a verbatim re-emission anchored
+                            //     to the union [1,15] hashes as 1 while the ch15 copy hashes as 15 — two rows.
+                            // So appending a "merged" finding beside the two it meant to replace made the list LONGER.
+                            // Reconciliation is not free and never was: it costs the merge map above, which is the only
+                            // channel in which the model can say "delete these two and keep that one".
+                            accumulated.AddRange(synthesis.Findings);
+                        }
                     }
                 }
                 catch (OperationCanceledException)
@@ -804,7 +973,8 @@ public class BookReviewService
                 try
                 {
                     var continuityFindings = await RunContinuityReduceAsync(
-                        fullBookBrief!, continuityPlan, lang, jobId, continuityBaseChunkIndex, totalChunks, ct);
+                        fullBookBrief!, continuityPlan, lang, jobId, continuityBaseChunkIndex, totalChunks,
+                        digestAnchorGate, ct);
                     if (continuityFindings.Count > 0)
                     {
                         foreach (var item in continuityFindings)
@@ -839,9 +1009,11 @@ public class BookReviewService
             // wb4-c06 coverage provenance for the returned result — ONE honest universe, invariant reviewed <= total:
             //   • ChaptersTotal    = distinct primaries across ALL windows (the reviewable set — every chapter the
             //     build was responsible for, including flat/raw-fallback chapters with no fresh structured brief).
-            //   • ChaptersReviewed = distinct primaries of the windows whose call SUCCEEDED (a strict subset).
-            //     A fully-successful build gives reviewed == total (N/N); a failed window gives reviewed < total;
-            //     a partial-brief book can NEVER produce reviewed > total.
+            //   • ChaptersReviewed = distinct primaries of the windows that PRODUCED FINDINGS (a strict subset).
+            //     reviewed == total iff EVERY window produced at least one finding; a FAILED window (be-c01: or an
+            //     EMPTY one, a suspected truncation) lowers reviewed below total; a partial-brief book can NEVER
+            //     produce reviewed > total. NOTE reviewed < total does NOT imply failedWindows > 0 — an empty window
+            //     lowers coverage without asserting an observed failure. The two counts answer different questions.
             //   • RanSynthesis / RanContinuityReduce mirror the exact gates the reduce passes ran under above
             //     (synthesis iff a full BookBrief existed; continuity iff the deterministic plan was non-null,
             //     i.e. a full BookBrief AND ordered chapter briefs existed).
@@ -862,13 +1034,39 @@ public class BookReviewService
             failedUnits = failedDimensions;
             totalUnits = Dimensions.Length;
 
-            // be-c02: the legacy path reviews the WHOLE book in ONE concatenated context (not per-window), so
-            // EVERY chapter order is reviewed together. Seed reviewedPrimaryOrders with all chapter orders so the
-            // scoped delete-vanished-open in PersistPreservingStatusAsync behaves EXACTLY as before on this path
-            // (it deletes any vanished-open finding — the whole book was re-reviewed). Without this the set would
-            // be empty here and the delete would never fire, silently preserving regenerated noise.
+            // b7 SHOWN-SET on the legacy path: this path concatenates EVERY window's text into ONE context, so the
+            // model is shown every chapter and the visibility gate is (correctly) a no-op — but it is STAMPED, not
+            // left null, so the property "every persisted anchor was seen by its author" holds on BOTH paths rather
+            // than being an accident of which toggle is on. It is derived from what the windows actually printed,
+            // not from chaptersByOrder: a genuinely empty chapter is never rendered into any window, so it is not
+            // something the model saw, and an anchor to it would be a guess here too.
+            var legacyShownOrders = windows
+                .SelectMany(w => w.IncludedChapterOrders)
+                .Distinct().OrderBy(o => o).ToArray();
+            foreach (var bucket in perDimension)
+            {
+                if (bucket != null)
+                    StampShownSet(bucket, legacyShownOrders);
+            }
+
+            // be-c02 + be-c03: the legacy path reviews the WHOLE book in ONE concatenated context (not per-window),
+            // so there is no partial coverage to reason about here — EVERY chapter order is reviewed together, and
+            // every chapter order is therefore also REVIEWABLE. Seed BOTH sets from the SAME source, in ONE loop, so
+            // they can never drift apart:
+            //   • reviewedPrimaryOrders (be-c02) scopes the delete-vanished-open pass. Without the seed the set would
+            //     be empty here and the delete would NEVER fire, silently preserving regenerated noise.
+            //   • totalReviewableOrders (be-c03) is the denominator of b3's book-wide (no-anchor) superset rule.
+            // Because the two are IDENTICAL on this path, `reviewed ⊇ reviewable` holds on EVERY legacy build and
+            // the book-wide rule fires exactly as it did before be-c03: no behavior change here. The P1-2
+            // immortal-orphan bug is WINDOWED-ONLY — only that path derives `reviewed` from window PRIMARIES, and the
+            // windower SKIPS genuinely empty chapters, so its `reviewed` could never cover the raw chapter set.
+            // KEEP THEM WELDED: seeding `reviewed` from the rendered chapters alone while leaving `reviewable` at the
+            // raw keys (or vice versa) would re-open exactly that hole on this path.
             foreach (var order in chaptersByOrder.Keys)
+            {
                 reviewedPrimaryOrders.Add(order);
+                totalReviewableOrders.Add(order);
+            }
 
             // wb4-c06 coverage provenance for the RETURNED result on the legacy path. chaptersReviewedCount /
             // chaptersTotalCount are otherwise assigned ONLY inside the windowed block above, so without this the
@@ -887,7 +1085,26 @@ public class BookReviewService
         // 4 + 5. UNION across dimensions and DEDUP by BookFinding.ComputeDedupKey(dimension, primaryOrder,
         //         rationale). First occurrence wins; later duplicates are merged away. This runs ONCE over the
         //         fully accumulated (all windows + reduce passes) set.
-        var deduped = UnionAndDedup(perDimension, chaptersByOrder, builtWithModel, lang);
+        //
+        //         The model's chapter references are UNTRUSTED (it invents orders, and has been seen reading one
+        //         out of a chapter TITLE — a 1-chapter book whose only chapter is titled "פרק 16" got anchors
+        //         claiming orders 1 and 16). ChapterAnchorResolver resolves each one against the REAL chapters —
+        //         by order, then by title, else DROP — so a phantom anchor is never persisted with an empty
+        //         chapterId. See ChapterAnchorResolver.LogResolution: the drops are never swallowed silently.
+        //         b4: UnionAndDedup also runs the NEAR-DUPLICATE COLLAPSE after the exact-key dedup. The key is a
+        //         SHA-256 of the exact prose, so it cannot absorb the model's re-wording of the same finding (book
+        //         2cf6fcf2: 20 rows, 20 distinct keys, ~10 real findings — one tone finding emitted FOUR times).
+        //         The collapse is BUILD-TIME only and moves no stored key, so Status preservation is untouched.
+        var anchorResolver = new ChapterAnchorResolver(chaptersByOrder);
+
+        // b7 gate coverage, measured BEFORE the dedup collapses anything: how many of the findings this build
+        // produced carry the shown-set of the pass that wrote them. Every production pass stamps one, so this
+        // should equal the total — and when it does not, the log below says so instead of silently degrading.
+        var allItems = perDimension.Where(d => d != null).SelectMany(d => d!).ToList();
+        var gatedFindings = allItems.Count(i => i.VisibleChapterOrders != null);
+
+        var deduped = UnionAndDedup(perDimension, anchorResolver, builtWithModel, lang, synthesisMerges, _logger);
+        anchorResolver.LogResolution(_logger, bookId, lang, gatedFindings, allItems.Count);
 
         // Shared repair config + Mode for BOTH the glossary (5b) and dynamic (5c) stages below. Hoisted here so
         // the two seams read the SAME Mode and mirror UnifiedAnalysisService.ApplyAnalysisRepairAsync, where Mode
@@ -1005,9 +1222,26 @@ public class BookReviewService
         //     (reviewed == total == chapter count) rather than 0/0.
         var persistedReviewed = reviewedPrimaryOrders.Count;
         var persistedTotal = singleCombined ? chaptersTotalCount : chaptersByOrder.Count;
+        // b2: the book's REAL chapter orders, threaded into the persist step so its scoped delete can tell a
+        // "real chapter that was not reviewed this build" (PRESERVE — the be-c02 rule) from an "anchor order that
+        // is no chapter of this book at all" (an INVALID/phantom anchor, which must NOT block deletion forever).
+        // reviewedPrimaryOrders is always a SUBSET of this set on both paths (window primaries and the legacy
+        // whole-book seed are both derived from chaptersByOrder), which is exactly why a phantom order could never
+        // enter it — and so, pre-fix, could never be deleted.
+        var realChapterOrders = chaptersByOrder.Keys.ToHashSet();
+        // be-c03: the three sets travel TOGETHER into the persist step, and the containment chain
+        // reviewed ⊆ reviewable ⊆ real holds on BOTH paths by construction:
+        //   • windowed — reviewed = the primaries of windows that PRODUCED findings; reviewable = the primaries of
+        //     ALL windows (empty chapters are never windowed, so reviewable ⊊ real on a book with one); real = every
+        //     Chapters row.
+        //   • legacy   — reviewed = reviewable = real (the whole book in one context; seeded in one loop above).
+        // totalReviewableOrders.Count is also exactly `persistedTotal` on both paths (chaptersTotalCount on the
+        // windowed path, chaptersByOrder.Count on the legacy one), so the coverage DENOMINATOR the user reads and the
+        // set the book-wide delete rule measures against are the same thing, said twice.
         if (!totalFailure)
             await PersistPreservingStatusAsync(
-                bookId, lang, deduped, reviewedPrimaryOrders, persistedReviewed, persistedTotal, ct);
+                bookId, lang, deduped, reviewedPrimaryOrders, totalReviewableOrders, realChapterOrders,
+                persistedReviewed, persistedTotal, ct);
 
         var totalNow = await _db.BookFindings.CountAsync(
             f => f.BookId == bookId && f.Language == lang, ct);
@@ -1017,9 +1251,16 @@ public class BookReviewService
         // honest "Reviewed N/N chapters across W windows" claim (+ a continuity note and a failed-window count
         // when relevant), so the FE never has to trust a possibly-truncated single call. No em-dash (U+2014)
         // anywhere — a regular hyphen only. `coverage` is the shared HONEST prefix.
+        // be-c01: an EMPTY window is named EXPLICITLY here (it is not in failedUnits, so the "N window(s) failed"
+        // clause below would never mention it, and a silently-degraded coverage number is how this class of bug
+        // hides). It rides the shared `coverage` prefix, so it shows in BOTH the success and the partial message.
         var coverage = $"Reviewed {chaptersReviewedCount}/{chaptersTotalCount} chapters across " +
                        $"{windowCountForResult} window(s)" +
-                       (ranContinuityReduce ? " + continuity pass" : string.Empty);
+                       (ranContinuityReduce ? " + continuity pass" : string.Empty) +
+                       (emptyWindowCount > 0
+                           ? $", {emptyWindowCount} window(s) returned no findings (possible truncation; their " +
+                             "chapters were not counted as reviewed)"
+                           : string.Empty);
 
         string msg;
         if (totalFailure)
@@ -1166,35 +1407,59 @@ public class BookReviewService
 
     /// <summary>
     /// Window framing passed to <see cref="RunCombinedCallAsync"/> to select the WINDOWED prompt
-    /// (wb4-c03 <see cref="PromptFactory.BuildBookReviewWindowPrompt"/>) instead of the whole-book combined
-    /// prompt. <see cref="WindowIndex"/> is 1-BASED (the frame says "window X of N"); <see cref="FirstOrder"/>
-    /// / <see cref="LastOrder"/> are the min/max PRIMARY chapter orders the window is responsible for, so the
-    /// frame names exactly the chapters shown (overlap chapters excluded). A null window = the non-windowed
-    /// single-combined call, unchanged.
+    /// (wb4-c03 <see cref="PromptFactory.BuildBookReviewWindowPrompt"/>). <see cref="WindowIndex"/> is 1-BASED
+    /// (the frame says "window X of N"); <see cref="FirstOrder"/> / <see cref="LastOrder"/> are the min/max
+    /// PRIMARY chapter orders the window is responsible for, so the frame names exactly the chapters shown
+    /// (overlap chapters excluded).
     /// </summary>
     private readonly record struct WindowFrame(int WindowIndex, int WindowCount, int FirstOrder, int LastOrder);
 
     /// <summary>
-    /// Runs ONE combined review call: prepends the shared [BOOK_CONTEXT] to either the whole-book combined
-    /// prompt (<paramref name="window"/> null) or, in the windowed MAP path, the wb4-c03
-    /// <see cref="PromptFactory.BuildBookReviewWindowPrompt"/> for that window, calls the router with
-    /// <see cref="AiTaskType.BookReview"/>, and parses the multi-dimension findings[] via the shared
-    /// <see cref="UnifiedAnalysisService.ExtractJson"/> extractor. Returns the parsed findings, or NULL when
-    /// the model errors or the output cannot be parsed (the caller treats null as a TOTAL/window failure).
-    /// Mirrors <see cref="RunDimensionAsync"/>'s request shape + null-on-failure contract.
+    /// Runs ONE combined review call for a single window of the windowed MAP path: prepends the shared
+    /// [BOOK_CONTEXT] to the wb4-c03 <see cref="PromptFactory.BuildBookReviewWindowPrompt"/> for
+    /// <paramref name="window"/>, calls the router with <see cref="AiTaskType.BookReview"/>, and parses the
+    /// multi-dimension findings[] via the shared <see cref="UnifiedAnalysisService.ExtractJson"/> extractor.
+    /// Returns the parsed findings, or NULL when the model errors or the output cannot be parsed (the caller
+    /// treats null as a window failure). Mirrors <see cref="RunDimensionAsync"/>'s request shape +
+    /// null-on-failure contract.
+    /// NOTE the EMPTY case is NOT collapsed into null here: a parsed-but-zero-finding result is returned as an
+    /// EMPTY list and CLASSIFIED by the caller (<see cref="WindowOutcomes.Classify"/>), because the windowed caller
+    /// treats it as a suspected truncation (be-c01) while other shapes may not. Do not "simplify" empty to null:
+    /// the two carry different information (nothing parsed vs nothing reported).
+    ///
+    /// NIT-7: <paramref name="window"/> is a REQUIRED parameter, not optional. It used to default to null with a
+    /// ternary selecting <see cref="PromptFactory.BuildBookReviewCombinedPrompt"/> (the whole-book, non-windowed
+    /// prompt) for the null case — but this method has exactly ONE call site (inside the windowed MAP loop in
+    /// <see cref="RunBuildAsync"/>), and it always constructs and passes a <see cref="WindowFrame"/>. The
+    /// non-windowed branch was therefore unreachable in production; confirmed by grep before removing it, per
+    /// house discipline that a comment/branch asserting reachability is a finding until verified. If a future
+    /// caller genuinely needs the non-windowed combined prompt again, call
+    /// <see cref="PromptFactory.BuildBookReviewCombinedPrompt"/> directly rather than reviving an optional
+    /// parameter that silently changes this method's prompt shape.
+    ///
+    /// b7 SHOWN-SET. <paramref name="shownOrders"/> is the set of chapter orders THIS call's [BOOK_CONTEXT]
+    /// actually displays — a window shows only its own chapters (primaries + overlap), not the whole book. It is
+    /// used TWICE, and the two uses are the whole point:
+    ///   • it is appended to the prompt as the explicit anchor ALLOWLIST (the model is told which orders exist
+    ///     for it), and
+    ///   • it is STAMPED on every parsed finding (<see cref="BookFindingItem.VisibleChapterOrders"/>) so
+    ///     <see cref="ChapterAnchorResolver"/> can DROP an anchor to a chapter this call never saw — even when
+    ///     that chapter is perfectly real, which is exactly the mis-anchoring b1's resolver could not catch.
+    /// A null shown-set leaves both off (unconstrained), preserving the pre-b7 behaviour for any caller that
+    /// cannot state what it displayed.
     /// </summary>
     private async Task<List<BookFindingItem>?> RunCombinedCallAsync(
         string lang,
         string bookContextSection,
         CancellationToken ct,
-        WindowFrame? window = null)
+        WindowFrame window,
+        IReadOnlyCollection<int>? shownOrders = null)
     {
         try
         {
-            var promptBody = window is { } w
-                ? _promptFactory.BuildBookReviewWindowPrompt(lang, w.WindowIndex, w.WindowCount, w.FirstOrder, w.LastOrder)
-                : _promptFactory.BuildBookReviewCombinedPrompt(lang);
-            var instruction = bookContextSection + promptBody;
+            var promptBody = _promptFactory.BuildBookReviewWindowPrompt(
+                lang, window.WindowIndex, window.WindowCount, window.FirstOrder, window.LastOrder);
+            var instruction = bookContextSection + promptBody + AllowlistSuffix(lang, shownOrders);
 
             var request = new AiRequest
             {
@@ -1205,7 +1470,7 @@ public class BookReviewService
                 JsonMode = true
             };
 
-            var scope = window is { } wf ? $"window {wf.WindowIndex}/{wf.WindowCount}" : "combined";
+            var scope = $"window {window.WindowIndex}/{window.WindowCount}";
 
             var response = await _router.CompleteAsync(request, ct);
             var raw = response.Content;
@@ -1222,13 +1487,19 @@ public class BookReviewService
                 return null;
             }
 
-            var parsed = JsonSerializer.Deserialize<BookReviewResult>(json, DeserializeOpts);
-            if (parsed?.Findings == null)
+            // be-c05: parsed through the defensive two-stage parser, so a stray/malformed `merges` key (which THIS
+            // pass's prompt never even asks for) cannot throw on the whole document and sink a window's findings.
+            // The findings tri-state is IDENTICAL to the old strict parse — and it is load-bearing for be-c01:
+            // an explicit `"findings": null` is a FAILURE (null), while an ABSENT key or `[]` is an EMPTY list that
+            // the caller classifies as a SUSPECTED TRUNCATION. Do not collapse them.
+            var parsed = BookReviewResponseParser.Parse(json, DeserializeOpts, scope, _logger);
+            if (parsed.Findings == null)
             {
                 _logger.LogWarning("Book review ({Scope}): JSON had no findings array; treating as failure.", scope);
                 return null;
             }
 
+            StampShownSet(parsed.Findings, shownOrders);
             return parsed.Findings;
         }
         catch (OperationCanceledException)
@@ -1243,12 +1514,41 @@ public class BookReviewService
         }
     }
 
-    // ─── Synthesis reduce pass (wb4-c04) ──────────────────────────────────────────────────────────
+    // ─── b7: the SHOWN-SET seam (one helper pair, used by EVERY anchor-bearing pass) ──────────────────
 
-    /// <summary>Max chars of a finding's rationale kept in a digest line (evidence/suggestedAction are dropped
-    /// entirely). Terse by design so the whole digest fits the model window even with ~100 accumulated
-    /// findings on the local 8192-token budget.</summary>
-    private const int SynthesisRationaleDigestChars = 140;
+    /// <summary>
+    /// b7: renders the anchor ALLOWLIST clause for a pass, ready to append to its instruction (with the blank-line
+    /// separator every block in these prompts uses). A NULL shown-set means the caller declared no visibility, so
+    /// nothing is appended and the prompt is byte-identical to its pre-b7 shape; an EMPTY set is a real statement
+    /// ("this pass shows you no chapter orders") and DOES emit a clause. Single-sourced through
+    /// <see cref="PromptFactory.BuildChapterAnchorAllowlistRule"/> so the sentence the model reads and the set the
+    /// resolver enforces are rendered from the SAME collection.
+    /// </summary>
+    private string AllowlistSuffix(string lang, IReadOnlyCollection<int>? shownOrders) =>
+        shownOrders == null
+            ? string.Empty
+            : "\n\n" + _promptFactory.BuildChapterAnchorAllowlistRule(lang, shownOrders);
+
+    /// <summary>
+    /// b7: stamps the emitting pass's shown-set onto every finding it produced, which is what lets
+    /// <see cref="ChapterAnchorResolver"/> — running LATER, once, over the whole accumulated set in
+    /// <see cref="UnionAndDedup"/> — still know WHICH chapters each individual finding's author could see. Without
+    /// this the resolver only knows the book's chapters, and a window-2 finding anchored to a window-1 chapter is
+    /// indistinguishable from a correct anchor.
+    /// </summary>
+    private static void StampShownSet(List<BookFindingItem> findings, IReadOnlyCollection<int>? shownOrders)
+    {
+        if (shownOrders == null)
+            return; // unconstrained: leave VisibleChapterOrders null (no gate)
+        foreach (var f in findings)
+            f.VisibleChapterOrders = shownOrders;
+    }
+
+    // ─── Synthesis reduce pass (wb4-c04) ──────────────────────────────────────────────────────────
+    //
+    // be-c09 (P2-7): the digest RENDERING this pass reads — the rationale caps, the no-anchor token, and both
+    // reduce digests themselves — now lives in BookReviewDigests. What remains here is the PASS: the model call,
+    // its prompt, and the parse.
 
     /// <summary>
     /// SYNTHESIS reduce pass (wb4-c04). Runs ONCE after the window MAP over the FULL accumulated finding set.
@@ -1267,23 +1567,52 @@ public class BookReviewService
     /// FAILURE: mirrors <see cref="RunCombinedCallAsync"/>'s null-on-failure contract. On a model error /
     /// unparseable output this returns NULL, which the caller treats as ZERO synthesis findings — NOT a
     /// total-build failure, since the windows already produced coverage. Reports exactly ONE progress chunk.
+    ///
+    /// b8 MERGE MAP: the pass also returns the model's optional <c>merges</c> map, VALIDATED against the ids this
+    /// digest actually printed (<see cref="SynthesisMergeMap.Resolve"/>). It is the reduce's only way to REMOVE a
+    /// finding; without it, "merge these two" could only ever be expressed by ADDING a third. The resolution is
+    /// produced whether or not the kill-switch is on — with the switch OFF it is measured and logged, never applied.
+    ///
+    /// AND THE PROMPT ASKS FOR IT EITHER WAY (be-c06). <see cref="PromptFactory.BuildBookReviewSynthesisPrompt"/>
+    /// takes no switch and carries the merge contract in both states, by design: the OFF state is a MEASURE state,
+    /// and a measurement taken against an input the ON build would not receive would be worthless. The consequence is
+    /// stated plainly rather than hidden — an OFF build is NOT a pre-b8 build, because the model answers the b8
+    /// prompt (id column, 260-char cap, "express a merge ONLY through `merges`") in both. See
+    /// <see cref="SynthesisMergeMap"/>, KILL-SWITCH.
     /// </summary>
-    private async Task<List<BookFindingItem>?> RunSynthesisAsync(
+    private async Task<SynthesisOutcome?> RunSynthesisAsync(
         BookBrief bookBrief,
         IReadOnlyList<BookFindingItem> accumulatedFindings,
         string lang,
         Guid? jobId,
+        DigestAnchorGate anchorGate,
         CancellationToken ct)
     {
         try
         {
             var briefBlock = BookContextAssembler.FormatBookBrief(bookBrief);
-            var digestBlock = BuildSynthesisDigest(accumulatedFindings, lang, briefBlock);
+            var (digestBlock, shownOrders, idMap) =
+                BookReviewDigests.BuildSynthesisDigest(
+                    accumulatedFindings, lang, briefBlock, anchorGate, _contextAssembler, _logger);
 
             // Input mirrors the combined call: whole-book context in the instruction's [BOOK_CONTEXT], then the
             // compact [WINDOW_FINDINGS] digest, then the synthesis prompt body. InputText stays empty.
+            //
+            // b7 SHOWN-SET. Synthesis sees NO chapter text and NO chapter headings — its [BOOK_CONTEXT] is the
+            // BookBrief alone (genre / themes / synopsis). The ONLY chapter orders in front of it are the ones
+            // printed in the EMITTED digest lines. So that is its shown-set, and any other order in its output is
+            // a number it made up. (Note this also repairs a b1 oversight: the generic ChapterOrderRule baked into
+            // the synthesis prompt tells the model to copy orders "from the chapter heading inside [BOOK_CONTEXT]",
+            // a heading this pass is never given. The allowlist appended below names the orders that ARE there.)
+            //
+            // be-c02 (P1-1). "The orders the digest prints" is only a safe allowlist if the DIGEST itself is safe.
+            // It was not: it printed the windows' RAW anchors, so a window that anchored to a chapter it never read
+            // put that chapter into the SYNTHESIS allowlist — and the resolver then accepted the synthesis's copy of
+            // it, because by then the order was both real and "shown". The gate (DigestAnchorGate) closes that loop:
+            // an order reaches this digest only if the finding that carries it will KEEP it through resolution.
             var bookContextSection = briefBlock + "\n\n" + digestBlock + "\n\n";
-            var instruction = bookContextSection + _promptFactory.BuildBookReviewSynthesisPrompt(lang);
+            var instruction = bookContextSection + _promptFactory.BuildBookReviewSynthesisPrompt(lang)
+                + AllowlistSuffix(lang, shownOrders);
 
             var request = new AiRequest
             {
@@ -1309,19 +1638,48 @@ public class BookReviewService
                 return null;
             }
 
-            var parsed = JsonSerializer.Deserialize<BookReviewResult>(json, DeserializeOpts);
-            if (parsed?.Findings == null)
+            // be-c05 (P1-5). THE TWO CHANNELS ARE PARSED SEPARATELY. `merges` is an OPTIONAL, model-supplied side
+            // channel, and until this fix a single malformed value in it — an object where the array belongs, ids as
+            // "W3,W7", ids as numbers — threw on the WHOLE document and the catch below discarded the synthesis
+            // ENTIRELY, taking its book-level findings (the holistic observations NO window can produce) with it. And
+            // the b8 kill-switch could not prevent that, because the PROMPT ASKS FOR `merges` WHETHER OR NOT THE
+            // SWITCH IS ON. BookReviewResponseParser confines a merges fault to the merge map: worst case is ZERO
+            // merge groups, never a lost finding.
+            var parsed = BookReviewResponseParser.Parse(json, DeserializeOpts, "synthesis", _logger);
+
+            // be-c05 (P2-8). `"findings": null` is NOT a failure here. System.Text.Json writes an explicit null OVER
+            // the `= new()` initialiser (the RepairableFields lesson — RepairableFields.For(BookReviewResult) guards
+            // this exact case for this exact DTO, and this consumer did not), and b8's prompt now EXPLICITLY invites a
+            // merges-only answer ("if there are no duplicates, omit `merges`… there is no limit on the number of
+            // groups"; the findings cap is on `findings` alone). So a synthesis with nothing new to ADD but real
+            // merges to PROPOSE legitimately emits {"findings": null, "merges": [...]} — and the old code threw BOTH
+            // away. Zero synthesis findings is a normal outcome; it is not a reason to discard the merge map.
+            var findings = parsed.Findings;
+            if (findings == null)
             {
-                _logger.LogWarning("Book review (synthesis): JSON had no findings array; treating as zero synthesis findings.");
-                return null;
+                _logger.LogWarning(
+                    "Book review (synthesis): the JSON carried an explicit `\"findings\": null`; treating it as ZERO " +
+                    "synthesis findings. The `merges` map in the SAME response is still honoured — a merges-only " +
+                    "answer is a shape the synthesis prompt explicitly allows (be-c05).");
+                findings = new List<BookFindingItem>();
             }
 
             // Self-labelled dimension (plot/pacing/theme for arc-level notes) — normalise defensively so a bad
             // self-label never poisons the dedup key or score rollup, exactly as the window path does.
-            foreach (var f in parsed.Findings)
+            foreach (var f in findings)
                 f.Dimension = NormalizeDimension(f.Dimension);
 
-            return parsed.Findings;
+            StampShownSet(findings, shownOrders);
+
+            // b8: resolve the merge map against the ids THIS digest printed. Validation is fail-closed and runs
+            // regardless of the kill-switch; only the APPLY step (SynthesisMergeMap.Apply, PASS 0 of UnionAndDedup)
+            // honours the switch, so the OFF state still measures what the model proposed instead of being blind.
+            // Every group the parser recovered arrives here UNCHANGED and faces the full all-or-nothing validation:
+            // be-c05 widened what the model may TYPE, never what it may DO.
+            var mergeMapEnabled = _aiOptions.Value.BookReview.SynthesisMergeMap;
+            var merges = SynthesisMergeMap.Resolve(mergeMapEnabled, parsed.Merges, idMap, _logger);
+
+            return new SynthesisOutcome(findings, merges);
         }
         catch (OperationCanceledException)
         {
@@ -1335,115 +1693,15 @@ public class BookReviewService
         }
     }
 
-    /// <summary>
-    /// Builds the COMPACT [WINDOW_FINDINGS] digest the synthesis prompt reads: one terse line per accumulated
-    /// finding — <c>dimension | chapterOrder | rationale[..140]</c> — with evidence and suggestedAction
-    /// STRIPPED so the block stays small even for ~100 findings. chapterOrder is the first chapter anchor's
-    /// Order (else 0), matching the dedup-key derivation. If the full digest's estimated tokens exceed the
-    /// resolved book-context budget (minus the brief block already charged), the digest is CAPPED by dropping
-    /// the LOWEST-severity findings first (highest severity retained) and the drop is LOGGED (no silent
-    /// truncation). The lines keep their original accumulation order; only the over-budget tail is removed.
-    /// </summary>
-    private string BuildSynthesisDigest(
-        IReadOnlyList<BookFindingItem> accumulatedFindings,
-        string lang,
-        string briefBlock)
-    {
-        var charsPerToken = BookContextAssembler.CharsPerTokenForLanguage(lang);
-        var budget = _contextAssembler.ResolveBudgetTokens(new[] { AiTaskType.BookReview });
-
-        // Reserve the room the FULL brief block already occupies in [BOOK_CONTEXT]; the digest must fit in what
-        // remains. Guard a pathological non-positive remainder to a small floor so at least a few lines survive.
-        var briefTokens = BookContextAssembler.EstimateTokens(briefBlock, charsPerToken);
-        var digestBudget = Math.Max(256, budget - briefTokens);
-
-        // One terse line per finding, in accumulation order, paired with its severity for the cap decision.
-        var lines = new List<(int Severity, string Line)>(accumulatedFindings.Count);
-        foreach (var f in accumulatedFindings)
-        {
-            var order = f.ChapterAnchors is { Count: > 0 } anchors ? anchors[0].Order : 0;
-            var rationale = (f.Rationale ?? string.Empty).Replace('\n', ' ').Replace('\r', ' ').Trim();
-            if (rationale.Length > SynthesisRationaleDigestChars)
-                rationale = rationale.Substring(0, SynthesisRationaleDigestChars);
-            var dimension = NormalizeDimension(f.Dimension);
-            lines.Add((f.Severity, $"{dimension} | {order} | {rationale}"));
-        }
-
-        const string openMarker = "[WINDOW_FINDINGS]";
-        const string closeMarker = "[/WINDOW_FINDINGS]";
-        var markerTokens = BookContextAssembler.EstimateTokens(openMarker + "\n" + closeMarker, charsPerToken);
-
-        // Greedily keep lines in ORIGINAL order until the budget is hit; if that would drop any line, instead
-        // keep the HIGHEST-severity lines (stable within a severity) so the most important findings survive the
-        // cap, then re-emit those in their original order. This keeps the digest deterministic and severity-first.
-        var keptCount = lines.Count;
-        var runningTokens = markerTokens;
-        for (var i = 0; i < lines.Count; i++)
-        {
-            var lineTokens = BookContextAssembler.EstimateTokens(lines[i].Line + "\n", charsPerToken);
-            if (runningTokens + lineTokens > digestBudget)
-            {
-                keptCount = i;
-                break;
-            }
-            runningTokens += lineTokens;
-        }
-
-        List<(int Severity, string Line)> emitted;
-        if (keptCount >= lines.Count)
-        {
-            emitted = lines; // everything fits
-        }
-        else
-        {
-            // Over budget: drop lowest-severity first. Rank by severity DESC (stable), keep as many as fit the
-            // digest budget, then restore original order for the kept subset.
-            var ranked = lines
-                .Select((l, idx) => (l.Severity, l.Line, idx))
-                .OrderByDescending(x => x.Severity)
-                .ThenBy(x => x.idx)
-                .ToList();
-
-            var keepIndices = new HashSet<int>();
-            var tokens = markerTokens;
-            foreach (var r in ranked)
-            {
-                var lineTokens = BookContextAssembler.EstimateTokens(r.Line + "\n", charsPerToken);
-                if (tokens + lineTokens > digestBudget)
-                    continue; // this line does not fit; a later lower-severity line will not either, but keep scanning
-                tokens += lineTokens;
-                keepIndices.Add(r.idx);
-            }
-
-            emitted = lines.Where((_, idx) => keepIndices.Contains(idx)).ToList();
-
-            var dropped = lines.Count - emitted.Count;
-            _logger.LogWarning(
-                "Book review (synthesis): the accumulated-findings digest ({Total} findings, ~{FullTokens} tokens) " +
-                "exceeded the reduce budget ({DigestBudget} tokens after the {BriefTokens}-token brief); capped to " +
-                "{Kept} findings (dropped {Dropped}, lowest-severity first) so the synthesis input fits the model window.",
-                lines.Count,
-                runningTokens,
-                digestBudget,
-                briefTokens,
-                emitted.Count,
-                dropped);
-        }
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine(openMarker);
-        foreach (var (_, line) in emitted)
-            sb.AppendLine(line);
-        sb.Append(closeMarker);
-        return sb.ToString();
-    }
+    /// <summary>What the synthesis reduce produced: the findings it ADDS (as before) and, b8, the validated
+    /// MERGE MAP it wants applied to the accumulated set (the channel that lets a reduce REMOVE, not only add).
+    /// A null <see cref="SynthesisOutcome"/> from <see cref="RunSynthesisAsync"/> still means "the pass failed";
+    /// an outcome with zero findings and zero merge groups means "it ran and had nothing to say".</summary>
+    private sealed record SynthesisOutcome(
+        List<BookFindingItem> Findings,
+        SynthesisMergeMap.Resolution Merges);
 
     // ─── Hierarchical continuity reduce pass (wb4-c05) ───────────────────────────────────────────────
-
-    /// <summary>Max chars of a group finding's rationale kept in the FINAL-reduce digest line (evidence +
-    /// suggestedAction dropped), mirroring <see cref="SynthesisRationaleDigestChars"/>. Terse so the union of
-    /// every group's continuity findings fits the final reduce's model window.</summary>
-    private const int ContinuityRationaleDigestChars = 140;
 
     /// <summary>Bounded recursion depth for the continuity grouping (wb4-c05). Level 0 = the group calls over
     /// the skeleton; each deeper level regroups the previous level's group-findings union when even THAT would
@@ -1530,7 +1788,8 @@ public class BookReviewService
         // terminates. Level 1 = the one flat group→final-reduce round (the common case).
         var digestBudget = Math.Max(256, budget - briefTokens);
         var perGroupDigestLineTokens = Math.Max(1, BookContextAssembler.EstimateTokens(
-            "continuity | 0,0 | " + new string('x', ContinuityRationaleDigestChars) + "\n", charsPerToken));
+            "continuity | 0,0 | " + new string('x', BookReviewDigests.ContinuityRationaleDigestChars) + "\n",
+            charsPerToken));
         var linesPerWindow = Math.Max(2, (digestBudget - markerTokens) / perGroupDigestLineTokens); // fan-in factor
         var level = 1;
         var remaining = (long)groups.Count;
@@ -1625,6 +1884,7 @@ public class BookReviewService
         Guid? jobId,
         int baseChunkIndex,
         int totalChunks,
+        DigestAnchorGate anchorGate,
         CancellationToken ct)
     {
         var briefBlock = BookContextAssembler.FormatBookBrief(bookBrief);
@@ -1638,7 +1898,12 @@ public class BookReviewService
                 _progress.ChunkStarted(jobId.Value, nextChunk, totalChunks);
 
             var skeleton = BookContextAssembler.FormatContinuitySkeleton(plan.Groups[0].Briefs);
-            var findings = await RunContinuityCallAsync(briefBlock, skeleton, lang, ct) ?? new List<BookFindingItem>();
+            // b7: a continuity group's shown-set is exactly the chapters whose skeleton LINES it prints. When the
+            // whole book fits one group that is every chapter (so the gate costs a legitimate cross-book continuity
+            // finding nothing); when it does not, a group sees only its slice and must not anchor outside it.
+            var findings = await RunContinuityCallAsync(
+                briefBlock, skeleton, lang, ct, SkeletonOrders(plan.Groups[0].Briefs))
+                ?? new List<BookFindingItem>();
 
             if (jobId.HasValue)
                 _progress.ChunkCompleted(jobId.Value, nextChunk, totalChunks);
@@ -1657,7 +1922,7 @@ public class BookReviewService
                 _progress.ChunkStarted(jobId.Value, nextChunk, totalChunks);
 
             var skeleton = BookContextAssembler.FormatContinuitySkeleton(group.Briefs);
-            var found = await RunContinuityCallAsync(briefBlock, skeleton, lang, ct);
+            var found = await RunContinuityCallAsync(briefBlock, skeleton, lang, ct, SkeletonOrders(group.Briefs));
             if (found is { Count: > 0 })
             {
                 foreach (var f in found) f.Dimension = "continuity";
@@ -1687,8 +1952,12 @@ public class BookReviewService
         {
             // The final reduce reuses the CONTINUITY skeleton marker so the same prompt/parse path applies: the
             // digest of group findings is rendered as skeleton-shaped lines the continuity prompt already reads.
-            var digestSkeleton = BuildContinuityFindingsDigest(groupFindings, lang, briefBlock);
-            finalFindings = await RunContinuityCallAsync(briefBlock, digestSkeleton, lang, ct)
+            // b7: like synthesis, this pass sees NO chapter content — only the orders its digest lines print — so
+            // that is its shown-set.
+            var (digestSkeleton, digestOrders) =
+                BookReviewDigests.BuildContinuityFindingsDigest(
+                    groupFindings, lang, briefBlock, anchorGate, _contextAssembler, _logger);
+            finalFindings = await RunContinuityCallAsync(briefBlock, digestSkeleton, lang, ct, digestOrders)
                 ?? new List<BookFindingItem>();
         }
 
@@ -1712,12 +1981,14 @@ public class BookReviewService
         string briefBlock,
         string skeletonBlock,
         string lang,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyCollection<int>? shownOrders = null)
     {
         try
         {
             var bookContextSection = briefBlock + "\n\n" + skeletonBlock + "\n\n";
-            var instruction = bookContextSection + _promptFactory.BuildBookReviewContinuityReducePrompt(lang);
+            var instruction = bookContextSection + _promptFactory.BuildBookReviewContinuityReducePrompt(lang)
+                + AllowlistSuffix(lang, shownOrders);
 
             var request = new AiRequest
             {
@@ -1743,13 +2014,17 @@ public class BookReviewService
                 return null;
             }
 
-            var parsed = JsonSerializer.Deserialize<BookReviewResult>(json, DeserializeOpts);
-            if (parsed?.Findings == null)
+            // be-c05: same defensive parse as the window and synthesis passes. This prompt does not ask for `merges`
+            // either, which is precisely why it must not be able to DIE of one: a stray merge key in a continuity
+            // group's output used to throw on the whole document and cost that group all of its findings.
+            var parsed = BookReviewResponseParser.Parse(json, DeserializeOpts, "continuity", _logger);
+            if (parsed.Findings == null)
             {
                 _logger.LogWarning("Book review (continuity): JSON had no findings array; treating as zero continuity findings.");
                 return null;
             }
 
+            StampShownSet(parsed.Findings, shownOrders);
             return parsed.Findings;
         }
         catch (OperationCanceledException)
@@ -1764,98 +2039,19 @@ public class BookReviewService
         }
     }
 
-    /// <summary>
-    /// Builds the COMPACT digest of group-level continuity findings for the FINAL reduce, rendered as
-    /// skeleton-shaped lines the continuity prompt reads: one line per finding —
-    /// <c>continuity | &lt;chapterOrders&gt; | rationale[..140]</c> — wrapped in the
-    /// <c>[CONTINUITY_SKELETON]…[/CONTINUITY_SKELETON]</c> markers so the same prompt/parse/mock switch applies.
-    /// chapterOrders lists ALL of a finding's anchor orders (a continuity break spans chapters). Capped to the
-    /// budget (minus the brief block) by dropping the LOWEST-severity findings first, LOGGED (no silent
-    /// truncation), exactly like <see cref="BuildSynthesisDigest"/>.
-    /// </summary>
-    private string BuildContinuityFindingsDigest(
-        IReadOnlyList<BookFindingItem> groupFindings,
-        string lang,
-        string briefBlock)
-    {
-        var charsPerToken = BookContextAssembler.CharsPerTokenForLanguage(lang);
-        var budget = _contextAssembler.ResolveBudgetTokens(new[] { AiTaskType.BookReview });
-        var briefTokens = BookContextAssembler.EstimateTokens(briefBlock, charsPerToken);
-        var digestBudget = Math.Max(256, budget - briefTokens);
-
-        var lines = new List<(int Severity, string Line)>(groupFindings.Count);
-        foreach (var f in groupFindings)
-        {
-            var orders = f.ChapterAnchors is { Count: > 0 } anchors
-                ? string.Join(",", anchors.Select(a => a.Order))
-                : "0";
-            var rationale = (f.Rationale ?? string.Empty).Replace('\n', ' ').Replace('\r', ' ').Trim();
-            if (rationale.Length > ContinuityRationaleDigestChars)
-                rationale = rationale.Substring(0, ContinuityRationaleDigestChars);
-            lines.Add((f.Severity, $"continuity | {orders} | {rationale}"));
-        }
-
-        var openMarker = BookContextAssembler.ContinuitySkeletonOpen;
-        var closeMarker = BookContextAssembler.ContinuitySkeletonClose;
-        var markerTokens = BookContextAssembler.EstimateTokens(openMarker + "\n" + closeMarker, charsPerToken);
-
-        var keptCount = lines.Count;
-        var runningTokens = markerTokens;
-        for (var i = 0; i < lines.Count; i++)
-        {
-            var lineTokens = BookContextAssembler.EstimateTokens(lines[i].Line + "\n", charsPerToken);
-            if (runningTokens + lineTokens > digestBudget)
-            {
-                keptCount = i;
-                break;
-            }
-            runningTokens += lineTokens;
-        }
-
-        List<(int Severity, string Line)> emitted;
-        if (keptCount >= lines.Count)
-        {
-            emitted = lines; // everything fits
-        }
-        else
-        {
-            var ranked = lines
-                .Select((l, idx) => (l.Severity, l.Line, idx))
-                .OrderByDescending(x => x.Severity)
-                .ThenBy(x => x.idx)
-                .ToList();
-
-            var keepIndices = new HashSet<int>();
-            var tokens = markerTokens;
-            foreach (var r in ranked)
-            {
-                var lineTokens = BookContextAssembler.EstimateTokens(r.Line + "\n", charsPerToken);
-                if (tokens + lineTokens > digestBudget)
-                    continue;
-                tokens += lineTokens;
-                keepIndices.Add(r.idx);
-            }
-
-            emitted = lines.Where((_, idx) => keepIndices.Contains(idx)).ToList();
-            _logger.LogWarning(
-                "Book review (continuity): the group-findings union digest ({Total} findings, ~{FullTokens} tokens) " +
-                "exceeded the reduce budget ({DigestBudget} tokens after the {BriefTokens}-token brief); capped to " +
-                "{Kept} findings (dropped {Dropped}, lowest-severity first) so the final reduce input fits the model window.",
-                lines.Count, runningTokens, digestBudget, briefTokens, emitted.Count, lines.Count - emitted.Count);
-        }
-
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine(openMarker);
-        foreach (var (_, line) in emitted)
-            sb.AppendLine(line);
-        sb.Append(closeMarker);
-        return sb.ToString();
-    }
+    /// <summary>b7: the chapter orders a continuity SKELETON block prints — one line per brief, so the shown-set is
+    /// exactly those briefs' Orders. Single-sourced here so the group call, the plan and the allowlist all read the
+    /// same set the skeleton renderer emits.</summary>
+    private static IReadOnlyCollection<int> SkeletonOrders(IReadOnlyList<ChapterBrief> briefs) =>
+        briefs.Select(b => b.Order).Distinct().OrderBy(o => o).ToArray();
 
     /// <summary>Normalises a model-supplied dimension to one of the six known dimensions (case-insensitive,
     /// trimmed). An unknown or blank value falls back to "plot" — the same unknown-dimension fallback the
-    /// per-dimension prompt uses — so a bad self-label never poisons the dedup key or score rollup.</summary>
-    private static string NormalizeDimension(string? dimension)
+    /// per-dimension prompt uses — so a bad self-label never poisons the dedup key or score rollup.
+    /// be-c09: internal (not private) so <see cref="BookReviewDigests"/> — which prints this exact normalised
+    /// dimension in every digest line — calls the ONE implementation rather than growing a second copy of it
+    /// (the same single-sourcing NIT-5 applied to <see cref="DeserializeOpts"/>).</summary>
+    internal static string NormalizeDimension(string? dimension)
     {
         var d = (dimension ?? string.Empty).Trim().ToLowerInvariant();
         return Array.IndexOf(Dimensions, d) >= 0 ? d : "plot";
@@ -1869,6 +2065,22 @@ public class BookReviewService
     /// the shared <see cref="UnifiedAnalysisService.ExtractJson"/> extractor (BOM/bidi-stripping,
     /// balanced-brace). Returns the parsed findings, or NULL when the model errors or the output cannot be
     /// parsed — the caller treats null as zero findings WITHOUT aborting the build.
+    ///
+    /// P3-3, NO ALLOWLIST ON THIS CALL. Unlike every windowed-path call (<see cref="RunCombinedCallAsync"/>,
+    /// <see cref="RunSynthesisAsync"/>, the continuity reduce), the instruction built here is NOT suffixed with
+    /// <see cref="AllowlistSuffix"/> — the caller (<see cref="RunPerDimensionFanOutAsync"/>, the legacy path) only
+    /// STAMPS a shown-set on the returned findings after the fact (see the "b7 SHOWN-SET on the legacy path"
+    /// comment at the call site), it never tells the MODEL what that set is. The shown-set itself is derived from
+    /// the concatenated window text handed to <paramref name="bookContextSection"/>'s caller, which is every
+    /// chapter in the book — but a big book's concatenated context can exceed the model's num_ctx, and the AI
+    /// provider silently truncates an over-budget prompt rather than failing it. If that happens, the model
+    /// genuinely did not see some tail chapters, yet the shown-set still lists them as shown (it is derived from
+    /// what was ASSEMBLED, not from what the model actually attended to) — the resolver's visibility gate then
+    /// treats an anchor into that tail as SEEN when it may have been a guess, precisely where the b7 gate exists
+    /// to catch a wrong one. Documented, not gated: the toggle that selects this path ships OFF by default
+    /// (<see cref="AiOptions.BookReviewSingleCombined"/> = true), it is kept only for a future larger-GPU
+    /// re-measure, and adding an allowlist here would still not fix the underlying truncation risk — only
+    /// windowing (the default path) bounds the per-call context to a size that is known to fit.
     /// </summary>
     private async Task<List<BookFindingItem>?> RunDimensionAsync(
         string dimension,
@@ -2033,18 +2245,69 @@ public class BookReviewService
     /// <summary>
     /// Unions the per-dimension findings into one set and dedups by
     /// <see cref="BookFinding.ComputeDedupKey"/>(dimension, primaryChapterOrder, rationale) where
-    /// primaryChapterOrder = the first chapter anchor's Order, else 0. First occurrence of a dedup key wins;
-    /// later duplicates are dropped. Each surviving item is projected to a <see cref="BookFinding"/> with
-    /// anchors/evidence chapterId backfilled by Order (Phase-3 navigation), Status defaulted to "open"
-    /// (the persist step preserves any prior user Status), and BuiltWithModel stamped.
+    /// primaryChapterOrder = the first RESOLVED chapter anchor's Order, else NULL (a book-wide, NO-ANCHOR
+    /// finding). First occurrence of a dedup key wins; later duplicates are dropped. Each item is projected to a
+    /// <see cref="BookFinding"/> with anchors/evidence RESOLVED against the book's real chapters by
+    /// <paramref name="anchors"/> (Phase-3 navigation), Status defaulted to "open" (the persist step preserves any
+    /// prior user Status), and BuiltWithModel stamped.
+    ///
+    /// b3 — the key is derived from the RESOLVED anchors, so PROJECT FIRST, then dedup (pre-b3 the key came from
+    /// the RAW model anchor, before resolution). Two reasons:
+    ///   • STABILITY. The model guesses orders (it has read one out of a chapter TITLE). Two builds that guess
+    ///     DIFFERENT phantom orders which both resolve to the same real chapter used to produce two different keys
+    ///     and hence two rows; resolving first collapses them onto one stable key.
+    ///   • THE SENTINEL. "No anchor" must be distinguishable from "anchored to chapter 0" — and after b1 a finding
+    ///     whose anchors are all unresolvable BECOMES a no-anchor finding, so the two are now routinely produced by
+    ///     the same build. <see cref="BookFinding.ComputeDedupKey"/> takes an <c>int?</c> for exactly this.
+    /// The rationale + dimension halves of the key still come from the RAW model item (the term-repair layers
+    /// rewrite Rationale in place AFTER this, and the key must not move when they do — see step 5b).
+    ///
+    /// Projecting before the dedup check means an exact-duplicate item has its anchors resolved (and any drop
+    /// counted) before it is discarded, so the resolver's diagnostic counters count dropped REFERENCES, including
+    /// those of items the dedup then collapses. That is a log-only effect.
+    ///
+    /// b4 — TWO dedup stages, in this order:
+    ///   1. EXACT-KEY (here). Byte-identical prose (modulo case / trim / whitespace runs) → one row. Cheap, and it
+    ///      is the stage whose key is PERSISTED, so it must stay exactly as it is: the persist step re-matches a
+    ///      cached row by that key to carry the user's Status across a rebuild.
+    ///   2. NEAR-DUPLICATE COLLAPSE (<see cref="NearDuplicateCollapser"/>). The exact key is a HASH, so it cannot
+    ///      absorb RE-WORDING — and the model routinely emits one finding two to four times with a word changed,
+    ///      which is what the user was seeing as "the same finding, listed again". The collapser buckets by
+    ///      (dimension, RESOLVED chapter order) and merges rationales whose normalized content-token sets are
+    ///      highly similar; it then folds a BOOK-WIDE copy into the ANCHORED copy of the same finding (b4b), and
+    ///      finally merges what the model filed under TWO DIFFERENT dimensions when the two are NEAR-IDENTICAL
+    ///      (b4c — a much stricter cut-off, because two dimensions are two questions asked of the same prose).
+    ///      It runs AFTER the exact-key stage (cheaper filter first) and changes NO key: it only decides which of
+    ///      the freshly built findings reach the persist step, so there is nothing to migrate.
+    ///
+    /// b8 — and BEFORE either of those, PASS 0: the SYNTHESIS MERGE MAP (<see cref="SynthesisMergeMap.Apply"/>). It
+    /// runs FIRST because it is the only pass that read the findings' MEANING rather than their tokens: the reduce
+    /// model saw every accumulated finding at once and named the ones that are one finding. The token metric is
+    /// provably exhausted on this corpus (a true duplicate at 0.455 sits BELOW a genuinely distinct pair at 0.462,
+    /// so no threshold can separate them), so the model's own judgement is the only signal that can. Running it
+    /// first means the deterministic passes then work on the already-merged set and never re-litigate it. It is
+    /// gated by a kill-switch that ships OFF, and it changes NO dedup key (the merge unions ANCHORS onto a survivor
+    /// that is one of the originals, by APPEND, so the first anchor — the key's primary-order input — cannot move).
     /// </summary>
     private static List<BookFinding> UnionAndDedup(
         IReadOnlyList<List<BookFindingItem>?> perDimension,
-        IReadOnlyDictionary<int, (Guid Id, string Title)> chaptersByOrder,
+        ChapterAnchorResolver anchors,
         string? builtWithModel,
-        string lang)
+        string lang,
+        SynthesisMergeMap.Resolution? synthesisMerges = null,
+        ILogger? logger = null)
     {
         var byKey = new Dictionary<string, BookFinding>(StringComparer.Ordinal);
+
+        // The collapse pass buckets on the RESOLVED primary chapter order — the SAME value that fed the dedup key
+        // (ProjectToEntity hands it back rather than us re-deriving it from the serialized anchors, so the bucket
+        // key and the dedup key can never drift apart).
+        var candidates = new List<NearDuplicateCollapser.Candidate>();
+
+        // b8: the RAW model item each candidate was projected from, index-aligned with `candidates`. The merge map
+        // names ITEMS (that is what the digest listed), the collapse works on ENTITIES; this is the bridge, and it
+        // is built here rather than reconstructed later so the two can never fall out of step.
+        var candidateItems = new List<BookFindingItem>();
 
         foreach (var dimensionFindings in perDimension)
         {
@@ -2056,65 +2319,111 @@ public class BookReviewService
                 if (string.IsNullOrWhiteSpace(item.Rationale))
                     continue; // a finding with no rationale is not actionable and cannot dedup stably
 
-                // ChapterAnchors/Evidence can arrive null when the model emits "chapterAnchors": null (or a
-                // value the deserializer leaves null) — a finding with only rationale + verdict is still valid.
-                // Treat missing anchors as empty (primaryOrder 0) instead of letting a NullReferenceException
-                // here fail the ENTIRE build (UnionAndDedup runs outside the per-dimension try/catch).
-                var primaryOrder = item.ChapterAnchors is { Count: > 0 } ? item.ChapterAnchors[0].Order : 0;
-                var dedupKey = BookFinding.ComputeDedupKey(item.Dimension, primaryOrder, item.Rationale);
+                var entity = ProjectToEntity(item, anchors, builtWithModel, lang, out var primaryOrder);
 
-                if (byKey.ContainsKey(dedupKey))
+                // NIT-8, PRE-EXISTING: first occurrence wins, and the discarded duplicate's ENTIRE projected entity
+                // is dropped with it — including any EXTRA anchors it carried that the first occurrence did not.
+                // The dedup key hashes (dimension, primaryOrder, rationale) only, so two items with byte-identical
+                // rationale/dimension/primary-order but DIFFERENT full anchor lists (e.g. [3,5] vs [3,7] — both
+                // resolve to the same primary order 3) collide on the SAME key, and whichever arrived second loses
+                // its "7" silently. b8's SynthesisMergeMap.Apply inherits this: it unions anchors onto a merge
+                // survivor from whatever the exact-key dedup already kept, so it can never recover an anchor lost
+                // here. Not fixed: the two items ARE the same finding (identical rationale), just with the model
+                // giving slightly different chapter lists across windows, and there is no principled way to prefer
+                // one item's anchor list over the other's without evidence beyond "which one this loop saw first".
+                if (byKey.ContainsKey(entity.DedupKey))
                     continue; // first occurrence wins
 
-                byKey[dedupKey] = ProjectToEntity(item, dedupKey, chaptersByOrder, builtWithModel, lang);
+                byKey[entity.DedupKey] = entity;
+                candidates.Add(new NearDuplicateCollapser.Candidate(entity, primaryOrder));
+                candidateItems.Add(item);
             }
         }
 
-        return byKey.Values.ToList();
+        // ── PASS 0: the synthesis MERGE MAP (b8) — the model's own "these are one finding" call. ──
+        var merged = SynthesisMergeMap.Apply(candidates, candidateItems, synthesisMerges, logger);
+
+        return NearDuplicateCollapser.Collapse(merged, logger);
     }
 
     /// <summary>
     /// Projects a model <see cref="BookFindingItem"/> into a <see cref="BookFinding"/> entity. Anchors and
-    /// evidence are CHAPTER-level only (never character offsets); chapterId is backfilled from the book's
-    /// chapters by Order where the model gave an Order (for Phase-3 navigation), else left empty/null.
+    /// evidence are CHAPTER-level only (never character offsets) and are RESOLVED against the book's REAL
+    /// chapters by <see cref="ChapterAnchorResolver"/>: by Order, then by Title, else DROPPED.
+    ///
+    /// The model is UNTRUSTED on chapter references (see the resolver's remarks: it has been seen inventing an
+    /// order, or reading one out of a chapter TITLE). An anchor that matches no real chapter is NOT persisted —
+    /// previously such an anchor was written with <c>ChapterId = Guid.Empty</c>, which is unusable for navigation
+    /// AND (its order being no real chapter's order) un-deletable by the scoped delete-vanished-open pass, so it
+    /// accumulated forever. A finding whose anchors are ALL dropped is still KEPT: its rationale can be valid
+    /// book-wide criticism, so it simply becomes a NO-ANCHOR finding (an empty anchors list) — an existing,
+    /// supported state — rather than a finding with a phantom anchor.
+    ///
+    /// b3: this is also where the DEDUP KEY is stamped (both the current key and the transient legacy-V1 key the
+    /// persist step migrates from), because the key's primary-order input is the first RESOLVED anchor — which
+    /// only exists here. See <see cref="UnionAndDedup"/> for why the key must be derived post-resolution.
     /// </summary>
+    /// <param name="primaryChapterOrder">OUT: the resolved primary chapter order that fed the dedup key (the first
+    /// resolved anchor's Order, or NULL for a no-anchor / book-wide finding). Handed back so the near-duplicate
+    /// collapse pass buckets on the SAME value the key hashes instead of re-deriving it from the serialized JSON.</param>
     private static BookFinding ProjectToEntity(
         BookFindingItem item,
-        string dedupKey,
-        IReadOnlyDictionary<int, (Guid Id, string Title)> chaptersByOrder,
+        ChapterAnchorResolver resolver,
         string? builtWithModel,
-        string lang)
+        string lang,
+        out int? primaryChapterOrder)
     {
-        // Backfill chapterId on anchors by Order (the model returns order + title, usually not the id).
-        // Null-safe: the model can emit "chapterAnchors": null, which the deserializer leaves null; a finding
-        // with only rationale/verdict is still valid, so a null list projects to no anchors (not a crash).
-        var anchors = item.ChapterAnchors?.Select(a =>
-        {
-            var resolved = chaptersByOrder.TryGetValue(a.Order, out var ch);
-            return new FindingChapterAnchor
-            {
-                ChapterId = resolved ? ch.Id : a.ChapterId, // keep any id the model supplied if order missed
-                Order = a.Order,
-                Title = !string.IsNullOrWhiteSpace(a.Title) ? a.Title : (resolved ? ch.Title : string.Empty)
-            };
-        }).ToList() ?? new List<FindingChapterAnchor>();
+        // b7: the shown-set of the PASS that produced this finding (null = the producer declared no visibility →
+        // unconstrained). Threaded per-ITEM, not per-build, because the whole point is that different findings in
+        // the SAME accumulated set were written by passes that saw DIFFERENT chapters.
+        var shownOrders = item.VisibleChapterOrders;
 
-        // Backfill chapterId on evidence by chapterOrder where we can (null when the order is unknown).
-        // Null-safe for the same reason as anchors above: "evidence": null projects to no evidence.
-        var evidence = item.Evidence?.Select(e =>
+        // RESOLVE the anchors (order → title → shown? → drop). Null-safe: the model can emit "chapterAnchors": null,
+        // which the deserializer leaves null; a finding with only rationale/verdict is still valid, so a null
+        // list projects to no anchors (not a crash).
+        var anchors = new List<FindingChapterAnchor>();
+        if (item.ChapterAnchors != null)
         {
-            Guid? chapterId = e.ChapterId;
-            if (chapterId == null && chaptersByOrder.TryGetValue(e.ChapterOrder, out var ch))
-                chapterId = ch.Id;
-            return new FindingEvidence
+            foreach (var a in item.ChapterAnchors)
             {
-                ChapterId = chapterId,
-                ChapterOrder = e.ChapterOrder,
-                Excerpt = e.Excerpt
-            };
-        }).ToList() ?? new List<FindingEvidence>();
+                if (resolver.TryResolveAnchor(a, out var resolved, shownOrders))
+                    anchors.Add(resolved);
+                // else: unresolvable (no such chapter) OR real-but-UNSEEN by this pass → DROPPED. Both are counted
+                // by the resolver, separately, and the build logs a warning for each class.
+            }
+        }
+
+        // RESOLVE the evidence by chapterOrder (evidence carries no title). An order that is not a real chapter
+        // order is a phantom nav target, so the item is dropped rather than pinned to a chapter it is not in.
+        // b7: so is an order naming a real chapter this pass never saw — the model cannot have excerpted it.
+        // Null-safe for the same reason as anchors above: "evidence": null projects to no evidence.
+        var evidence = new List<FindingEvidence>();
+        if (item.Evidence != null)
+        {
+            foreach (var e in item.Evidence)
+            {
+                if (resolver.TryResolveEvidence(e, out var resolved, shownOrders))
+                    evidence.Add(resolved);
+            }
+        }
 
         var severity = Math.Clamp(item.Severity, 1, 3);
+
+        // b3 DEDUP KEY. The primary chapter order is the first RESOLVED anchor's Order, or NULL when the finding
+        // anchors NO chapter — the model emitted none, or every anchor it emitted was unresolvable and dropped
+        // above. NULL, not 0: chapter 0 is a REAL chapter in every (0-based) book, so the old 0-as-"no anchor"
+        // sentinel made a book-wide finding hash identically to a first-chapter one.
+        int? primaryOrder = anchors.Count > 0 ? anchors[0].Order : null;
+        primaryChapterOrder = primaryOrder; // b4: same value, handed to the near-duplicate collapse bucketing.
+        var dedupKey = BookFinding.ComputeDedupKey(item.Dimension, primaryOrder, item.Rationale);
+
+        // MIGRATION SHIM (transient, never persisted). The key this finding WOULD have had under the pre-b3
+        // derivation — RAW (unresolved) first anchor order, 0 when the model emitted none. The persist step uses it
+        // to re-match a cached row that was written under V1 so the user's Status survives the derivation change,
+        // then upgrades that row's stored key. Derived from the SAME raw model item V1 hashed, which is why this
+        // works where a recompute-from-the-persisted-row could not (see BookFinding.ComputeLegacyDedupKeyV1).
+        var rawPrimaryOrder = item.ChapterAnchors is { Count: > 0 } rawAnchors ? rawAnchors[0].Order : 0;
+        var legacyKey = BookFinding.ComputeLegacyDedupKeyV1(item.Dimension, rawPrimaryOrder, item.Rationale);
 
         return new BookFinding
         {
@@ -2129,6 +2438,7 @@ public class BookReviewService
             SuggestedAction = string.IsNullOrWhiteSpace(item.SuggestedAction) ? null : item.SuggestedAction,
             Status = "open",
             DedupKey = dedupKey,
+            LegacyDedupKeyV1 = legacyKey,
             BuiltWithModel = builtWithModel
             // CreatedAt/UpdatedAt stamped by the SaveChanges override.
         };
@@ -2145,26 +2455,42 @@ public class BookReviewService
     /// <summary>
     /// Persists the freshly-built findings PRESERVING any user-set Status, mirroring the suggestion
     /// outcome-preservation idiom (match incoming to existing rows by a stable key; never clobber a user
-    /// decision on rebuild). Match key = (BookId, DedupKey):
+    /// decision on rebuild). A fresh finding is matched to its cached row in THREE tiers — the current dedup key,
+    /// then b3's legacy-V1 key, then b4b's RE-WORDING match — run TIER-MAJOR: every incoming finding goes through
+    /// tier 1 before ANY finding is offered to tier 2, and every leftover through tier 2 before ANY reaches tier 3
+    /// (be-c04 — see <see cref="BookFindingReconciler.MatchIncomingToExistingRows"/> for why the old per-finding interleaving could let a
+    /// fuzzy GUESS steal the row an exact key matched, and RESURRECT a dismissed finding as an open card).
+    /// All three tiers mean the same thing ("this fresh finding IS that row") and are handled identically:
     ///   • MATCH: keep the existing Status (acknowledged/dismissed/done stays; an existing "open" stays
     ///     "open") and refresh the content (verdict/severity/rationale/evidence/anchors/suggestedAction) +
-    ///     BuiltWithModel + UpdatedAt — the finding regenerated identically (same key) but its text may have
-    ///     shifted slightly.
+    ///     BuiltWithModel + UpdatedAt — the finding regenerated (identically, or re-worded) but its text may have
+    ///     shifted. The one exception: a RE-WORDING match whose fresh copy anchors NO chapter does not blank a real
+    ///     anchor the cached row already has (the anchored side keeps the chapter link) — and, be-c08 / P3-6, such a
+    ///     row keeps its own DEDUP KEY too, because the primary chapter order is an input to that key and a row whose
+    ///     key disagreed with its own anchors lost those anchors on the very next build.
     ///   • NEW: insert as "open".
     ///   • VANISHED (existing row whose key is NOT in the new set): a user decision must not be lost, so
     ///     DELETE ONLY rows still "open" (pure regenerated noise the model no longer surfaces) and PRESERVE
     ///     any the user acted on (acknowledged/dismissed/done) — they remain as a record of that decision.
     ///     be-c02 SCOPING: the delete is FURTHER gated to only findings whose EVERY anchored chapter order is in
-    ///     <paramref name="reviewedChapterOrders"/> (the primaries of windows whose model call SUCCEEDED this
+    ///     <paramref name="reviewedChapterOrders"/> (the primaries of windows that PRODUCED FINDINGS this
     ///     build). A vanished-open finding anchored to ANY chapter whose window FAILED (or was never covered) is
     ///     PRESERVED — we did not actually re-review that chapter, so its absence from `incoming` is a
     ///     truncation/failure artifact, NOT the model retracting the finding. Checking ALL anchors (not just the
     ///     first) matters for MULTI-chapter continuity findings: one whose first anchor was re-reviewed but a
     ///     later anchored chapter's window failed must survive. Without this scope a partial rebuild (some windows
     ///     fail) would silently wipe the prior still-open findings — and their user Status path was already handled
-    ///     above — for the un-reviewed chapters. A parsed-EMPTY window is a SUCCESS per be-c01 (its chapters ARE in
-    ///     reviewedChapterOrders and legitimately clean), so a finding anchored ENTIRELY within reviewed chapters
-    ///     IS deleted — the window(s) reviewed them and no longer surface it (regenerated noise).
+    ///     above — for the un-reviewed chapters. be-c01 (2026-07-13) TIGHTENED what "reviewed" means: a window that
+    ///     PARSED but returned ZERO findings is a SUSPECTED TRUNCATION (the model cannot express "clean" distinctly
+    ///     from "cut short" — see <see cref="WindowOutcome"/>), so its chapters are NOT in
+    ///     <paramref name="reviewedChapterOrders"/> either. Only a window that PRODUCED findings licenses a delete
+    ///     on its chapters; a finding anchored ENTIRELY within such chapters IS deleted — those windows reviewed
+    ///     them and no longer surface it (regenerated noise).
+    ///     b2 IMMORTAL-ORPHAN FIX: that scope is evaluated over the anchors that name a REAL chapter of this book
+    ///     only (see <see cref="BookFindingReconciler.IsVanishedOpenDeletable"/>). An anchor order the book does not have is an INVALID
+    ///     (phantom) anchor — it can never appear in <paramref name="reviewedChapterOrders"/> (a subset of the real
+    ///     orders), so under the raw all-anchors test it blocked the delete on EVERY rebuild, forever. The be-c02
+    ///     preservation intent is untouched; an invalid anchor simply carries no preservation weight.
     ///
     /// DECISION (delete-open vs superseded status): we DELETE vanished "open" rows rather than introduce a
     /// "superseded" status. A superseded status would need a migration + widening the status set + FE
@@ -2172,21 +2498,40 @@ public class BookReviewService
     /// noise). Preserving user-acted rows already covers the only case where losing the row would lose
     /// information. So: delete-open / preserve-touched, no schema change.
     /// </summary>
-    /// <param name="reviewedChapterOrders">The distinct PRIMARY chapter orders of the windows whose model call
-    /// SUCCEEDED this build (be-c01's <c>reviewedPrimaryOrders</c>, passed through verbatim). A vanished-open
-    /// finding is deleted ONLY when EVERY chapter order it anchors is in this set; a finding anchored to any
-    /// un-reviewed (failed/uncovered) chapter is preserved. On a fully-successful build this covers every reviewed
+    /// <param name="reviewedChapterOrders">The distinct PRIMARY chapter orders of the windows that PRODUCED
+    /// FINDINGS this build (<c>reviewedPrimaryOrders</c>, passed through verbatim; a window that errored, was
+    /// unparseable, or came back EMPTY is excluded — see <see cref="WindowOutcome"/>). A vanished-open finding is
+    /// deleted ONLY when EVERY REAL chapter order it anchors is in this set; a finding anchored to any un-reviewed
+    /// REAL chapter is preserved. On a build where every window produced findings this covers every reviewable
     /// chapter, so the delete behaves exactly as before (no behavior change).</param>
+    /// <param name="reviewableChapterOrders">be-c03: the chapter orders this build actually PUT IN FRONT OF THE
+    /// MODEL (<c>totalReviewableOrders</c>) — the union of every window's PRIMARY orders on the windowed path, every
+    /// chapter order on the legacy whole-book-context path. A GENUINELY EMPTY chapter (title-only divider, DOCX
+    /// artefact) is skipped by the windower, so it is in <paramref name="realChapterOrders"/> but NOT here. This is
+    /// the denominator of the b3 BOOK-WIDE (no-anchor) rule: such a finding is retractable only by a build that
+    /// reviewed everything it COULD review. Measuring it against the RAW chapter set instead made the test
+    /// PERMANENTLY unsatisfiable on any book with an empty chapter, so every vanished-open book-wide finding was
+    /// preserved on every rebuild, forever (the b2 immortal-orphan class, resurrected).
+    /// Contains <paramref name="reviewedChapterOrders"/>; is contained by <paramref name="realChapterOrders"/>.</param>
+    /// <param name="realChapterOrders">b2: the book's REAL chapter orders (<c>chaptersByOrder.Keys</c>, 0-based).
+    /// An anchor order OUTSIDE this set is a phantom the model invented (b1 stops NEW ones being written, but rows
+    /// persisted before that fix still carry them) and is IGNORED when scoping the delete — otherwise it pins the
+    /// row alive on every future rebuild. <paramref name="reviewedChapterOrders"/> is always a subset of this
+    /// set. Kept SEPARATE from <paramref name="reviewableChapterOrders"/> on purpose (be-c03): only the REAL set can
+    /// tell a phantom anchor (no preservation weight) from a real-but-unreviewed chapter (PRESERVE).</param>
     /// <param name="chaptersReviewed">data-c01 HONEST coverage numerator to persist (see
     /// <see cref="BookReviewCoverage"/>): chapters actually reviewed this build. Upserted into the (BookId,
     /// Language) coverage row inside this SAME persist step so the status probe stays honest across a reload.</param>
     /// <param name="chaptersTotal">data-c01 HONEST coverage denominator to persist: chapters this build was
-    /// responsible for. Always &gt;= <paramref name="chaptersReviewed"/>.</param>
+    /// responsible for. Always &gt;= <paramref name="chaptersReviewed"/>. Equals
+    /// <paramref name="reviewableChapterOrders"/>.Count on both build paths.</param>
     private async Task PersistPreservingStatusAsync(
         Guid bookId,
         string lang,
         IReadOnlyList<BookFinding> incoming,
         IReadOnlySet<int> reviewedChapterOrders,
+        IReadOnlySet<int> reviewableChapterOrders,
+        IReadOnlySet<int> realChapterOrders,
         int chaptersReviewed,
         int chaptersTotal,
         CancellationToken ct)
@@ -2199,56 +2544,195 @@ public class BookReviewService
             .GroupBy(f => f.DedupKey, StringComparer.Ordinal)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
 
-        var incomingKeys = new HashSet<string>(incoming.Select(f => f.DedupKey), StringComparer.Ordinal);
+        // b3 KEY MIGRATION. Rows cached under the PRE-b3 derivation carry a stale key, so matching on the current
+        // key alone would orphan EVERY user-acted finding and silently drop its Status. The CURRENT key is tried
+        // first (for every incoming finding), then the fresh finding's LEGACY-V1 key (BookFinding.LegacyDedupKeyV1,
+        // re-derived in ProjectToEntity from the same raw model item V1 hashed); a legacy hit preserves the row and
+        // UPGRADES its stored key in place. Idempotent and self-healing: after one rebuild the row matches on the
+        // current key and the fallback never fires again for it.
+        //
+        // Matched rows are tracked BY ID, not by key: with two key derivations in play, key-set membership can no
+        // longer answer "was this cached row claimed by an incoming finding?" (a legacy-matched row's stored key is
+        // in NEITHER incoming key set until we rewrite it). A row is claimed at most once — by the STRONGEST tier
+        // that wants it (be-c04), never merely by the first finding in list order — so two incoming findings can
+        // never be folded onto the same row.
+        var matchedExistingIds = new HashSet<Guid>();
 
-        foreach (var fresh in incoming)
+        // b4b TIER 3 — the RE-WORDING match. The two key tiers above are hashes, so they only see a finding the
+        // model re-emitted CHARACTER-FOR-CHARACTER. When it rephrases one instead, the fresh finding matches
+        // nothing, is inserted as a new open row, and lands NEXT TO the row it is a rewording of — visibly, because
+        // a user-acted (acknowledged/dismissed/done) row is never deleted and is therefore always still there. That
+        // is the duplicate pair the user reported. Offer every existing row (with the chapter it is compared on)
+        // to the collapser as a possible original; see NearDuplicateCollapser.FindPersistedNearDuplicate for the
+        // Status semantics, which are exactly the exact-key tier's (the row survives, Status untouched, content
+        // refreshed) because a rewording of a finding IS that finding.
+        var persistedCandidates = new List<NearDuplicateCollapser.PersistedCandidate>(existing.Count);
+        foreach (var row in existing)
         {
+            var anchorOrders = BookFindingReconciler.ChapterOrdersOf(row);
+            if (anchorOrders is null)
+                continue; // UNKNOWN scope (unparseable anchors) → never fuzzy-matched, just as it is never deleted.
+            persistedCandidates.Add(
+                NearDuplicateCollapser.Prepare(
+                    row, BookFindingReconciler.ComparisonOrderOf(anchorOrders, realChapterOrders)));
+        }
+
+        // be-c04: the three tiers run TIER-MAJOR (every incoming finding through tier 1, then the leftovers through
+        // tier 2, then the leftovers through tier 3) rather than FINDING-major, so an EXACT-key match can never lose
+        // its row to an earlier finding's 0.45-similarity guess. See BookFindingReconciler.MatchIncomingToExistingRows.
+        var matches = BookFindingReconciler.MatchIncomingToExistingRows(
+            incoming, existingByKey, persistedCandidates, realChapterOrders, matchedExistingIds,
+            out var legacyMatches, _logger);
+
+        var rewordFolds = 0;
+        var rewordFoldsOntoUserActed = 0;
+        var keyUpgrades = 0;
+
+        for (var i = 0; i < incoming.Count; i++)
+        {
+            var fresh = incoming[i];
             fresh.BookId = bookId;
 
-            if (existingByKey.TryGetValue(fresh.DedupKey, out var prior))
-            {
-                // MATCH: preserve the user's Status, refresh content + model + UpdatedAt.
-                prior.Dimension = fresh.Dimension;
-                prior.Verdict = fresh.Verdict;
-                prior.Severity = fresh.Severity;
-                prior.Rationale = fresh.Rationale;
-                prior.EvidenceJson = fresh.EvidenceJson;
-                prior.ChapterAnchorsJson = fresh.ChapterAnchorsJson;
-                prior.SuggestedAction = fresh.SuggestedAction;
-                prior.BuiltWithModel = fresh.BuiltWithModel;
-                // prior.Status intentionally untouched (user decision preserved; "open" stays "open").
-                _db.Entry(prior).State = EntityState.Modified; // force UpdatedAt refresh via the override
-            }
-            else
+            if (matches[i] is not { } match)
             {
                 // NEW: insert as "open" (already defaulted on the projected entity).
                 _db.BookFindings.Add(fresh);
+                continue;
             }
+
+            var prior = match.Row;
+            var priorIsUserActed = !string.Equals(prior.Status, "open", StringComparison.Ordinal);
+            if (match.ViaReword)
+            {
+                rewordFolds++;
+                if (priorIsUserActed)
+                {
+                    rewordFoldsOntoUserActed++;
+
+                    // AUDIT TRAIL FOR A DESTRUCTIVE PATH (P2-2 / be-f01), mirroring SynthesisMergeMap's KEPT/DELETED
+                    // log for its own destructive operation. This fuzzy fold is the ONLY path that can rewrite a
+                    // USER-ACTED row's prose: Status is preserved correctly, but if the 0.45-0.60 similarity guess
+                    // is WRONG, the user's acknowledgement/dismissal now attaches to text they never read, and the
+                    // OLD text is unrecoverable the moment it is overwritten below. A bare count cannot tell a
+                    // correct fold from a bad one, so log the actual before/after snippets and the score that cleared
+                    // (or the be-c07 stricter bar it had to clear, on an anchor mismatch).
+                    _logger.LogInformation(
+                        "Book review (dedup): book {BookId} ({Lang}) — fuzzy re-wording fold onto USER-ACTED row " +
+                        "{RowId} (status '{Status}', score {Score} >= required {Required}). OLD: [{OldDim}] \"{Old}\". " +
+                        "NEW: [{NewDim}] \"{New}\".",
+                        bookId, lang, prior.Id, prior.Status,
+                        match.Score.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture),
+                        match.RequiredThreshold.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture),
+                        prior.Dimension, SynthesisMergeMap.Snippet(prior.Rationale),
+                        fresh.Dimension, SynthesisMergeMap.Snippet(fresh.Rationale));
+                }
+            }
+
+            // MATCH (any tier — all three mean "this fresh finding IS that row"): preserve the user's Status,
+            // refresh content + model + UpdatedAt. The row was already claimed (BY ID) by the matcher, so it is
+            // neither offered to another fresh finding nor seen as VANISHED by the delete pass below.
+            prior.Dimension = fresh.Dimension;
+            prior.Verdict = fresh.Verdict;
+            prior.Severity = fresh.Severity;
+            prior.Rationale = fresh.Rationale;
+            prior.EvidenceJson = fresh.EvidenceJson;
+
+            // THE KEY AND THE ANCHORS TRAVEL TOGETHER (be-c08 / P3-6). A fold whose fresh copy anchors NO chapter
+            // while the row it claims anchors a REAL one must not blank that anchor: the anchored side always keeps
+            // the chapter link (the same rule the build-time cross-bucket fold enforces). Only the ANCHOR is
+            // preserved, never the evidence — evidence is excerpts, and pairing one copy's quotes with another copy's
+            // prose would fabricate a finding neither states.
+            //
+            // ...and when the row keeps its ANCHORS it must ALSO keep its KEY, because the primary chapter order is
+            // an INPUT to that key (b3). Writing the anchor-less fresh key onto an anchored row made the row's key
+            // disagree with the row's own anchors, and that is not a cosmetic inconsistency — it is a NON-FIXED-POINT
+            // that DESTROYS the very anchor this branch exists to protect, on the NEXT build:
+            //     build N   — the row (anchored ch5) is fuzzy-claimed by a book-wide copy: anchors KEPT, key
+            //                 overwritten with the copy's "no-anchor" key.
+            //     build N+1 — the model emits the same book-wide copy. Its key now EQUALS the row's stored key, so
+            //                 TIER 1 claims it — and a tier-1 match is not a KeepPriorAnchors match (the guard is
+            //                 fuzzy-tier-only, and rightly so: on a key match the order is an input to the key, so an
+            //                 anchored row and an anchor-less finding cannot normally share one). The `else` below
+            //                 fires and the row's chapter link is BLANKED.
+            // Keeping the row's own key closes the loop: the book-wide copy misses both key tiers again, the fuzzy
+            // tier re-claims the row, and the anchors survive every rebuild. It is now a fixed point.
+            //
+            // SAFE ON THE UNIQUE INDEX (BookId, Language, DedupKey) — by construction, thanks to be-c04's TIER-MAJOR
+            // matching: tier 1 has already run over EVERY incoming finding, so any row still unclaimed by the time
+            // the fuzzy tier reaches it carries a key that NO incoming finding will write. Keeping that key can
+            // therefore never collide with one.
+            if (match.KeepPriorAnchors)
+            {
+                // Neither the key nor the anchors move. (The rationale IS refreshed, so the key's rationale input is
+                // now stale — which is the same, already-accepted disagreement every repaired row carries: the key is
+                // hashed on the RAW prose and DynamicTermRepairService rewrites the stored prose afterwards. What must
+                // NOT drift is the key's PRIMARY-ORDER input, because that is what BookFindingReconciler.ComparisonOrderOf and the collapser
+                // bucket on.)
+            }
+            else
+            {
+                // b3 KEY MIGRATION (P2-3 / be-f01): a row's STORED key actually changes value exactly here, when the
+                // fresh finding's key differs from the one the row was cached under — every tier-2 (legacy) hit, and
+                // every tier-3 (fuzzy) fold that is NOT anchor-preserving. Measured on the WRITE itself (not inferred
+                // from the tier) so the count stays correct even if a future tier's invariant changes.
+                if (!string.Equals(prior.DedupKey, fresh.DedupKey, StringComparison.Ordinal))
+                    keyUpgrades++;
+                prior.DedupKey = fresh.DedupKey; // b3: a no-op on a current-key match; the UPGRADE on a legacy one.
+                prior.ChapterAnchorsJson = fresh.ChapterAnchorsJson;
+            }
+
+            prior.SuggestedAction = fresh.SuggestedAction;
+            prior.BuiltWithModel = fresh.BuiltWithModel;
+            // prior.Status intentionally untouched (user decision preserved; "open" stays "open").
+            _db.Entry(prior).State = EntityState.Modified; // force UpdatedAt refresh via the override
         }
 
+        // Observability for a pass that SUPPRESSES rows: a silent suppressor is indistinguishable from a bug.
+        // UNCONDITIONAL (P1-6 / be-f01) — it must fire when nothing was folded too, so "0 folds" is distinguishable
+        // from "this pass never ran".
+        _logger.LogInformation(
+            "Book review (dedup): book {BookId} ({Lang}) — {Folds} freshly built finding(s) were RE-WORDINGS of an " +
+            "existing row and were folded onto it instead of being inserted as duplicate cards; {UserActed} of those " +
+            "rows carry a user Status (acknowledged/dismissed/done), which is PRESERVED (the finding is not re-opened).",
+            bookId, lang, rewordFolds, rewordFoldsOntoUserActed);
+
+        // Observability for the b3 dedup-key MIGRATION shim (P2-3 / be-f01) — UNCONDITIONAL, because the whole point
+        // is a RETIREMENT CRITERION: nobody can ever demonstrate zero legacy-keyed rows remain if a zero count looks
+        // identical to "this counter was never wired". legacyMatches = findings recovered ONLY via the pre-b3
+        // ComputeLegacyDedupKeyV1 key (tier 2); keyUpgrades = rows whose STORED key was actually rewritten this
+        // build (every legacy match, plus every fuzzy re-wording fold — both claim a row under a key that differs
+        // from the incoming finding's current one). Once legacyMatches is 0 across enough rebuilds, the shim can be
+        // retired.
+        _logger.LogInformation(
+            "Book review (dedup-key migration): book {BookId} ({Lang}) — {LegacyMatches} finding(s) matched via the " +
+            "LEGACY (pre-b3) dedup key this build; {KeyUpgrades} existing row(s) had their stored key rewritten in " +
+            "place as a result (legacy matches plus fuzzy re-wording folds). Zero legacy matches, sustained across " +
+            "rebuilds, is the signal that no row still carries the pre-b3 key and the shim can be retired.",
+            bookId, lang, legacyMatches, keyUpgrades);
+
         // VANISHED rows: delete ONLY those still "open" (regenerated noise); preserve user-acted ones. be-c02:
-        // AND scope the delete to chapters actually REVIEWED this build — a still-open finding vanishes from the
-        // delete ONLY when EVERY chapter order it anchors is in `reviewedChapterOrders` (windows that SUCCEEDED).
-        // A finding anchored to ANY chapter whose window FAILED / was uncovered is PRESERVED (its absence from
+        // AND scope the delete to chapters actually REVIEWED this build — a still-open finding is deleted ONLY when
+        // every REAL chapter order it anchors is in `reviewedChapterOrders` (windows that SUCCEEDED). A finding
+        // anchored to ANY real chapter whose window FAILED / was uncovered is PRESERVED (its absence from
         // `incoming` is a truncation/failure artifact, not the model retracting it), stopping a partial rebuild
-        // from silently wiping prior open findings. The anchor orders of an EXISTING row are derived in memory
-        // from its persisted ChapterAnchorsJson (every anchor's Order, else {0}) — the same no-anchor convention
-        // UnionAndDedup uses — since the JSON is not SQL-queryable.
+        // from silently wiping prior open findings. b2: an anchor order that is NOT a real chapter order of this
+        // book is a PHANTOM (pre-b1 rows carry them) and is IGNORED by that scope — it could never be "reviewed",
+        // so requiring it kept the row alive forever. See BookFindingReconciler.IsVanishedOpenDeletable for the full
+        // case analysis. The anchor orders of an EXISTING row are derived in memory from its persisted
+        // ChapterAnchorsJson (every anchor's Order; EMPTY for a no-anchor/book-wide finding, null when the payload
+        // does not parse — see BookFindingReconciler.ChapterOrdersOf), since it is not SQL-queryable.
         foreach (var stale in existing)
         {
-            if (incomingKeys.Contains(stale.DedupKey))
-                continue; // still present → handled above
+            if (matchedExistingIds.Contains(stale.Id))
+                continue; // still present (matched on the current OR the legacy key) → handled above
             if (!string.Equals(stale.Status, "open", StringComparison.Ordinal))
                 continue; // acknowledged/dismissed/done → preserve the user's decision (keep the row).
-            // be-c02 multi-anchor scope: a vanished-open finding is deleted ONLY when EVERY chapter it anchors was
-            // reviewed this build. A MULTI-chapter continuity finding (anchors spanning e.g. ch 5 and ch 12) whose
-            // FIRST anchor was re-reviewed but another anchored chapter's window FAILED / was uncovered must be
-            // PRESERVED — its absence from `incoming` is a truncation/failure artifact for the un-reviewed anchor,
-            // not the model retracting the finding. Requiring ALL anchor orders (not just the first, as the old
-            // PrimaryChapterOrderOf did) closes that gap. A no-anchor finding maps to {0}, preserving the prior
-            // order-0 convention: deletable only when 0 is itself a reviewed order.
-            if (!ChapterOrdersOf(stale).All(reviewedChapterOrders.Contains))
-                continue; // at least one anchored chapter was NOT re-reviewed this build → preserve.
+            // be-c02 multi-anchor scope + b2 invalid-anchor exclusion + b3 no-anchor rule (be-c03: measured against
+            // the REVIEWABLE set, not the raw chapter set) — see BookFindingReconciler.IsVanishedOpenDeletable.
+            if (!BookFindingReconciler.IsVanishedOpenDeletable(
+                    BookFindingReconciler.ChapterOrdersOf(stale),
+                    reviewedChapterOrders, reviewableChapterOrders, realChapterOrders))
+                continue; // a REAL anchored chapter was NOT re-reviewed this build → preserve.
             _db.BookFindings.Remove(stale);
         }
 
@@ -2280,7 +2764,7 @@ public class BookReviewService
         {
             await _db.SaveChangesAsync(ct);
         }
-        catch (DbUpdateException ex)
+        catch (Exception ex) when (ex is DbUpdateException or InvalidOperationException)
         {
             // A unique-index violation (e.g. the (BookId, Language, DedupKey) constraint, or a concurrent
             // build racing the same key) must not leave this SCOPED DbContext dirty — the caller goes on to
@@ -2288,6 +2772,18 @@ public class BookReviewService
             // writes. Mirror BookSummaryService.RunBuildAsync: log, DETACH every Added/Modified BookFinding AND
             // the coverage row queued this batch (data-c01) so the failed batch is not retried, then surface a
             // clean failure for the build to report.
+            //
+            // be-c08 (P3-15) — WHY THE FILTER IS ONE CLAUSE WIDER THAN `DbUpdateException`. Not every save failure is
+            // a DbUpdateException, and the one that is not is reachable from exactly the code this batch runs: EF
+            // orders a batch's commands itself, and when the rows' keys form a CYCLE (two rows swapping DedupKeys in
+            // one SaveChanges — which the fuzzy tier's in-place key rewrites can produce under the unique index) it
+            // gives up BEFORE issuing any SQL and throws a plain InvalidOperationException ("a circular dependency was
+            // detected"). That never reached this handler, so the detach hygiene was SKIPPED on the one failure that
+            // needs it just as much: the context stays dirty, the caller's CountAsync runs on it, and the next
+            // SaveChanges on this scoped context re-attempts the whole failed batch. The handler's job is "a failed
+            // batch must not poison the context", and that job does not depend on which exception type reports it.
+            // (OperationCanceledException is deliberately NOT caught: a cancelled request tears the scope down anyway,
+            // and swallowing it here would turn a cancellation into a persist failure.)
             _logger.LogWarning(ex,
                 "Failed to persist BookFinding rows for book {BookId} ({Lang}); detaching the dirty batch", bookId, lang);
 
@@ -2305,40 +2801,6 @@ public class BookReviewService
 
             throw new InvalidOperationException(
                 $"Failed to persist whole-book review findings for book {bookId} ({lang}).", ex);
-        }
-    }
-
-    /// <summary>The order set an EXISTING finding with NO usable anchors maps to — the single order 0, matching
-    /// the primaryOrder=0 no-anchor convention <see cref="UnionAndDedup"/> uses for INCOMING findings (so a
-    /// no-anchor row is deletable only when 0 is itself a reviewed order). Shared instance to avoid re-allocating.</summary>
-    private static readonly IReadOnlyCollection<int> NoAnchorOrders = new[] { 0 };
-
-    /// <summary>
-    /// Derives the FULL set of chapter orders an EXISTING persisted <see cref="BookFinding"/> anchors, from its
-    /// <see cref="BookFinding.ChapterAnchorsJson"/> (a serialized <c>List&lt;FindingChapterAnchor&gt;</c>): EVERY
-    /// anchor's <c>Order</c> (deduped), or <see cref="NoAnchorOrders"/> ({0}) when there are none — the SAME
-    /// no-anchor convention <see cref="UnionAndDedup"/> uses for INCOMING findings. Used by the be-c02 scoped
-    /// delete to require that ALL of a finding's anchored chapters were reviewed this build before a vanished-open
-    /// row is deleted, so a MULTI-chapter continuity finding is not wiped when only its first anchor was
-    /// re-reviewed. The JSON is not SQL-queryable, so this runs in memory on the already-loaded rows. Deserialized
-    /// with <see cref="DeserializeOpts"/> (case-insensitive CamelCase), matching the CamelCase writer in
-    /// <see cref="ProjectToEntity"/>. A malformed / empty payload is treated defensively as {0} (a review-content
-    /// wipe must never be triggered by a parse blip — order 0 is only deletable when 0 is itself a reviewed order).
-    /// </summary>
-    private static IReadOnlyCollection<int> ChapterOrdersOf(BookFinding finding)
-    {
-        if (string.IsNullOrWhiteSpace(finding.ChapterAnchorsJson))
-            return NoAnchorOrders;
-        try
-        {
-            var anchors = JsonSerializer.Deserialize<List<FindingChapterAnchor>>(finding.ChapterAnchorsJson, DeserializeOpts);
-            if (anchors is { Count: > 0 })
-                return anchors.Select(a => a.Order).Distinct().ToList();
-            return NoAnchorOrders;
-        }
-        catch (JsonException)
-        {
-            return NoAnchorOrders;
         }
     }
 
