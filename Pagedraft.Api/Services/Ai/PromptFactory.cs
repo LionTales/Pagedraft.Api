@@ -1237,16 +1237,111 @@ public class PromptFactory
         return isHe ? BookReviewCombinedHe : BookReviewCombinedEn;
     }
 
+    // ── THE CHAPTER ORDER CONTRACT (single-sourced into EVERY BookReview prompt surface) ──────────────
+    //
+    // Chapter Order is 0-BASED in the DB (every book runs 0..N-1) and the assembled [BOOK_CONTEXT] prints that
+    // exact number in each chapter heading ("## Chapter {order}: {title}"). The prompts USED to say only "use
+    // the order and title from [BOOK_CONTEXT]" while showing "order": 1 in the JSON example, which reads as
+    // 1-based; and the DEGRADED (flat) context path printed no order at all. So the model guessed: a one-chapter
+    // book (real order 0) whose only chapter is titled "פרק 16" came back with anchors claiming orders 1 and 16,
+    // the latter read straight out of the TITLE. Neither existed, and every anchor was persisted with an empty
+    // chapterId. The prompt and the parser must AGREE, so the contract is stated explicitly here, the JSON
+    // examples start at 0, and ChapterAnchorResolver enforces it server-side (resolve by order, then by title,
+    // else DROP the anchor). Keep all three in step.
+    // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
+    private const string ChapterOrderRuleHe =
+        "כלל מספרי הפרקים (חובה): העתק את הערך של \"order\" ו-\"chapterOrder\" בדיוק כפי שהוא מופיע בכותרת הפרק " +
+        "בתוך [BOOK_CONTEXT] (\"## Chapter <order>: <title>\"). מספרי הסדר מתחילים ב-0: הפרק הראשון הוא 0, השני 1, " +
+        "וכן הלאה. אל תסיק מספר סדר מתוך כותרת הפרק (פרק שכותרתו \"פרק 16\" אינו בהכרח מספר סדר 16), אל תמספר מחדש " +
+        "החל מ-1, ואל תמציא מספר. אם אינך בטוח במספר הסדר של פרק, אל תוסיף אותו כעוגן במקום לנחש.";
+
+    private const string ChapterOrderRuleEn =
+        "CHAPTER ORDER RULE (mandatory): copy the \"order\" and \"chapterOrder\" values EXACTLY as they appear in " +
+        "the chapter heading inside [BOOK_CONTEXT] (\"## Chapter <order>: <title>\"). Orders start at 0: the first " +
+        "chapter is 0, the second is 1, and so on. Never infer an order from the chapter TITLE (a chapter titled " +
+        "\"Chapter 16\" does not mean its order is 16), never renumber from 1, and never invent a number. If you " +
+        "are unsure of a chapter's order, leave that chapter out of the anchors rather than guessing.";
+
+    // The CONTINUITY reduce pass reads its chapters from the dense [CONTINUITY_SKELETON] (one line per chapter,
+    // "#<order> <title> | threads: … | states: …"), not from the [BOOK_CONTEXT] chapter headings, so the same
+    // contract points at the skeleton instead. Same 0-based rule, same ban on guessing.
+    // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
+    private const string ChapterOrderRuleContinuityHe =
+        "כלל מספרי הפרקים (חובה): העתק את הערך של \"order\" ו-\"chapterOrder\" בדיוק כפי שהוא מופיע ב-" +
+        "[CONTINUITY_SKELETON] (כל שורה מתחילה ב-#<order>). מספרי הסדר מתחילים ב-0. אל תסיק מספר סדר מתוך כותרת " +
+        "הפרק, אל תמספר מחדש החל מ-1, ואל תמציא מספר. אם אינך בטוח במספר הסדר של פרק, אל תוסיף אותו כעוגן.";
+
+    private const string ChapterOrderRuleContinuityEn =
+        "CHAPTER ORDER RULE (mandatory): copy the \"order\" and \"chapterOrder\" values EXACTLY as they appear in " +
+        "[CONTINUITY_SKELETON] (each line starts with #<order>). Orders start at 0. Never infer an order from the " +
+        "chapter title, never renumber from 1, and never invent a number. If you are unsure of a chapter's order, " +
+        "leave that chapter out of the anchors rather than guessing.";
+
+    // ── THE ANCHOR ALLOWLIST (b7) ─────────────────────────────────────────────────────────────────────
+    //
+    // The ChapterOrderRule above says "copy the order, do not invent it" — and the model obeys it, in the sense
+    // that it copies a REAL number. What it does NOT obey is the boundary of its own context: the whole-book
+    // review is a MAP-REDUCE, so each pass is shown only a SLICE of the book (one window's chapters, a findings
+    // digest, a skeleton group). Shown chapters 11-16, the model still anchored a finding to chapters 2 and 5 —
+    // real chapters, but ones it had never read. "Do not invent an order" cannot catch that, because 2 and 5 are
+    // not invented; they are just not THIS pass's chapters. So each pass now states its allowed set EXPLICITLY,
+    // and ChapterAnchorResolver enforces the same set server-side (an anchor outside it is dropped as UNSEEN).
+    // The prompt makes the model right more often; the resolver makes a wrong one HARMLESS. Both, not either.
+    //
+    // Placed LAST in the instruction by the caller (after the prompt body) for recency salience, and rendered
+    // from the SAME set the resolver gates on, so the prompt and the parser cannot drift.
+
+    /// <summary>
+    /// b7: the ALLOWLIST clause naming the exact chapter orders this pass may anchor to — the orders its context
+    /// actually SHOWS. Appended after the prompt body by every whole-book review pass (window map, synthesis
+    /// reduce, continuity reduce), each supplying the orders IT displayed.
+    ///
+    /// An EMPTY <paramref name="allowedOrders"/> is a real state, not a bug: a pass can show no chapter orders at
+    /// all (e.g. a synthesis digest in which every accumulated finding is book-wide). Then the honest instruction
+    /// is "you can see no chapter numbers, so anchor nothing" — which is what it emits, rather than a nonsensical
+    /// empty list. Orders are rendered ascending and de-duplicated so the clause is deterministic.
+    /// </summary>
+    public string BuildChapterAnchorAllowlistRule(string language, IReadOnlyCollection<int> allowedOrders)
+    {
+        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var orders = (allowedOrders ?? Array.Empty<int>()).Distinct().OrderBy(o => o).ToList();
+
+        if (orders.Count == 0)
+        {
+            return isHe
+                // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
+                ? "פרקים מותרים לעיגון (חובה): במעבר הזה לא מוצג לפניך אף מספר סדר של פרק. לכן החזר \"chapterAnchors\": [] " +
+                  "ריק בכל ממצא ואל תוסיף \"evidence\" עם chapterOrder. אל תנחש מספר פרק. עיגון לפרק שלא הוצג לך יימחק."
+                : "ALLOWED CHAPTER ANCHORS (mandatory): this pass shows you NO chapter order at all. Return an empty " +
+                  "\"chapterAnchors\": [] on every finding and do not attach \"evidence\" with a chapterOrder. Do not " +
+                  "guess a chapter number. An anchor to a chapter you were not shown will be DISCARDED.";
+        }
+
+        var list = string.Join(", ", orders);
+        return isHe
+            // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
+            ? $"פרקים מותרים לעיגון (חובה): במעבר הזה מותר לך לעגן ממצאים אך ורק למספרי הסדר הבאים: {list}. אלה הפרקים " +
+              "היחידים שהוצגו לפניך. כל מספר סדר אחר אסור, גם אם הוא קיים בספר, כי לא קראת את הפרק ההוא במעבר הזה. " +
+              "אם ממצא נוגע לפרק שאינו ברשימה, או שאינך בטוח, החזר \"chapterAnchors\": [] ריק (ממצא כלל-ספרי) במקום לנחש. " +
+              "גם \"chapterOrder\" ב-\"evidence\" חייב להיות מתוך הרשימה הזו. עיגון לפרק שמחוץ לרשימה יימחק."
+            : $"ALLOWED CHAPTER ANCHORS (mandatory): in THIS pass you may anchor findings ONLY to these chapter " +
+              $"orders: {list}. They are the only chapters you were shown. Any other order is forbidden even if it " +
+              "exists in the book, because you did not read that chapter in this pass. If a finding is about a " +
+              "chapter that is not in this list, or you are unsure, return an empty \"chapterAnchors\": [] (a " +
+              "book-wide finding) instead of guessing. Every \"chapterOrder\" in \"evidence\" must also come from " +
+              "this list. An anchor outside the list will be DISCARDED.";
+    }
+
     // The six dimensions, listed once in each language so the prompt names them consistently.
     private static readonly string BookReviewCombinedHe =
-        """
+        $$"""
         אתה עורך ספרותי פיתוחי (developmental editor) המעריך ספר שלם בבת אחת על פני שישה ממדים: plot (עלילה), character (דמויות), pacing (קצב), tone (טון/קול), theme (נושא), continuity (רציפות).
         הקשר הספר מסופק בתוך הסימון [BOOK_CONTEXT]: סקירת הספר (BookBrief) ותקצירי הפרקים שנכללו, לפי הסדר. קרא את כל הספר וזהה ממצאים עריכתיים על פני כל ששת הממדים בקריאה אחת.
 
         החזר אך ורק JSON תקין במבנה הבא, בלי טקסט לפני או אחרי וללא גדרות markdown:
         {
           "dimensionSignals": [
-            { "dimension": "plot", "chapterOrder": 1, "title": "כותרת הפרק", "observation": "תצפית קצרה על הממד בפרק זה" }
+            { "dimension": "plot", "chapterOrder": 0, "title": "כותרת הפרק", "observation": "תצפית קצרה על הממד בפרק זה" }
           ],
           "findings": [
             {
@@ -1255,15 +1350,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "משפט אחד או שניים שמסבירים את הממצא, בשפת הספר וללא מונחים טכניים.",
               "chapterAnchors": [
-                { "order": 1, "title": "כותרת הפרק" }
+                { "order": 0, "title": "כותרת הפרק" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים" }
+                { "chapterOrder": 0, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים" }
               ],
               "suggestedAction": "פעולה עריכתית מומלצת אחת (אופציונלי)"
             }
           ]
         }
+
+        {{ChapterOrderRuleHe}}
 
         dimensionSignals: שדה עזר פנימי למחשבה (אינו מוצג למשתמש). לפני שתחליט על findings, רשום תצפיות קצרות על פני הממדים השונים. רשום תצפית רק עבור צמדי ממד-פרק הרלוונטיים באמת, ולא עבור כל פרק וכל ממד; הגבל את עצמך ללכל היותר 12 תצפיות בסך הכול (לא לפי פרק), כל אחת משפט קצר אחד (dimension, chapterOrder, title, ותצפית תמציתית). בחר את התצפיות החשובות ביותר לאורך הספר. השתמש בתצפיות האלה כדי לגזור את הממצאים.
 
@@ -1280,14 +1377,14 @@ public class PromptFactory
         """;
 
     private static readonly string BookReviewCombinedEn =
-        """
+        $$"""
         You are a developmental editor assessing a complete book in ONE pass across all SIX dimensions: plot, character, pacing, tone (tone/voice), theme, continuity.
         The book context is provided inside the [BOOK_CONTEXT] marker: the book overview (BookBrief) and the included chapter briefs, in order. Read the whole book and identify editorial findings across all six dimensions in a single read.
 
         Return ONLY valid JSON in the exact shape below, with no text before or after and no markdown fences:
         {
           "dimensionSignals": [
-            { "dimension": "plot", "chapterOrder": 1, "title": "chapter title", "observation": "a short observation about this dimension in this chapter" }
+            { "dimension": "plot", "chapterOrder": 0, "title": "chapter title", "observation": "a short observation about this dimension in this chapter" }
           ],
           "findings": [
             {
@@ -1296,15 +1393,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "One or two sentences explaining the finding, in the book's language and free of technical jargon.",
               "chapterAnchors": [
-                { "order": 1, "title": "chapter title" }
+                { "order": 0, "title": "chapter title" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "a short excerpt or paraphrase drawn from the briefs" }
+                { "chapterOrder": 0, "excerpt": "a short excerpt or paraphrase drawn from the briefs" }
               ],
               "suggestedAction": "one recommended editorial action (optional)"
             }
           ]
         }
+
+        {{ChapterOrderRuleEn}}
 
         dimensionSignals: an internal scratch field for your own reasoning (not shown to the user). Before deciding on findings, note short observations across the dimensions. Write an observation ONLY for the dimension+chapter pairs that are genuinely relevant, not for every chapter and every dimension; limit yourself to at most 12 observations TOTAL (not per chapter), each a single short sentence (dimension, chapterOrder, title, and a terse observation). Pick the observations that matter most across the book. Use these notes to derive the findings.
 
@@ -1331,7 +1430,7 @@ public class PromptFactory
         החזר אך ורק JSON תקין במבנה הבא, בלי טקסט לפני או אחרי וללא גדרות markdown:
         {
           "dimensionSignals": [
-            { "chapterOrder": 1, "title": "כותרת הפרק", "observation": "תצפית קצרה על {{dimensionKey}} בפרק זה לאורך הספר" }
+            { "chapterOrder": 0, "title": "כותרת הפרק", "observation": "תצפית קצרה על {{dimensionKey}} בפרק זה לאורך הספר" }
           ],
           "findings": [
             {
@@ -1340,15 +1439,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "משפט אחד או שניים שמסבירים את הממצא, בשפת הספר וללא מונחים טכניים.",
               "chapterAnchors": [
-                { "order": 1, "title": "כותרת הפרק" }
+                { "order": 0, "title": "כותרת הפרק" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים" }
+                { "chapterOrder": 0, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים" }
               ],
               "suggestedAction": "פעולה עריכתית מומלצת אחת (אופציונלי)"
             }
           ]
         }
+
+        {{ChapterOrderRuleHe}}
 
         dimensionSignals: שדה עזר פנימי למחשבה (אינו מוצג למשתמש). לפני שתחליט על findings, רשום תצפיות קצרות. {{signalGuidance}} רשום תצפית רק עבור הפרקים הרלוונטיים באמת לממד שהוקצה לך, ולא עבור כל פרק; הגבל את עצמך ללכל היותר 12 תצפיות, כל אחת משפט קצר אחד (chapterOrder, title, ותצפית תמציתית). אם בספר יותר מ-12 פרקים, בחר את הפרקים החשובים ביותר לממד זה בלבד. השתמש בתצפיות האלה כדי לגזור את הממצאים.
 
@@ -1372,7 +1473,7 @@ public class PromptFactory
         Return ONLY valid JSON in the exact shape below, with no text before or after and no markdown fences:
         {
           "dimensionSignals": [
-            { "chapterOrder": 1, "title": "chapter title", "observation": "a short observation about {{dimensionKey}} in this chapter across the book" }
+            { "chapterOrder": 0, "title": "chapter title", "observation": "a short observation about {{dimensionKey}} in this chapter across the book" }
           ],
           "findings": [
             {
@@ -1381,15 +1482,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "One or two sentences explaining the finding, in the book's language and free of technical jargon.",
               "chapterAnchors": [
-                { "order": 1, "title": "chapter title" }
+                { "order": 0, "title": "chapter title" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "a short excerpt or paraphrase drawn from the briefs" }
+                { "chapterOrder": 0, "excerpt": "a short excerpt or paraphrase drawn from the briefs" }
               ],
               "suggestedAction": "one recommended editorial action (optional)"
             }
           ]
         }
+
+        {{ChapterOrderRuleEn}}
 
         dimensionSignals: an internal scratch field for your own reasoning (not shown to the user). Before deciding on findings, note short observations. {{signalGuidance}} Write an observation ONLY for the chapters that are genuinely relevant to your assigned dimension, not for every chapter; limit yourself to at most 12 observations, each a single short sentence (chapterOrder, title, and a terse observation). If the book has more than 12 chapters, pick only the chapters that matter most for this dimension. Use these notes to derive the findings.
 
@@ -1509,11 +1612,13 @@ public class PromptFactory
             ? $"""
                אתה סוקר את פרקים {firstOrder}-{lastOrder} מתוך ספר גדול יותר בן {windowCount} חלונות סקירה (זהו חלון {windowIndex}). הסקירה של הספר בשלמותו נמצאת בתוך הסימון [BOOK_CONTEXT].
                דווח ממצאים אך ורק עבור הפרקים המוצגים בחלון זה. אל תסמן שהספר נפתח או מסתיים באופן חד או פתאומי, ואל תשפוט כאן את קשת העלילה, הקצב או המבנה ברמת הספר כולו (מעבר מאוחר יותר עושה זאת). הישאר בתוך הפרקים שבחלון והשתמש ב-[BOOK_CONTEXT] רק כרקע.
+               ייתכן שבתוך [BOOK_CONTEXT] מופיע גם פרק נוסף אחד או שניים מהחלון הקודם, כרקע בלבד ולא לצורך דיווח. רשימת הפרקים המדויקת שמותר לך לעגן אליהם ממצאים מפורטת בהמשך ההנחיות, תחת "פרקים מותרים לעיגון".
 
                """
             : $"""
                You are reviewing chapters {firstOrder}-{lastOrder} of a larger {windowCount}-window book (this is window {windowIndex}); the whole-book overview is in [BOOK_CONTEXT].
                Report findings only for the chapters shown in this window; do NOT flag the book as starting or ending abruptly and do not judge overall book-level arc, pacing, or structure here (a later pass does that). Stay within the chapters in this window and treat [BOOK_CONTEXT] as background only.
+               [BOOK_CONTEXT] may also include a chapter or two carried over from the previous window, as background only, not for reporting on. The exact list of chapters you may anchor findings to is stated later in these instructions, under "ALLOWED CHAPTER ANCHORS".
 
                """;
         return frame + body;
@@ -1553,13 +1658,13 @@ public class PromptFactory
     // -- (B) SYNTHESIS reduce strings ------------------------------------------------
     // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
     private static readonly string BookReviewSynthesisHe =
-        """
+        $$"""
         אתה עורך ספרותי פיתוחי (developmental editor) המבצע מעבר סינתזה סופי על סקירה של ספר שלם. מעברי סקירה קודמים כיסו את הספר בחלונות של פרקים; כעת עליך להסתכל על הספר בשלמותו.
-        הקשר הספר בשלמותו מסופק בתוך הסימון [BOOK_CONTEXT] (BookBrief). רשימה תמציתית של כל הממצאים שנצברו מכל החלונות מסופקת בתוך הסימון [WINDOW_FINDINGS], כל פריט עם dimension, מספר סדר של פרק (chapterOrder), ומשפט רציונל אחד.
+        הקשר הספר בשלמותו מסופק בתוך הסימון [BOOK_CONTEXT] (BookBrief). רשימה תמציתית של כל הממצאים שנצברו מכל החלונות מסופקת בתוך הסימון [WINDOW_FINDINGS]. כל שורה שם בנויה כך: מזהה | dimension | מספר/י סדר של פרק (chapterOrder; כמה מספרים מופרדים בפסיקים כאשר הממצא נוגע ביותר מפרק אחד) | משפט רציונל אחד. המזהה הוא קוד קצר בצורת W1, W2, W3 וכן הלאה, והוא הדרך היחידה להתייחס לממצא קיים. כאשר ממצא הוא כלל-ספרי ואינו מעוגן לפרק מסוים, העמודה של מספר הסדר מוצגת כ-"-" (מקף) במקום מספר.
 
         המשימה שלך כפולה:
         1) הוסף ממצאים ברמת הספר כולו שהמעברים לפי חלון לא יכלו לראות באופן הוליסטי: צורת קשת העלילה הכוללת, איזון הקצב הגלובלי, החוט התמטי לאורך הספר, והאם הסיום משלם על ההבטחות וההנחות שנזרעו בפתיחה. אלה ממצאים חדשים שנובעים מהסתכלות על הספר כשלם.
-        2) בצע רקונסיליאציה של הממצאים שב-[WINDOW_FINDINGS]: מזג ממצאים כפולים או כמעט-כפולים לממצא אחד המאחד את הפרקים הרלוונטיים, והשמט ממצאים סותרים או כאלה שמעבר החלונות סימן בטעות (למשל "פתיחה חדה" שנובעת רק מגבול החלון).
+        2) בצע רקונסיליאציה של הממצאים שב-[WINDOW_FINDINGS]: אם שני ממצאים או יותר הם למעשה אותו ממצא (נוסח מחדש, או אותה הערה שנרשמה על פרקים שונים או תחת dimension אחר), אחד אותם דרך שדה "merges" שלהלן. אל תכתוב ממצא חדש כדי לתאר מיזוג; המיזוג נעשה אך ורק דרך "merges".
 
         החזר אך ורק JSON תקין במבנה הבא, בלי טקסט לפני או אחרי וללא גדרות markdown:
         {
@@ -1570,36 +1675,50 @@ public class PromptFactory
               "severity": 1,
               "rationale": "משפט אחד או שניים שמסבירים את הממצא, בשפת הספר וללא מונחים טכניים.",
               "chapterAnchors": [
-                { "order": 1, "title": "כותרת הפרק" }
+                { "order": 0, "title": "כותרת הפרק" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים או מרשימת הממצאים" }
+                { "chapterOrder": 0, "excerpt": "ציטוט קצר או פרפראזה מתוך התקצירים או מרשימת הממצאים" }
               ],
               "suggestedAction": "פעולה עריכתית מומלצת אחת (אופציונלי)"
             }
+          ],
+          "merges": [
+            { "ids": ["W3", "W7"], "keep": "W7" }
           ]
         }
+
+        {{ChapterOrderRuleHe}}
+
+        כללי המיזוג (השדה "merges"):
+        - "merges" הוא שדה אופציונלי. אם אין ממצאים כפולים, השמט אותו לגמרי או החזר רשימה ריקה.
+        - כל קבוצת "ids" חייבת לכלול לפחות שני מזהים; קבוצה עם מזהה בודד אינה מיזוג ותידחה.
+        - כל קבוצה ב-"merges" אומרת: הממצאים ששמותיהם ב-"ids" הם ממצא אחד ויחיד. "keep" הוא המזהה של הממצא שיישאר, והשאר יימחקו. חשוב: "keep" חייב להיות אחד מהמזהים שברשימת "ids" של אותה קבוצה.
+        - השתמש אך ורק במזהים שמופיעים בפועל ב-[WINDOW_FINDINGS]. אל תמציא מזהה, ואל תשתמש במזהה של ממצא חדש שאתה עצמך מוסיף ב-"findings".
+        - בחר ב-"keep" את הניסוח המדויק והמפורט ביותר מבין הממצאים שבקבוצה. הפרקים של כל הממצאים בקבוצה יאוחדו אוטומטית אל הממצא שנשמר, ולכן אינך צריך לכתוב אותם מחדש.
+        - כל ממצא יכול להופיע בקבוצה אחת לכל היותר.
+        - מזג רק כאשר מדובר באמת באותה טענה. אם שני ממצאים עוסקים בנושא דומה אך אומרים דברים שונים (למשל אחד מציין סתירה עובדתית ואחד משבח רצף עקבי), הם שני ממצאים נפרדים ואסור למזג אותם. מיזוג שגוי מוחק ממצא אמיתי מהמשתמש; אי-מיזוג רק משאיר כפילות. במקרה של ספק, אל תמזג.
 
         כללים לכל ממצא:
         - "dimension": אחד מששת הממדים בדיוק (plot, character, pacing, tone, theme, continuity), המסומן נכון לפי תוכן הממצא.
         - "verdict": אחד מ-keep, improve, cut. keep = חוזק אמיתי בספר ששווה לשמר; improve = חולשה ניתנת לתיקון; cut = דבר שכדאי להסיר.
         - "severity": מספר שלם. 1 (מינורי) / 2 (בינוני) / 3 (מהותי).
         - "rationale": משפט אחד או שניים, בשפת הספר (עברית), ברורים לכותב, ללא ז'רגון. אל תשתמש בקו מפריד ארוך ברציונל; השתמש בפסיק, בנקודה או בסוגריים.
-        - "chapterAnchors": הפרקים שהממצא נוגע בהם, לפי מספר הסדר ("order") והכותרת ("title") בלבד. לעולם אל תשתמש בהיסטים של תווים (character offsets); רק order ו-title. ממצא ממוזג מרשימת החלונות יכלול את כל הפרקים הרלוונטיים שאוחדו.
+        - "chapterAnchors": הפרקים שהממצא נוגע בהם, לפי מספר הסדר ("order") והכותרת ("title") בלבד. לעולם אל תשתמש בהיסטים של תווים (character offsets); רק order ו-title.
         - "evidence": קטע קצר או פרפראזה הנשענים על [BOOK_CONTEXT] או על רשימת הממצאים, כל פריט עם chapterOrder ו-excerpt קצר.
         - "suggestedAction": אופציונלי. פעולה עריכתית קונקרטית אחת בשפת הספר. אם אין, השמט את השדה או החזר מחרוזת ריקה. גם כאן אל תשתמש בקו מפריד ארוך.
 
-        עמדת דיוק: העדף רשימת findings קצרה של ממצאים בעלי ביטחון גבוה. אל תשכפל ממצאים שכבר אוחדו, ואל תמציא חולשות כדי למלא מכסה. דווח רק על מה שנתמך ב-[BOOK_CONTEXT] או בממצאים שנצברו. הגבל את עצמך ללכל היותר 12 ממצאים בסך הכול כדי שהתשובה תושלם במלואה.
+        עמדת דיוק: העדף רשימת findings קצרה של ממצאים בעלי ביטחון גבוה. אל תחזור על ממצא שכבר מופיע ב-[WINDOW_FINDINGS] (הוא כבר נשמר; אם הוא כפול, מזג אותו דרך "merges"), ואל תמציא חולשות כדי למלא מכסה. דווח רק על מה שנתמך ב-[BOOK_CONTEXT] או בממצאים שנצברו. הגבל את עצמך ללכל היותר 12 ממצאים חדשים ב-"findings" כדי שהתשובה תושלם במלואה. המגבלה הזו חלה על "findings" בלבד; אין מגבלה על מספר הקבוצות ב-"merges".
         """;
 
     private static readonly string BookReviewSynthesisEn =
-        """
+        $$"""
         You are a developmental editor performing a final SYNTHESIS pass over a whole-book review. Earlier review passes covered the book in windows of chapters; now you must look at the book as a whole.
-        The whole-book context is provided inside the [BOOK_CONTEXT] marker (BookBrief). A compact list of every finding accumulated across all windows is provided inside the [WINDOW_FINDINGS] marker, each item with a dimension, a chapter order (chapterOrder), and a one-line rationale.
+        The whole-book context is provided inside the [BOOK_CONTEXT] marker (BookBrief). A compact list of every finding accumulated across all windows is provided inside the [WINDOW_FINDINGS] marker. Each line there reads: id | dimension | chapter order(s) (chapterOrder; comma-separated when the finding touches more than one chapter) | one-line rationale. The id is a short code of the form W1, W2, W3 and so on, and it is the ONLY way to refer to an existing finding. When a finding is book-wide (it anchors no specific chapter), its chapter-order column shows "-" (a dash) instead of a number.
 
         Your task is twofold:
         1) ADD book-level findings the per-window passes could not see holistically: the overall arc shape, global pacing balance, the thematic throughline across the book, and whether the ending pays off the setup and promises seeded in the opening. These are new findings that come from looking at the book as a whole.
-        2) RECONCILE the findings in [WINDOW_FINDINGS]: merge duplicate or near-duplicate findings into a single finding that unions the chapters involved, and drop contradictory findings or ones a window pass mis-flagged (for example an "abrupt opening" that is only an artifact of the window boundary).
+        2) RECONCILE the findings in [WINDOW_FINDINGS]: when two or more of them are really the SAME finding (re-worded, or the same observation filed against different chapters or under a different dimension), unite them through the "merges" field below. Do NOT write a new finding to describe a merge; a merge is expressed ONLY through "merges".
 
         Return ONLY valid JSON in the exact shape below, with no text before or after and no markdown fences:
         {
@@ -1610,32 +1729,46 @@ public class PromptFactory
               "severity": 1,
               "rationale": "One or two sentences explaining the finding, in the book's language and free of technical jargon.",
               "chapterAnchors": [
-                { "order": 1, "title": "chapter title" }
+                { "order": 0, "title": "chapter title" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "a short excerpt or paraphrase drawn from the briefs or the finding list" }
+                { "chapterOrder": 0, "excerpt": "a short excerpt or paraphrase drawn from the briefs or the finding list" }
               ],
               "suggestedAction": "one recommended editorial action (optional)"
             }
+          ],
+          "merges": [
+            { "ids": ["W3", "W7"], "keep": "W7" }
           ]
         }
+
+        {{ChapterOrderRuleEn}}
+
+        Merge rules (the "merges" field):
+        - "merges" is OPTIONAL. If there are no duplicates, omit it entirely or return an empty list.
+        - Each group's "ids" must contain at least TWO ids; a group with a single id is not a merge and will be rejected.
+        - Each group says: the findings named in "ids" are ONE single finding. "keep" is the id of the one that stays; the others are deleted. "keep" MUST be one of that group's own "ids".
+        - Use ONLY ids that actually appear in [WINDOW_FINDINGS]. Never invent an id, and never use an id for a new finding you are adding in "findings".
+        - Choose as "keep" the most precise and most specific wording among the group. The chapters of every finding in the group are unioned onto the kept finding automatically, so you do not need to restate them.
+        - Each finding may appear in at most ONE group.
+        - Merge only when it really is the same claim. If two findings discuss a similar subject but say DIFFERENT things (for example one reports a factual contradiction and the other praises a consistent thread), they are two separate findings and must NOT be merged. A wrong merge deletes a real finding from the author; a missed merge only leaves a duplicate. When in doubt, do not merge.
 
         Rules for each finding:
         - "dimension": exactly one of the six (plot, character, pacing, tone, theme, continuity), correctly labelled by the finding's content.
         - "verdict": one of keep, improve, cut. keep = a genuine strength worth preserving; improve = a fixable weakness; cut = something to remove.
         - "severity": integer. 1 (minor) / 2 (moderate) / 3 (major).
         - "rationale": one or two sentences, in the book's language (English), clear to the author, no jargon. Do not use an em-dash in the rationale; use a comma, a period, or parentheses instead.
-        - "chapterAnchors": the chapters the finding touches, by chapter "order" and "title" only. Never use character offsets; only order and title. A finding merged from the window list should list all the relevant chapters it unions.
+        - "chapterAnchors": the chapters the finding touches, by chapter "order" and "title" only. Never use character offsets; only order and title.
         - "evidence": a short excerpt or paraphrase drawn from [BOOK_CONTEXT] or the finding list, each item with a chapterOrder and a short excerpt.
         - "suggestedAction": optional. One concrete editorial action in the book's language. If none, omit the field or return an empty string. Do not use an em-dash here either.
 
-        Precision posture: prefer a short list of high-confidence findings. Do not re-emit findings you have already merged, and do not invent weaknesses to fill a quota. Report only what is supported by [BOOK_CONTEXT] or the accumulated findings. Limit yourself to at most 12 findings TOTAL, so the response completes in full.
+        Precision posture: prefer a short list of high-confidence findings. Do not restate a finding that is already in [WINDOW_FINDINGS] (it is already kept; if it is a duplicate, merge it through "merges"), and do not invent weaknesses to fill a quota. Report only what is supported by [BOOK_CONTEXT] or the accumulated findings. Limit yourself to at most 12 NEW findings in "findings", so the response completes in full. That limit applies to "findings" only; there is no limit on the number of groups in "merges".
         """;
 
     // -- (C) CONTINUITY reduce strings -----------------------------------------------
     // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
     private static readonly string BookReviewContinuityReduceHe =
-        """
+        $$"""
         אתה עורך ספרותי המתמקד ברציפות (continuity) של ספר שלם. משימתך היחידה היא לזהות שברי רציפות חוצי-פרקים; אל תעריך עלילה, דמויות, קצב, טון או נושא.
         הקשר הספר בשלמותו מסופק בתוך הסימון [BOOK_CONTEXT] (BookBrief). שלד רציפות צפוף לכל פרק מסופק בתוך הסימון [CONTINUITY_SKELETON], כל פריט עם order (מספר סדר), title (כותרת), openThreads (חוטים פתוחים) ו-characterStates (מצבי דמויות).
 
@@ -1655,15 +1788,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "משפט אחד או שניים שמסבירים את שבר הרציפות, בשפת הספר וללא מונחים טכניים.",
               "chapterAnchors": [
-                { "order": 1, "title": "כותרת הפרק" }
+                { "order": 0, "title": "כותרת הפרק" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "ציטוט קצר או פרפראזה מתוך השלד" }
+                { "chapterOrder": 0, "excerpt": "ציטוט קצר או פרפראזה מתוך השלד" }
               ],
               "suggestedAction": "פעולה עריכתית מומלצת אחת (אופציונלי)"
             }
           ]
         }
+
+        {{ChapterOrderRuleContinuityHe}}
 
         כללים לכל ממצא:
         - "dimension": תמיד "continuity".
@@ -1678,7 +1813,7 @@ public class PromptFactory
         """;
 
     private static readonly string BookReviewContinuityReduceEn =
-        """
+        $$"""
         You are a literary editor focused on the continuity of a whole book. Your sole task is to detect cross-chapter continuity breaks; do not assess plot, character, pacing, tone, or theme.
         The whole-book context is provided inside the [BOOK_CONTEXT] marker (BookBrief). A dense per-chapter continuity skeleton is provided inside the [CONTINUITY_SKELETON] marker, each item with order (chapter order), title, openThreads, and characterStates.
 
@@ -1698,15 +1833,17 @@ public class PromptFactory
               "severity": 1,
               "rationale": "One or two sentences explaining the continuity break, in the book's language and free of technical jargon.",
               "chapterAnchors": [
-                { "order": 1, "title": "chapter title" }
+                { "order": 0, "title": "chapter title" }
               ],
               "evidence": [
-                { "chapterOrder": 1, "excerpt": "a short excerpt or paraphrase drawn from the skeleton" }
+                { "chapterOrder": 0, "excerpt": "a short excerpt or paraphrase drawn from the skeleton" }
               ],
               "suggestedAction": "one recommended editorial action (optional)"
             }
           ]
         }
+
+        {{ChapterOrderRuleContinuityEn}}
 
         Rules for each finding:
         - "dimension": always "continuity".
