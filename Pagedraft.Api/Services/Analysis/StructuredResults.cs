@@ -316,6 +316,48 @@ public class BookReviewResult
     /// <summary>Per-dimension rollup scores summarising all findings in that dimension.</summary>
     [JsonPropertyName("scores")]
     public List<DimensionScore> Scores { get; set; } = new();
+
+    /// <summary>
+    /// b8 — THE MERGE MAP. Emitted ONLY by the SYNTHESIS reduce pass, and OPTIONAL there: a list of groups of
+    /// accumulated findings (named by the build-local <c>W#</c> ids printed in the [WINDOW_FINDINGS] digest) that
+    /// the model judges to be ONE finding, each naming which member to KEEP.
+    ///
+    /// WHY IT EXISTS. The synthesis prompt has always asked the model to reconcile duplicates, but its only output
+    /// channel was <see cref="Findings"/>, which the build APPENDS to the accumulated set. So a "merge" could only
+    /// ever ADD a third finding beside the two it meant to replace. This is the DELETE channel that was missing.
+    /// It is ADDITIVE ON THE WIRE: a response that omits <c>merges</c> is handled exactly as it was pre-b8. It is
+    /// NOT additive on the PROMPT side — the synthesis prompt ASKS for this key whether or not the kill-switch
+    /// (<c>Ai:BookReview:SynthesisMergeMap</c>) is on, so an OFF build is not a pre-b8 build (see
+    /// <see cref="SynthesisMergeMap"/>, KILL-SWITCH).
+    ///
+    /// UNTRUSTED, like every other model-supplied reference in this file. Ids are validated against the digest the
+    /// model was actually shown and every malformed group is REJECTED whole (see
+    /// <see cref="SynthesisMergeMap.Resolve"/>), never partially honoured.
+    ///
+    /// NULL vs EMPTY: System.Text.Json writes NULL over an initialiser when the JSON says <c>"merges": null</c>, so
+    /// every consumer must treat this as nullable regardless of the <c>= new()</c> (the RepairableFields lesson).
+    /// </summary>
+    [JsonPropertyName("merges")]
+    public List<SynthesisMergeItem>? Merges { get; set; }
+}
+
+/// <summary>
+/// b8 — one proposed merge group from the SYNTHESIS reduce: "these accumulated findings are the SAME finding;
+/// keep this one". Raw model output, fully untrusted; <see cref="SynthesisMergeMap.Resolve"/> is the only thing
+/// allowed to turn it into an action.
+/// </summary>
+public class SynthesisMergeItem
+{
+    /// <summary>The build-local ids (W1..Wn, as printed in the digest) of the findings the model says are one
+    /// finding. Fewer than 2 resolvable ids means the group says nothing and is ignored.</summary>
+    [JsonPropertyName("ids")]
+    public List<string>? Ids { get; set; }
+
+    /// <summary>Which of <see cref="Ids"/> SURVIVES. The survivor is kept VERBATIM (one of the originals): the
+    /// model chooses among findings it was shown, it never writes merged prose. A keep that is not one of the
+    /// group's own ids rejects the group.</summary>
+    [JsonPropertyName("keep")]
+    public string? Keep { get; set; }
 }
 
 /// <summary>One editorial finding from the book review, as produced by the model.</summary>
@@ -347,6 +389,34 @@ public class BookFindingItem
     /// <summary>Optional concrete editorial action the model suggests.</summary>
     [JsonPropertyName("suggestedAction")]
     public string? SuggestedAction { get; set; }
+
+    /// <summary>
+    /// b7 — THE SHOWN-SET. The chapter Orders the pass that produced this finding actually SHOWED the model,
+    /// stamped by the producing pass (never by the model, never serialized: it is provenance, not output).
+    ///
+    /// WHY. The whole-book review is a MAP-REDUCE: no single pass sees the whole book. A window sees only its
+    /// own chapters, the synthesis reduce sees only a findings digest, a continuity group sees only its slice of
+    /// the skeleton. A model asked to anchor a finding "by chapter order" will nonetheless emit an order for a
+    /// chapter it was never shown — and in a multi-chapter book that invented order LANDS ON A REAL CHAPTER, so
+    /// <see cref="ChapterAnchorResolver"/> resolves it happily and the finding is silently MIS-ANCHORED: the user
+    /// clicks it and lands in the wrong chapter. Observed live on a 17-chapter book: a finding whose prose is
+    /// explicitly about chapter 16 ("Ktiv") came back anchored to chapters 2 and 5, both real, both in a window
+    /// the emitting pass never saw. Being a REAL order, nothing in b1's resolver could object.
+    ///
+    /// An anchor to a chapter the pass never saw is not evidence, it is a guess — so the resolver treats it as
+    /// UNRESOLVABLE and drops it (the finding survives as a book-wide, no-anchor finding, which is exactly the
+    /// shape b4b's cross-bucket fold then merges into its anchored twin).
+    ///
+    /// NULL vs EMPTY — two DIFFERENT states, deliberately (the b3 lesson: never let one value mean two things):
+    ///   • NULL  = UNCONSTRAINED. The producer did not declare a shown-set, so no visibility gate applies. This
+    ///             is the default, so a caller that constructs a BookFindingItem by hand (tests, future callers)
+    ///             keeps the pre-b7 behaviour.
+    ///   • EMPTY = the pass saw NO chapter orders at all (e.g. a synthesis digest in which every accumulated
+    ///             finding was book-wide). Then EVERY anchor is a guess and every anchor is dropped. This is
+    ///             correct, not a degenerate case: the model had no chapter number in front of it to copy.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyCollection<int>? VisibleChapterOrders { get; set; }
 }
 
 /// <summary>A single piece of textual evidence supporting a <see cref="BookFindingItem"/>.</summary>

@@ -295,8 +295,14 @@ public class BookContextAssemblerTests
         Assert.True(BookContextAssembler.EstimateTokens(result.Text) <= result.BudgetTokens);
         Assert.True(result.DroppedCount > 0, "tight budget over 10 flat summaries should drop some");
         Assert.True(result.DroppedCount < 10, "some flat summaries should have fit under the budget");
-        // The flat framing is used (and at least one unit made it into the text).
-        Assert.Contains("פרק / Chapter:", result.Text);
+        // The flat framing is used (and at least one unit made it into the text) AND it carries the chapter's
+        // REAL 0-based Order in the heading, exactly like the structured "## Chapter {order}: {title}" block.
+        // The degraded path used to print "## פרק / Chapter: {title}" with NO order, so a book on this path
+        // showed the model titles only, while the review prompt asks it to anchor findings BY ORDER: the model
+        // duly invented orders (and read them out of chapter TITLES). Both context paths must show the order the
+        // parser resolves against.
+        Assert.Contains("## פרק / Chapter 0: Ch0", result.Text);
+        Assert.DoesNotContain("פרק / Chapter:", result.Text);
     }
 
     [Fact]

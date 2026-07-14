@@ -535,14 +535,13 @@ public class BookReviewQualityTests
 
     // ─── Matching helpers ───────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Normalizes a model-supplied dimension to one of the six known dimensions (case-insensitive,
-    /// trimmed); an unknown or blank value falls back to "plot". Mirrors BookReviewService.NormalizeDimension
-    /// exactly so the combined-run harness scores the SAME label production scores + persists.</summary>
-    private static string NormalizeDimension(string? dimension)
-    {
-        var d = (dimension ?? string.Empty).Trim().ToLowerInvariant();
-        return Array.IndexOf(Dimensions, d) >= 0 ? d : "plot";
-    }
+    /// <summary>Normalizes a model-supplied dimension to one of the six known dimensions (case-insensitive, trimmed;
+    /// an unknown or blank value falls back to "plot"), so this harness scores the SAME label production scores and
+    /// persists. final-r01: it now CALLS the shipped implementation instead of hand-copying it — a third copy of a
+    /// value that feeds the dedup key was exactly the drift NIT-5 and be-c09 flagged, and a harness that "mirrors"
+    /// production by re-typing it cannot detect the day production changes.</summary>
+    private static string NormalizeDimension(string? dimension) =>
+        BookReviewService.NormalizeDimension(dimension);
 
     private static bool IsKeep(PlantedDefect d) => IsKeepVerdict(d.Verdict);
     private static bool IsKeepVerdict(string? verdict) =>

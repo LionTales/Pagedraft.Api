@@ -773,7 +773,7 @@ public class BookContextAssembler
             if (string.IsNullOrWhiteSpace(body))
                 continue; // genuinely empty chapter: nothing to include and nothing to truncate
 
-            var block = FormatFlatChapterBlock(title, body);
+            var block = FormatFlatChapterBlock(chapter.Order, title, body);
             var blockTokens = EstimateTokens(block, charsPerToken);
 
             if (budgetExhausted || used + blockTokens > budget)
@@ -835,18 +835,25 @@ public class BookContextAssembler
             : SyncfusionWatermarkStripper.StripSyncfusionWatermark(contentText ?? "");
         if (string.IsNullOrWhiteSpace(body))
             return (null, null); // genuinely empty chapter: nothing to include and nothing to truncate
-        return (FormatFlatChapterBlock(title, body), null);
+        return (FormatFlatChapterBlock(order, title, body), null);
     }
 
     // ─── Rendering (mirrors PromptFactory's brief formatting so the model reads a familiar shape) ──────
 
     /// <summary>
-    /// Flat (degraded) per-chapter block: the "## פרק / Chapter: {title}\n{body}\n\n" framing used by the
+    /// Flat (degraded) per-chapter block: the "## פרק / Chapter {order}: {title}\n{body}\n\n" framing used by the
     /// flat fallback, shared so a chapter back-filled from its summary/raw text in the structured path reads
     /// identically. The trailing separator is part of the block (and is charged like every other block).
+    ///
+    /// The ORDER is part of the heading, exactly as in <see cref="FormatChapterBrief"/> ("## Chapter {order}: …").
+    /// It used to be OMITTED here, which left a book on the degraded path showing the model chapter TITLES and no
+    /// orders at all — while the review prompt asks for findings anchored BY ORDER. The model duly invented them:
+    /// a one-chapter book (real order 0) whose only chapter is titled "פרק 16" came back with anchors claiming
+    /// orders 1 and 16, read straight out of the title. Both paths must show the SAME 0-based order the parser
+    /// resolves against (see ChapterAnchorResolver), or the model is being asked to guess.
     /// </summary>
-    private static string FormatFlatChapterBlock(string title, string body) =>
-        $"## פרק / Chapter: {title}\n{body}{BlockSeparator}";
+    private static string FormatFlatChapterBlock(int order, string title, string body) =>
+        $"## פרק / Chapter {order}: {title}\n{body}{BlockSeparator}";
 
     /// <summary>
     /// Renders the FULL (untrimmed) BookBrief into a self-contained <c>[BOOK_CONTEXT]…[/BOOK_CONTEXT]</c>

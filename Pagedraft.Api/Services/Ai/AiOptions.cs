@@ -83,6 +83,13 @@ public class AiOptions
     public bool BookReviewSingleCombined { get; set; } = true;
 
     /// <summary>
+    /// b8 — the nested "Ai:BookReview" block. Deliberately a SECTION rather than another flat
+    /// <c>BookReviewXxx</c> property: it is where the whole-book review's staged-rollout switches live, and a
+    /// switch that ships OFF needs a home that says so, not a name buried among a dozen tuning scalars.
+    /// </summary>
+    public BookReviewOptions BookReview { get; set; } = new();
+
+    /// <summary>
     /// Max tokens the trimmed BookBrief may occupy when it is repeated at the head of EVERY window of the
     /// windowed whole-book review path (BookContextAssembler.AssembleWindowsAsync, wb4-c01). The BookBrief is
     /// the global anchor placed first in each window and charged to that window's budget; a full BookBrief
@@ -178,6 +185,49 @@ public class AiOptions
         var derived = Math.Min(byFraction, byReserve);
         return Math.Max(256, derived); // never below a floor so the BookBrief can always be attempted
     }
+}
+
+/// <summary>The "Ai:BookReview" block: staged-rollout switches for the whole-book review engine.</summary>
+public class BookReviewOptions
+{
+    /// <summary>
+    /// b8 — THE SYNTHESIS MERGE MAP (kill-switch; binds <c>Ai:BookReview:SynthesisMergeMap</c>). DEFAULT OFF.
+    ///
+    /// WHAT IT GATES. The synthesis reduce sees every accumulated window finding side by side and its prompt has
+    /// always told it to "merge duplicate or near-duplicate findings" — but its output schema was a flat findings
+    /// array that the build APPENDS, so the only way it could express a merge was to emit a THIRD finding, which
+    /// was then unioned with the two originals. A reduce that can only ADD is not a reduce. The merge map is the
+    /// missing channel: an optional <c>merges: [{ ids: [...], keep: ... }]</c> naming the build-local ids (W1..Wn)
+    /// printed in the findings digest. When this is TRUE the build APPLIES that map (see
+    /// <see cref="Analysis.SynthesisMergeMap"/>).
+    ///
+    /// WHAT "FALSE" ACTUALLY MEANS — READ THIS BEFORE RELYING ON IT (be-c06 / P1-4). This doc used to say the OFF
+    /// build was "byte-identical to the pre-b8 behavior". IT IS NOT, and the difference matters:
+    ///   • APPLIED: nothing. No finding is deleted, no anchor unioned, no severity lifted. The switch gates the only
+    ///     MUTATION — the only irreversible harm the feature can do — and that guarantee is exact.
+    ///   • MEASURED: the map is still parsed, validated against the digest, resolved and LOGGED, naming the groups a
+    ///     flipped build would have merged. That log is the artefact this rollout exists to produce.
+    ///   • NOT REVERTED: THE PROMPT. b8 changed the model's INPUT unconditionally — the digest's W# id column, the
+    ///     rationale cap (140 → 260), and the merge contract in both synthesis prompts, including "do NOT write a new
+    ///     finding to describe a merge". So with the switch OFF the model answers a DIFFERENT prompt from the pre-b8
+    ///     one and its OWN findings may differ. OFF is a THIRD behavior, not the old one. To get the pre-b8 build,
+    ///     revert b8; this flag will not do it. (The prompt is ungated ON PURPOSE: gating it would leave the OFF
+    ///     state with nothing to measure, and would make the measurement it does take worthless, because the ON build
+    ///     would then run a prompt the OFF build never exercised. Full argument on SynthesisMergeMap.)
+    ///
+    /// WHY IT SHIPS OFF (user decision, 2026-07-13). This is the first mechanism in the review that lets the MODEL
+    /// decide two findings are one, i.e. that lets a model judgement DELETE a paid-for finding. Every earlier
+    /// collapse pass is deterministic and bounded by a measured similarity threshold; this one is not bounded by
+    /// anything but the model. And the live gate MEASURED the harm: gemma4:12b falsely merged a tone finding with an
+    /// unrelated character finding (both merely mentioned "Daniel"), which were the book's ONLY TWO character
+    /// findings, so the character dimension VANISHED from the score panel. So it ships in MEASURE mode: the coverage
+    /// log states, every build, exactly what the model proposed and what would have been merged. Flip it on only
+    /// against a model whose log has been read and is clean, mirroring the dynamic-term-repair rollout.
+    ///
+    /// TURNING IT OFF IS ALWAYS SAFE, IN THIS PRECISE SENSE: it removes the only mutation, and the passes that follow
+    /// (the near-duplicate collapser) are untouched by it. It does NOT restore the pre-b8 prompt — see above.
+    /// </summary>
+    public bool SynthesisMergeMap { get; set; } = false;
 }
 
 public class OllamaProviderOptions
