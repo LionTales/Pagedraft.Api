@@ -656,9 +656,9 @@ public class BookIntelligenceService
     /// model's markdown fence — the FE parses <c>profile.charactersJson</c> with a bare <c>JSON.parse</c> that a
     /// fenced string would break).
     ///
-    /// GATE (mirrors <c>ApplyAnalysisRepairAsync</c> + <c>PerTypeAllows</c>): runs only when the repair layer is
-    /// <see cref="AnalysisRepairOptions.Enabled"/> AND <see cref="PerTypeAllows"/> allows the type; the Hebrew
-    /// check lives inside <see cref="GlossaryRepairPass.RepairFields"/>. FAIL-SAFE: an off gate, an unparseable
+    /// GATE (mirrors <c>ApplyAnalysisRepairAsync</c>): runs only when <see cref="AnalysisRepairGate.Evaluate"/>
+    /// (Enabled + PerType) allows the type; the Hebrew check lives inside
+    /// <see cref="GlossaryRepairPass.RepairFields"/>. FAIL-SAFE: an off gate, an unparseable
     /// payload, or ANY repair/serialize fault returns the RAW string unchanged, so this can never break the
     /// profile build (identical to the pre-fix behaviour on every non-repaired path). NO new LLM (glossary only).
     /// </summary>
@@ -672,8 +672,19 @@ public class BookIntelligenceService
     {
         // Layer gate: a null block, Enabled=false, or a non-empty PerType map that excludes this type is a
         // strict no-op -> store the raw model output verbatim (pre-fix behaviour).
-        if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, type))
+        //
+        // h1-observable-gate-skip: name WHICH of the three reasons closed the gate via the shared
+        // AnalysisRepairGate predicate (also consulted by UnifiedAnalysisService.ApplyAnalysisRepairAsync
+        // and BookReviewService's glossary/dynamic hooks), Debug-only — a gated-out type here is a normal
+        // steady state (e.g. Mode/PerType excluding it), never INFO/WARN noise.
+        var gateReason = AnalysisRepairGate.Evaluate(cfg, type.ToString());
+        if (gateReason != AnalysisRepairGateReason.Allowed)
+        {
+            logger.LogDebug(
+                "AnalysisRepair: type={Type} gate closed ({Reason}); storing un-repaired raw JSON",
+                type, gateReason);
             return rawResult;
+        }
 
         try
         {
@@ -698,17 +709,6 @@ public class BookIntelligenceService
                 type, language);
             return rawResult;
         }
-    }
-
-    /// <summary>
-    /// Mirror of <c>UnifiedAnalysisService.PerTypeAllows</c>: a null/empty <see cref="AnalysisRepairOptions.PerType"/>
-    /// map means NO per-type restriction (allowed); a non-empty map is a strict allowlist keyed by the
-    /// <see cref="AnalysisType"/> name, so the type must be present AND true.
-    /// </summary>
-    private static bool PerTypeAllows(AnalysisRepairOptions cfg, AnalysisType type)
-    {
-        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
-        return cfg.PerType.TryGetValue(type.ToString(), out var enabled) && enabled;
     }
 
     private static string? ExtractJson(string content)

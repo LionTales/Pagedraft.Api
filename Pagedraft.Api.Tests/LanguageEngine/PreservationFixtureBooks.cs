@@ -93,6 +93,9 @@ namespace Pagedraft.Api.Tests.LanguageEngine;
 /// <c>GatingEntity</c> is not in the provider's set is a FINDING, not something to paper over with a
 /// hand-fed fallback.
 /// </summary>
+/// <param name="BookKey">Which seeded book supplies this case's entity set. <c>null</c> = the original two-book
+/// routing (Hebrew-expected -&gt; the Hebrew-native book, Latin-expected -&gt; the English-native book).
+/// <see cref="PreservationFixtureBooks.SynopsisBookKey"/> routes the case to the SYNOPSIS book (q1).</param>
 public sealed record LegitCase(
     string Cls,
     string Token,
@@ -100,7 +103,8 @@ public sealed record LegitCase(
     string Language,
     string Value,
     string Note,
-    string? GatingEntity = null);
+    string? GatingEntity = null,
+    string? BookKey = null);
 
 /// <summary>
 /// A single CLEANING (recall) case for the d5 gate: realistic Hebrew literary-analysis prose leaking EXACTLY
@@ -151,12 +155,13 @@ public sealed class PreservationFixtureBooks : IDisposable
     private readonly ServiceProvider _services;
 
     private PreservationFixtureBooks(
-        ServiceProvider services, Guid hebrewBookId, Guid englishBookId, Guid adversarialBookId)
+        ServiceProvider services, Guid hebrewBookId, Guid englishBookId, Guid adversarialBookId, Guid synopsisBookId)
     {
         _services = services;
         HebrewBookId = hebrewBookId;
         EnglishBookId = englishBookId;
         AdversarialBookId = adversarialBookId;
+        SynopsisBookId = synopsisBookId;
         Provider = services.GetRequiredService<IBookEntityProvider>();
     }
 
@@ -169,6 +174,13 @@ public sealed class PreservationFixtureBooks : IDisposable
     /// <summary>The ADVERSARIAL Hebrew-native book (be-c08): its manuscript carries a CAPITALIZED occurrence of
     /// four d5 leak words, so the provider harvests them as MANUSCRIPT-tier entities. See the file header.</summary>
     public Guid AdversarialBookId { get; }
+
+    /// <summary>The SYNOPSIS book (q1): a Hebrew-native historical novel whose manuscript carries the Latin
+    /// character / place / brand names its synopsis then repeats. See <see cref="SeedSynopsisBook"/>.</summary>
+    public Guid SynopsisBookId { get; }
+
+    /// <summary>The <see cref="LegitCase.BookKey"/> value that routes a case to the SYNOPSIS book.</summary>
+    public const string SynopsisBookKey = "synopsis";
 
     /// <summary>The REAL, production-registered provider (singleton over IServiceScopeFactory).</summary>
     public IBookEntityProvider Provider { get; }
@@ -396,6 +408,170 @@ public sealed class PreservationFixtureBooks : IDisposable
             "classifier LEAVE (book-entity — MANUSCRIPT cross-chapter recurrence)", "ירושלים"),
     };
 
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+    // q1 — THE SYNOPSIS FIXTURE (new; the INSTRUMENTS are unchanged, only the corpus is)
+    //
+    // WHY A NEW CORPUS AT ALL. The d5/d6 sets above are ANALYSIS-shaped values: one or two sentences of
+    // literary-analysis prose carrying ONE foreign token. A `Synopsis` value has a different SHAPE, and the
+    // shape is the risk: `PromptFactory.SynopsisHe` (PromptFactory.cs:998-1001) asks for "3-5 paragraphs,
+    // third person, in a professional style like a book editor's", and a synopsis is by its nature DENSE in
+    // legitimate proper nouns — character names, place names, transliterated titles. Density plus length is
+    // exactly the condition a span-scoped repair can misfire on, and NO existing fixture value exercises it.
+    //
+    // WHAT THE BOOK IS. A Hebrew-native historical novel ("מכתבים מאודסה") whose MANUSCRIPT carries the same
+    // Latin names its synopsis repeats — which is the PRODUCTION shape: a synopsis is generated FOR a book,
+    // and BookEntityProvider harvests that book. So the entity lever is genuinely in play here, unlike the
+    // be-c01 P0 shapes where it is inert by construction.
+    //
+    // WHAT IS DELIBERATELY *NOT* SEEDED (do not "fix" this):
+    //   • `Chekhov` — an author the SYNOPSIS invokes as a comparison but the BOOK never names. It is
+    //     sentence-initial in its case, so rule (7) cannot spare it and the entity lever cannot either: it
+    //     REACHES THE MODEL. That is the honest false-positive surface for this type and the whole reason the
+    //     type has to be measured rather than assumed.
+    //   • `Winter` / `Letters` — the quoted book-within-a-book title. Seeding them would harvest them
+    //     (Title-Case + one mid-sentence mention is enough) and the report would credit the ENTITY lever for a
+    //     case that classifier rule (5) (quoted multi-word span) is supposed to carry alone.
+    //   • `NKVD` is IN the manuscript but is ALL-CAPS, so the Title-Case-only scan cannot harvest it —
+    //     classifier rule (6) owns it, same asymmetry as NASA/PDF above.
+    // ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Latin names seeded Title-Case + MID-SENTENCE into the SYNOPSIS book's chapters, so the real
+    /// provider harvests them into the MANUSCRIPT (case-SENSITIVE) tier.</summary>
+    public static readonly IReadOnlyList<string> SynopsisBookLatinNames = new[]
+    {
+        "Odessa", "Trieste", "Anton", "Katarina", "Volkov", "Kodak",
+    };
+
+    /// <summary>Latin tokens the SYNOPSIS CASES contain but the SYNOPSIS BOOK's manuscript deliberately does
+    /// NOT — so the provider cannot harvest them and their gate (or lack of one) is attributable to the
+    /// deterministic classifier, or to the model. See the block comment above.</summary>
+    public static readonly IReadOnlyList<string> SynopsisBookNonHarvestedTokens = new[]
+    {
+        "Chekhov",           // reaches the model (sentence-initial, no entity) — the measured FP surface
+        "Winter", "Letters", // quoted title — classifier rule (5) must carry it alone
+        "NKVD",              // ALL-CAPS — classifier rule (6); not Title-Case, so not harvestable at all
+        "Vries",             // the Title-Case tail of "Katarina de Vries" — rule (7) mid-sentence
+    };
+
+    /// <summary>
+    /// The q1 SYNOPSIS PRESERVATION set: multi-paragraph Hebrew editorial prose of the shape `SynopsisHe`
+    /// asks for, each value dense in LEGITIMATE proper nouns that MUST survive byte-identical. Measured by
+    /// the SAME d6 instrument, against the SAME bar (preservation &gt;= 90%, over-rewrite exactly 0).
+    /// Deliberately NOT folded into <see cref="Cases"/>: that list is PINNED by
+    /// <c>BookEntityFixtureSeedTests.EveryLegitCase_IsDeterministicallyGated_WithTheRealProviderSet</c>, and
+    /// whether a synopsis value is deterministically gated is precisely what q1 is measuring, not something
+    /// to assert up front.
+    /// </summary>
+    public static readonly IReadOnlyList<LegitCase> SynopsisCases = new[]
+    {
+        // (1) The baseline shape: five proper nouns, every one Title-Case MID-sentence => classifier rule (7).
+        new LegitCase("synopsis (dense proper nouns, mid-sentence)", "Odessa/Anton/Katarina/Trieste/Volkov",
+            ExpectedScript.Hebrew, "he-IL",
+            "הרומן עוקב אחר מרים, צלמת צעירה שהגיעה אל נמל Odessa בחורף 1919, ומגלה שם עולם שלם של פליטים ומבריחים. " +
+            "בין הרציפים היא פוגשת את הצלם Anton, שמלמד אותה לראות את העיר דרך העדשה במקום דרך הפחד.\n\n" +
+            "ככל שהחורף מעמיק מתהדק הקשר בינה ובין Katarina, אישה מסתורית שהגיעה מן העיר Trieste ונושאת עמה חבילת מכתבים ישנה. " +
+            "השתיים מתחילות לתעד את מה שנותר מן הקהילה, ומרים מבינה שהתיעוד עצמו הפך למעשה של התנגדות.\n\n" +
+            "הקצין Volkov, המופקד על הנמל, רואה במצלמה איום ממשי. " +
+            "העימות ביניהם נבנה לאיטו, והשאלה אם התמונות יצליחו לצאת מן העיר נותרת פתוחה עד הפרק האחרון.",
+            "classifier LEAVE on every run (Title-Case mid-sentence); the entity set is present but not load-bearing",
+            null, SynopsisBookKey),
+
+        // (2) PARAGRAPH-INITIAL character name. A synopsis opens paragraphs with its protagonists, and a
+        // sentence-initial capital is NOT a proper-noun signal (rule 7 is explicitly mid-sentence only), so the
+        // ONLY thing that can spare this is the per-book ENTITY lever — through the REAL provider.
+        new LegitCase("synopsis (paragraph-initial character name)", "Katarina",
+            ExpectedScript.Hebrew, "he-IL",
+            "הספר נפתח בערב שבו שבה מרים אל בית הילדות שלה, ומוצאת את החדרים ריקים מכל מה שזכרה. " +
+            "מכתב יחיד מחכה לה על השולחן, ובו הזמנה לנסוע אל הנמל.\n\n" +
+            "Katarina מחכה לה שם, על הרציף, עם אותה חבילת מכתבים שלא נפתחה מעולם. " +
+            "מן הרגע הזה הופכות השתיים לשותפות בעל כורחן, וכל אחת מהן שומרת סוד שהשנייה אינה יכולה לנחש.\n\n" +
+            "בפרקים הבאים נחשף מה קרה בבית ההוא בחורף 1919, ומדוע איש מן השכנים אינו מוכן לדבר על כך. " +
+            "ככל שהמכתבים נפתחים אחד אחר השני, מתברר שהגרסה שסופרה למרים כל חייה נבנתה כדי להגן על מישהו אחר לגמרי.",
+            "entity LEAVE (manuscript-harvested name; sentence-initial, so rule 7 cannot spare it)",
+            "Katarina", SynopsisBookKey),
+
+        // (3) A TRANSLITERATED TITLE in quotes + an ALL-CAPS acronym — both routine in a synopsis, and both
+        // carried by classifier rules with NO entity help (neither token is in the manuscript).
+        new LegitCase("synopsis (quoted transliterated title + acronym)", "\"Winter Letters\" / NKVD",
+            ExpectedScript.Hebrew, "he-IL",
+            "התקציר מציג ספר בתוך ספר: אוסף המכתבים שמרים ו-Anton מרכיבים לאורך העלילה מתפרסם בסופו של דבר תחת הכותרת \"Winter Letters\". " +
+            "הכותרת הזאת היא גם המפתח למבנה הכפול של הרומן.\n\n" +
+            "ברקע פועלת זרוע החקירות NKVD, שמנסה לאתר את מקור התצלומים, והלחץ על הקהילה הקטנה גובר מפרק לפרק.\n\n" +
+            "הסיום משאיר את הקורא עם שאלה אחת: האם הספר שראה אור הוא באמת אותו אוסף, או גרסה מצונזרת שלו. " +
+            "התשובה, ככל שהיא נרמזת, נמצאת דווקא בפרטים הקטנים של העימוד ובמה שנשמט מבין הדפים.",
+            "classifier LEAVE (quoted multi-word span for the title, ALL-CAPS for the acronym)",
+            null, SynopsisBookKey),
+
+        // (4) THE MEASURED FP SURFACE: an author the synopsis invokes as a comparison, SENTENCE-INITIAL, and
+        // absent from the book's manuscript. Rule (7) is mid-sentence-only and the entity lever is inert, so
+        // this run REACHES THE REPAIR MODEL and only the model's "return a proper noun unchanged" contract +
+        // the IsAcceptableReplacement echo-reject guard can preserve it. This is the case q1 exists to price.
+        new LegitCase("synopsis (sentence-initial author reference — REACHES MODEL)", "Chekhov",
+            ExpectedScript.Hebrew, "he-IL",
+            "במרכז הרומן עומדת מרים, צלמת שמתעדת את חיי הנמל בזמן שהעולם סביבה מתפורר. " +
+            "הפרוזה נשענת על תיאורים קצרים ומדויקים, והמספר שומר מרחק מכוון מן הדמויות.\n\n" +
+            "Chekhov הוא ההשוואה המתבקשת: אותה כלכלה של פרטים, אותה חמלה מאופקת כלפי אנשים קטנים ברגעים גדולים. " +
+            "אך בניגוד אליו, הרומן הזה בוחר בסיום שאינו מוותר על תקווה.\n\n" +
+            "שלושת החלקים של הספר מסודרים לפי עונות, והמעבר בין החורף לאביב הוא גם המעבר של הגיבורה מן ההסתרה אל החשיפה.",
+            "NO deterministic gate — reaches the repair model; preserved only by the model + the echo-reject guard",
+            null, SynopsisBookKey),
+
+        // (5) A transliterated name span with a lowercase PARTICLE inside a long multi-paragraph value — the
+        // be-c01 rule (8) shape, now at synopsis length rather than in a one-line probe.
+        new LegitCase("synopsis (name span with lowercase particle)", "Katarina de Vries",
+            ExpectedScript.Hebrew, "he-IL",
+            "העלילה מתרחשת בעיר נמל אחת ובמשך שלושה חורפים, והיא נפתחת בהגעתה של האמנית Katarina de Vries אל החוף. " +
+            "היא מביאה עמה תיק תצלומים שאיש אינו מוכן לקנות, ואת השם שלה איש אינו מוכן להגות במלואו.\n\n" +
+            "מרים, בתו של סוחר הדגים, הופכת לעוזרת שלה, ובהדרגה גם לעיניים שלה בעיר. " +
+            "היחסים ביניהן נעים בין הערצה לתלות, ובין נאמנות לניצול.\n\n" +
+            "כשהמשטרה מתחילה לחפש את בעלת התיק, נאלצת מרים להחליט אם להסגיר את האישה שלימדה אותה לראות.",
+            "classifier LEAVE (rule 8 name-span walk over 'de', rule 7 for the Title-Case anchors)",
+            null, SynopsisBookKey),
+
+        // (6) A brand + a place name, the place opening the VALUE itself (index 0 is sentence-initial by
+        // definition). Again only the entity lever can spare it.
+        new LegitCase("synopsis (value-initial place name + brand)", "Odessa / Kodak",
+            ExpectedScript.Hebrew, "he-IL",
+            "Odessa של שנת 1919 היא הדמות השנייה של הרומן: עיר שמחליפה שלטון שלוש פעמים בתוך שנה אחת, " +
+            "ושכל אחד מתושביה לומד לחיות עם מזוודה ארוזה ליד הדלת.\n\n" +
+            "מרים מתעדת את הימים האלה במצלמת Kodak שירשה מאביה, והתצלומים הופכים בהדרגה למסמך היחיד ששרד. " +
+            "העלילה נעה בין המרתף שבו היא מפתחת את הפילם ובין הרציף שבו היא מוכרת אותו.\n\n" +
+            "בשליש האחרון מתברר שהתצלומים הגיעו רחוק יותר משחשבה, ושמחיר ההגעה הזאת ישולם בידי מישהו אחר.",
+            "entity LEAVE for the value-initial place (rule 7 cannot fire); classifier LEAVE for the brand",
+            "Odessa", SynopsisBookKey),
+    };
+
+    /// <summary>
+    /// The q1 SYNOPSIS CLEANING set: the d5 mirror at synopsis LENGTH. Each value is multi-paragraph Hebrew
+    /// synopsis prose leaking EXACTLY ONE lowercase English abstract noun and containing NO other Latin run
+    /// (the d5 instrument's single-run seed contract). Kept OUT of <see cref="LeakCases"/> because
+    /// <c>BookEntityFixtureSeedTests.AdversarialBook_IsGenuinelyAdversarial_...</c> asserts an exact
+    /// spared-count over that list.
+    /// </summary>
+    public static readonly IReadOnlyList<LeakCase> SynopsisLeakCases = new[]
+    {
+        new LeakCase("synopsis-leak-estrangement", "estrangement",
+            "הרומן עוקב אחר מרים, צלמת צעירה שחוזרת אל עיר הנמל שבה גדלה, ומגלה שהמקום כבר אינו זוכר אותה. " +
+            "הפרקים הראשונים בונים בהדרגה תחושת estrangement שאינה מרפה ממנה לאורך כל החורף.\n\n" +
+            "במקביל נפרשת עלילת המשנה של אחיה, שבחר להישאר ולשלם על כך מחיר כבד. " +
+            "שני הקווים נפגשים רק בשליש האחרון של הספר, ואז מתברר עד כמה היו שזורים זה בזה מלכתחילה.\n\n" +
+            "הסיום נמנע מפתרון מסודר, ומשאיר את הקוראים עם שאלה על מה שאפשר להשיב ועל מה שאבד לתמיד."),
+
+        new LeakCase("synopsis-leak-reckoning", "reckoning",
+            "התקציר מציג משפחה אחת לאורך שלושה דורות, ואת הבית שעובר מיד ליד עד שאין בו עוד מקום לאיש. " +
+            "הדור השלישי הוא זה שנושא על כתפיו reckoning שלם של הבחירות שנעשו לפניו.\n\n" +
+            "הפרקים האמצעיים מתמקדים בסבתא, שסירבה כל חייה לספר מה קרה בקיץ ההוא, " +
+            "ובנכדה שמנסה לשחזר את הסיפור מתוך מסמכים ותצלומים בלבד.\n\n" +
+            "ככל שהחקירה הפרטית מתקדמת, מתחוור שהשתיקה לא נועדה להגן על המתים אלא על החיים."),
+
+        new LeakCase("synopsis-leak-yearning", "yearning",
+            "בלב הרומן עומדת אהבה שלא מומשה, וכל אחד משלושת החלקים מסופר מנקודת מבט אחרת עליה. " +
+            "החלק הראשון שייך לגיבורה, והוא ספוג yearning שקטה שאינה מוצאת לה מוצא.\n\n" +
+            "החלק השני עובר אל בן זוגה לשעבר, שמנסה לבנות חיים חדשים בעיר אחרת ונכשל שוב ושוב. " +
+            "החלק השלישי, הקצר מכולם, מוסר את הדברים מפי בתם המשותפת, שנים לאחר מכן.\n\n" +
+            "המבנה המשולש הזה הוא שהופך סיפור פרטי לתמונה של דור שלם."),
+    };
+
     // ── construction ──────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Seeds both books into a fresh in-memory store and wires the REAL provider over it (registered
@@ -419,12 +595,14 @@ public sealed class PreservationFixtureBooks : IDisposable
         var hebrewBookId = Guid.NewGuid();
         var englishBookId = Guid.NewGuid();
         var adversarialBookId = Guid.NewGuid();
+        var synopsisBookId = Guid.NewGuid();
         SeedHebrewNativeBook(db, hebrewBookId);
         SeedLatinNativeBook(db, englishBookId);
         SeedAdversarialLeakBook(db, adversarialBookId);
+        SeedSynopsisBook(db, synopsisBookId);
         await db.SaveChangesAsync();
 
-        return new PreservationFixtureBooks(sp, hebrewBookId, englishBookId, adversarialBookId);
+        return new PreservationFixtureBooks(sp, hebrewBookId, englishBookId, adversarialBookId, synopsisBookId);
     }
 
     /// <summary>The entity set for a case's BOOK, straight from the real provider — harvested for the case's OWN
@@ -433,9 +611,16 @@ public sealed class PreservationFixtureBooks : IDisposable
     /// provider harvests is by construction the script the classifier looks up. Hebrew-expected cases read the
     /// Hebrew-native book; Latin-expected cases read the English-native book.</summary>
     public Task<IReadOnlySet<string>> EntitiesForAsync(LegitCase c)
-        => c.Expected == ExpectedScript.Hebrew
-            ? Provider.GetEntitiesAsync(HebrewBookId, c.Language)
-            : Provider.GetEntitiesAsync(EnglishBookId, c.Language);
+        => c.BookKey == SynopsisBookKey
+            ? Provider.GetEntitiesAsync(SynopsisBookId, c.Language)
+            : c.Expected == ExpectedScript.Hebrew
+                ? Provider.GetEntitiesAsync(HebrewBookId, c.Language)
+                : Provider.GetEntitiesAsync(EnglishBookId, c.Language);
+
+    /// <summary>The SYNOPSIS book's entity set, straight from the real provider, harvested for a HEBREW
+    /// analysis (its native direction: foreign = Latin). q1.</summary>
+    public Task<IReadOnlySet<string>> SynopsisBookEntitiesAsync()
+        => Provider.GetEntitiesAsync(SynopsisBookId, HebrewBookLanguage);
 
     /// <summary>The HEBREW-native book harvested for a HEBREW-language analysis (its native direction: foreign =
     /// Latin).</summary>
@@ -689,6 +874,73 @@ public sealed class PreservationFixtureBooks : IDisposable
             StructuredResult = SerializeCharacters(
                 new[] { "מרים", "אליהו" },
                 ("מרים", "אליהו")),
+        });
+    }
+
+    /// <summary>
+    /// The SYNOPSIS book (q1): a Hebrew-native historical novel. Its manuscript carries, Title-Case and
+    /// MID-SENTENCE, exactly the Latin names the synopsis fixture then repeats
+    /// (<see cref="SynopsisBookLatinNames"/>) — the PRODUCTION shape, since a synopsis is generated for the
+    /// very book the provider harvests.
+    ///
+    /// DELIBERATELY ABSENT (see <see cref="SynopsisBookNonHarvestedTokens"/> and the block comment above the
+    /// synopsis fixture): `Chekhov` (so the sentence-initial author reference genuinely REACHES THE MODEL —
+    /// the surface q1 exists to price) and `Winter` / `Letters` (so the quoted-title case is attributable to
+    /// classifier rule (5), not to the entity lever). `NKVD` IS present but is ALL-CAPS, so the Title-Case-only
+    /// manuscript scan cannot harvest it — rule (6) owns it, exactly as for NASA/PDF.
+    ///
+    /// PLAIN TEXT, NOT SFDT — see the file header.
+    /// </summary>
+    private static void SeedSynopsisBook(AppDbContext db, Guid bookId)
+    {
+        db.Books.Add(new Book { Id = bookId, Title = "מכתבים מאודסה", Language = "he" });
+
+        db.Chapters.Add(new Chapter
+        {
+            Id = Guid.NewGuid(),
+            BookId = bookId,
+            Order = 0,
+            Title = "פרק 0",
+            ContentText =
+                "הרומן נפתח בנמל של Odessa בשלהי החורף, ובו פוגשת הגיבורה את הצלם Anton בפעם הראשונה. " +
+                "היא נושאת עמה מצלמת Kodak ישנה, ומבטה נתפס בעיניו של Volkov הקצין. " +
+                "בערב ההוא הגיעה גם Katarina מן העיר Trieste, ובידה מכתב שלא נפתח.",
+        });
+
+        db.Chapters.Add(new Chapter
+        {
+            Id = Guid.NewGuid(),
+            BookId = bookId,
+            Order = 1,
+            Title = "פרק 1",
+            ContentText =
+                "בפרק השני חוזרת הגיבורה אל Odessa ומגלה כי אנשי NKVD כבר תפסו את הבית. " +
+                "היא מבקשת מן הצלם Anton להסתיר את הפילם, ואילו Katarina בוחרת בדרך אחרת. " +
+                "הימים חולפים, ו-Volkov ממשיך לעקוב אחריהם ברחובות.",
+        });
+
+        db.Chapters.Add(new Chapter
+        {
+            Id = Guid.NewGuid(),
+            BookId = bookId,
+            Order = 2,
+            Title = "פרק 2",
+            ContentText =
+                "בפרק האחרון נאספים המכתבים אל תוך ספר אחד, והוא נשלח אל Trieste. " +
+                "הגיבורה נזכרת באיש Volkov ובימים שבהם הסתתרה עם Katarina במרתף.",
+        });
+
+        // The book's own HEBREW protagonists — declared tier, inert for gating in a Hebrew-native book (same
+        // honest picture as the other two Hebrew books: every entity that gates anything here is manuscript-tier).
+        db.AnalysisResults.Add(new AnalysisResult
+        {
+            BookId = bookId,
+            AnalysisType = AnalysisType.CharacterAnalysis,
+            Scope = AnalysisScope.Book,
+            Status = AnalysisStatus.Active,
+            StructuredResult = SerializeCharacters(
+                new[] { "מרים", "יונה" },
+                ("מרים", "יונה")),
         });
     }
 

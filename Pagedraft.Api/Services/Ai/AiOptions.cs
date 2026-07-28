@@ -363,6 +363,73 @@ public static class AnalysisRepairModeExtensions
 }
 
 /// <summary>
+/// WHY a type's repair-layer gate is open or closed (h1-observable-gate-skip). Every gate call site
+/// previously collapsed all three "closed" reasons into the SAME silent early-return/false, so a type that
+/// was skipped left no trace of WHICH reason closed it — and the three have different fixes: a null block
+/// means no "Ai:AnalysisRepair" section is bound at all; <see cref="Disabled"/> means the section is bound
+/// but its master switch is off; <see cref="PerTypeExcluded"/> means the layer is on but this specific type
+/// is absent from (or mapped to false in) a non-empty <see cref="AnalysisRepairOptions.PerType"/> allowlist.
+/// </summary>
+public enum AnalysisRepairGateReason
+{
+    /// <summary>The gate is OPEN — the repair layer may run for this type (subject to <see cref="AnalysisRepairMode"/>
+    /// stage selection, which is a separate, already-observable knob).</summary>
+    Allowed,
+
+    /// <summary>No "Ai:AnalysisRepair" block is bound (<c>cfg is null</c>) — the layer defaults to fully off.</summary>
+    NullConfig,
+
+    /// <summary><see cref="AnalysisRepairOptions.Enabled"/> is false.</summary>
+    Disabled,
+
+    /// <summary>A non-empty <see cref="AnalysisRepairOptions.PerType"/> map excludes this type (absent, or
+    /// present and mapped to false).</summary>
+    PerTypeExcluded
+}
+
+/// <summary>
+/// The SINGLE source of truth for "is the repair layer's Enabled/PerType gate open for TYPE, and if not,
+/// why?" (h1-observable-gate-skip). Before this, the identical null/Enabled/PerType check was spelled out
+/// longhand at FOUR independent call sites — <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>,
+/// <c>Analysis.BookIntelligenceService.RepairStructuredProfileJson</c>, and BOTH the glossary
+/// (<c>Analysis.BookReviewService.ApplyGlossaryToFindings</c>) and dynamic (inline <c>dynamicGateOpen</c>)
+/// hooks in <c>Analysis.BookReviewService</c> — each with its OWN private <c>PerTypeAllows</c> copy. Four
+/// copies of a predicate that must agree is exactly the be-c06 replicated-gate trap (see
+/// <see cref="AnalysisRepairModeExtensions"/> above): centralising it here means a gate call site can log
+/// WHY it closed without re-deriving the reason, and a fifth divergent copy cannot be written.
+///
+/// NOTE: this predicate answers ONLY the Enabled/PerType question. It is layered ABOVE
+/// <see cref="AnalysisRepairMode"/> stage selection (<see cref="AnalysisRepairModeExtensions"/>), which
+/// every call site must still consult separately — an <see cref="AnalysisRepairGateReason.Allowed"/> verdict
+/// here never overrides Mode=Off/Glossary/Dynamic skipping a particular stage.
+/// </summary>
+public static class AnalysisRepairGate
+{
+    /// <param name="cfg">The bound "Ai:AnalysisRepair" block, or null if absent.</param>
+    /// <param name="typeKey">The <see cref="Contracts.AnalysisType"/> name (e.g. "Summarization"), or the
+    /// fixed literal "BookReview" for the whole-book review engine hooks, which are not keyed by an
+    /// AnalysisType value on their own seam.</param>
+    /// <returns>
+    /// CONTRACT: a returned <see cref="AnalysisRepairGateReason.Allowed"/> IMPLIES <paramref name="cfg"/>
+    /// is not null. At least one call site - <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>
+    /// - relies on exactly this to dereference <c>cfg!</c> without its own null check after seeing
+    /// <c>Allowed</c>. That means the <c>cfg is null</c> check below MUST stay the FIRST statement in this
+    /// method: reordering it after the Enabled/PerType checks, or adding a fifth reason ahead of it, would
+    /// let a non-null-implying <c>Allowed</c> reach that dereference and NRE.
+    /// </returns>
+    public static AnalysisRepairGateReason Evaluate(AnalysisRepairOptions? cfg, string typeKey)
+    {
+        if (cfg is null) return AnalysisRepairGateReason.NullConfig;
+        if (!cfg.Enabled) return AnalysisRepairGateReason.Disabled;
+        if (cfg.PerType is { Count: > 0 } perType && !(perType.TryGetValue(typeKey, out var enabled) && enabled))
+        {
+            return AnalysisRepairGateReason.PerTypeExcluded;
+        }
+        return AnalysisRepairGateReason.Allowed;
+    }
+}
+
+/// <summary>
 /// Config for the analysis-output repair layer (analysis-output-repair plan, p6-config; extended by the
 /// dynamic-term-repair-design plan, d4), read by
 /// <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>. There are now THREE repair

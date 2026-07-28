@@ -1113,6 +1113,34 @@ public class BookReviewService
         var repairCfg = _aiOptions.Value.AnalysisRepair;
         var repairMode = repairCfg?.Mode ?? Ai.AnalysisRepairMode.Off;
 
+        // 5a-gate. be-c02 — the LAYER gate (Enabled + PerType-allows "BookReview"), evaluated ONCE for BOTH
+        //     stages below and logged ONCE, mirroring UnifiedAnalysisService.ApplyAnalysisRepairAsync's single
+        //     per-call gate log. Enabled/PerType is a whole-LAYER knob: when it closes, NEITHER the glossary
+        //     (5b) nor the dynamic (5c) stage runs, whatever Mode says. Evaluating it here fixes an OBSERVABILITY
+        //     asymmetry the h1 todo left behind one layer up from the predicate it de-duplicated:
+        //       - the glossary skip used to be logged only from INSIDE ApplyGlossaryToFindings, which under
+        //         Mode=Off/Dynamic is never CALLED — so half the layer vanished silently under 2 of the 4 Modes;
+        //       - the dynamic skip was logged unconditionally, so a Mode=Off build emitted exactly ONE line that
+        //         named only the dynamic stage, reading as "just the dynamic stage was gated out" when in fact
+        //         the ENTIRE layer was.
+        //     One line naming BOTH stages (and the Mode it did not need to consult) removes the asymmetry AND
+        //     today's DOUBLE line under Mode=GlossaryThenDynamic, where the two hooks logged the same reason
+        //     twice. Debug ONLY: a gated-out type is a normal steady state (BookReview is routinely absent from
+        //     a PerType allowlist) and must never rise to INFO/WARN.
+        //     NOTE: ApplyGlossaryToFindings KEEPS its own identical Enabled/PerType gate — deliberate
+        //     defence-in-depth for the other callers/tests that drive it directly; this hoist short-circuits
+        //     ahead of it rather than replacing it.
+        var repairLayerGateReason = Ai.AnalysisRepairGate.Evaluate(repairCfg, AnalysisType.BookReview.ToString());
+        var repairLayerGateOpen = repairLayerGateReason == Ai.AnalysisRepairGateReason.Allowed;
+        if (!repairLayerGateOpen)
+        {
+            _logger.LogDebug(
+                "AnalysisRepair: type={Type} gate closed ({Reason}); skipping the ENTIRE repair layer for book " +
+                "{BookId} ({Lang}): BOTH the glossary stage and the dynamic (span-scoped) stage are skipped, " +
+                "regardless of Mode={Mode}",
+                AnalysisType.BookReview, repairLayerGateReason, bookId, lang, repairMode);
+        }
+
         // 5b. f5-wire JOB 2 — DETERMINISTIC GLOSSARY SAFETY NET over the finalised findings, BEFORE persist.
         //     BookReview runs on the SAME gemma4:12b as LiteraryAnalysis and emits the SAME structured Hebrew
         //     prose (findings[].rationale / suggestedAction), which leaks English terms STOCHASTICALLY — yet it
@@ -1132,7 +1160,9 @@ public class BookReviewService
         //     be-c06: the predicate itself lives ONCE, on the enum (AnalysisRepairModeExtensions.RunsGlossary) —
         //     the "mirrors UnifiedAnalysisService EXACTLY" claim above is now enforced by construction (one
         //     shared predicate) rather than by two longhand copies that had to be kept in step by hand.
-        if (repairMode.RunsGlossary())
+        //     be-c02: the Enabled/PerType half is the HOISTED repairLayerGateOpen above (evaluated + logged once
+        //     for the whole layer), so this seam now reads exactly like 5c: layer gate AND Mode-selects-stage.
+        if (repairLayerGateOpen && repairMode.RunsGlossary())
         {
             try
             {
@@ -1166,8 +1196,17 @@ public class BookReviewService
         //     be-c06: the Mode half of this gate is the SHARED predicate (AnalysisRepairModeExtensions.RunsDynamic),
         //     the same one UnifiedAnalysisService.ApplyAnalysisRepairAsync's dynamic stage calls. Enabled/PerType
         //     still gate FIRST and independently — RunsDynamic() answers ONLY "does this Mode select the stage".
-        var dynamicGateOpen = repairCfg is not null && repairCfg.Enabled && PerTypeAllowsBookReview(repairCfg) &&
-            repairMode.RunsDynamic();
+        // h1-observable-gate-skip: the Enabled/PerType half of this gate is OBSERVABLE — it names WHICH of the
+        // three reasons (null block / Enabled=false / PerType exclusion) closed it, since each has a different
+        // fix. A Mode that simply does not select the dynamic stage (e.g. Mode=Glossary) is NOT logged, that is
+        // ordinary stage selection, not a silently-skipped type. Byte-identical gate semantics to the original
+        // inline expression: `cfg is not null && cfg.Enabled && PerTypeAllows(cfg, "BookReview")` <=>
+        // `Evaluate(...) == Allowed`.
+        // be-c02: that evaluation + its Debug line now live ONCE at 5a-gate above, covering BOTH stages, because
+        // the reason is a property of the LAYER, not of this stage — logging it here (and only here) made a
+        // Mode=Off build report the dynamic stage as the only thing gated out while the glossary half of the
+        // path stayed invisible, and made a Mode=GlossaryThenDynamic build log the same reason twice.
+        var dynamicGateOpen = repairLayerGateOpen && repairMode.RunsDynamic();
         if (dynamicGateOpen)
         {
             try
@@ -2158,9 +2197,9 @@ public class BookReviewService
     /// Severity / EvidenceJson / ChapterAnchorsJson / DedupKey / Status / BuiltWithModel — is never exposed to
     /// the glossary, so it stays byte-identical.
     ///
-    /// GATE (mirrors ApplyAnalysisRepairAsync + UnifiedAnalysisService.PerTypeAllows): runs only when the
-    /// repair layer is <see cref="Ai.AnalysisRepairOptions.Enabled"/> AND PerType allows "BookReview" AND the
-    /// book language is Hebrew (the Hebrew check lives inside <see cref="GlossaryRepairPass.RepairFields"/>).
+    /// GATE (mirrors ApplyAnalysisRepairAsync): runs only when <see cref="Ai.AnalysisRepairGate.Evaluate"/>
+    /// (Enabled + PerType allows "BookReview") is Allowed AND the book language is Hebrew (the Hebrew check
+    /// lives inside <see cref="GlossaryRepairPass.RepairFields"/>).
     /// A null/off config, a PerType exclusion, or a non-Hebrew book is a strict no-op. NOTE: this hook is
     /// deliberately glossary-ONLY and ignores <see cref="Ai.AnalysisRepairOptions.GuardOnly"/> — BookReview
     /// never runs the value-scoped LLM stage (this glossary hook itself makes no model call; the separate
@@ -2183,8 +2222,20 @@ public class BookReviewService
 
         // Layer gate: a null block or Enabled=false is a FULL no-op; a non-empty PerType map that excludes
         // "BookReview" also skips. (The Hebrew-book gate is enforced inside GlossaryRepairPass.RepairFields.)
-        if (cfg is null || !cfg.Enabled || !PerTypeAllowsBookReview(cfg))
+        //
+        // h1-observable-gate-skip: name WHICH of the three reasons closed the gate via the shared
+        // AnalysisRepairGate predicate (also consulted by UnifiedAnalysisService.ApplyAnalysisRepairAsync,
+        // BookIntelligenceService.RepairStructuredProfileJson, and this class's dynamic-repair hook below),
+        // Debug-only — BookReview is routinely gated out on non-BookReview PerType allowlists, so this must
+        // never rise to INFO/WARN.
+        var gateReason = Ai.AnalysisRepairGate.Evaluate(cfg, AnalysisType.BookReview.ToString());
+        if (gateReason != Ai.AnalysisRepairGateReason.Allowed)
+        {
+            logger?.LogDebug(
+                "AnalysisRepair: type={Type} gate closed ({Reason}); skipping glossary repair",
+                AnalysisType.BookReview, gateReason);
             return 0;
+        }
 
         var changedFindings = 0;
 
@@ -2226,18 +2277,6 @@ public class BookReviewService
         }
 
         return changedFindings;
-    }
-
-    /// <summary>
-    /// Mirror of <c>UnifiedAnalysisService.PerTypeAllows</c> for <see cref="AnalysisType.BookReview"/>: a
-    /// null/empty PerType map means NO restriction (allowed); a non-empty map is a strict allowlist, so
-    /// "BookReview" must be present AND true. Kept in step with that method — both key on the
-    /// <see cref="AnalysisType"/> name.
-    /// </summary>
-    private static bool PerTypeAllowsBookReview(Ai.AnalysisRepairOptions cfg)
-    {
-        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
-        return cfg.PerType.TryGetValue(AnalysisType.BookReview.ToString(), out var enabled) && enabled;
     }
 
     // ─── Union + dedup ────────────────────────────────────────────────────────────────────────────

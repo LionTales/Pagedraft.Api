@@ -486,8 +486,32 @@ public class OutputQualityDiagnostic
         Emit("");
 
         // ── MEASUREMENT SET (shared with the deterministic BookEntityFixtureSeedTests) ────────────────────
-        var seeds = PreservationFixtureBooks.LeakCases;
-        Emit($"Measurement set: {seeds.Count} Hebrew prose values (2 known real leaks + {seeds.Count - 2} seeded out-of-glossary), each leaking one Latin run.");
+        // q1 appends the SYNOPSIS-shaped leak values (the same single-Latin-run contract, at multi-paragraph
+        // synopsis LENGTH) so the cleaning/recall side of the gate is measured for that shape too.
+        //
+        // be-c01 SCOPING: `Synopsis` is NOT one of the eight analysis types the shipped dynamic repair layer
+        // runs over, so its values are LOADED and MEASURED here but are NOT part of the d5 aggregate or the
+        // d5 CLEANING VERDICT. The verdict is computed over the SHIPPED corpus of record ONLY (the be-c08
+        // figures of record, 10/10), because a verdict that mixed in a type the product never repairs could
+        // recommend rolling back the shipped stage for all eight repaired types on the strength of a failure
+        // in a type that is not in the layer. The SYNOPSIS numbers are reported in their own subset section.
+        var shippedSeedCount = PreservationFixtureBooks.LeakCases.Count;
+        var seeds = PreservationFixtureBooks.LeakCases
+            .Concat(PreservationFixtureBooks.SynopsisLeakCases)
+            .ToList();
+        // Index lists over `seeds` (and therefore over every array parallel to it: repairRunsA/B, outcomes).
+        var shippedSeedIdx = Enumerable.Range(0, shippedSeedCount).ToList();
+        var synopsisSeedIdx = Enumerable.Range(shippedSeedCount, seeds.Count - shippedSeedCount).ToList();
+        bool IsShippedSeed(int i) => i < shippedSeedCount;
+        Emit($"Measurement set: {seeds.Count} Hebrew prose values — {shippedSeedCount} SHIPPED "
+             + $"(2 known real leaks + {shippedSeedCount - 2} seeded out-of-glossary) + "
+             + $"{synopsisSeedIdx.Count} q1 SYNOPSIS-shaped (multi-paragraph editorial prose), "
+             + "each leaking exactly one Latin run.");
+        Emit($"**SCOPE OF THE VERDICT (be-c01): the d5 aggregate and the d5 CLEANING VERDICT below are computed over "
+             + $"the {shippedSeedCount} SHIPPED values ONLY — the corpus of record for the eight analysis types the "
+             + $"dynamic repair layer actually runs over. The {synopsisSeedIdx.Count} SYNOPSIS values are measured on "
+             + "the same instrument against the same bar and reported SEPARATELY (see the q1 subset section); "
+             + "`Synopsis` is not a repaired type, so they are NOT part of the ship/HALT decision.**");
         Emit("");
 
         // ── THE ADVERSARIAL BOOK + ITS REAL ENTITY SET (be-c08) ───────────────────────────────────────────
@@ -541,7 +565,13 @@ public class OutputQualityDiagnostic
         // reported below) rather than being inferred from a model output that could differ for other reasons.
         var repairRunsA = new List<ForeignRun>[seeds.Count];
         var repairRunsB = new List<ForeignRun>[seeds.Count];
+        // SCOPE (be-c01): this check stays GLOBAL — over BOTH corpora — deliberately. It is DETERMINISTIC and
+        // GPU-independent: a leak the classifier refuses to send to the model is a CODE DEFECT in the entity
+        // lever, not a stochastic model quality number, so scoping it to the shipped corpus would only hide a
+        // real be-c04 regression. Only the STOCHASTIC aggregate (cleaned %, over-rewrite) is shipped-scoped.
         var entitySparedLeaks = new List<string>();
+        var entitySparedShipped = new List<string>();
+        var entitySparedSynopsis = new List<string>();
         for (var i = 0; i < seeds.Count; i++)
         {
             var runs = LatinInHebrewContentDetector.DetectForeignRuns(seeds[i].Value, ExpectedScript.Hebrew);
@@ -550,21 +580,28 @@ public class OutputQualityDiagnostic
             if (repairRunsA[i].Count > 0 && repairRunsB[i].Count == 0)
             {
                 entitySparedLeaks.Add(seeds[i].Leak);
+                (IsShippedSeed(i) ? entitySparedShipped : entitySparedSynopsis).Add(seeds[i].Leak);
             }
         }
 
         Emit("### Deterministic classification (no model): does the entity set SPARE any leak?");
         Emit("");
+        Emit("(Scope: BOTH corpora. This one is deterministic and a failure is a CODE DEFECT in the entity lever, "
+             + "so it is deliberately NOT narrowed to the shipped corpus.)");
+        Emit("");
         if (entitySparedLeaks.Count == 0)
         {
             Emit("**NO leak is spared by the entity set.** Every one of the "
-                 + $"{seeds.Count} leaks is still classified REPAIR with the adversarial book's REAL entity set — "
+                 + $"{seeds.Count} leaks ({shippedSeedCount} shipped + {synopsisSeedIdx.Count} SYNOPSIS) is still "
+                 + "classified REPAIR with the adversarial book's REAL entity set — "
                  + "including the lowercase twins of the harvested words. The be-c04 case-SENSITIVE manuscript tier holds.");
         }
         else
         {
             Emit($"**REGRESSION — the entity set spares {entitySparedLeaks.Count} REAL leak(s): "
-                 + $"`{string.Join("`, `", entitySparedLeaks)}`.** These never reach the model in ARM B, so they cannot be");
+                 + $"`{string.Join("`, `", entitySparedLeaks)}`** "
+                 + $"({entitySparedShipped.Count} in the SHIPPED corpus, {entitySparedSynopsis.Count} in the SYNOPSIS "
+                 + "subset). These never reach the model in ARM B, so they cannot be");
             Emit("cleaned. This is the be-c04 failure mode; be-c08 HALTs.");
         }
         Emit("");
@@ -636,17 +673,20 @@ public class OutputQualityDiagnostic
                 var m = new TierMeasurement { Name = $"{tierName}/ARM {armName}", Model = $"{provider}|{model}" };
                 var outcomes = new LeakOutcome[seeds.Count];
 
-                Emit("| seed | leak (Latin) | model calls | cleaned? | over-rewrite? | before→after span | latency ms |");
-                Emit("|---|---|---|---|---|---|---|");
+                Emit("| seed | corpus | leak (Latin) | model calls | cleaned? | over-rewrite? | before→after span | latency ms |");
+                Emit("|---|---|---|---|---|---|---|---|");
 
                 for (var i = 0; i < seeds.Count; i++)
                 {
                     var (label, leak, value) = (seeds[i].Label, seeds[i].Leak, seeds[i].Value);
+                    // be-c01: every row is labelled with the corpus it belongs to, and ONLY the SHIPPED rows
+                    // accumulate into `m` (the tier/arm aggregate the decision table + verdict read).
+                    var corpus = IsShippedSeed(i) ? "shipped" : "SYNOPSIS";
                     var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
                     // Seeds are authored single-leak; guard anyway so an authoring slip is visible, not silent.
                     if (runs.Count != 1)
                     {
-                        Emit($"| {label} | {leak} | - | SEED-ERR | runs={runs.Count} | (expected exactly 1 Latin run) | - |");
+                        Emit($"| {label} | {corpus} | {leak} | - | SEED-ERR | runs={runs.Count} | (expected exactly 1 Latin run) | - |");
                         outcomes[i] = new LeakOutcome { SeedError = true };
                         continue;
                     }
@@ -662,8 +702,8 @@ public class OutputQualityDiagnostic
                     if (result.Fault is not null)
                     {
                         // A surfaced fault on a preflight-OK tier = a genuine per-call failure; record it honestly.
-                        Emit($"| {label} | {leak} | {repairRuns.Count} | FAULT | - | {FirstLine(result.Fault.Message)} | {result.LatencyMs} |");
-                        m.Faults++;
+                        Emit($"| {label} | {corpus} | {leak} | {repairRuns.Count} | FAULT | - | {FirstLine(result.Fault.Message)} | {result.LatencyMs} |");
+                        if (IsShippedSeed(i)) m.Faults++;
                         outcomes[i] = new LeakOutcome { Fault = true, ModelCalls = repairRuns.Count, EntitySpared = entitySpared };
                         continue;
                     }
@@ -675,11 +715,17 @@ public class OutputQualityDiagnostic
                     var overRewrite = changed && !ChangeConfinedToRepairSpans(value, repairRuns, result.Value);
                     var (spanScoped, replacement) = SpanScopeCheck(value, run.Start, run.Length, result.Value);
 
-                    m.Total++;
-                    if (cleaned) m.Cleaned++;
-                    if (overRewrite) m.OverRewrite++;
-                    m.ModelCalls += repairRuns.Count;
-                    if (repairRuns.Count > 0) m.Latencies.Add(result.LatencyMs);
+                    // be-c01: SHIPPED-corpus rows only. The SYNOPSIS rows are still measured and still recorded
+                    // in `outcomes` (the q1 subset section below reads them), they just do not move the
+                    // aggregate that the decision table + the d5 CLEANING VERDICT are computed from.
+                    if (IsShippedSeed(i))
+                    {
+                        m.Total++;
+                        if (cleaned) m.Cleaned++;
+                        if (overRewrite) m.OverRewrite++;
+                        m.ModelCalls += repairRuns.Count;
+                        if (repairRuns.Count > 0) m.Latencies.Add(result.LatencyMs);
+                    }
 
                     outcomes[i] = new LeakOutcome
                     {
@@ -707,25 +753,32 @@ public class OutputQualityDiagnostic
                         beforeAfter = $"`{leak}` → `{(spanScoped ? replacement.Trim() : Trunc(result.Value, 40))}`";
                     }
 
-                    Emit($"| {label} | {leak} | {repairRuns.Count} | {(cleaned ? "yes" : "**NO**")} | {(overRewrite ? "**YES**" : "no")} | {beforeAfter} | {(repairRuns.Count > 0 ? result.LatencyMs.ToString() : "-")} |");
+                    Emit($"| {label} | {corpus} | {leak} | {repairRuns.Count} | {(cleaned ? "yes" : "**NO**")} | {(overRewrite ? "**YES**" : "no")} | {beforeAfter} | {(repairRuns.Count > 0 ? result.LatencyMs.ToString() : "-")} |");
                 }
 
                 Emit("");
                 var (med, p90) = LatencyStats(m.Latencies);
                 m.MedianMs = med; m.P90Ms = p90;
-                Emit($"**{tierName} / ARM {armName} summary:** measured {m.Total}/{seeds.Count}"
+                Emit($"**{tierName} / ARM {armName} summary (SHIPPED corpus of record only — be-c01):** measured {m.Total}/{shippedSeedCount}"
                      + (m.Faults > 0 ? $" ({m.Faults} per-call fault(s))" : "")
                      + $"  |  cleaned {m.Cleaned}/{m.Total}"
                      + (m.Total > 0 ? $" ({100.0 * m.Cleaned / m.Total:F0}%)" : "")
                      + $"  |  over-rewrite {m.OverRewrite}  |  model calls {m.ModelCalls}"
                      + $"  |  latency median {med} ms / p90 {p90} ms");
+                // The SYNOPSIS values were measured on the same instrument in the same pass — surfaced here so
+                // nothing is hidden, but NOT folded into the aggregate above (`Synopsis` is not a repaired type).
+                var synMeasured = synopsisSeedIdx.Count(i => !outcomes[i].SeedError && !outcomes[i].Fault);
+                var synCleaned = synopsisSeedIdx.Count(i => outcomes[i].Cleaned);
+                var synOver = synopsisSeedIdx.Count(i => outcomes[i].OverRewrite);
+                Emit($"  (SYNOPSIS subset, reported separately, NOT in the aggregate above: cleaned {synCleaned}/{synMeasured}"
+                     + $"  |  over-rewrite {synOver}  |  model calls {synopsisSeedIdx.Sum(i => outcomes[i].ModelCalls)})");
                 Emit("");
                 perTier.Add(m);
                 armOutcomes[(tierName, armName)] = outcomes;
             }
 
             // ── ARM A vs ARM B — THE be-c08 GATE (computed here, not eyeballed) ──────────────────────────
-            EmitArmComparison(Emit, tierName, seeds, armOutcomes, harvestedLeakWords);
+            EmitArmComparison(Emit, tierName, seeds, shippedSeedCount, armOutcomes, harvestedLeakWords);
         }
 
         // ── FIELD-VALUE-SCOPE CONTRAST (blast-radius) — LOCAL only, 2 cases ────────────────────────────────
@@ -766,7 +819,12 @@ public class OutputQualityDiagnostic
         // ── DECISION TABLE (one row per tier × arm) ────────────────────────────────────────────────────────
         Emit("---");
         Emit("");
-        Emit("## Decision table");
+        Emit($"## Decision table — SHIPPED corpus of record ONLY ({shippedSeedCount} values)");
+        Emit("");
+        Emit($"Scope (be-c01): every number in this table is computed over the {shippedSeedCount} SHIPPED leak values — "
+             + "the corpus of record for the eight analysis types the dynamic repair layer runs over. The "
+             + $"{synopsisSeedIdx.Count} q1 SYNOPSIS values were measured on the same instrument in the same pass and are "
+             + "reported SEPARATELY below; `Synopsis` is not a repaired type, so they are NOT part of this decision.");
         Emit("");
         Emit("| tier / arm | model | cleaned % | over-rewrite (bar=0) | model calls | latency median / p90 (ms) | status |");
         Emit("|---|---|---|---|---|---|---|");
@@ -784,13 +842,25 @@ public class OutputQualityDiagnostic
         Emit("");
 
         var overRewriteGateHeld = perTier.Where(x => !x.Blocked).All(x => x.OverRewrite == 0);
-        Emit($"**Over-rewrite HARD gate (must be 0 on every measured tier/arm): {(overRewriteGateHeld ? "HELD" : "VIOLATED")}.**");
+        Emit($"**Over-rewrite HARD gate over the SHIPPED corpus (must be 0 on every measured tier/arm): "
+             + $"{(overRewriteGateHeld ? "HELD" : "VIOLATED")}.**");
+        // Reported, not gating: the SYNOPSIS over-rewrite count on every measured tier/arm, so a synopsis-only
+        // over-rewrite is VISIBLE here even though it cannot move the shipped verdict.
+        var synOverRewriteTotal = armOutcomes.Sum(kv => synopsisSeedIdx.Count(i => kv.Value[i].OverRewrite));
+        Emit($"(SYNOPSIS subset, reported not gating: {synOverRewriteTotal} over-rewrite(s) across all measured tier/arms — "
+             + "see the q1 subset section for the per-tier breakdown.)");
         Emit("");
 
         // ── THE be-c08 CLEANING VERDICT (ARM B vs ARM A on the measured tier) ─────────────────────────────
         var localA = perTier.FirstOrDefault(x => x.Name == "LOCAL/ARM A" && !x.Blocked);
         var localB = perTier.FirstOrDefault(x => x.Name == "LOCAL/ARM B" && !x.Blocked);
-        Emit("### be-c08 verdict — does the entity lever spare a REAL leak?");
+        Emit($"### be-c08 verdict — does the entity lever spare a REAL leak? (SHIPPED corpus of record, {shippedSeedCount} values)");
+        Emit("");
+        Emit($"**Scope of this verdict (be-c01): the cleaned/over-rewrite numbers below are the {shippedSeedCount} SHIPPED "
+             + $"leak values ONLY. The {synopsisSeedIdx.Count} q1 SYNOPSIS values are reported SEPARATELY (q1 subset "
+             + "section) and are NOT part of this ship/HALT decision — `Synopsis` is not one of the analysis types the "
+             + "dynamic repair layer runs over. The entity-spared-leak check above is the one exception: it is "
+             + "deterministic and covers BOTH corpora, because a spared leak is a code defect, not a model number.**");
         Emit("");
         if (localA is null || localB is null)
         {
@@ -810,7 +880,9 @@ public class OutputQualityDiagnostic
                  + (entitySparedLeaks.Count > 0 ? $" — `{string.Join("`, `", entitySparedLeaks)}`" : ""));
             Emit($"- ARM B over-rewrite: **{localB.OverRewrite}** (bar = 0)");
             Emit("");
-            Emit($"**d5 CLEANING GATE: {(pass ? "PASS" : "HALT")}.** "
+            Emit($"**d5 CLEANING GATE (SHIPPED corpus of record, {shippedSeedCount} values; the {synopsisSeedIdx.Count} "
+                 + "SYNOPSIS values are reported separately and are NOT part of this decision): "
+                 + $"{(pass ? "PASS" : "HALT")}.** "
                  + (pass
                      ? "ARM B matches ARM A: the per-book entity lever, sourced from the REAL BookEntityProvider over an "
                        + "ADVERSARIAL manuscript that harvested the leak words themselves, spares NO real leak. The be-c04 "
@@ -836,6 +908,46 @@ public class OutputQualityDiagnostic
         Emit("  for its ~35 known terms, dynamic for the residual tail) ONLY IF this cleaning gate PASSES **and** d6");
         Emit("  (precision/FP gate on the legitimate-term set) passes. Either one HALTing keeps `Mode=Glossary`.");
         Emit("");
+
+        // ── q1: THE SYNOPSIS SUBSET, REPORTED SEPARATELY ─────────────────────────────────────────────────────
+        Emit("---");
+        Emit("");
+        Emit("## q1 — SYNOPSIS subset of the cleaning set (same instrument, same bar)");
+        Emit("");
+        Emit("The SHIPPED subset below restates the corpus the verdict above was computed over (so the be-c08 figures "
+             + "of record stay readable off this report). The SYNOPSIS subset is q1's evidence: measured, reported, "
+             + "and deliberately OUTSIDE the ship decision.");
+        Emit("");
+        foreach (var (subsetName, idx) in new (string, IReadOnlyList<int>)[]
+                 {
+                     ("SHIPPED subset (the d5 corpus of record — THIS is what the verdict above is scoped to)", shippedSeedIdx),
+                     ("SYNOPSIS subset (q1 — NEW, multi-paragraph; NOT part of the verdict)", synopsisSeedIdx),
+                 })
+        {
+            Emit($"### {subsetName} ({idx.Count} value(s))");
+            foreach (var (tierName, _, _) in tiers)
+            foreach (var (arm, _, _) in arms)
+            {
+                if (!armOutcomes.TryGetValue((tierName, arm), out var os))
+                {
+                    Emit($"- {tierName}/ARM {arm}: not measured (tier blocked/skipped).");
+                    continue;
+                }
+
+                var measured = idx.Count(i => !os[i].SeedError && !os[i].Fault);
+                var cleaned = idx.Count(i => os[i].Cleaned);
+                var over = idx.Count(i => os[i].OverRewrite);
+                var calls = idx.Sum(i => os[i].ModelCalls);
+                Emit($"- {tierName}/ARM {arm}: cleaned **{(measured > 0 ? 100.0 * cleaned / measured : 0):F0}%** "
+                     + $"({cleaned}/{measured})  |  over-rewrite **{over}** (bar = 0)  |  model calls {calls}");
+                foreach (var i in idx.Where(i => !os[i].Cleaned && !os[i].SeedError))
+                {
+                    Emit($"  - NOT CLEANED [{seeds[i].Label}] `{seeds[i].Leak}` → `{Trunc(os[i].Repaired ?? "", 90)}`");
+                }
+            }
+
+            Emit("");
+        }
 
         // ── Persist the RULE-0 artifact ──
         var outDir = Environment.GetEnvironmentVariable("DIAG_OUT_DIR");
@@ -866,11 +978,19 @@ public class OutputQualityDiagnostic
     /// (entity-free) on one tier. Emits the cleaning-percentage comparison and a PER-CASE DIFF of every case
     /// where the two arms disagree — on cleaned, on over-rewrite, or on model-call count — so the parent reads a
     /// verdict, not two tables.
+    /// <para>
+    /// be-c01 SCOPE: the AGGREGATE comparison (the gate) is computed over the first
+    /// <paramref name="shippedSeedCount"/> seeds — the SHIPPED corpus of record. The SYNOPSIS tail is
+    /// summarised on its own line, reported but not gating (`Synopsis` is not a repaired analysis type).
+    /// The PER-CASE DIFF stays over ALL seeds (each row is labelled with its corpus), since a per-case
+    /// arm disagreement is diagnostic, not an aggregate.
+    /// </para>
     /// </summary>
     private static void EmitArmComparison(
         Action<string> emit,
         string tierName,
         IReadOnlyList<LeakCase> seeds,
+        int shippedSeedCount,
         IReadOnlyDictionary<(string tier, string arm), LeakOutcome[]> armOutcomes,
         IReadOnlyList<string> harvestedLeakWords)
     {
@@ -880,19 +1000,32 @@ public class OutputQualityDiagnostic
             return; // a tier that was blocked/skipped produced no arms — nothing to compare.
         }
 
-        emit($"### ARM A vs ARM B on {tierName} — the be-c08 cleaning comparison");
+        var shippedIdx = Enumerable.Range(0, shippedSeedCount).ToList();
+        var synopsisIdx = Enumerable.Range(shippedSeedCount, seeds.Count - shippedSeedCount).ToList();
+
+        emit($"### ARM A vs ARM B on {tierName} — the be-c08 cleaning comparison (SHIPPED corpus of record, {shippedIdx.Count} values)");
+        emit("");
+        emit($"Scope (be-c01): the percentages and the delta below are the {shippedIdx.Count} SHIPPED leak values ONLY. "
+             + $"The {synopsisIdx.Count} SYNOPSIS values are summarised on their own line and are NOT part of this gate.");
         emit("");
 
-        var measuredA = a.Count(o => !o.SeedError && !o.Fault);
-        var measuredB = b.Count(o => !o.SeedError && !o.Fault);
-        var cleanedA = a.Count(o => o.Cleaned);
-        var cleanedB = b.Count(o => o.Cleaned);
+        var measuredA = shippedIdx.Count(i => !a[i].SeedError && !a[i].Fault);
+        var measuredB = shippedIdx.Count(i => !b[i].SeedError && !b[i].Fault);
+        var cleanedA = shippedIdx.Count(i => a[i].Cleaned);
+        var cleanedB = shippedIdx.Count(i => b[i].Cleaned);
         var pctA = measuredA > 0 ? 100.0 * cleanedA / measuredA : 0;
         var pctB = measuredB > 0 ? 100.0 * cleanedB / measuredB : 0;
 
-        emit($"- ARM A (entity-free): cleaned **{cleanedA}/{measuredA} ({pctA:F0}%)**, {a.Sum(o => o.ModelCalls)} model calls");
-        emit($"- ARM B (real entity set): cleaned **{cleanedB}/{measuredB} ({pctB:F0}%)**, {b.Sum(o => o.ModelCalls)} model calls");
+        emit($"- ARM A (entity-free): cleaned **{cleanedA}/{measuredA} ({pctA:F0}%)**, {shippedIdx.Sum(i => a[i].ModelCalls)} model calls");
+        emit($"- ARM B (real entity set): cleaned **{cleanedB}/{measuredB} ({pctB:F0}%)**, {shippedIdx.Sum(i => b[i].ModelCalls)} model calls");
         emit($"- delta (B - A): **{pctB - pctA:F0} percentage points** (must be >= 0 — ARM B may not clean fewer)");
+        if (synopsisIdx.Count > 0)
+        {
+            var synMeasuredA = synopsisIdx.Count(i => !a[i].SeedError && !a[i].Fault);
+            var synMeasuredB = synopsisIdx.Count(i => !b[i].SeedError && !b[i].Fault);
+            emit($"- SYNOPSIS subset (reported, NOT gating): ARM A cleaned **{synopsisIdx.Count(i => a[i].Cleaned)}/{synMeasuredA}**, "
+                 + $"ARM B cleaned **{synopsisIdx.Count(i => b[i].Cleaned)}/{synMeasuredB}**");
+        }
         emit("");
 
         var diffs = Enumerable.Range(0, seeds.Count)
@@ -909,10 +1042,10 @@ public class OutputQualityDiagnostic
         }
         else
         {
-            emit("**PER-CASE DIFF — the arms disagree on the following cases:**");
+            emit("**PER-CASE DIFF — the arms disagree on the following cases (ALL cases, corpus-labelled):**");
             emit("");
-            emit("| seed | leak | A cleaned | B cleaned | A calls | B calls | entity-spared in B? | reading |");
-            emit("|---|---|---|---|---|---|---|---|");
+            emit("| seed | corpus | leak | A cleaned | B cleaned | A calls | B calls | entity-spared in B? | reading |");
+            emit("|---|---|---|---|---|---|---|---|---|");
             foreach (var i in diffs)
             {
                 var reading = a[i].Cleaned && !b[i].Cleaned
@@ -922,20 +1055,32 @@ public class OutputQualityDiagnostic
                     : (!a[i].Cleaned && b[i].Cleaned
                         ? "B cleaned a leak A missed (model variance — not a gate change)"
                         : "same cleaning outcome; model-call / over-rewrite difference only");
-                emit($"| {seeds[i].Label} | `{seeds[i].Leak}` | {(a[i].Cleaned ? "yes" : "NO")} | {(b[i].Cleaned ? "yes" : "NO")} "
+                emit($"| {seeds[i].Label} | {(i < shippedSeedCount ? "shipped" : "SYNOPSIS")} | `{seeds[i].Leak}` "
+                     + $"| {(a[i].Cleaned ? "yes" : "NO")} | {(b[i].Cleaned ? "yes" : "NO")} "
                      + $"| {a[i].ModelCalls} | {b[i].ModelCalls} | {(b[i].EntitySpared ? "**YES**" : "no")} | {reading} |");
             }
         }
         emit("");
 
-        var regressed = diffs.Where(i => a[i].Cleaned && !b[i].Cleaned).ToList();
+        // be-c01: the GATE is the SHIPPED corpus. `regressed` is a stochastic model comparison, so it is
+        // shipped-scoped; `leverAte` is the DETERMINISTIC entity-spare check and deliberately stays global
+        // (a spared leak is a code defect in any corpus). SYNOPSIS regressions are reported, not gating.
+        var regressed = diffs.Where(i => i < shippedSeedCount && a[i].Cleaned && !b[i].Cleaned).ToList();
+        var synopsisRegressed = diffs.Where(i => i >= shippedSeedCount && a[i].Cleaned && !b[i].Cleaned).ToList();
         var leverAte = Enumerable.Range(0, seeds.Count).Where(i => b[i].EntitySpared).ToList();
         var pass = regressed.Count == 0 && leverAte.Count == 0;
-        emit($"**{tierName} cleaning gate: {(pass ? "PASS — ARM B matches ARM A" : "HALT")}.** "
+        emit($"**{tierName} cleaning gate (SHIPPED corpus of record, {shippedIdx.Count} values; the "
+             + $"{synopsisIdx.Count} SYNOPSIS values are reported separately and are NOT part of this gate): "
+             + $"{(pass ? "PASS — ARM B matches ARM A" : "HALT")}.** "
              + (pass
                  ? $"The entity lever is armed ({harvestedLeakWords.Count} leak word(s) harvested as manuscript-tier "
                    + "entities) and STILL spares no leak."
-                 : $"{regressed.Count} leak(s) regressed, {leverAte.Count} spared by the entity set."));
+                 : $"{regressed.Count} shipped leak(s) regressed, {leverAte.Count} spared by the entity set "
+                   + "(entity-spare check spans BOTH corpora — deterministic)."));
+        if (synopsisRegressed.Count > 0)
+        {
+            emit($"  (SYNOPSIS subset, reported not gating: {synopsisRegressed.Count} value(s) where ARM B cleaned less than ARM A.)");
+        }
         emit("");
     }
 
@@ -1008,12 +1153,16 @@ public class OutputQualityDiagnostic
         using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
         var hebrewBookEntities = await fixtureBooks.HebrewBookEntitiesAsync();
         var englishBookEntities = await fixtureBooks.EnglishBookEntitiesAsync();
+        // q1: the SYNOPSIS book — a third seeded book, read through the SAME real provider, because a synopsis
+        // is generated FOR a book and the entity lever must come from that book, not from a hand-authored set.
+        var synopsisBookEntities = await fixtureBooks.SynopsisBookEntitiesAsync();
 
         // Per-case entities = the entity set of the case's BOOK, straight from the provider. No hand-fed union,
         // no per-case override: if a case needs an entity the provider cannot produce, that is a FINDING and the
         // report says so (see the "Entity-lever provenance" section below).
         IReadOnlySet<string> EntitiesFor(LegitCase c)
-            => c.Expected == ExpectedScript.Hebrew ? hebrewBookEntities : englishBookEntities;
+            => c.BookKey == PreservationFixtureBooks.SynopsisBookKey ? synopsisBookEntities
+             : c.Expected == ExpectedScript.Hebrew ? hebrewBookEntities : englishBookEntities;
 
         // ── LEGITIMATE-TERM SET ────────────────────────────────────────────────────────────────────────────
         // Each value is realistic Hebrew (or, for the last three, English) analysis prose that contains a
@@ -1022,13 +1171,43 @@ public class OutputQualityDiagnostic
         // set changed. The set lives in PreservationFixtureBooks.Cases so the deterministic seed test and this
         // live gate measure the SAME cases against the SAME books.
 
-        var cases = PreservationFixtureBooks.Cases;
+        // q1 appends the SYNOPSIS-shaped values (multi-paragraph Hebrew editorial prose, dense in legitimate
+        // proper nouns) to the SAME measured set, driven by the SAME instrument against the SAME bar. They are
+        // a SEPARATE fixture list so the shipped set's own pins (BookEntityFixtureSeedTests) stay exact, and so
+        // the report can summarise the two sets independently — see "q1 SYNOPSIS subset" below.
+        //
+        // be-c01 SCOPING: `Synopsis` is NOT one of the eight analysis types the shipped dynamic repair layer
+        // runs over. Its values are LOADED and MEASURED here, but the d6 AGGREGATE (tierPreservationPct /
+        // tierOverRewrite) and the **d6 VERDICT** are computed over the SHIPPED indices ONLY. A verdict over a
+        // mixed corpus could, on one stochastic Synopsis-shaped false positive, emit a HALT recommending
+        // ROLLBACK of the shipped dynamic stage for all EIGHT repaired types on the strength of a failure in a
+        // type that is not in the layer — and it also makes the be-c08 figures of record (21/21) unreadable off
+        // the headline aggregate. The SYNOPSIS numbers live in their own subset section.
+        var cases = PreservationFixtureBooks.Cases
+            .Concat(PreservationFixtureBooks.SynopsisCases)
+            .ToList();
+        var synopsisIdx = Enumerable.Range(0, cases.Count)
+            .Where(i => cases[i].BookKey == PreservationFixtureBooks.SynopsisBookKey)
+            .ToList();
+        var shippedIdx = Enumerable.Range(0, cases.Count).Except(synopsisIdx).ToList();
+        // Membership helper — every array below (predicted, per-tier outcomes) is PARALLEL to `cases`, so all
+        // scoping is done by INDEX against these two lists, never by re-filtering a projected sequence.
+        var synopsisIdxSet = new HashSet<int>(synopsisIdx);
+        bool IsShippedCase(int i) => !synopsisIdxSet.Contains(i);
 
         var hebrewSet = hebrewBookEntities as BookEntitySet;
         var englishSet = englishBookEntities as BookEntitySet;
         var hebrewCaseCount = cases.Count(c => c.Expected == ExpectedScript.Hebrew);
+        var shippedHebrewCount = shippedIdx.Count(i => cases[i].Expected == ExpectedScript.Hebrew);
         Emit($"Legitimate-term set: {cases.Count} values ({hebrewCaseCount} Hebrew-native + "
-             + $"{cases.Count - hebrewCaseCount} English-native).");
+             + $"{cases.Count - hebrewCaseCount} English-native) — **{shippedIdx.Count} SHIPPED** "
+             + $"({shippedHebrewCount} Hebrew-native + {shippedIdx.Count - shippedHebrewCount} English-native) "
+             + $"+ **{synopsisIdx.Count} q1 SYNOPSIS**.");
+        Emit($"**SCOPE OF THE VERDICT (be-c01): the d6 aggregate and the `d6 VERDICT` line below are computed over the "
+             + $"{shippedIdx.Count} SHIPPED values ONLY — the corpus of record for the eight analysis types the dynamic "
+             + $"repair layer actually runs over. The {synopsisIdx.Count} SYNOPSIS values are measured on the same "
+             + "instrument against the same bar and reported SEPARATELY (see the q1 subset section); `Synopsis` is not "
+             + "a repaired type, so they are NOT part of the ship/HALT decision.**");
         Emit("Per-book entity gate ACTIVE, and sourced from the REAL `BookEntityProvider.GetEntitiesAsync(bookId,");
         Emit("language)` over a REAL DbContext (be-c07 — the e4 run hand-authored these sets, so the harvest logic");
         Emit("and the bookId threading were never on the measured path). The language passed is each case's own");
@@ -1073,8 +1252,8 @@ public class OutputQualityDiagnostic
         // ── ENTITY-LEVER PROVENANCE — the be-c07 measurement (deterministic, no model) ───────────────────────
         Emit("## Entity-lever provenance (which cases the REAL provider actually gates)");
         Emit("");
-        Emit("| # | class | token | gated by | provider entity | tier |");
-        Emit("|---|---|---|---|---|---|");
+        Emit("| # | corpus | class | token | gated by | provider entity | tier |");
+        Emit("|---|---|---|---|---|---|---|");
         for (var i = 0; i < cases.Count; i++)
         {
             var c = cases[i];
@@ -1084,31 +1263,45 @@ public class OutputQualityDiagnostic
                 : p.EntityLoadBearing ? "**entity (provider-harvested)**" : "classifier/detector rule";
             var ent = p.EntityLoadBearing ? "`" + string.Join("`, `", p.EntitySparedRuns.Distinct()) + "`" : "—";
             var tier = p.EntityLoadBearing ? string.Join(", ", p.EntitySparedTiers.Distinct()) : "—";
-            Emit($"| {i + 1} | {c.Cls} | `{Trunc(c.Token, 22)}` | {gatedBy} | {ent} | {tier} |");
+            Emit($"| {i + 1} | {(IsShippedCase(i) ? "shipped" : "SYNOPSIS")} | {c.Cls} | `{Trunc(c.Token, 22)}` | {gatedBy} | {ent} | {tier} |");
         }
         Emit("");
 
-        var entityGatedCount = predicted.Count(p => p.EntityLoadBearing);
-        var ruleGatedCount = predicted.Count(p => !p.ReachesModel && !p.EntityLoadBearing);
-        var modelReachedCount = predicted.Count(p => p.ReachesModel);
-        Emit($"**Gate attribution: {entityGatedCount} case(s) gated by a PROVIDER-HARVESTED entity, "
-             + $"{ruleGatedCount} by a classifier/detector rule, {modelReachedCount} reach the model.**");
+        // be-c01: these counts are consumed by the "Residual weaknesses" section, whose denominators must NOT
+        // mix corpora. They are therefore SHIPPED-scoped, with the SYNOPSIS counterparts computed and emitted
+        // alongside so the composition is explicit rather than implied.
+        var entityGatedCount = shippedIdx.Count(i => predicted[i].EntityLoadBearing);
+        var ruleGatedCount = shippedIdx.Count(i => !predicted[i].ReachesModel && !predicted[i].EntityLoadBearing);
+        var modelReachedCount = shippedIdx.Count(i => predicted[i].ReachesModel);
+        var synEntityGatedCount = synopsisIdx.Count(i => predicted[i].EntityLoadBearing);
+        var synRuleGatedCount = synopsisIdx.Count(i => !predicted[i].ReachesModel && !predicted[i].EntityLoadBearing);
+        var synModelReachedCount = synopsisIdx.Count(i => predicted[i].ReachesModel);
+        Emit($"**Gate attribution — SHIPPED corpus of record ({shippedIdx.Count} values): {entityGatedCount} case(s) "
+             + $"gated by a PROVIDER-HARVESTED entity, {ruleGatedCount} by a classifier/detector rule, "
+             + $"{modelReachedCount} reach the model.**");
+        Emit($"Gate attribution — SYNOPSIS subset ({synopsisIdx.Count} values, reported separately, NOT part of the "
+             + $"verdict): {synEntityGatedCount} entity-gated, {synRuleGatedCount} rule-gated, "
+             + $"{synModelReachedCount} reach the model.");
         Emit("");
 
         // FINDINGS: a case that DECLARES a required entity the provider could NOT produce could only ever have
         // passed with a hand-fed entity. Record it plainly — never paper over it with a hard-coded fallback.
+        // SCOPE (be-c01): deliberately GLOBAL. This is a deterministic FIXTURE-INTEGRITY finding (the provider
+        // cannot produce a declared entity), not a stochastic quality number, so it is reported for BOTH
+        // corpora — each line labelled with the corpus it came from.
         var missingEntityCases = Enumerable.Range(0, cases.Count).Where(i => predicted[i].RequiredEntityMissing).ToList();
         if (missingEntityCases.Count == 0)
         {
-            Emit("FINDINGS: none — every case that requires a per-book entity is gated by an entity the REAL "
-                 + "`BookEntityProvider` actually harvested. No hand-fed entity is needed anywhere in this fixture.");
+            Emit("FINDINGS (both corpora): none — every case that requires a per-book entity is gated by an entity the "
+                 + "REAL `BookEntityProvider` actually harvested. No hand-fed entity is needed anywhere in this fixture.");
         }
         else
         {
-            Emit("**FINDINGS — cases that can ONLY pass with a HAND-FED entity the provider cannot produce:**");
+            Emit("**FINDINGS (both corpora) — cases that can ONLY pass with a HAND-FED entity the provider cannot produce:**");
             foreach (var i in missingEntityCases)
             {
-                Emit($"- [{cases[i].Cls}] `{cases[i].Token}` requires entity `{cases[i].GatingEntity}` — NOT harvested. "
+                Emit($"- [{(IsShippedCase(i) ? "shipped" : "SYNOPSIS")}] [{cases[i].Cls}] `{cases[i].Token}` requires "
+                     + $"entity `{cases[i].GatingEntity}` — NOT harvested. "
                      + "The provider cannot gate this case; it reaches the repair model in production.");
             }
         }
@@ -1189,15 +1382,15 @@ public class OutputQualityDiagnostic
         // ── FP TABLE (both tiers side by side) ───────────────────────────────────────────────────────────────
         Emit("---");
         Emit("");
-        Emit("## Preservation table (per case, both tiers)");
+        Emit("## Preservation table (per case, both tiers, BOTH corpora — the `corpus` column says which)");
         Emit("");
-        Emit("| # | class | token | runs / repair | predicted gate | LOCAL | CLOUD |");
-        Emit("|---|---|---|---|---|---|---|");
+        Emit("| # | corpus | class | token | runs / repair | predicted gate | LOCAL | CLOUD |");
+        Emit("|---|---|---|---|---|---|---|---|");
         for (var i = 0; i < cases.Count; i++)
         {
             var c = cases[i];
             var p = predicted[i];
-            Emit($"| {i + 1} | {c.Cls} | `{Trunc(c.Token, 22)}` | {p.Runs} / {p.RepairRuns} | {p.Gate} | {CellFor("LOCAL", outcomes, blocked, i)} | {CellFor("CLOUD", outcomes, blocked, i)} |");
+            Emit($"| {i + 1} | {(IsShippedCase(i) ? "shipped" : "SYNOPSIS")} | {c.Cls} | `{Trunc(c.Token, 22)}` | {p.Runs} / {p.RepairRuns} | {p.Gate} | {CellFor("LOCAL", outcomes, blocked, i)} | {CellFor("CLOUD", outcomes, blocked, i)} |");
         }
         Emit("");
 
@@ -1205,9 +1398,13 @@ public class OutputQualityDiagnostic
         var tierPreservationPct = new Dictionary<string, double>();
         var tierOverRewrite = new Dictionary<string, int>();
         var tierBlocked = new Dictionary<string, bool>();
+        // be-c01: EVERY number in this loop — and therefore tierPreservationPct / tierOverRewrite, the two
+        // dictionaries the `Shippable()` bar and the d6 VERDICT read — is scoped to `shippedIdx`. The SYNOPSIS
+        // values are measured in the same pass and summarised in the q1 subset section below.
         foreach (var (tierName, _, _) in tiers)
         {
-            Emit($"### {tierName} summary");
+            Emit($"### {tierName} summary — SHIPPED corpus of record ONLY ({shippedIdx.Count} values; "
+                 + $"the {synopsisIdx.Count} SYNOPSIS values are summarised separately in the q1 section)");
             if (blocked.ContainsKey(tierName))
             {
                 Emit($"BLOCKED: {FirstLine(blocked[tierName] ?? "")}");
@@ -1218,22 +1415,22 @@ public class OutputQualityDiagnostic
             tierBlocked[tierName] = false;
 
             var os = outcomes[tierName];
-            var total = os.Length;
-            var preserved = os.Count(o => o.Preserved);
+            var total = shippedIdx.Count;
+            var preserved = shippedIdx.Count(i => os[i].Preserved);
             var fp = total - preserved;
-            var over = os.Count(o => o.OverRewrite);
-            var faults = os.Count(o => o.Fault);
-            var pct = 100.0 * preserved / total;
+            var over = shippedIdx.Count(i => os[i].OverRewrite);
+            var faults = shippedIdx.Count(i => os[i].Fault);
+            var pct = total > 0 ? 100.0 * preserved / total : 0;
             tierPreservationPct[tierName] = pct;
             tierOverRewrite[tierName] = over;
 
             // Where the safety came from.
-            var gated = os.Count(o => !o.ReachedModel);
-            var gatedPreserved = os.Count(o => !o.ReachedModel && o.Preserved);
-            var reached = os.Count(o => o.ReachedModel);
-            var reachedPreserved = os.Count(o => o.ReachedModel && o.Preserved);
+            var gated = shippedIdx.Count(i => !os[i].ReachedModel);
+            var gatedPreserved = shippedIdx.Count(i => !os[i].ReachedModel && os[i].Preserved);
+            var reached = shippedIdx.Count(i => os[i].ReachedModel);
+            var reachedPreserved = shippedIdx.Count(i => os[i].ReachedModel && os[i].Preserved);
 
-            var reachedLatencies = os.Where(o => o.ReachedModel).Select(o => o.LatencyMs).ToList();
+            var reachedLatencies = shippedIdx.Where(i => os[i].ReachedModel).Select(i => os[i].LatencyMs).ToList();
             var (med, p90) = LatencyStats(reachedLatencies);
 
             Emit($"- PRESERVED {preserved}/{total} (**{pct:F0}%**)  |  FALSE-POSITIVE {fp}  |  over-rewrite {over}"
@@ -1243,8 +1440,8 @@ public class OutputQualityDiagnostic
 
             // Per-class breakdown (gated vs model-preserved), so the report shows where the safety sits.
             Emit("");
-            Emit($"  per-class ({tierName}): preserved / total  [gated | model]");
-            foreach (var grp in Enumerable.Range(0, total).GroupBy(i => cases[i].Cls))
+            Emit($"  per-class ({tierName}, SHIPPED corpus): preserved / total  [gated | model]");
+            foreach (var grp in shippedIdx.GroupBy(i => cases[i].Cls))
             {
                 var idxs = grp.ToList();
                 var cPres = idxs.Count(i => os[i].Preserved);
@@ -1254,20 +1451,103 @@ public class OutputQualityDiagnostic
             }
 
             // Concrete false positives (the legit token that was wrongly altered).
-            var fps = Enumerable.Range(0, total).Where(i => !os[i].Preserved).ToList();
+            var fps = shippedIdx.Where(i => !os[i].Preserved).ToList();
             Emit("");
             if (fps.Count == 0)
             {
-                Emit($"  concrete false positives ({tierName}): NONE — every legitimate token preserved byte-identical.");
+                Emit($"  concrete false positives ({tierName}, SHIPPED corpus): NONE — every legitimate token preserved byte-identical.");
             }
             else
             {
-                Emit($"  concrete false positives ({tierName}):");
+                Emit($"  concrete false positives ({tierName}, SHIPPED corpus):");
                 foreach (var i in fps)
                     Emit($"  - [{cases[i].Cls}] `{Trunc(cases[i].Token, 24)}`  |  before: `{Trunc(cases[i].Value, 70)}`  →  after: `{Trunc(os[i].Repaired, 70)}`  ({(os[i].OverRewrite ? "OVER-REWRITE" : "token-only")})");
             }
+            // SYNOPSIS one-liner so a synopsis FP is never invisible from the tier summary, even though it
+            // cannot move the aggregate above. The full per-FP detail is in the q1 subset section.
+            var synPreserved = synopsisIdx.Count(i => os[i].Preserved);
+            var synOver = synopsisIdx.Count(i => os[i].OverRewrite);
+            Emit($"  (SYNOPSIS subset, reported separately, NOT in the aggregate above: preserved "
+                 + $"{synPreserved}/{synopsisIdx.Count}  |  over-rewrite {synOver})");
             Emit("");
         }
+
+        // ── q1: THE SYNOPSIS SUBSET, REPORTED SEPARATELY ─────────────────────────────────────────────────────
+        // be-c01: the aggregate above is SHIPPED-scoped, so this section is where the two corpora sit side by
+        // side. q1's decision is about `Synopsis` ALONE, and the shipped set's recorded numbers must stay
+        // readable next to it, so both subsets are summarised here against the SAME bar (preservation >= 90%
+        // AND over-rewrite == 0). Gate ATTRIBUTION is reported too: a 100% that comes from everything being
+        // deterministically gated is a property of the GATE, not of the model.
+        Emit("---");
+        Emit("");
+        Emit("## q1 — SYNOPSIS subset vs the shipped subset (same instrument, same bar)");
+        Emit("");
+        Emit($"The LOADED set is {cases.Count} values: **{shippedIdx.Count} shipped** (the d6 corpus of record, and the "
+             + $"ONLY corpus the aggregate + verdict above are computed over) + **{synopsisIdx.Count} SYNOPSIS** "
+             + "(multi-paragraph Hebrew editorial prose of the shape `SynopsisHe` asks for — "
+             + "PromptFactory.cs:998-1001 — dense in legitimate proper nouns). `Synopsis` is not one of the analysis "
+             + "types the dynamic repair layer runs over, so its numbers are EVIDENCE, not a gate: they are reported "
+             + "here and are NOT part of the ship decision.");
+        Emit("");
+
+        void EmitSubset(string subsetName, IReadOnlyList<int> idx)
+        {
+            var entityGated = idx.Count(i => predicted[i].EntityLoadBearing);
+            var ruleGated = idx.Count(i => !predicted[i].ReachesModel && !predicted[i].EntityLoadBearing);
+            var reachesModel = idx.Count(i => predicted[i].ReachesModel);
+
+            Emit($"### {subsetName} ({idx.Count} value(s))");
+            Emit("");
+            Emit($"- gate attribution (deterministic, tier-independent): **{entityGated} entity-gated** "
+                 + $"(provider-harvested), **{ruleGated} classifier/detector-rule-gated**, "
+                 + $"**{reachesModel} REACH THE MODEL**.");
+
+            foreach (var (tierName, provider, model) in tiers)
+            {
+                if (tierBlocked.GetValueOrDefault(tierName, true))
+                {
+                    Emit($"- {tierName} (`{provider}|{model}`): BLOCKED — no numbers.");
+                    continue;
+                }
+
+                var os = outcomes[tierName];
+                var total = idx.Count;
+                var preserved = idx.Count(i => os[i].Preserved);
+                var over = idx.Count(i => os[i].OverRewrite);
+                var pct = total > 0 ? 100.0 * preserved / total : 0;
+                var meets = pct >= 90.0 && over == 0;
+                Emit($"- {tierName} (`{provider}|{model}`): preservation **{pct:F0}%** ({preserved}/{total})  |  "
+                     + $"false positives **{total - preserved}**  |  over-rewrite **{over}** (bar = 0)  |  "
+                     + $"**{(meets ? "MEETS THE BAR" : "DOES NOT MEET THE BAR")}**");
+
+                var fps = idx.Where(i => !os[i].Preserved).ToList();
+                if (fps.Count > 0)
+                {
+                    foreach (var i in fps)
+                    {
+                        // The FIRST DIFFERING REGION, not the head of the value: a synopsis-length value's
+                        // change can sit hundreds of chars in, and a truncated head shows an identical prefix
+                        // twice and reads as "nothing changed" (RULE 0 — show the artifact where it differs).
+                        var (beforeCtx, afterCtx) = FirstDiffContext(cases[i].Value, os[i].Repaired ?? "");
+                        Emit($"  - FP [{cases[i].Cls}] `{Trunc(cases[i].Token, 30)}` "
+                             + $"({(os[i].OverRewrite ? "**OVER-REWRITE**" : "token-only")})");
+                        Emit($"    - before: …`{beforeCtx}`…");
+                        Emit($"    - after:  …`{afterCtx}`…");
+                    }
+                }
+
+                var reached = idx.Where(i => os[i].ReachedModel).ToList();
+                Emit($"  - values that reached the model on this tier: **{reached.Count}** "
+                     + (reached.Count == 0
+                         ? "(so this tier's number is a property of the DETERMINISTIC GATE, not of the model)"
+                         : $"— {string.Join(", ", reached.Select(i => $"`{Trunc(cases[i].Token, 24)}` ({(os[i].Preserved ? "preserved" : "**ALTERED**")})"))}"));
+            }
+
+            Emit("");
+        }
+
+        EmitSubset("SHIPPED subset (the d6 corpus of record — THIS is what the aggregate + verdict are scoped to)", shippedIdx);
+        EmitSubset("SYNOPSIS subset (q1 — NEW, never measured before; NOT part of the verdict)", synopsisIdx);
 
         // ── NON-REGRESSION vs the shipped glossary under GlossaryThenDynamic (deterministic, no GPU) ──────────
         // Confirms the closed glossary STILL cleans its known terms under GlossaryThenDynamic: the glossary
@@ -1315,7 +1595,14 @@ public class OutputQualityDiagnostic
         // ── DECISION vs the AGREED BAR (preservation >= 90% AND over-rewrite == 0) ───────────────────────────
         Emit("---");
         Emit("");
-        Emit("## Decision vs agreed bar (preservation >= 90% AND over-rewrite == 0)");
+        Emit($"## Decision vs agreed bar — SHIPPED corpus of record ONLY ({shippedIdx.Count} values) "
+             + "(preservation >= 90% AND over-rewrite == 0)");
+        Emit("");
+        Emit($"**Corpus of this decision (be-c01): the {shippedIdx.Count} SHIPPED values — the analysis types the "
+             + $"dynamic repair layer actually runs over. The {synopsisIdx.Count} q1 SYNOPSIS values were measured on "
+             + "the same instrument against the same bar and are reported SEPARATELY in the q1 subset section above; "
+             + "`Synopsis` is NOT one of the repaired types, so the SYNOPSIS subset is NOT part of this ship decision "
+             + "and cannot move the verdict below.**");
         Emit("");
         Emit("| tier | model | preservation % | over-rewrite (bar=0) | meets bar? |");
         Emit("|---|---|---|---|---|");
@@ -1354,20 +1641,27 @@ public class OutputQualityDiagnostic
             verdict = "HALT";
             recommendation = "HALT — NEITHER tier met the bar. Keep the SHIPPED default Mode=Glossary (dynamic stays available but OFF).";
         }
-        Emit($"**d6 VERDICT: {verdict}.**  {recommendation}");
+        Emit($"**d6 VERDICT (scoped to the SHIPPED corpus of record — {shippedIdx.Count} values across the analysis "
+             + $"types the dynamic repair layer runs over; the {synopsisIdx.Count} SYNOPSIS values are reported "
+             + $"separately in the q1 subset section and are NOT part of this ship decision): {verdict}.**  {recommendation}");
         Emit("(d6 records the precision-gated recommendation only; d7 owns the documented rollout / appsettings default.)");
         Emit("");
 
         // ── RESIDUAL WEAKNESSES / DEFERRALS (honest limits of this measure) ──────────────────────────────────
         Emit("## Residual weaknesses / deferrals");
         Emit("");
-        Emit($"- **Safety is carried by the DETERMINISTIC GATE, not by the tier.** {cases.Count - modelReachedCount}/{cases.Count} values never");
+        Emit($"(Denominators in this section are the SHIPPED corpus of record — {shippedIdx.Count} values — matching the "
+             + $"verdict above. The SYNOPSIS subset's own gate attribution is stated separately: "
+             + $"{synEntityGatedCount} entity-gated, {synRuleGatedCount} rule-gated, {synModelReachedCount} reach the model "
+             + $"of {synopsisIdx.Count}.)");
+        Emit("");
+        Emit($"- **Safety is carried by the DETERMINISTIC GATE, not by the tier.** {shippedIdx.Count - modelReachedCount}/{shippedIdx.Count} shipped values never");
         Emit($"  reach the model (detector allowlist + d2 classifier LEAVE + the per-book entity lever), so they are");
-        Emit($"  preserved identically on EVERY tier and cost 0 model calls. Only {modelReachedCount} value(s) are tier-sensitive.");
+        Emit($"  preserved identically on EVERY tier and cost 0 model calls. Only {modelReachedCount} shipped value(s) are tier-sensitive.");
         Emit("  Read the preservation % accordingly: when the gate catches everything it is a property of the GATE,");
         Emit("  and this measure stops discriminating between LOCAL and CLOUD (that is the intended invariant — but");
         Emit("  it also means d6 no longer stresses the MODEL's preserve-a-proper-noun behaviour).");
-        Emit($"- **The entity lever load-bears on only {entityGatedCount} of {cases.Count} cases — ALL of them Latin-native.** For the");
+        Emit($"- **The entity lever load-bears on only {entityGatedCount} of {shippedIdx.Count} shipped cases — ALL of them Latin-native.** For the");
         Emit("  HEBREW-native book every legit token is spared by a CLASSIFIER RULE (Title-Case mid-sentence,");
         Emit("  ALL-CAPS, the be-c01 name-span walk, the be-c05 quote pair, URL/email), so the Latin harvest is");
         Emit("  belt-and-braces there, not load-bearing. In the LATIN-native direction there is NO case signal at");
@@ -1427,6 +1721,31 @@ public class OutputQualityDiagnostic
         var o = outcomes[tier][i];
         if (o.Preserved) return "preserved";
         return o.OverRewrite ? "**FP (over-rewrite)**" : "**FP**";
+    }
+
+    /// <summary>
+    /// The FIRST region where <paramref name="before"/> and <paramref name="after"/> differ, with a little
+    /// context on each side, so a report line about a LONG value points at the change instead of at an
+    /// identical prefix. Returns two windows anchored on the common prefix/suffix boundary.
+    /// </summary>
+    private static (string before, string after) FirstDiffContext(string before, string after, int context = 45)
+    {
+        var p = 0;
+        while (p < before.Length && p < after.Length && before[p] == after[p]) p++;
+
+        var s = 0;
+        while (s < before.Length - p && s < after.Length - p
+               && before[before.Length - 1 - s] == after[after.Length - 1 - s]) s++;
+
+        var start = Math.Max(0, p - context);
+        string Window(string v, int tailKeptFromEnd)
+        {
+            var end = Math.Min(v.Length, v.Length - tailKeptFromEnd + context);
+            if (end <= start) end = Math.Min(v.Length, start + context);
+            return v.Substring(start, end - start).Replace("\n", "\\n");
+        }
+
+        return (Window(before, s), Window(after, s));
     }
 
     /// <summary>

@@ -1,6 +1,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using Microsoft.Extensions.Logging;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Analysis;
@@ -262,6 +264,92 @@ public class BookReviewGlossaryRepairTests
         Assert.Equal(0, changed);
         Assert.Contains("Action", finding.Rationale);
         Assert.Contains("Action", finding.SuggestedAction!);
+    }
+
+    // ─── h1-observable-gate-skip: the Enabled/PerType gate above previously returned 0 with NO logging at
+    //     all, so a caller staring at a skipped book review could not tell WHICH of the three reasons (null
+    //     block / Enabled=false / PerType exclusion) closed it. It now evaluates the shared
+    //     AnalysisRepairGate predicate and logs a Debug line naming "BookReview" + the reason before
+    //     returning. Debug-only: BookReview is routinely gated out on PerType allowlists that don't include
+    //     it, so this must never rise to INFO/WARN.
+    //
+    //     be-c02 NOTE: BuildBookReviewAsync now evaluates the SAME Enabled/PerType gate ONCE for the whole
+    //     repair layer and short-circuits ahead of this method, so on the ENGINE path this internal gate is
+    //     belt-and-braces that never fires. It is deliberately KEPT (defence-in-depth for any other caller)
+    //     and these four tests, which drive ApplyGlossaryToFindings DIRECTLY, are what still cover it — the
+    //     engine-path equivalent is BookReviewServiceTests' RepairLayerGate_* group. ───
+
+    /// <summary>Minimal in-memory <see cref="ILogger"/> (ApplyGlossaryToFindings takes a plain, non-generic
+    /// <see cref="ILogger"/>?) that records every entry's level + rendered message.</summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
+    }
+
+    private static IReadOnlyList<(LogLevel Level, string Message)> SkipLogEntries(CapturingLogger logger) =>
+        logger.Entries.Where(e => e.Message.Contains("gate closed", StringComparison.Ordinal)).ToList();
+
+    [Fact]
+    public void PerTypeExcludesBookReview_LogsDebugWithTypeAndReason()
+    {
+        var finding = SampleFinding("תיאור פעולה (Action) עז.", suggestedAction: null);
+        var cfg = new AnalysisRepairOptions
+        {
+            Enabled = true,
+            PerType = new Dictionary<string, bool> { ["LiteraryAnalysis"] = true } // excludes BookReview
+        };
+        var logger = new CapturingLogger();
+
+        BookReviewService.ApplyGlossaryToFindings(new[] { finding }, "he", cfg, logger);
+
+        var entry = Assert.Single(SkipLogEntries(logger));
+        Assert.Equal(LogLevel.Debug, entry.Level);
+        Assert.Contains("BookReview", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("PerTypeExcluded", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LayerDisabled_LogsDebugWithDisabledReason()
+    {
+        var finding = SampleFinding("תיאור פעולה (Action) עז.", suggestedAction: null);
+        var cfg = EnabledCfg();
+        cfg.Enabled = false;
+        var logger = new CapturingLogger();
+
+        BookReviewService.ApplyGlossaryToFindings(new[] { finding }, "he", cfg, logger);
+
+        var entry = Assert.Single(SkipLogEntries(logger));
+        Assert.Contains("BookReview", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("Disabled", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NullConfig_LogsDebugWithNullConfigReason()
+    {
+        var finding = SampleFinding("תיאור פעולה (Action) עז.", suggestedAction: null);
+        var logger = new CapturingLogger();
+
+        BookReviewService.ApplyGlossaryToFindings(new[] { finding }, "he", cfg: null, logger);
+
+        var entry = Assert.Single(SkipLogEntries(logger));
+        Assert.Contains("BookReview", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("NullConfig", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AllowedType_LogsNoSkipLine()
+    {
+        var finding = SampleFinding("תיאור פעולה (Action) עז.", suggestedAction: null);
+        var logger = new CapturingLogger();
+
+        BookReviewService.ApplyGlossaryToFindings(new[] { finding }, "he", EnabledCfg(), logger);
+
+        Assert.Empty(SkipLogEntries(logger));
     }
 
     // ─── RepairableFields.For(BookFinding) overload: scope of exposed accessors ───
