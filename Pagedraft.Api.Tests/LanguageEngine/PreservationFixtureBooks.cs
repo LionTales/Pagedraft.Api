@@ -709,6 +709,16 @@ public sealed class PreservationFixtureBooks : IDisposable
     // ── seeding ───────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// q2 scope (i): seed THIS fixture's HEBREW-native manuscript into an ARBITRARY <see cref="AppDbContext"/>
+    /// under an arbitrary book id, so a harness that needs the book to live in the SAME DbContext as the
+    /// service under test (the c2 profile hook resolves <c>IBookEntityProvider</c> out of its own DI graph)
+    /// can reuse the manuscript VERBATIM instead of copy-pasting it and letting the two drift. The caller owns
+    /// <c>SaveChangesAsync</c>. Nothing about the manuscript changes — this is a visibility shim over
+    /// <see cref="SeedHebrewNativeBook"/>, which stays the single definition of what that book contains.
+    /// </summary>
+    public static void SeedHebrewNativeBookInto(AppDbContext db, Guid bookId) => SeedHebrewNativeBook(db, bookId);
+
+    /// <summary>
     /// The HEBREW-native book. FOREIGN script = Latin, so the provider harvests Latin TITLE-CASE tokens that
     /// RECUR across chapters OR appear MID-SENTENCE at least once. Every Latin name below sits MID-SENTENCE
     /// (preceded by a Hebrew word, never by a sentence terminator — a sentence-initial capital is orthography,
