@@ -79,6 +79,73 @@ public class AnalysisRepairConfigParityTests
             $"(base={baseMode}, prod={prodMode}), breaking the documented mirror (docs/ANALYSIS_OUTPUT_REPAIR.md §13/§15).");
     }
 
+    /// <summary>
+    /// be-c03. <c>Ai:AnalysisRepair:SummaryBatchWindowChapters</c> is the third value that must mirror across
+    /// the two files. It bounds how many chapters <c>SummarizeChaptersCoreAsync</c> summarizes and repairs
+    /// before it COMMITS, so a divergence is not cosmetic: a prod value silently larger than the base one
+    /// re-widens the all-or-nothing persist window that this key exists to bound, and on the real 80-chapter
+    /// corpus that is the difference between losing 10 chapters' work to an abort and losing all 80. Same
+    /// override hazard as PerType and Mode - Production.json fully replaces the base block.
+    /// </summary>
+    [Fact]
+    public void SummaryBatchWindowChapters_BaseAndProduction_AreEqual()
+    {
+        var basePath = FindUpward(Path.Combine("Pagedraft.Api", "appsettings.json"));
+        var prodPath = FindUpward(Path.Combine("Pagedraft.Api", "appsettings.Production.json"));
+
+        var baseWindow = LoadSummaryBatchWindow(basePath);
+        var prodWindow = LoadSummaryBatchWindow(prodPath);
+
+        Assert.True(baseWindow.HasValue,
+            $"appsettings.json has no Ai:AnalysisRepair:SummaryBatchWindowChapters value ({basePath}).");
+        Assert.True(prodWindow.HasValue,
+            $"appsettings.Production.json has no Ai:AnalysisRepair:SummaryBatchWindowChapters value ({prodPath}). " +
+            "Production fully OVERRIDES the base Ai:AnalysisRepair block, so an absent key here does not " +
+            "inherit the base value - it falls back to the AnalysisRepairOptions class default.");
+
+        Assert.True(baseWindow == prodWindow,
+            "Ai:AnalysisRepair:SummaryBatchWindowChapters differs between appsettings.json and " +
+            $"appsettings.Production.json (base={baseWindow}, prod={prodWindow}), so the chapter-summary " +
+            "checkpoint window - the bound on how much work one abort can discard - is not the same in the " +
+            "two environments.");
+
+        // The shipped value must be POSITIVE. A non-positive value is clamped to the default at runtime
+        // (BookIntelligenceService.ResolveSummaryBatchWindow), so a 0 or -1 here would not restore the
+        // all-or-nothing persist, but it WOULD mean the file no longer says what actually runs.
+        Assert.True(baseWindow!.Value > 0,
+            $"appsettings.json ships Ai:AnalysisRepair:SummaryBatchWindowChapters={baseWindow}, which is " +
+            "clamped to the class default at runtime - the config no longer states the window in effect.");
+    }
+
+    /// <summary>
+    /// The companion to the parity check: the shipped value must actually REACH
+    /// <see cref="AnalysisRepairOptions.SummaryBatchWindowChapters"/>. Both files currently ship the same
+    /// number as the class default, so an equality check against the default would prove nothing - this
+    /// compares the bound value to the RAW string in the JSON, which catches a misspelled or moved key.
+    /// </summary>
+    [Theory]
+    [InlineData("appsettings.json")]
+    [InlineData("appsettings.Production.json")]
+    public void ShippedSummaryBatchWindow_BindsIntoAiOptions(string fileName)
+    {
+        var path = FindUpward(Path.Combine("Pagedraft.Api", fileName));
+        var config = new ConfigurationBuilder().AddJsonFile(path).Build();
+
+        var ai = config.GetSection("Ai").Get<AiOptions>();
+        Assert.NotNull(ai);
+        Assert.NotNull(ai!.AnalysisRepair);
+
+        var raw = config.GetSection("Ai:AnalysisRepair:SummaryBatchWindowChapters").Value;
+        Assert.False(string.IsNullOrWhiteSpace(raw),
+            $"{fileName} has no Ai:AnalysisRepair:SummaryBatchWindowChapters value ({path}).");
+        Assert.True(int.TryParse(raw, out var expected),
+            $"{fileName} ships a non-integer Ai:AnalysisRepair:SummaryBatchWindowChapters=\"{raw}\".");
+        Assert.True(expected == ai.AnalysisRepair!.SummaryBatchWindowChapters,
+            $"{fileName} ships Ai:AnalysisRepair:SummaryBatchWindowChapters=\"{raw}\" but it bound to " +
+            $"{ai.AnalysisRepair.SummaryBatchWindowChapters} - the config value is not reaching " +
+            "AiOptions.AnalysisRepair.SummaryBatchWindowChapters.");
+    }
+
     // ---------------------------------------------------------------------------------------------
     // be-c06 - the SHIPPED Mode vs the CODE PATH.
     //
@@ -241,6 +308,13 @@ public class AnalysisRepairConfigParityTests
     {
         var config = new ConfigurationBuilder().AddJsonFile(path).Build();
         return config.GetSection("Ai:AnalysisRepair:PerType").Get<Dictionary<string, bool>>();
+    }
+
+    private static int? LoadSummaryBatchWindow(string path)
+    {
+        var config = new ConfigurationBuilder().AddJsonFile(path).Build();
+        var raw = config.GetSection("Ai:AnalysisRepair:SummaryBatchWindowChapters").Value;
+        return int.TryParse(raw, out var value) ? value : null;
     }
 
     private static string? LoadMode(string path)

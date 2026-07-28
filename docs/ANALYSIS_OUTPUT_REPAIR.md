@@ -1240,3 +1240,140 @@ REAL `appsettings.json` and asserts the bound `Mode` drives the stage predicates
   accept/reject and feed rejections into a per-book do-not-touch store the gate consults. Highest build cost,
   out of scope here.
 - **Function-word leaks stay structurally out of reach of span-scope** (section 17.4), unchanged by this plan.
+
+## 19. Operational cost: cross-model GPU swap on a single-GPU host (termrepair-model-swap-thrash plan, 2026-07-27)
+
+TermRepair routes to `Ai:FeatureModels:TermRepair` (gemma4:12b, section 13), the same model LinguisticAnalysis
+and BookReview already use. Three of the OTHER repairable task types route elsewhere (section 3's table):
+Summarization/QA/GenericChat -> qwen3.5:9b, LineEdit -> DictaLM-3.0-Nemotron-12B. On a single-GPU host with
+`OLLAMA_MAX_LOADED_MODELS=1` (the standing tuning, memory `pagedraft-ollama-8gb-tuning`), a repair that fires
+on one of those three EVICTS the task model and LOADS gemma4:12b, and the user's next same-type action then
+evicts it back. This section records what was measured, not guessed (plan
+`src/.cursor/plans/_todo/termrepair-model-swap-thrash-2026-07-12.plan.md`, todos s1-s4) - it SUPERSEDES the
+plan's original "~25 s cold load" estimate that motivated the investigation.
+
+### 19.1 The no-op cost (read this first, so nobody over-corrects)
+
+**A clean analysis makes ZERO model calls and costs 0-127 ms of repair-layer overhead** - measured across 27
+real-content chapter summaries plus the LiteraryAnalysis runs (s1, s3). Everything below applies only when a
+value actually leaks, and leaks are measured rare (19.4). The repair layer is free in the common case; nothing
+in this section is a reason to disable it pre-emptively.
+
+### 19.2 Measured swap cost - asymmetric, not a single number
+
+Measured directly against the Ollama API, `num_ctx=16384`, inference cost held negligible (s1, s4):
+
+| leg | measured cold load (wall ms) | notes |
+|---|---|---|
+| -> gemma4:12b | 21,489 / 22,930 / 23,423 | 3 samples, tight range |
+| -> qwen3.5:9b | 17,785 / 17,886 / **34,296** | page-cache-warm ~17.8 s; ONE first-touch (cold page cache) sample nearly 2x worse |
+| -> DictaLM-3.0-Nemotron-12B | 16,423 | 1 sample |
+| warm span (same model resident, no swap) | gemma 2.2-3.0 s, qwen 1.3-1.9 s | |
+
+- **The swap is asymmetric, not the single "~25 s" the plan started from.** qwen -> gemma costs ~21.5-22.9 s;
+  gemma -> qwen costs ~17.8 s page-cache-warm, but a first-touch load (OS page cache cold) was measured at
+  34.3 s - read "~25 s" as the page-cache-warm best case, not the worst.
+- **Eviction itself is free.** The entire cost is the incoming model's load; it is statistically identical
+  whether the GPU was empty or another model was resident.
+- **One full out-and-back** (a leaking repair swaps out to gemma; the user's next same-type action swaps back)
+  costs roughly **40 s** on the page-cache-warm numbers, and can be worse on a first touch.
+
+### 19.3 The N-swap loop is fixed (batching)
+
+The one place this was genuinely brutal was `BookIntelligenceService.SummarizeChaptersAsync`, which used to
+repair INSIDE the per-chapter loop, so a book with K leaking chapters paid K swaps. It was restructured (now
+`SummarizeChaptersCoreAsync`) into summarize-all -> ONE repair pass -> persist, so the repair model loads at
+most ONCE PER CHECKPOINT WINDOW no matter how many of that window's chapters leak (as first shipped the window
+was the whole book, i.e. once per `/summarize` call; the paragraph below explains why it is now bounded, and
+why bounding it does not cost swaps in practice). Verified live against the real API:
+**88,033 ms / 2 swaps (interleaved) -> 80,417 ms / 1 swap (batched)**, with no content lost, no cross-chapter
+mix-up, and no dropped chapter (full per-assertion evidence in the plan's `## s3 quality-gate results`).
+
+**Residual, worth knowing:** batching moves the swap-back OUT of the `/summarize` operation, it does not
+eliminate it globally. gemma4:12b is left resident when the call returns, so the user's NEXT qwen/Dicta-routed
+action (not this one) pays that load. That residual single-swap-per-analysis cost is what 19.4 addresses.
+
+**The batch is WINDOWED, not whole-book (be-c03, 2026-07-28).** As first shipped, the restructure had a single
+`SaveChanges` at the very end of the pass, which removed monotonic progress: an abort, a client disconnect, or
+a wedged Ollama runner during the summarize phase discarded EVERY chapter, where the old per-chapter persist
+kept the completed ones. That was priced as "never a correctness loss, only repeated work", which is true of
+correctness and false of progress - work aborted at the SAME point every time never converges. The pass now
+processes chapters in CHECKPOINT WINDOWS of `Ai:AnalysisRepair:SummaryBatchWindowChapters` (default 10,
+mirrored into `appsettings.Production.json` and guarded by `AnalysisRepairConfigParityTests`), each window
+running its own summarize -> repair -> persist. The non-negotiable invariant is unchanged: a window persists
+only AFTER its own repair pass, so un-repaired prose is still never written, not even transiently.
+
+Sizing, from the numbers above rather than by feel. Decomposing the 80,417 ms 2-chapter batched run into fixed
+model-load cost plus marginal cost gives **~18-27 s per chapter**, so a pass is roughly `21.5 s + N x (18-27 s)`.
+That crosses 2 minutes at 4-6 chapters, 5 minutes at 11-17, and 30 minutes at 66-101; the real 80-chapter
+Hebrew manuscript in this project's corpus is a **24-37 minute** single request on its first pass. A window of
+10 bounds the work a single abort can discard to ~3-4.5 minutes. **Lowering the window does NOT cost one swap
+per window on a healthy corpus:** a window whose chapters all come back clean makes no repair model call at all
+(19.1), and the measured leak rate is ~3% (19.4), so the expected swap count is `min(windows, leaking chapters)`
+either way - about 2-3 on an 80-chapter book regardless of the window size. Setting the window at or above a
+book's chapter count reproduces the original single-commit behaviour exactly.
+
+### 19.4 Why the remaining single-swap cost was left alone (s4 decision: ACCEPT)
+
+s4 evaluated four options for the remaining "one swap per leaking Line Edit or Summarize" cost and recommended
+**(a) ACCEPT - no routing change, nothing built.** Full evidence and the three rejected alternatives are in the
+plan's `## s4 decision`; the load-bearing reasons:
+
+- **Only 2 of the 6 editor analysis types can trigger a TermRepair swap at all.** Proofread and Custom are
+  absent from `Ai:AnalysisRepair:PerType` and are never repaired (section 4); Linguistic and Literary already
+  route to gemma4:12b (Literary indirectly - see 19.5) so a repair there is same-model and swap-free. Only Line
+  Edit (Dicta) and Summarize (qwen) can force a swap.
+- **In a mixed editing session, task routing itself already dominates the swap budget.** An editor session
+  alternating across analysis types already swaps models on every type change, independent of the repair
+  layer - measured at roughly 6 minutes of load time across a 20-action mixed session, with ZERO involvement
+  from TermRepair. TermRepair's marginal cost in that shape is ~0: a leaking Line Edit swaps to gemma, which
+  the session's next Linguistic/Literary action needed anyway, so the repair pre-warms it.
+- **The measured leak rate is low.** ~3% Summarization leak-and-repair rate (n=32 real-content runs, 1 repair;
+  Wilson 95% CI 0.6-15.8%). Even in the worst realistic shape modeled (20 consecutive Line Edits on one
+  chapter), the projected marginal cost is tens of seconds, not minutes, and is reversible in one config line
+  (`Ai:AnalysisRepair.Mode=Glossary` or `Off`).
+- **The two build-something options were disqualified by measurement, not taste.** A small co-resident repair
+  model (so no swap is ever needed) is arithmetically ruled out on this card - see 19.6. Routing TermRepair to
+  each task's own model would avoid the swap entirely but is unvalidated for repair quality on
+  qwen3.5:9b/DictaLM (the d5/d6 gates in sections 14/18 measured gemma4:12b only), and Dicta is already known
+  to over-rewrite prose in this role (see the model-choice rationale in section 2 / `_comment_TermRepair`).
+
+### 19.5 What already routes to gemma4:12b and never swaps
+
+| task | -> AiTaskType | model | swaps vs TermRepair? |
+|---|---|---|---|
+| LinguisticAnalysis | LinguisticAnalysis | gemma4:12b | no |
+| LiteraryAnalysis | LinguisticAnalysis (indirect - no dedicated `FeatureModels:LiteraryAnalysis` key) | gemma4:12b | no |
+| BookOverview / CharacterAnalysis / StoryAnalysis | LinguisticAnalysis (same indirection) | gemma4:12b | no |
+| BookReview | BookReview | gemma4:12b | no |
+
+**LiteraryAnalysis has no `FeatureModels:LiteraryAnalysis` key** - do not add one expecting it to change
+anything, and do not describe LiteraryAnalysis as "routing to gemma4:12b" without this caveat. It reaches
+gemma4:12b only because `AnalysisTaskMapping` maps `AnalysisType.LiteraryAnalysis` onto
+`AiTaskType.LinguisticAnalysis`, which resolves `FeatureModels:LinguisticAnalysis`. The same indirection is
+what puts BookOverview/CharacterAnalysis/StoryAnalysis on gemma4:12b.
+
+### 19.6 VRAM: why a small co-resident repair model does not fit this card
+
+For anyone tempted to eliminate the swap by loading a tiny repair model ALONGSIDE the task model: the card is
+8,188 MiB total, and `nvidia-smi` FREE VRAM measured with a task model actually resident is only **465-823 MiB**
+(gemma4:12b 592, qwen3.5:9b 465, DictaLM-3.0-Nemotron-12B 823) - most of the card is already spent on the
+resident model's weights, KV cache, and the Windows desktop's own ~1.1 GB baseline. The smallest model present
+on this host, `DictaLM-3.0-1.7B`, needs **1,056 MiB of weights alone**, before any KV cache - it does not fit
+in the largest measured headroom. Co-residency of any two current models is arithmetically impossible on this
+card; it was not tested further because 1,056 MiB does not fit in 823 MiB by arithmetic, not by hypothesis.
+
+**Do NOT raise `OLLAMA_MAX_LOADED_MODELS`** to try anyway - it has previously OOM-wedged this GPU (memory
+`pagedraft-ollama-8gb-tuning`; HTTP 500 after ~30 min with the GPU idle). If a >=16 GB GPU host ever exists, a
+small co-resident repair model becomes the right shape of answer and should be revisited then (see the plan's
+`## s4 decision`, option (c)) - not attempted on this hardware.
+
+### 19.7 Field tripwire
+
+No new instrumentation was added; the existing `TermRepair.span ... latencyMs=` Debug line (section 12.5) is
+already the field signal. **A `TermRepair.span` `latencyMs` above roughly 10 seconds IS a cold model load**,
+not slow inference - the warm marginal cost tops out under 3 seconds on this hardware (19.2). That threshold is
+cheap to grep for in production logs if the swap rate ever needs to be watched in the field.
+
+Full investigation, measurement, and decision detail: `src/.cursor/plans/_todo/termrepair-model-swap-thrash-2026-07-12.plan.md`
+(`## Investigation findings`, `## s3 quality-gate results`, `## s4 decision`).

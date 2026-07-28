@@ -345,7 +345,14 @@ public class AppDbContext : DbContext
             }
             else if (entry.Entity is ChunkSummary cs)
             {
-                if (entry.State == EntityState.Added) cs.CreatedAt = DateTimeOffset.UtcNow;
+                // be-c01: stamp on Add ONLY when the writer did not supply one. CreatedAt is the FLAT
+                // surface's freshness stamp, and the batched re-summary path anchors it to the chapter's own
+                // summarize time (BookIntelligenceService phase 1), which is minutes before this save on a
+                // real book. Overwriting it here with the persist time is what would let a chapter edited
+                // mid-pass be classified fresh forever. Every other writer (ChapterBriefService,
+                // BooksController's user-edit path) leaves it unset and still gets the persist-time stamp.
+                if (entry.State == EntityState.Added && cs.CreatedAt == default)
+                    cs.CreatedAt = DateTimeOffset.UtcNow;
             }
             else if (entry.Entity is BookBible bb)
             {
