@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Pagedraft.Api.Services.Analysis;
+using Pagedraft.Api.Tests.LanguageEngine;
 using Xunit;
 
 namespace Pagedraft.Api.Tests;
@@ -12,7 +13,10 @@ namespace Pagedraft.Api.Tests;
 ///
 /// Two layers:
 ///   • TARGETED [Fact]/[Theory] tests document each heuristic in isolation (proper-noun
-///     Title-Case mid-sentence, sentence-initial capitalization, ALL-CAPS acronym,
+///     Title-Case mid-sentence, sentence-initial capitalization, the c3 LINE-HEAD
+///     rule (7b), including the be-c03 SINGLE-break position, which is the production shape and
+///     which no `PreservationFixtureBooks` value covers, plus the four BOUNDARY positions it
+///     deliberately does not claim, ALL-CAPS acronym,
 ///     URL/email/code, number+unit, book-entity, single-letter guard, Hebrew-in-Latin,
 ///     name spans — one particle (van / da / de) AND two adjacent ones (van der / de la /
 ///     of the) — plus the bound that keeps a leaked English clause out, quoted foreign
@@ -63,6 +67,184 @@ public class ForeignRunClassifierTests
     {
         // A leading quote is transparent to sentence-initial detection.
         AssertSingleRun("\"Confusion\" הייתה התחושה.", ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    // ── c3: rule (7b), the LINE-HEAD Title-Case LEAVE ────────────────────────
+    //
+    // Closes the q1 false positive (`Chekhov` -> `צ'כוב`, transliterated at the head of a synopsis's second
+    // paragraph). ADDITIVE by construction: (7b) can only fire where rule (7) declined, so it converts
+    // REPAIR -> LEAVE and never the reverse — its whole blast radius is RECALL. The three tests below the
+    // first two are the BOUNDARY pins: they are the positions (7b) deliberately does NOT claim, and they are
+    // what keeps the rule narrow rather than "Title-Case always LEAVEs".
+    //
+    // be-c03: the predicate (`IsLineInitial`) fires on ONE hard line break; a BLANK line is deliberately NOT
+    // required, because the real persisted prose this layer repairs separates paragraphs with a single '\n'
+    // (3 of 3 `BookProfiles.Synopsis` and 32 of 33 `ChunkSummaries.SummaryText` rows in the runtime DB carry a
+    // lone break and ZERO carry a blank line). The fixtures below and every value in `PreservationFixtureBooks`
+    // use `\n\n`, so the SINGLE-break position is pinned explicitly by
+    // `TitleCaseWord_AfterSingleLineBreakFollowingSentenceEnd_IsLeave` rather than left to the corpus.
+
+    [Fact]
+    public void TitleCaseProperNoun_AtParagraphHead_IsLeave()
+    {
+        // THE q1 SHAPE: a synopsis opens its second paragraph by topic-fronting a named entity. Rule (7) is
+        // mid-sentence-only and cannot fire; before (7b) this run reached the repair model and was
+        // transliterated.
+        AssertSingleRun(
+            "המספר שומר מרחק מכוון מן הדמויות.\n\nChekhov הוא ההשוואה המתבקשת בפרק זה.",
+            ExpectedScript.Hebrew, ForeignRunDecision.Leave);
+    }
+
+    [Fact]
+    public void TitleCaseProperNoun_AtParagraphHead_WithCrLfAndOpeningQuote_IsLeave()
+    {
+        // Real model output uses CRLF as often as LF, and a paragraph may open on a quote. Both are
+        // transparent to the LINE-head scan (IsLineInitial), which skips the same transparent-open set
+        // IsSentenceInitial does; the difference between the two is which character it stops on, not which
+        // ones it skips.
+        AssertSingleRun(
+            "המספר שומר מרחק מכוון.\r\n\r\n\"Chekhov הוא ההשוואה המתבקשת בפרק זה.",
+            ExpectedScript.Hebrew, ForeignRunDecision.Leave);
+    }
+
+    [Theory]
+    [InlineData("המספר שומר מרחק מכוון.\nChekhov הוא ההשוואה המתבקשת בפרק זה.", "LF")]
+    [InlineData("המספר שומר מרחק מכוון.\r\nChekhov הוא ההשוואה המתבקשת בפרק זה.", "CRLF")]
+    [InlineData("המספר שומר מרחק מכוון.\rChekhov הוא ההשוואה המתבקשת בפרק זה.", "CR")]
+    [InlineData("מי באמת סיפר את הסיפור?\nChekhov הוא ההשוואה המתבקשת בפרק זה.", "LF after '?'")]
+    [InlineData("המספר שומר מרחק מכוון.\n  \"Chekhov הוא ההשוואה המתבקשת בפרק זה.", "LF + indent + opening quote")]
+    public void TitleCaseWord_AfterSingleLineBreakFollowingSentenceEnd_IsLeave(string value, string shape)
+    {
+        // be-c03: THE SINGLE-BREAK PIN. Rule (7b) requires ONE hard line break, not a BLANK line, and this is
+        // the only position where that breadth is load-bearing: the previous line ENDS on a sentence
+        // terminator, so IsSentenceInitial is true and rule (7) declines, so only (7b) can spare the run.
+        //
+        // This is not a hypothetical shape. It is the PRODUCTION shape: read-only against the runtime DB, 3 of
+        // 3 `BookProfiles.Synopsis` values (~1.2-1.6k chars, exactly 2 LF and 0 CR) and 32 of 33
+        // `ChunkSummaries.SummaryText` values separate their paragraphs with a SINGLE '\n' and ZERO carry a
+        // blank line, while every fixture in `PreservationFixtureBooks` uses '\n\n'. So if the predicate is
+        // ever narrowed to require a blank line to "match the paragraph wording", rule (7b) goes DEAD on every
+        // real Synopsis and Summary value and q1's measured false positive (`Chekhov` -> `צ'כוב`) returns on
+        // exactly the shape `f2` shipped, with no fixture able to see it. This test is that fixture.
+        //
+        // REVERT-VERIFIED against a blank-line predicate: the LF, CR, "LF after '?'" and "LF + indent +
+        // opening quote" rows go RED on the assertion below. The CRLF row does NOT discriminate (a lone
+        // "\r\n" is two break characters, so a naive blank-line scan reads it as a blank line); it is kept
+        // because CRLF is a real model-output shape, but the LF / CR rows are the ones that carry the pin.
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        Assert.Single(runs);
+        Assert.Equal("Chekhov", runs[0].Text);
+
+        var decision = ForeignRunClassifier.Classify(runs[0], value, ExpectedScript.Hebrew, null);
+        Assert.True(decision == ForeignRunDecision.Leave,
+            $"[{shape}] a Title-Case Latin proper noun after a SINGLE hard line break that follows a completed " +
+            "sentence was classified REPAIR. Rule (7b) must fire at a LINE head, not only at a BLANK line: the " +
+            "real persisted Synopsis / SummaryText prose separates paragraphs with one '\\n' and never with a " +
+            "blank line, so a blank-line predicate makes (7b) dead in production and hands q1's false-positive " +
+            "shape back to the repair model.");
+    }
+
+    [Theory]
+    [InlineData("הדמות הראשית שקעה בתחושה עמוקה של\nConfusion מוחלטת לאורך כל הפרק.", "soft wrap mid-sentence")]
+    [InlineData("הנושאים המרכזיים:\nConfusion היא התחושה השלטת בפרק.", "list line, no marker")]
+    [InlineData("הנושאים המרכזיים:\n- Confusion היא התחושה השלטת בפרק.", "list line, hyphen marker")]
+    public void TitleCaseWord_AfterSingleLineBreakMidSentence_IsLeave_ByRule7_NotRule7b(string value, string shape)
+    {
+        // be-c03, the ATTRIBUTION pin. These are the three shapes rule (7b)'s breadth is usually suspected of
+        // exposing: a soft line break inside one paragraph, a wrapped line, and a newline-separated list line
+        // whose marker IsTransparentOpen does not cover. They are LEAVE, but NOT because of (7b): in each of
+        // them the previous line does not end on a sentence terminator, so IsSentenceInitial is FALSE, rule (7)
+        // is evaluated first and already returns Leave. That is PRE-c3 behaviour and narrowing (7b) would not
+        // recover any of them. Recorded as a test so the exposure is attributed rather than argued.
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(value, ExpectedScript.Hebrew);
+        Assert.Single(runs);
+        Assert.Equal("Confusion", runs[0].Text);
+
+        var decision = ForeignRunClassifier.Classify(runs[0], value, ExpectedScript.Hebrew, null);
+        Assert.True(decision == ForeignRunDecision.Leave,
+            $"[{shape}] this run changed verdict. It is spared by rule (7) (Title-Case, NOT sentence-initial " +
+            "because a line break is skipped as ordinary whitespace by IsSentenceInitial before its terminator " +
+            "check), which predates rule (7b). A flip here means rule (7) or IsSentenceInitial moved, not (7b).");
+    }
+
+    [Fact]
+    public void TitleCaseWord_AtSentenceHeadMidParagraph_StillRepairs()
+    {
+        // THE ADDITIVE BOUNDARY. A sentence head that is NOT a paragraph head keeps rule (7)'s verdict: the
+        // orthographic argument ("a sentence-initial capital is not evidence of a name") is untouched there,
+        // so a capitalized leaked common noun mid-paragraph is still sent to the model. If this ever flips,
+        // rule (7b) has silently widened into "Title-Case always LEAVEs".
+        AssertSingleRun(
+            "הפרק נפתח בשקט גמור.\n\nהמתח עלה בהדרגה. Panic התפשט בין הנוכחים.",
+            ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void TitleCaseWord_ValueInitial_WithLeadingWhitespace_StillRepairs()
+    {
+        // VALUE-initial is deliberately NOT a paragraph head: a short structured field whose whole value is one
+        // sentence can plausibly OPEN with a capitalized leak, and there is no paragraph boundary to argue from.
+        // Leading horizontal whitespace must not turn the value start into one.
+        AssertSingleRun("  Confusion שלטה בכל הבית.", ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void LowercaseLeak_AtParagraphHead_StillRepairs()
+    {
+        // The CASE gate: (7b) requires Title-Case, so a lowercase leak opening a paragraph is untouched.
+        AssertSingleRun(
+            "הפרק הראשון בונה את הדמות לאט.\n\nconfusion היא התחושה השלטת לאורך כל הפרק השני.",
+            ExpectedScript.Hebrew, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void HebrewRun_AtParagraphHead_InLatinBook_StillRepairs()
+    {
+        // The SCRIPT gate: (7b) lives inside the Hebrew-expected/Latin-run block, because Hebrew has no letter
+        // case and therefore no Title-Case signal to read. A Hebrew run opening a paragraph in an English book
+        // must still REPAIR (only the entity lever can spare it).
+        AssertSingleRun(
+            "The narrator keeps a deliberate distance.\n\nמתח builds slowly through the second act.",
+            ExpectedScript.Latin, ForeignRunDecision.Repair);
+    }
+
+    [Fact]
+    public void Q1MeasuredFalsePositive_TheSynopsisChekhovValue_IsNowDeterministicallyGated()
+    {
+        // ANCHORED TO THE MEASUREMENT, not to a re-authored shape: this is q1's actual d6 case, read from the
+        // fixture it was measured with (PreservationFixtureBooks.SynopsisCases). It scored 83% preservation
+        // because this ONE value reached the model. With (7b) it must be gated deterministically — zero model
+        // calls — which is what q2 scope (ii) re-measures live.
+        var chekhov = PreservationFixtureBooks.SynopsisCases.Single(c => c.Token == "Chekhov");
+
+        var runs = LatinInHebrewContentDetector.DetectForeignRuns(chekhov.Value, chekhov.Expected);
+        Assert.Single(runs);
+        Assert.Equal("Chekhov", runs[0].Text);
+
+        // NO entity set at all: the point is that the CLASSIFIER carries it, with the entity lever inert
+        // (the synopsis book's manuscript never names Chekhov, and no widening of the entity set could
+        // contain a name the synopsis itself introduces).
+        var repairRuns = ForeignRunClassifier.RunsToRepair(runs, chekhov.Value, chekhov.Expected, null);
+        Assert.Empty(repairRuns);
+    }
+
+    [Fact]
+    public void Rule7b_SparesNoLeakInEitherD5CleaningCorpus()
+    {
+        // THE RECALL PIN, and the model-free half of q2's regression scope (iii). Rule (7b) is additive, so it
+        // cannot damage PRESERVATION — the only thing it can cost is CLEANING. Assert the prediction directly:
+        // every leak in the shipped d5 corpus AND in q1's synopsis cleaning corpus is still classified REPAIR
+        // with no entity set. A failure here IS the predicted recall regression, visible without a GPU.
+        foreach (var leak in PreservationFixtureBooks.LeakCases.Concat(PreservationFixtureBooks.SynopsisLeakCases))
+        {
+            var runs = LatinInHebrewContentDetector.DetectForeignRuns(leak.Value, ExpectedScript.Hebrew);
+            var repairRuns = ForeignRunClassifier.RunsToRepair(runs, leak.Value, ExpectedScript.Hebrew, null);
+
+            Assert.True(repairRuns.Any(r => r.Text == leak.Leak),
+                $"[{leak.Label}] the leak '{leak.Leak}' is no longer classified REPAIR. Rule (7b) (c3) was " +
+                "supposed to cost ZERO cleaning on both d5 corpora — this is the recall regression that " +
+                "reverts c3 under q2 scope (iii).");
+        }
     }
 
     [Theory]
