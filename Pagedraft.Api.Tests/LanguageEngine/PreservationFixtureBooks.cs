@@ -424,10 +424,12 @@ public sealed class PreservationFixtureBooks : IDisposable
     // be-c01 P0 shapes where it is inert by construction.
     //
     // WHAT IS DELIBERATELY *NOT* SEEDED (do not "fix" this):
-    //   • `Chekhov` — an author the SYNOPSIS invokes as a comparison but the BOOK never names. It is
-    //     sentence-initial in its case, so rule (7) cannot spare it and the entity lever cannot either: it
-    //     REACHES THE MODEL. That is the honest false-positive surface for this type and the whole reason the
-    //     type has to be measured rather than assumed.
+    //   • `Chekhov` — an author the SYNOPSIS invokes as a comparison but the BOOK never names. Still NOT
+    //     seeded, and the entity lever still cannot reach it (no widening of a per-book entity set can contain
+    //     a name the synopsis itself introduces). When q1 measured this corpus it therefore REACHED THE MODEL
+    //     and was transliterated (`צ'כוב`) — the single false positive behind the Synopsis HALT. c3 added
+    //     classifier rule (7b) (Title-Case at a LINE head; this fixture uses a blank line, but one break suffices), which now gates it deterministically; the
+    //     VALUES here are unchanged, so q2 measures the CHANGE against exactly the corpus that failed.
     //   • `Winter` / `Letters` — the quoted book-within-a-book title. Seeding them would harvest them
     //     (Title-Case + one mid-sentence mention is enough) and the report would credit the ENTITY lever for a
     //     case that classifier rule (5) (quoted multi-word span) is supposed to carry alone.
@@ -476,9 +478,13 @@ public sealed class PreservationFixtureBooks : IDisposable
             "classifier LEAVE on every run (Title-Case mid-sentence); the entity set is present but not load-bearing",
             null, SynopsisBookKey),
 
-        // (2) PARAGRAPH-INITIAL character name. A synopsis opens paragraphs with its protagonists, and a
-        // sentence-initial capital is NOT a proper-noun signal (rule 7 is explicitly mid-sentence only), so the
-        // ONLY thing that can spare this is the per-book ENTITY lever — through the REAL provider.
+        // (2) PARAGRAPH-INITIAL character name. A synopsis opens paragraphs with its protagonists. When q1
+        // measured this, rule (7) was mid-sentence-only and the per-book ENTITY lever was the ONLY thing that
+        // could spare it. c3's rule (7b) now spares it deterministically as a Title-Case run at a PARAGRAPH
+        // head, so the entity lever here is no longer load-bearing and GatingEntity is null — the VALUE is
+        // untouched (q2 measures the CHANGE against q1's corpus), only the attribution moved. Case (6) is
+        // now the fixture's witness that the entity lever still gates something on its own: it is
+        // VALUE-initial, which (7b) deliberately does not claim.
         new LegitCase("synopsis (paragraph-initial character name)", "Katarina",
             ExpectedScript.Hebrew, "he-IL",
             "הספר נפתח בערב שבו שבה מרים אל בית הילדות שלה, ומוצאת את החדרים ריקים מכל מה שזכרה. " +
@@ -487,8 +493,8 @@ public sealed class PreservationFixtureBooks : IDisposable
             "מן הרגע הזה הופכות השתיים לשותפות בעל כורחן, וכל אחת מהן שומרת סוד שהשנייה אינה יכולה לנחש.\n\n" +
             "בפרקים הבאים נחשף מה קרה בבית ההוא בחורף 1919, ומדוע איש מן השכנים אינו מוכן לדבר על כך. " +
             "ככל שהמכתבים נפתחים אחד אחר השני, מתברר שהגרסה שסופרה למרים כל חייה נבנתה כדי להגן על מישהו אחר לגמרי.",
-            "entity LEAVE (manuscript-harvested name; sentence-initial, so rule 7 cannot spare it)",
-            "Katarina", SynopsisBookKey),
+            "classifier LEAVE (rule 7b, Title-Case at a paragraph head — was entity LEAVE before c3)",
+            null, SynopsisBookKey),
 
         // (3) A TRANSLITERATED TITLE in quotes + an ALL-CAPS acronym — both routine in a synopsis, and both
         // carried by classifier rules with NO entity help (neither token is in the manuscript).
@@ -502,18 +508,22 @@ public sealed class PreservationFixtureBooks : IDisposable
             "classifier LEAVE (quoted multi-word span for the title, ALL-CAPS for the acronym)",
             null, SynopsisBookKey),
 
-        // (4) THE MEASURED FP SURFACE: an author the synopsis invokes as a comparison, SENTENCE-INITIAL, and
-        // absent from the book's manuscript. Rule (7) is mid-sentence-only and the entity lever is inert, so
-        // this run REACHES THE REPAIR MODEL and only the model's "return a proper noun unchanged" contract +
-        // the IsAcceptableReplacement echo-reject guard can preserve it. This is the case q1 exists to price.
-        new LegitCase("synopsis (sentence-initial author reference — REACHES MODEL)", "Chekhov",
+        // (4) THE VALUE THAT PRODUCED q1's ONLY FALSE POSITIVE: an author the synopsis invokes as a comparison,
+        // at the head of paragraph 2, and absent from the book's manuscript. Rule (7) is mid-sentence-only and
+        // the entity lever is inert here, so when q1 measured this the run REACHED THE REPAIR MODEL and was
+        // transliterated (`צ'כוב`) — 83% preservation, and the Synopsis HALT.
+        // c3 added classifier rule (7b) (Title-Case at a LINE head; this fixture uses a blank line, but one break suffices), which now gates it with ZERO model
+        // calls. THE VALUE IS UNCHANGED so q2 measures the CHANGE against the corpus that failed; only the
+        // label / note moved. The remaining un-gated shape of this class is a mid-paragraph sentence head,
+        // which (7b) deliberately does not claim.
+        new LegitCase("synopsis (paragraph-head author reference — the q1 FP; now rule 7b)", "Chekhov",
             ExpectedScript.Hebrew, "he-IL",
             "במרכז הרומן עומדת מרים, צלמת שמתעדת את חיי הנמל בזמן שהעולם סביבה מתפורר. " +
             "הפרוזה נשענת על תיאורים קצרים ומדויקים, והמספר שומר מרחק מכוון מן הדמויות.\n\n" +
             "Chekhov הוא ההשוואה המתבקשת: אותה כלכלה של פרטים, אותה חמלה מאופקת כלפי אנשים קטנים ברגעים גדולים. " +
             "אך בניגוד אליו, הרומן הזה בוחר בסיום שאינו מוותר על תקווה.\n\n" +
             "שלושת החלקים של הספר מסודרים לפי עונות, והמעבר בין החורף לאביב הוא גם המעבר של הגיבורה מן ההסתרה אל החשיפה.",
-            "NO deterministic gate — reaches the repair model; preserved only by the model + the echo-reject guard",
+            "classifier LEAVE (rule 7b, Title-Case at a paragraph head — before c3 this reached the repair model)",
             null, SynopsisBookKey),
 
         // (5) A transliterated name span with a lowercase PARTICLE inside a long multi-paragraph value — the
@@ -697,6 +707,16 @@ public sealed class PreservationFixtureBooks : IDisposable
     }
 
     // ── seeding ───────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// q2 scope (i): seed THIS fixture's HEBREW-native manuscript into an ARBITRARY <see cref="AppDbContext"/>
+    /// under an arbitrary book id, so a harness that needs the book to live in the SAME DbContext as the
+    /// service under test (the c2 profile hook resolves <c>IBookEntityProvider</c> out of its own DI graph)
+    /// can reuse the manuscript VERBATIM instead of copy-pasting it and letting the two drift. The caller owns
+    /// <c>SaveChangesAsync</c>. Nothing about the manuscript changes — this is a visibility shim over
+    /// <see cref="SeedHebrewNativeBook"/>, which stays the single definition of what that book contains.
+    /// </summary>
+    public static void SeedHebrewNativeBookInto(AppDbContext db, Guid bookId) => SeedHebrewNativeBook(db, bookId);
 
     /// <summary>
     /// The HEBREW-native book. FOREIGN script = Latin, so the provider harvests Latin TITLE-CASE tokens that

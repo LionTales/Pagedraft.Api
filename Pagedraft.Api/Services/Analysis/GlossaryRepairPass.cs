@@ -108,9 +108,9 @@ public static class GlossaryRepairPass
     /// plus the residual Latin runs for the p3 hand-off. Any non-target type, a non-Hebrew book,
     /// a parse failure, or a clean field is a no-op that returns the inputs byte-identical.
     /// </summary>
-    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired here.</param>
-    /// <param name="structuredJson">The parsed-and-reserialised StructuredResult (null for Summarization / non-structured types).</param>
-    /// <param name="cleanContent">The prose ResultText (the whole repairable text for Summarization).</param>
+    /// <param name="type">Analysis type; only Summarization / Synopsis / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired here.</param>
+    /// <param name="structuredJson">The parsed-and-reserialised StructuredResult (null for Summarization / Synopsis / non-structured types).</param>
+    /// <param name="cleanContent">The prose ResultText (the whole repairable text for Summarization / Synopsis).</param>
     /// <param name="language">BOOK language; the pass fires only when this starts with "he".</param>
     /// <param name="jsonOptions">The pipeline's camelCase JsonOpts, so re-serialisation matches persistence exactly.</param>
     public static GlossaryRepairResult Apply(
@@ -133,6 +133,20 @@ public static class GlossaryRepairPass
             // Summarization: TryParseStructured returns null, so the ENTIRE cleanContent is the
             // repairable prose (applied via RepairableFields.ForPlainText).
             AnalysisType.Summarization => RepairPlainText(structuredJson, cleanContent),
+
+            // Synopsis (f2, 2026-07-28): PLAIN TEXT, exactly like Summarization - TryParseStructured's
+            // `_ => null` arm covers it (UnifiedAnalysisService.cs), so there is no structured payload and no
+            // field whitelist; the whole prose value is the repairable surface. Enabled after q2 MEASURED the
+            // §18.2 bar CLEARED on q1's own fixtures (preservation 100% (6/6), 0 false positives, over-rewrite
+            // 0, 0 of 6 legitimate values reaching the model), which SUPERSEDES q1's 83%/1-FP HALT. The FP q1
+            // lost was a paragraph-head proper noun; ForeignRunClassifier rule (7b) now LEAVES that position
+            // deterministically, so the pass no longer asks the model about it. GPU-SWAP NOTE (do not
+            // re-litigate): unlike CharacterAnalysis/StoryAnalysis, Synopsis routes to
+            // AiTaskType.Summarization -> qwen3.5:9b while TermRepair routes to gemma4:12b, so a repair here
+            // DOES cost a cross-model load on an OLLAMA_MAX_LOADED_MODELS=1 host - but only on a value that
+            // actually leaks (a clean synopsis makes zero model calls), and Synopsis is produced once per
+            // profile build, not per chapter. See docs/ANALYSIS_OUTPUT_REPAIR.md §4.1/§4.2 and §19.4.
+            AnalysisType.Synopsis => RepairPlainText(structuredJson, cleanContent),
 
             AnalysisType.LiteraryAnalysis =>
                 RepairStructured<LiteraryAnalysisResult>(structuredJson, cleanContent, jsonOptions, RepairableFields.For),

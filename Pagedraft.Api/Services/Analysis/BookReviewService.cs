@@ -2225,7 +2225,7 @@ public class BookReviewService
         //
         // h1-observable-gate-skip: name WHICH of the three reasons closed the gate via the shared
         // AnalysisRepairGate predicate (also consulted by UnifiedAnalysisService.ApplyAnalysisRepairAsync,
-        // BookIntelligenceService.RepairStructuredProfileJson, and this class's dynamic-repair hook below),
+        // BookIntelligenceService.RepairStructuredProfileJsonAsync, and this class's dynamic-repair hook below),
         // Debug-only — BookReview is routinely gated out on non-BookReview PerType allowlists, so this must
         // never rise to INFO/WARN.
         var gateReason = Ai.AnalysisRepairGate.Evaluate(cfg, AnalysisType.BookReview.ToString());

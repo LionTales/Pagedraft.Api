@@ -71,6 +71,16 @@ public readonly record struct ClassifiedForeignRun(ForeignRun Run, ForeignRunDec
 ///   <item>inside a QUOTED, MULTI-word foreign span — an OPENING quote to the left and its MATCHING CLOSING quote to the right (<c>"…"</c>, <c>'…'</c>, <c>«…»</c>, <c>“…”</c>, <c>‘…’</c>, <c>״…״</c>), with another word inside — a do-not-translate citation such as "carpe diem". A LONE scare-quoted word does NOT qualify, and a MISMATCHED pair (e.g. an opening <c>"</c> "closed" by a possessive apostrophe or a Hebrew abbreviation geresh) does not either (be-c05);</item>
 ///   <item>an ALL-CAPS acronym (Latin only, e.g. NASA / FBI);</item>
 ///   <item>a Title-Case, MID-sentence Latin word (a proper noun — sentence-initial capitalization does NOT count);</item>
+///   <item>(7b) a Title-Case Latin word at a LINE HEAD, i.e. the only thing between it and a HARD LINE BREAK
+///     ('\n' or '\r') is horizontal whitespace / transparent opening punctuation. ONE break is enough; a BLANK
+///     line is deliberately not required, because the real persisted prose this layer repairs separates
+///     paragraphs with a single '\n' (be-c03 measured the runtime DB) and a blank-line predicate would make the
+///     rule dead on it. A completed sentence followed by a deliberate hard line break opens a new discourse
+///     unit, a PLANNED move made in the target language (a synopsis fronts the entity a paragraph is about),
+///     whereas a vocabulary leak is an in-flight lexical failure inside a clause. VALUE-initial position is
+///     deliberately NOT included, and a sentence head MID-LINE is deliberately NOT included, so the "leaked
+///     common noun the model capitalized" shape rule (7) protects against stays REPAIRable everywhere else
+///     (c3, restated as a line head by be-c03);</item>
 ///   <item>a NAME-PARTICLE: an all-lowercase Latin run that lies WITHIN a Title-Case Latin name span — scanning outward across space-separated Latin tokens there is a Title-Case Latin token on BOTH sides with only all-lowercase Latin tokens in between (the "van" of "Vincent van Gogh", but also the "van der" of "Mies van der Rohe" and the "of the" of "The Lord of the Rings") — a name connective, not a leak.</item>
 /// </list>
 /// Everything else — the plain lowercase foreign word in prose — is <see cref="ForeignRunDecision.Repair"/>.
@@ -175,11 +185,64 @@ public static class ForeignRunClassifier
 
             // (7) Title-Case MID-sentence => proper noun. Sentence-initial capitalization is
             // just orthography and does NOT signal a name, so a Title-Case word that opens a
-            // sentence (or the value) still REPAIRs — it is likely a leaked common noun the model
-            // capitalized. This deliberately LEAVES Title-Case mid-sentence tokens; a Title-Case
+            // sentence (or the value) still REPAIRs HERE — it is likely a leaked common noun the model
+            // capitalized. (The ONE sentence-initial position that is spared is a LINE head, and it is
+            // spared by the separate, additive rule (7b) below on a DISCOURSE argument, not this orthographic
+            // one; every other sentence head keeps this rule's verdict.) This deliberately LEAVES Title-Case
+            // mid-sentence tokens; a Title-Case
             // literary term ("Tension") is therefore left for the d3 model to NOT reach, which is
             // the accepted precision/recall trade of a cheap gate (see header BIAS note).
             if (IsTitleCase(text) && hasContext && !IsSentenceInitial(fullValue!, run.Start))
+            {
+                return ForeignRunDecision.Leave;
+            }
+
+            // (7b) Title-Case at a LINE HEAD (any HARD LINE BREAK, one is enough) => proper noun. STRICTLY
+            // ADDITIVE over (7): it is a `return Leave` on a path that previously fell through to
+            // `return Repair`, and rule (7) is evaluated FIRST, so (7b) can only fire where (7) declined
+            // (IsSentenceInitial == true). It converts REPAIR -> LEAVE and never the reverse; blast radius is
+            // RECALL only, and no already-LEAVE run changes verdict.
+            //
+            // WHY a line head is different from a sentence head mid-line. Rule (7) excludes sentence-initial
+            // capitalization because, in ENGLISH orthography, the first word of a sentence is capitalized
+            // regardless of what it is — so the capital carries no proper-noun information. That argument is
+            // about ORTHOGRAPHY and it holds at every sentence head. The argument for (7b) is about DISCOURSE:
+            // a completed sentence followed by a DELIBERATE hard line break opens a new discourse unit, which
+            // is a PLANNED move authored in the target language, and the shape that actually occurs there is a
+            // topic-fronted named entity ("Chekhov הוא ההשוואה המתבקשת" — the q1 false positive this rule
+            // exists to close). A vocabulary LEAK, by contrast, is an in-flight lexical failure: the model
+            // reaches for a missing word in the MIDDLE of a clause it has already started ("תחושת confusion"),
+            // which (7b) never touches.
+            //
+            // WHY "line" AND NOT "paragraph" (be-c03). The prose above argues a PARAGRAPH boundary, and a
+            // blank-line predicate would match that prose more tidily, but it would not match the DATA. The
+            // real persisted prose this layer repairs separates paragraphs with a SINGLE '\n': measured
+            // read-only against the runtime DB, 3 of 3 `BookProfiles.Synopsis` values (each ~1.2-1.6k chars
+            // with exactly 2 LF and 0 CR) and 32 of 33 `ChunkSummaries.SummaryText` values carry a lone break
+            // and ZERO carry a blank line. Requiring a blank line would make this rule DEAD on every real
+            // Synopsis and Summary value and re-open q1's measured false positive on exactly the production
+            // shape. The honest residual is stated rather than hidden: the one shape the discourse argument
+            // does NOT cover is a SOFT WRAP that happens to fall right after a sentence terminator. It is
+            // bounded to Title-Case Latin tokens, it can only send FEWER runs to the model, and it is now
+            // PINNED (`TitleCaseWord_AfterSingleLineBreakFollowingSentenceEnd_IsLeave`) rather than accidental.
+            // NOTE: the three shapes this breadth is most often suspected of (a soft wrap mid-sentence, a
+            // wrapped line, and a newline-separated list line) are already LEAVE WITHOUT (7b), via rule (7),
+            // because in each of them the previous line does not end on a sentence terminator, so
+            // IsSentenceInitial is false and (7) fires first. Narrowing (7b) would not recover any of them.
+            //
+            // The MEASURED corpus is double-newline ONLY: every value in `PreservationFixtureBooks`
+            // .SynopsisCases / .SynopsisLeakCases uses '\n\n', and the d5/d6 corpora carry no break at all, so
+            // q2 scope (iii)'s "zero recall cost" and `Rule7b_SparesNoLeakInEitherD5CleaningCorpus` speak to
+            // the blank-line shape only. The single-break shape is pinned deterministically here instead.
+            //
+            // DELIBERATELY NOT INCLUDED, so the exposed leak shape stays as small as possible:
+            //   • VALUE-initial (index 0, or only whitespace before it). A short structured field whose whole
+            //     value is one sentence can plausibly OPEN with a capitalized leak, and there is no line
+            //     boundary there to argue from. `TitleCaseWord_SentenceInitial_IsRepair` still pins it.
+            //   • a sentence head MID-LINE (". Panic ..."). Same orthography argument as (7), unchanged.
+            // The residual class this does NOT close is an external proper noun at a mid-line sentence
+            // head; it still reaches the d3 model, which is the semantic backstop (see header BIAS note).
+            if (IsTitleCase(text) && hasContext && IsLineInitial(fullValue!, run.Start))
             {
                 return ForeignRunDecision.Leave;
             }

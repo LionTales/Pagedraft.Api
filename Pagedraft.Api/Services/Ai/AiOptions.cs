@@ -391,7 +391,7 @@ public enum AnalysisRepairGateReason
 /// The SINGLE source of truth for "is the repair layer's Enabled/PerType gate open for TYPE, and if not,
 /// why?" (h1-observable-gate-skip). Before this, the identical null/Enabled/PerType check was spelled out
 /// longhand at FOUR independent call sites — <see cref="Analysis.UnifiedAnalysisService.ApplyAnalysisRepairAsync"/>,
-/// <c>Analysis.BookIntelligenceService.RepairStructuredProfileJson</c>, and BOTH the glossary
+/// <c>Analysis.BookIntelligenceService.RepairStructuredProfileJsonAsync</c>, and BOTH the glossary
 /// (<c>Analysis.BookReviewService.ApplyGlossaryToFindings</c>) and dynamic (inline <c>dynamicGateOpen</c>)
 /// hooks in <c>Analysis.BookReviewService</c> — each with its OWN private <c>PerTypeAllows</c> copy. Four
 /// copies of a predicate that must agree is exactly the be-c06 replicated-gate trap (see

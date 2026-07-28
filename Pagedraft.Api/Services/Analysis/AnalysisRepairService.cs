@@ -203,12 +203,16 @@ public class AnalysisRepairService
     ///
     /// Handles ONLY the repair-target types reachable at the analysis seams: Summarization (whole
     /// <paramref name="cleanContent"/>), LiteraryAnalysis, LinguisticAnalysis, LineEdit, BookOverview,
-    /// CharacterAnalysis, StoryAnalysis, QA. Proofread and every other type — plus a non-Hebrew book, an
+    /// CharacterAnalysis, StoryAnalysis, QA. That is EIGHT arms, one fewer than the nine each deterministic switch
+    /// carries. <b>Synopsis is allowlisted and wired in both deterministic switches but is DELIBERATELY NOT an
+    /// arm here</b> (be-c01): this stage has no ForeignRunClassifier rule-(7b) gate, which is the property q2
+    /// measured and the reason Synopsis shipped. The full argument and the reversal condition are stated at the
+    /// <c>default:</c> arm. Proofread, Synopsis and every other type — plus a non-Hebrew book, an
     /// unparsable payload, or any exception — return the inputs UNCHANGED (fail-safe; never throws). For
     /// LineEdit the caller (UnifiedAnalysisService) refreshes ResultText from the repaired overallFeedback;
     /// this method only repairs the structured value.
     /// </summary>
-    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired.</param>
+    /// <param name="type">Analysis type; only Summarization / LiteraryAnalysis / LinguisticAnalysis / LineEdit / BookOverview / CharacterAnalysis / StoryAnalysis / QA are repaired (Synopsis is a NAMED exclusion here; see the <c>default:</c> arm).</param>
     /// <param name="structuredJson">Parsed-and-reserialised StructuredResult (null for Summarization / non-structured types).</param>
     /// <param name="cleanContent">Prose ResultText (the whole repairable text for Summarization).</param>
     /// <param name="language">BOOK language; the pass fires only when this starts with "he".</param>
@@ -357,6 +361,43 @@ public class AnalysisRepairService
                     };
                 }
 
+                // ── SYNOPSIS: allowlisted, wired in the other two switches, DELIBERATELY NOT here ──────────
+                // (be-c01, 2026-07-28.) This is a NAMED exclusion, not a gap. `f2` enabled Synopsis
+                // (PerType=true in both files) and added a PLAIN-TEXT arm to BOTH DETERMINISTIC dispatch
+                // switches - GlossaryRepairPass.Apply and DynamicTermRepairService.ApplyAsync - so under the
+                // shipped Enabled=true / GuardOnly=true posture Synopsis is fully repaired. It reaches THIS
+                // switch only in the opt-in state (3) (GuardOnly=false), and there it stays out, because:
+                //
+                //   (1) THIS STAGE CANNOT HONOUR RULE (7b), AND RULE (7b) IS WHY SYNOPSIS SHIPPED. q1 HALTED
+                //       Synopsis at 83% preservation (5/6) with ONE false positive: the repair model
+                //       TRANSLITERATED "Chekhov" -> "צ'כוב" at a paragraph head. What cleared the §18.2 bar in
+                //       q2 (preservation 100% (6/6), 0 FP, over-rewrite 0) was NOT a better model - it was
+                //       ForeignRunClassifier rule (7b) making that position a deterministic LEAVE, so 0 of the
+                //       6 legitimate values reach a model at all. Rule (7b) lives in ForeignRunClassifier and
+                //       is consulted ONLY by DynamicTermRepairService. This service never touches the
+                //       classifier: its sole gate is LatinInHebrewContentDetector.HasNonAllowlistedLatin, and
+                //       past it the WHOLE value goes to the model under RepairInstruction, which explicitly
+                //       orders "replace every non-Hebrew term with the accepted Hebrew equivalent".
+                //   (2) IsAcceptableRepair WOULD NOT CATCH IT. It rejects a NEW Latin run, non-Hebrew output,
+                //       and a length ratio outside [0.6, 1.6]. Transliterating a proper noun REMOVES a Latin
+                //       run and barely moves the length, so q1's exact false positive passes every guard.
+                //   (3) THE ONLY MEASUREMENT OF A REPAIR MODEL REWRITING SYNOPSIS PROSE IS q1's HALT. Adding an
+                //       arm here would put the failing configuration back one config flip away, with no
+                //       measurement covering it. (The p3-gate GUARD-ONLY decision's over-rewrite finding on
+                //       mixed leak+prose fields supports this, but is not the reason - it does not distinguish
+                //       Synopsis from Summarization. The missing rule-(7b) gate does.)
+                //   (4) PRECEDENT: "Repaired, but deliberately outside the value-scoped stage" already exists -
+                //       BookReview's engine hook ignores GuardOnly entirely by design
+                //       (docs/ANALYSIS_OUTPUT_REPAIR.md §4.2's `GuardOnly` asymmetry note). Synopsis is the
+                //       second such case, for a different and stated reason.
+                //
+                // TO REVERSE: re-run the §18.2 gate (preservation >= 90% AND over-rewrite exactly 0) for
+                // Synopsis THROUGH THIS SERVICE on q1's own fixtures, or give this stage a rule-(7b)
+                // equivalent, then add `case AnalysisType.Synopsis:` mirroring the Summarization arm above.
+                // Pinned by AnalysisRepairExclusionRegressionTests.
+                // ShippedSynopsis_IsDeliberatelyOutsideTheValueScopedLlmStage and recorded in
+                // AnalysisRepairConfigParityTests.DispatchCoverageFor. See docs §4.1 / §4.2.
+                //
                 // Proofread and everything else: NEVER repaired. Return the inputs unchanged (counters 0).
                 default:
                     return new AnalysisRepairResult { StructuredJson = structuredJson, CleanContent = cleanContent };

@@ -966,9 +966,10 @@ public class UnifiedAnalysisService
         // path — which BookIntelligenceService.SummarizeChaptersAsync persists into ChunkSummary.SummaryText
         // — would skip the shipped glossary repair and leak English that every other summarization run has
         // cleaned. The repair layer is type-aware and fail-safe: for the non-target types RunRawAsync also
-        // serves (BookOverview / Synopsis / CharacterAnalysis / StoryAnalysis) it is a strict no-op that
-        // returns the text byte-identical. Summarization has no structured payload, so the whole text is the
-        // repairable prose (structuredJson: null).
+        // serves (BookOverview / CharacterAnalysis / StoryAnalysis) it is a strict no-op that returns the
+        // text byte-identical. Summarization and Synopsis are the two plain-text types this seam repairs
+        // (structuredJson null for both), while BookOverview / CharacterAnalysis / StoryAnalysis stay strict
+        // no-ops here because their structured arms blank-guard on a null structuredJson.
         // SEAM PARITY (be-c02): the bookId is THREADED FROM THE CALLER, exactly like the persisted seams
         // (RunAsync / RunWithInputAsync / streaming / chunked LineEdit) do — RunRawAsync takes raw inputText
         // rather than a book/chapter target, but every real caller (BookIntelligenceService's
@@ -2922,7 +2923,7 @@ public class UnifiedAnalysisService
         // h1-observable-gate-skip: those three reasons previously funnelled into the SAME silent return —
         // an operator staring at a skipped type could not tell which of them (each has a different fix:
         // bind the section / flip Enabled / add the type to PerType) closed the gate. AnalysisRepairGate is
-        // the shared predicate (also consulted by BookIntelligenceService.RepairStructuredProfileJson and
+        // the shared predicate (also consulted by BookIntelligenceService.RepairStructuredProfileJsonAsync and
         // BookReviewService's glossary/dynamic hooks) so this can name the reason without a divergent copy.
         // Debug ONLY: a gated-out type is a normal steady state (Proofread is skipped on every proofread
         // run) and must never produce INFO/WARN noise, mirroring the aggregate line's own no-noise-when-

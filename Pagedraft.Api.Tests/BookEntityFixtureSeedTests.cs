@@ -359,10 +359,13 @@ public class BookEntityFixtureSeedTests
         foreach (var name in PreservationFixtureBooks.SynopsisBookLatinNames)
         {
             Assert.True(entities.Contains(name),
-                $"The REAL BookEntityProvider did not harvest '{name}' from the SYNOPSIS book's manuscript. The " +
-                "q1 synopsis cases that can ONLY be spared by the entity lever (the paragraph-initial and " +
-                "value-initial names, where rule (7) is mid-sentence-only and cannot fire) would then reach the " +
-                "repair model, and the measured gate attribution would be wrong.");
+                $"The REAL BookEntityProvider did not harvest '{name}' from the SYNOPSIS book's manuscript. A " +
+                "missing harvest makes the live q1 report's GATE ATTRIBUTION a lie: after c3's paragraph-head " +
+                "rule (7b), only ONE synopsis name is entity-LOAD-BEARING (the VALUE-initial `Odessa`, which " +
+                "neither rule (7) nor rule (7b) can spare on its own) and would reach the repair model instead " +
+                "of being gated; every other name here is now carried by a classifier rule, so a missing " +
+                "harvest for it would still mis-attribute which lever spared it, even though it would not flip " +
+                "the gated outcome.");
             Assert.Contains(name, set.ManuscriptTokens);
         }
     }
@@ -389,11 +392,20 @@ public class BookEntityFixtureSeedTests
     [Fact]
     public async Task SynopsisCases_HaveTheGateAttributionTheQ1ReportClaims()
     {
-        // NOT the same assertion as EveryLegitCase_IsDeterministicallyGated: q1's whole point is that ONE
-        // synopsis value genuinely REACHES the model, so "everything is gated" is the wrong pin here. What is
-        // pinned instead is the SHAPE of the attribution the report will print: every case that declares a
-        // GatingEntity is spared by an entity the REAL provider harvested and is LOAD-BEARING, exactly one case
-        // reaches the model, and the rest are carried by classifier rules with the entity lever inert.
+        // The SHAPE of the attribution the live report will print: every case that declares a GatingEntity is
+        // spared by an entity the REAL provider harvested AND is LOAD-BEARING, and the rest are carried by
+        // classifier rules with the entity lever inert.
+        //
+        // c3 CHANGED THIS PIN, deliberately, and the change is the evidence the rule works. When q1 measured
+        // this corpus, EXACTLY ONE value reached the model — `Chekhov`, a paragraph-initial external proper
+        // noun — and the model transliterated it (`צ'כוב`), which is the whole Synopsis HALT. Classifier rule
+        // (7b) (Title-Case at a PARAGRAPH head, ForeignRunClassifier.cs) now gates it, so the expected set is
+        // EMPTY. Two consequences pinned below:
+        //   • no synopsis value reaches the model any more, so q2 scope (ii) must report its preservation as a
+        //     property of the deterministic GATE, not as evidence about gemma4:12b (q1's central lesson);
+        //   • case (2) `Katarina` was entity-gated and is now (7b)-gated, so its GatingEntity is null. Case (6)
+        //     `Odessa` is VALUE-initial — a position (7b) deliberately does not claim — and remains the
+        //     fixture's proof that the entity lever still gates a synopsis value on its own.
         using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
 
         var reachesModel = new List<string>();
@@ -418,7 +430,19 @@ public class BookEntityFixtureSeedTests
             }
         }
 
-        Assert.Equal(new[] { "Chekhov" }, reachesModel);
+        Assert.True(reachesModel.Count == 0,
+            $"{reachesModel.Count} synopsis value(s) still reach the repair model ({string.Join(", ", reachesModel)}). " +
+            "After c3's rule (7b) every synopsis case must be gated deterministically — if 'Chekhov' is back in " +
+            "this list, rule (7b) has regressed and q2 scope (ii) would re-measure the SAME false positive q1 " +
+            "already priced.");
+
+        // NON-VACUITY: the list is empty because a RULE gates every case, not because the attribution helper
+        // stopped detecting model-reaching cases. Strip the paragraph break out of the Chekhov value and the
+        // very same run must go back to reaching the model — i.e. it is (7b), specifically, that carries it.
+        var chekhov = PreservationFixtureBooks.SynopsisCases.Single(c => c.Token == "Chekhov");
+        var flattened = chekhov.Value.Replace("\n\n", " ");
+        var flattenedRuns = LatinInHebrewContentDetector.DetectForeignRuns(flattened, chekhov.Expected);
+        Assert.NotEmpty(ForeignRunClassifier.RunsToRepair(flattenedRuns, flattened, chekhov.Expected, null));
     }
 
     [Fact]

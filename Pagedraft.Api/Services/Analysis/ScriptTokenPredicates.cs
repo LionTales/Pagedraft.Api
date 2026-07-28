@@ -110,8 +110,13 @@ internal static class ScriptTokenPredicates
     /// True when the token at <paramref name="start"/> OPENS a sentence in <paramref name="text"/> —
     /// i.e. scanning left of <paramref name="start"/> and skipping whitespace and transparent opening
     /// punctuation (quotes/brackets/parentheses), the first meaningful character is a sentence
-    /// terminator ('.', '!', '?', '…', or a line break) or the string start. Used to DISQUALIFY
-    /// sentence-initial capitalization from the mid-sentence proper-noun signal.
+    /// terminator ('.', '!', '?', '…') or the string start. Used to DISQUALIFY sentence-initial
+    /// capitalization from the mid-sentence proper-noun signal.
+    /// <para>EVALUATION ORDER (the difference from <see cref="IsLineInitial"/>, which follows directly
+    /// below): the <c>char.IsWhiteSpace</c> skip is tested BEFORE the terminator check, so a '\n' / '\r'
+    /// is consumed here as ordinary whitespace and the line-break entries in
+    /// <see cref="IsSentenceTerminator"/> are unreachable from THIS scan. A line break therefore does not
+    /// by itself make a following token sentence-initial.</para>
     /// </summary>
     public static bool IsSentenceInitial(string text, int start)
     {
@@ -129,6 +134,52 @@ internal static class ScriptTokenPredicates
         }
 
         return true; // reached the start of the text
+    }
+
+    /// <summary>
+    /// True when the token at <paramref name="start"/> is LINE-INITIAL in <paramref name="text"/>: scanning
+    /// LEFT and treating whitespace and transparent opening punctuation (quotes / brackets, the same set
+    /// <see cref="IsSentenceInitial"/> skips) as transparent, the first meaningful character is a HARD LINE
+    /// BREAK ('\n' or '\r'). The break test comes FIRST, so '\n' / '\r' are never consumed by the whitespace
+    /// skip; the remaining Unicode line separators (U+2028 / U+2029 / U+0085 / '\v' / '\f') are treated as
+    /// ordinary transparent whitespace here, deliberately, because none of them occurs in the persisted prose
+    /// this predicate runs over.
+    /// <para>ONE break is enough; a BLANK line is deliberately NOT required. The name says "line", not
+    /// "paragraph", because that is what the predicate actually tests, and because it is what the data needs:
+    /// the real persisted prose this layer repairs separates paragraphs with a SINGLE '\n' (be-c03 measured
+    /// the runtime DB: 3 of 3 <c>BookProfiles.Synopsis</c> values and 32 of 33 <c>ChunkSummaries.SummaryText</c>
+    /// values carry a lone break and ZERO carry a blank line). A blank-line requirement would make
+    /// ForeignRunClassifier rule (7b) dead on every real value.</para>
+    /// <para>Reaching the START of the value returns FALSE: value-initial is deliberately NOT a line head
+    /// for rule (7b), which is what keeps a short single-sentence field's opening token REPAIRable.</para>
+    /// <para>NOT a subset of <see cref="IsSentenceInitial"/>, and neither predicate contains the other. The
+    /// whole difference is the EVALUATION ORDER visible in the two bodies above and below: this scan tests the
+    /// '\n' / '\r' break FIRST, whereas <see cref="IsSentenceInitial"/> tests <c>char.IsWhiteSpace</c> first
+    /// and so skips the break as ordinary whitespace before it can ever reach the line-break entries in
+    /// <see cref="IsSentenceTerminator"/>. Hence a soft wrap is line-initial but not sentence-initial, and a
+    /// value start is sentence-initial but not line-initial. Rule (7b) is still strictly ADDITIVE over rule
+    /// (7), but by evaluation order rather than by a set relation: rule (7) is tested first and already
+    /// returns Leave for every run where <see cref="IsSentenceInitial"/> is false.</para>
+    /// </summary>
+    public static bool IsLineInitial(string text, int start)
+    {
+        for (var i = start - 1; i >= 0; i--)
+        {
+            var c = text[i];
+            if (c is '\n' or '\r')
+            {
+                return true;
+            }
+
+            if (char.IsWhiteSpace(c) || IsTransparentOpen(c))
+            {
+                continue;
+            }
+
+            return false;
+        }
+
+        return false; // the start of the VALUE, not a line head (see the remarks above)
     }
 
     /// <summary>Opening punctuation transparent to sentence-initial detection (quotes / brackets).</summary>
