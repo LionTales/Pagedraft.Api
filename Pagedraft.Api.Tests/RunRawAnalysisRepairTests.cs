@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -40,14 +43,15 @@ public class RunRawAnalysisRepairTests
         IAiRouter router,
         AnalysisRepairOptions? repair,
         IAiRouter? termRepairRouter = null,
-        IBookEntityProvider? entityProvider = null)
+        IBookEntityProvider? entityProvider = null,
+        ILogger<UnifiedAnalysisService>? logger = null)
         => new(
             db,
             router,
             new PromptFactory(),
             new SfdtConversionService(),
             Options.Create(new AiOptions { AnalysisRepair = repair }),
-            NullLogger<UnifiedAnalysisService>.Instance,
+            logger ?? NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             new Mock<IAnalysisContextService>().Object,
             new SuggestionDiffService(),
@@ -56,6 +60,18 @@ public class RunRawAnalysisRepairTests
             new DynamicTermRepairService(
                 termRepairRouter ?? new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
             entityProvider ?? new StubBookEntityProvider());
+
+    /// <summary>Minimal in-memory <see cref="ILogger{T}"/> that records every entry's level + rendered
+    /// message (h1-observable-gate-skip idiom, mirrors OllamaProviderFallbackLoggingTests.CapturingLogger).</summary>
+    private sealed class CapturingLogger : ILogger<UnifiedAnalysisService>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
+    }
 
     private static AppDbContext NewDb()
         => new(new DbContextOptionsBuilder<AppDbContext>()
@@ -205,5 +221,98 @@ public class RunRawAnalysisRepairTests
         Assert.DoesNotContain("Daniel", result);
         termRouter.Verify(
             r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    // ── h1-observable-gate-skip: UnifiedAnalysisService.ApplyAnalysisRepairAsync's first gate previously
+    // returned silently for a null config block, Enabled=false, or a non-empty PerType map excluding the
+    // type — leaving no trace of WHICH of the three reasons closed it (each has a different fix). These
+    // tests drive the gate through RunRawAsync (the same public seam RunRawAnalysisRepairTests uses above)
+    // and assert the Debug-level "gate closed" line names the type + reason, or (for an allowed type) that
+    // NO such line is emitted at all. ──
+
+    private static IReadOnlyList<(LogLevel Level, string Message)> SkipLogEntries(CapturingLogger logger) =>
+        logger.Entries.Where(e => e.Message.Contains("gate closed", StringComparison.Ordinal)).ToList();
+
+    private static IReadOnlyList<string> SkipLogMessages(CapturingLogger logger) =>
+        SkipLogEntries(logger).Select(e => e.Message).ToList();
+
+    [Fact]
+    public async Task ApplyAnalysisRepairAsync_PerTypeExcludesType_LogsDebugWithTypeAndReason()
+    {
+        await using var db = NewDb();
+        var logger = new CapturingLogger();
+        var svc = NewService(
+            db,
+            RouterReturning("סיכום עם (Action) בפנים."),
+            new AnalysisRepairOptions
+            {
+                Enabled = true,
+                // Non-empty allowlist that does NOT include Summarization → PerTypeExcluded.
+                PerType = new Dictionary<string, bool> { ["LiteraryAnalysis"] = true }
+            },
+            logger: logger);
+
+        await svc.RunRawAsync(
+            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
+
+        var entry = Assert.Single(SkipLogEntries(logger));
+        Assert.Equal(LogLevel.Debug, entry.Level);
+        Assert.Contains("Summarization", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("PerTypeExcluded", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ApplyAnalysisRepairAsync_Disabled_LogsDebugWithDisabledReason()
+    {
+        await using var db = NewDb();
+        var logger = new CapturingLogger();
+        var svc = NewService(
+            db,
+            RouterReturning("סיכום עם (Action) בפנים."),
+            new AnalysisRepairOptions { Enabled = false },
+            logger: logger);
+
+        await svc.RunRawAsync(
+            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
+
+        var line = Assert.Single(SkipLogMessages(logger));
+        Assert.Contains("Summarization", line, StringComparison.Ordinal);
+        Assert.Contains("Disabled", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ApplyAnalysisRepairAsync_NullConfig_LogsDebugWithNullConfigReason()
+    {
+        await using var db = NewDb();
+        var logger = new CapturingLogger();
+        var svc = NewService(
+            db,
+            RouterReturning("סיכום עם (Action) בפנים."),
+            repair: null,
+            logger: logger);
+
+        await svc.RunRawAsync(
+            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
+
+        var line = Assert.Single(SkipLogMessages(logger));
+        Assert.Contains("Summarization", line, StringComparison.Ordinal);
+        Assert.Contains("NullConfig", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ApplyAnalysisRepairAsync_AllowedType_LogsNoSkipLine()
+    {
+        await using var db = NewDb();
+        var logger = new CapturingLogger();
+        var svc = NewService(
+            db,
+            RouterReturning("סיכום עם (Action) בפנים."),
+            new AnalysisRepairOptions { Enabled = true, GuardOnly = true }, // no PerType restriction → allowed
+            logger: logger);
+
+        await svc.RunRawAsync(
+            "טקסט.", AnalysisType.Summarization, instruction: null, language: "he", ct: CancellationToken.None);
+
+        Assert.Empty(SkipLogMessages(logger));
     }
 }

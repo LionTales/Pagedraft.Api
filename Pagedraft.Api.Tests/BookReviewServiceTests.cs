@@ -489,6 +489,167 @@ public class BookReviewServiceTests
         }
     }
 
+    // ─── 3d. h1-observable-gate-skip / be-c02: the Enabled+PerType gate over the BookReview repair layer must
+    //     leave an observable trace naming WHICH of the three reasons closed it (null block / Enabled=false /
+    //     PerType exclusion — each has a different fix), Debug-only (a routine PerType exclusion must never
+    //     rise to INFO/WARN).
+    //
+    //     be-c02 REWROTE these from a DYNAMIC-stage contract to a LAYER contract. h1 left the two sibling hooks
+    //     reporting the SAME closed gate asymmetrically: the glossary skip was logged only from INSIDE
+    //     ApplyGlossaryToFindings, which Mode=Off/Dynamic never CALL, while the dynamic skip was logged
+    //     unconditionally. So a Mode=Off build emitted exactly ONE line, naming only the dynamic stage — an
+    //     operator read "the dynamic stage was gated out" when the ENTIRE layer was, and the glossary half of
+    //     the path was invisible under 2 of the 4 Modes; a Mode=GlossaryThenDynamic build logged the same
+    //     reason TWICE. The gate is now evaluated + logged ONCE for the whole layer (mirroring
+    //     UnifiedAnalysisService.ApplyAnalysisRepairAsync's single per-call gate log), naming BOTH stages.
+    //
+    //     These tests therefore assert the line is UNIQUE across the whole build (pinning the de-duplication)
+    //     and that it names BOTH stages (pinning the symmetry) — not merely that "a line mentioning dynamic"
+    //     exists, which is what they checked before. ───
+
+    /// <summary>Every "gate closed" line the build emitted, across ALL categories — deliberately NOT filtered
+    /// to one stage, so a per-stage duplicate would show up as an extra entry.</summary>
+    private static IReadOnlyList<(LogLevel Level, string Message)> RepairGateSkipLines(
+        CapturingLoggerProvider logCapture) =>
+        logCapture.Entries
+            .Where(e => e.Message.Contains("gate closed", StringComparison.Ordinal))
+            .ToList();
+
+    /// <summary>Asserts the ONE layer-gate line: Debug, names the type + reason, and names BOTH gated stages
+    /// (glossary AND dynamic) so neither half of the layer can go silent again.</summary>
+    private static void AssertSingleLayerGateSkipLine(CapturingLoggerProvider logCapture, string expectedReason)
+    {
+        var entry = Assert.Single(RepairGateSkipLines(logCapture)); // exactly ONE line for the whole layer
+        Assert.Equal(LogLevel.Debug, entry.Level);
+        Assert.Contains("BookReview", entry.Message, StringComparison.Ordinal);
+        Assert.Contains(expectedReason, entry.Message, StringComparison.Ordinal);
+        Assert.Contains("glossary", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("dynamic", entry.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildBookReviewAsync_RepairLayerGate_PerTypeExcludesBookReview_LogsOneDebugLineNamingBothStages()
+    {
+        var byDim = FindingsPerDimension(perDimensionCount: 1);
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildProvider(out _, byDim, logCapture);
+        var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+        aiOptions.AnalysisRepair = new AnalysisRepairOptions
+        {
+            Enabled = true,
+            // Mode WOULD select BOTH stages — so pre-be-c02 this build logged the same reason twice (once from
+            // inside ApplyGlossaryToFindings, once from the dynamic block). Assert.Single now pins that down.
+            Mode = AnalysisRepairMode.GlossaryThenDynamic,
+            PerType = new Dictionary<string, bool> { ["LiteraryAnalysis"] = true }, // ...but PerType excludes BookReview
+        };
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        AssertSingleLayerGateSkipLine(logCapture, "PerTypeExcluded");
+    }
+
+    [Fact]
+    public async Task BuildBookReviewAsync_RepairLayerGate_Disabled_LogsOneDebugLineNamingBothStages()
+    {
+        var byDim = FindingsPerDimension(perDimensionCount: 1);
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildProvider(out _, byDim, logCapture);
+        var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+        aiOptions.AnalysisRepair = new AnalysisRepairOptions
+        {
+            Enabled = false,
+            Mode = AnalysisRepairMode.GlossaryThenDynamic,
+        };
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        AssertSingleLayerGateSkipLine(logCapture, "Disabled");
+    }
+
+    [Fact]
+    public async Task BuildBookReviewAsync_RepairLayerGate_NullConfig_LogsOneDebugLineNamingBothStages()
+    {
+        var byDim = FindingsPerDimension(perDimensionCount: 1);
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildProvider(out _, byDim, logCapture);
+        // aiOptions.AnalysisRepair stays null (BuildProvider's default) → NullConfig.
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        AssertSingleLayerGateSkipLine(logCapture, "NullConfig");
+    }
+
+    [Fact]
+    public async Task BuildBookReviewAsync_RepairLayerGate_Allowed_LogsNoSkipLine()
+    {
+        var byDim = FindingsPerDimension(perDimensionCount: 1);
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildProvider(out _, byDim, logCapture);
+        var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+        aiOptions.AnalysisRepair = new AnalysisRepairOptions
+        {
+            Enabled = true,
+            Mode = AnalysisRepairMode.GlossaryThenDynamic,
+            PerType = new Dictionary<string, bool> { ["BookReview"] = true }, // no exclusion → allowed
+        };
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.Empty(RepairGateSkipLines(logCapture));
+    }
+
+    // ─── be-c02 REGRESSION (the case with NO test before this todo): under a Mode that does NOT select the
+    //     glossary stage (Off / Dynamic), the glossary hook is never CALLED, so its INTERNAL gate line can
+    //     never fire. Before the hoist that meant a closed Enabled/PerType gate produced exactly ONE line,
+    //     about the DYNAMIC stage only — the glossary half of the BookReview repair path was completely
+    //     unobservable, the very failure h1 exists to eliminate. The layer line must name the glossary stage
+    //     under these Modes too. Mode is reported (never consulted) so the operator can also see that the
+    //     stage selection was irrelevant: Enabled/PerType closed everything. ───
+    [Theory]
+    [InlineData(AnalysisRepairMode.Off)]
+    [InlineData(AnalysisRepairMode.Dynamic)]
+    public async Task BuildBookReviewAsync_RepairLayerGate_ClosedUnderModeThatSkipsGlossary_StillReportsGlossaryStage(
+        AnalysisRepairMode mode)
+    {
+        var byDim = FindingsPerDimension(perDimensionCount: 1);
+        var logCapture = new CapturingLoggerProvider();
+        using var provider = BuildProvider(out _, byDim, logCapture);
+        var aiOptions = provider.GetRequiredService<IOptions<AiOptions>>().Value;
+        aiOptions.AnalysisRepair = new AnalysisRepairOptions
+        {
+            Enabled = false, // the LAYER gate is closed...
+            Mode = mode,     // ...under a Mode that would not have selected the glossary stage anyway
+            PerType = new Dictionary<string, bool> { ["BookReview"] = true },
+        };
+
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var entry = Assert.Single(RepairGateSkipLines(logCapture));
+        Assert.Equal(LogLevel.Debug, entry.Level); // a gated-out type is a normal steady state
+        Assert.Contains("BookReview", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("Disabled", entry.Message, StringComparison.Ordinal);
+        // THE POINT: the GLOSSARY stage is named even though ApplyGlossaryToFindings was never invoked.
+        Assert.Contains("glossary", entry.Message, StringComparison.Ordinal);
+        Assert.Contains("dynamic", entry.Message, StringComparison.Ordinal);
+        // ...and the Mode that did not select it is reported, so "the layer was off" is unambiguous.
+        Assert.Contains($"Mode={mode}", entry.Message, StringComparison.Ordinal);
+    }
+
     // ─── 4. DimensionScore rollup counts ──────────────────────────────────────────────────────────
 
     [Fact]
@@ -6282,10 +6443,18 @@ public class BookReviewServiceTests
     /// </summary>
     private static ServiceProvider BuildProvider(
         out Mock<IAiRouter> routerMock,
-        Dictionary<string, string> dimensionFindings)
+        Dictionary<string, string> dimensionFindings,
+        CapturingLoggerProvider? logCapture = null)
     {
         var services = new ServiceCollection();
-        services.AddLogging();
+        services.AddLogging(b =>
+        {
+            if (logCapture != null)
+            {
+                b.SetMinimumLevel(LogLevel.Trace);
+                b.AddProvider(logCapture);
+            }
+        });
         services.AddDbContext<AppDbContext>(opt => opt.UseInMemoryDatabase(Guid.NewGuid().ToString()));
         services.AddSingleton<SfdtConversionService>();
         services.AddSingleton<PromptFactory>();

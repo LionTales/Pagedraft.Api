@@ -2918,8 +2918,21 @@ public class UnifiedAnalysisService
         // shipped appsettings block sets Enabled=true, so production runs the Mode-selected stage(s)
         // (glossary + dynamic under the shipped Mode=GlossaryThenDynamic). Also skip when a non-empty PerType map excludes this
         // analysis type (a type absent/false is skipped).
-        if (cfg is null || !cfg.Enabled || !PerTypeAllows(cfg, analysisType))
+        //
+        // h1-observable-gate-skip: those three reasons previously funnelled into the SAME silent return —
+        // an operator staring at a skipped type could not tell which of them (each has a different fix:
+        // bind the section / flip Enabled / add the type to PerType) closed the gate. AnalysisRepairGate is
+        // the shared predicate (also consulted by BookIntelligenceService.RepairStructuredProfileJson and
+        // BookReviewService's glossary/dynamic hooks) so this can name the reason without a divergent copy.
+        // Debug ONLY: a gated-out type is a normal steady state (Proofread is skipped on every proofread
+        // run) and must never produce INFO/WARN noise, mirroring the aggregate line's own no-noise-when-
+        // healthy convention below.
+        var gateReason = AnalysisRepairGate.Evaluate(cfg, analysisType.ToString());
+        if (gateReason != AnalysisRepairGateReason.Allowed)
         {
+            _logger.LogDebug(
+                "AnalysisRepair: type={Type} gate closed ({Reason}); skipping repair layer",
+                analysisType, gateReason);
             return (structuredJson, cleanContent);
         }
 
@@ -2932,7 +2945,9 @@ public class UnifiedAnalysisService
         // early-out means exactly "no stage is selected -> strict no-op" and stays correct for any future
         // mode (and for a config-bound value outside the enum, which selects nothing). For Mode=Off this is
         // byte-identical to the previous check.
-        var mode = cfg.Mode;
+        // cfg is guaranteed non-null here: AnalysisRepairGate.Evaluate only returns Allowed when cfg is not
+        // null (NullConfig otherwise), so the early-return above already ruled out the null case.
+        var mode = cfg!.Mode;
         if (!mode.RunsGlossary() && !mode.RunsDynamic())
         {
             return (structuredJson, cleanContent);
@@ -3073,18 +3088,6 @@ public class UnifiedAnalysisService
         }
 
         return (structuredJson, cleanContent);
-    }
-
-    /// <summary>
-    /// Per-type gate for the repair layer (p6-config). When <see cref="Ai.AnalysisRepairOptions.PerType"/>
-    /// is null/empty there is NO per-type restriction (every repairable type is allowed). When it is a
-    /// non-empty map it is a strict allowlist: a type absent from the map, or mapped to false, is skipped.
-    /// Keyed by the <see cref="AnalysisType"/> name (e.g. "Summarization", "LiteraryAnalysis").
-    /// </summary>
-    private static bool PerTypeAllows(Ai.AnalysisRepairOptions cfg, AnalysisType analysisType)
-    {
-        if (cfg.PerType is null || cfg.PerType.Count == 0) return true;
-        return cfg.PerType.TryGetValue(analysisType.ToString(), out var enabled) && enabled;
     }
 
     // ─── Sanitization ───────────────────────────────────────────────
