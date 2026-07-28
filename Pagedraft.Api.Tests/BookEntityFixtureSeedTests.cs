@@ -341,6 +341,124 @@ public class BookEntityFixtureSeedTests
         }
     }
 
+    // ── the SYNOPSIS book (q1): the offline half of the Synopsis quality gate ───────────────────────────
+    //
+    // The q1 GPU run measures preservation / over-rewrite for `Synopsis`-shaped values. These three tests are
+    // its OFFLINE half and they are what makes that run worth doing: if the provider does not harvest the
+    // synopsis book's names, or if the deliberately-unseeded tokens start being harvested, the live report's
+    // GATE ATTRIBUTION becomes a lie (it would credit the entity lever for what a classifier rule did, or vice
+    // versa) — and attribution is the whole point of q1's verdict.
+
+    [Fact]
+    public async Task SynopsisBook_HarvestsEveryLatinNameTheSynopsisFixtureDependsOn()
+    {
+        using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
+        var entities = await fixtureBooks.SynopsisBookEntitiesAsync();
+        var set = Assert.IsType<BookEntitySet>(entities);
+
+        foreach (var name in PreservationFixtureBooks.SynopsisBookLatinNames)
+        {
+            Assert.True(entities.Contains(name),
+                $"The REAL BookEntityProvider did not harvest '{name}' from the SYNOPSIS book's manuscript. The " +
+                "q1 synopsis cases that can ONLY be spared by the entity lever (the paragraph-initial and " +
+                "value-initial names, where rule (7) is mid-sentence-only and cannot fire) would then reach the " +
+                "repair model, and the measured gate attribution would be wrong.");
+            Assert.Contains(name, set.ManuscriptTokens);
+        }
+    }
+
+    [Fact]
+    public async Task SynopsisBook_DoesNotHarvestTheDeliberatelyUnseededTokens()
+    {
+        // The construction that keeps q1's attribution honest. `Chekhov` must REACH THE MODEL (it is the
+        // measured false-positive surface); `Winter`/`Letters` must be carried by classifier rule (5) alone;
+        // `NKVD` is ALL-CAPS and therefore not harvestable at all (rule 6 owns it); `Vries` is only ever
+        // spared by rule (7). If any of them starts harvesting, the live report credits the ENTITY lever for
+        // work the classifier (or the model) actually did.
+        using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
+        var entities = await fixtureBooks.SynopsisBookEntitiesAsync();
+
+        foreach (var token in PreservationFixtureBooks.SynopsisBookNonHarvestedTokens)
+        {
+            Assert.False(entities.Contains(token),
+                $"'{token}' was harvested from the SYNOPSIS book's manuscript, but the q1 fixture depends on it " +
+                "NOT being an entity — see the block comment above PreservationFixtureBooks.SynopsisCases.");
+        }
+    }
+
+    [Fact]
+    public async Task SynopsisCases_HaveTheGateAttributionTheQ1ReportClaims()
+    {
+        // NOT the same assertion as EveryLegitCase_IsDeterministicallyGated: q1's whole point is that ONE
+        // synopsis value genuinely REACHES the model, so "everything is gated" is the wrong pin here. What is
+        // pinned instead is the SHAPE of the attribution the report will print: every case that declares a
+        // GatingEntity is spared by an entity the REAL provider harvested and is LOAD-BEARING, exactly one case
+        // reaches the model, and the rest are carried by classifier rules with the entity lever inert.
+        using var fixtureBooks = await PreservationFixtureBooks.CreateAsync();
+
+        var reachesModel = new List<string>();
+        foreach (var c in PreservationFixtureBooks.SynopsisCases)
+        {
+            var entities = await fixtureBooks.EntitiesForAsync(c);
+            var gate = PreservationFixtureBooks.AttributeGate(c, entities);
+
+            if (c.GatingEntity is not null)
+            {
+                Assert.False(gate.RequiredEntityMissing,
+                    $"FINDING: [{c.Cls}] '{c.Token}' requires the book-entity '{c.GatingEntity}', which the REAL " +
+                    "BookEntityProvider did NOT produce.");
+                Assert.True(gate.EntityLoadBearing,
+                    $"[{c.Cls}] '{c.Token}' is no longer gated BY THE ENTITY SET — the q1 report would credit a " +
+                    "classifier rule for the entity lever's work.");
+            }
+
+            if (gate.ReachesModel)
+            {
+                reachesModel.Add(c.Token);
+            }
+        }
+
+        Assert.Equal(new[] { "Chekhov" }, reachesModel);
+    }
+
+    [Fact]
+    public void SynopsisLeakCases_EachCarryExactlyOneLatinRun_AndItIsTheLeak()
+    {
+        // The d5 instrument's seed contract (it reports SEED-ERR otherwise, and a SEED-ERR row measures
+        // nothing). Also pins that the leak is classified REPAIR with NO entity set at all, so a synopsis-length
+        // value does not accidentally acquire a name-span / quote gate that spares the leak.
+        foreach (var leak in PreservationFixtureBooks.SynopsisLeakCases)
+        {
+            var runs = LatinInHebrewContentDetector.DetectForeignRuns(leak.Value, ExpectedScript.Hebrew);
+            Assert.True(runs.Count == 1,
+                $"[{leak.Label}] produced {runs.Count} Latin run(s) " +
+                $"({string.Join(", ", runs.Select(r => $"'{r.Text}'"))}); the d5 instrument requires exactly one.");
+            Assert.Equal(leak.Leak, runs[0].Text);
+
+            var repairRuns = ForeignRunClassifier.RunsToRepair(runs, leak.Value, ExpectedScript.Hebrew, null);
+            Assert.True(repairRuns.Count == 1, $"[{leak.Label}] the leak is not classified REPAIR.");
+        }
+    }
+
+    [Fact]
+    public void SynopsisCases_AreActuallyMultiParagraph_AndProperNounDense()
+    {
+        // NON-VACUITY. The q1 claim is that the SHAPE is new — multi-paragraph editorial prose (SynopsisHe asks
+        // for 3-5 paragraphs) dense in proper nouns — not just more one-line probes. Pin the shape, so a later
+        // edit cannot quietly shrink the fixture back to the analysis-shaped corpus it exists to differ from.
+        foreach (var c in PreservationFixtureBooks.SynopsisCases)
+        {
+            var paragraphs = c.Value.Split("\n\n", StringSplitOptions.RemoveEmptyEntries).Length;
+            Assert.True(paragraphs >= 3, $"[{c.Cls}] has {paragraphs} paragraph(s); SynopsisHe asks for 3-5.");
+            Assert.True(c.Value.Length >= 400, $"[{c.Cls}] is only {c.Value.Length} chars — not synopsis length.");
+        }
+
+        // At least one value must carry 4+ distinct Latin runs: the DENSITY is the risk being measured.
+        Assert.Contains(PreservationFixtureBooks.SynopsisCases, c =>
+            LatinInHebrewContentDetector.DetectForeignRuns(c.Value, ExpectedScript.Hebrew)
+                .Select(r => r.Text).Distinct().Count() >= 4);
+    }
+
     [Fact]
     public void MultiParticleNameSpans_ClassifyEveryRunLeave_WithNoEntitySetAtAll()
     {
