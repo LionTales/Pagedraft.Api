@@ -889,6 +889,48 @@ public class UnifiedAnalysisService
         Guid? bookId = null,
         CancellationToken ct = default)
     {
+        // COMPOSITION, not a copy: the public seam is literally "generate, then repair". Splitting the body
+        // into the two internal halves below is what lets the ONE batching caller
+        // (BookIntelligenceService.SummarizeChaptersAsync) defer the repair half without any second code path
+        // — so this seam and the batched seam cannot drift apart (the exact bug class that shipped twice on
+        // this feature: the glossary skipped RunRawAsync, then the entity lever skipped it).
+        var pending = await RunRawDeferredRepairAsync(inputText, analysisType, instruction, language, bookId, ct);
+        return await CompleteDeferredRepairAsync(pending, ct);
+    }
+
+    /// <summary>
+    /// An UN-REPAIRED raw model run: the sanitized model text plus everything
+    /// <see cref="CompleteDeferredRepairAsync"/> needs to finish it. Deliberately NOT a <c>string</c> —
+    /// a value of this type cannot be assigned to, persisted as, or returned as a finished analysis
+    /// result without first being handed back to <see cref="CompleteDeferredRepairAsync"/>, so "I forgot
+    /// to repair" is a compile error rather than a silent leak of English into persisted Hebrew prose.
+    /// <c>internal</c> + a name that states the contract; there is no public repair-less raw seam.
+    /// </summary>
+    internal readonly record struct DeferredRepairRawRun(
+        string UnrepairedText,
+        AnalysisType AnalysisType,
+        string Language,
+        Guid BookId);
+
+    /// <summary>
+    /// FIRST HALF of <see cref="RunRawAsync"/>: run the model and sanitize, WITHOUT the repair layer.
+    ///
+    /// This is NOT a general "raw without repair" seam and must not become one. It exists for exactly one
+    /// caller — <c>BookIntelligenceService.SummarizeChaptersAsync</c>, which summarizes every chapter first
+    /// so the Summarization model stays resident, then runs ONE repair pass so the TermRepair model loads
+    /// once instead of once per leaking chapter (an ~21 s cold model load per swap on a single-GPU host with
+    /// <c>OLLAMA_MAX_LOADED_MODELS=1</c>). Its result MUST be completed through
+    /// <see cref="CompleteDeferredRepairAsync"/> before it is persisted or returned; the
+    /// <see cref="DeferredRepairRawRun"/> return type is what enforces that.
+    /// </summary>
+    internal async Task<DeferredRepairRawRun> RunRawDeferredRepairAsync(
+        string inputText,
+        AnalysisType analysisType,
+        string? instruction,
+        string language,
+        Guid? bookId = null,
+        CancellationToken ct = default)
+    {
         var taskType = MapToTaskType(analysisType);
         var prompt = instruction ?? _promptFactory.GetAnalysisPrompt(analysisType, language);
 
@@ -904,6 +946,21 @@ public class UnifiedAnalysisService
         var response = await _router.CompleteAsync(request, ct);
         var sanitized = SanitizeResponse(response.Content);
 
+        // A null bookId degrades to Guid.Empty here, exactly as the un-split seam did (see the fail-safe note
+        // on CompleteDeferredRepairAsync) — the resolution happens ONCE, at the producer.
+        return new DeferredRepairRawRun(sanitized, analysisType, language, bookId ?? Guid.Empty);
+    }
+
+    /// <summary>
+    /// SECOND HALF of <see cref="RunRawAsync"/>: apply the repair layer to a
+    /// <see cref="DeferredRepairRawRun"/>. Identical prompt, identical span-scoped engine, identical
+    /// validation-by-re-detect as the un-deferred call — the ONLY thing a batching caller changes is WHEN
+    /// this runs, never WHAT it does, so repair quality is unchanged by construction.
+    /// </summary>
+    internal async Task<string> CompleteDeferredRepairAsync(
+        DeferredRepairRawRun pending,
+        CancellationToken ct = default)
+    {
         // Apply the SAME analysis-output repair layer the persisted seams (RunAsync / RunWithInputAsync /
         // streaming / chunked LineEdit) run. Without this, a Hebrew Summarization routed through this raw
         // path — which BookIntelligenceService.SummarizeChaptersAsync persists into ChunkSummary.SummaryText
@@ -926,7 +983,8 @@ public class UnifiedAnalysisService
         // identical to what this seam did before. Under the rollback Mode=Glossary/Off the dynamic stage does
         // not run here at all (and the provider is never consulted).
         var (_, repaired) = await ApplyAnalysisRepairAsync(
-            structuredJson: null, cleanContent: sanitized, analysisType, language, bookId ?? Guid.Empty, ct);
+            structuredJson: null, cleanContent: pending.UnrepairedText, pending.AnalysisType,
+            pending.Language, pending.BookId, ct);
         return repaired;
     }
 

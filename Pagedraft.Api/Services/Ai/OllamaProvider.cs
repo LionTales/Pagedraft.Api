@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Pagedraft.Api.Services.Ai.Contracts;
 
@@ -22,12 +23,25 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
     private readonly IHttpClientFactory _httpFactory;
     private readonly IConfiguration _config;
     private readonly AiOptions _options;
+    private readonly ILogger<OllamaProvider> _logger;
 
-    public OllamaProvider(IHttpClientFactory httpFactory, IConfiguration config, IOptions<AiOptions> options)
+    // The logger is optional (defaults to NullLogger below) ONLY so the 10 existing three-positional-arg
+    // construction sites under Pagedraft.Api.Tests/LanguageEngine/ (e.g. `new OllamaProvider(factory, c, opts)`)
+    // keep compiling without every one of those live-GPU test files being touched for no functional gain.
+    // The ONE production registration (Program.cs, the `["Ollama"] = new OllamaProvider(...)` entry) MUST
+    // keep passing a real ILogger<OllamaProvider> - if it ever falls back to NullLogger, the 404-fallback
+    // deployment-risk warnings below (CompleteAsync and StreamCompleteAsync) go silently unemitted, which
+    // is the exact failure mode this logger was added to catch.
+    public OllamaProvider(
+        IHttpClientFactory httpFactory,
+        IConfiguration config,
+        IOptions<AiOptions> options,
+        ILogger<OllamaProvider>? logger = null)
     {
         _httpFactory = httpFactory;
         _config = config;
         _options = options.Value;
+        _logger = logger ?? NullLogger<OllamaProvider>.Instance;
     }
 
     public async Task<AiResponse> CompleteAsync(ResolvedAiRequest request, CancellationToken cancellationToken = default)
@@ -51,6 +65,10 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
+            _logger.LogWarning(
+                "Ollama model fallback: requested model '{RequestedModel}' returned 404 (not found); retrying with the default model '{FallbackModel}'. " +
+                "Task {TaskType} now runs on a DIFFERENT model than configured - check for a typo in Ai:FeatureModels, or pull the requested model (ollama pull).",
+                model, defaultModel, request.TaskType);
             response.Dispose();
             model = defaultModel;
             payload = request.JsonMode
@@ -104,6 +122,10 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         using var response = await client.PostAsJsonAsync("/api/generate", payload, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound && model != defaultModel)
         {
+            _logger.LogWarning(
+                "Ollama model fallback (streaming): requested model '{RequestedModel}' returned 404 (not found); retrying with the default model '{FallbackModel}'. " +
+                "Task {TaskType} now runs on a DIFFERENT model than configured - check for a typo in Ai:FeatureModels, or pull the requested model (ollama pull).",
+                model, defaultModel, request.TaskType);
             model = defaultModel;
             payload = request.JsonMode
                 ? new { model, prompt, stream = true, think = false, options, stop = StopSequences, format = "json" }

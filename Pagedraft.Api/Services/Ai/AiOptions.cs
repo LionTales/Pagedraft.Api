@@ -447,4 +447,36 @@ public class AnalysisRepairOptions
     /// BookReviewService (engine path; glossary-only, no LLM). A null/empty map means NO per-type
     /// restriction (every repairable type is allowed). Proofread is never repaired regardless of this map.</summary>
     public Dictionary<string, bool>? PerType { get; set; }
+
+    /// <summary>The default checkpoint window (be-c03). Sized from the MEASURED per-chapter cost in
+    /// docs/ANALYSIS_OUTPUT_REPAIR.md section 19: ~18-27 s per chapter, so 10 chapters bounds the work a
+    /// single abort can discard to roughly 3-4.5 minutes. It also sits at or above every chapter count in
+    /// the deterministic batching suite, so those tests still run as ONE window.</summary>
+    public const int DefaultSummaryBatchWindowChapters = 10;
+
+    /// <summary>
+    /// How many chapters <c>BookIntelligenceService.SummarizeChaptersCoreAsync</c> summarizes, repairs and
+    /// persists as ONE checkpoint (be-c03). This is a repair-layer knob because the batch exists ONLY to
+    /// amortize the TermRepair model swap: the pass groups chapters so the repair model loads once per
+    /// WINDOW rather than once per leaking chapter.
+    ///
+    /// The window is the LIVENESS bound. Before it existed the pass had a single commit at the very end, so
+    /// an abort, a client disconnect, or a wedged Ollama runner during the summarize phase discarded EVERY
+    /// chapter - and on a real 80-chapter book that is a 24-37 minute pass that could never persist a single
+    /// summary if it kept failing at the same point. With a window of K, at most K chapters' work is ever at
+    /// risk and each completed window is durable.
+    ///
+    /// The GPU cost of a smaller window is close to zero rather than proportional: a window whose chapters
+    /// all come back CLEAN makes no repair call at all and therefore causes no swap (section 19.1), and the
+    /// measured leak rate is ~3% (section 19.4), so the expected swap count is min(windows, leaking
+    /// chapters) either way. Raising this to a value at or above the book's chapter count reproduces the
+    /// original single-commit behaviour exactly. A non-positive value is treated as
+    /// <see cref="DefaultSummaryBatchWindowChapters"/> rather than as "no windowing", mirroring the
+    /// Ollama TimeoutMinutes idiom in Program.cs - "unwindowed" is expressible as a large number, whereas a
+    /// stray 0 must not silently restore the defect this setting exists to fix.
+    ///
+    /// KEEP IN SYNC with the appsettings "Ai:AnalysisRepair.SummaryBatchWindowChapters" value in BOTH
+    /// appsettings.json and appsettings.Production.json; AnalysisRepairConfigParityTests guards the mirror.
+    /// </summary>
+    public int SummaryBatchWindowChapters { get; set; } = DefaultSummaryBatchWindowChapters;
 }
