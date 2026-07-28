@@ -215,6 +215,8 @@ test that runs a transform mutating every prose accessor and asserts every non-w
   "GuardOnly": true,
   "Model": "gemma4:12b",
   "PerType": {
+    "Custom": false,           // DELIBERATELY excluded (d1, narrowed by c1) - see 4.1 / 4.2
+    "Synopsis": true,          // f2 (2026-07-28) - enabled after q2 cleared the 18.2 bar; see 4.1 / 4.2
     "Summarization": true,
     "LiteraryAnalysis": true,
     "LinguisticAnalysis": true,
@@ -250,27 +252,41 @@ skipped. Proofread is never repaired regardless of `PerType`.
 ### 4.1 The `PerType` decision table - every `AnalysisType`, not just the ones that ship
 
 `PerType` is a decision table over the WHOLE `AnalysisType` enum (12 members), not merely a switch that
-happens to list nine keys. Every member is either **Repaired** (present-and-`true` in `PerType`, in BOTH
-`appsettings.json` and `appsettings.Production.json`, AND a dispatch target in the two switches below) or
+happens to list the keys that ship. Every member is either **Repaired** (present-and-`true` in `PerType`, in
+BOTH `appsettings.json` and `appsettings.Production.json`, AND a dispatch target in the **three** switches
+below, or covered by a recorded, reasoned exception) or
 **DeliberatelyExcluded** (absent, or present-and-`false`, with a stated reason). This table was established
 by the `analysis-repair-pertype-coverage-holes-2026-07-28` plan's `i1` investigation, `d1` decision and `q1`
 quality gate, which found the coverage picture is **four unrepaired types plus one dead allowlist key**, not
-the two (`Synopsis`, `Custom`) it started from:
+the two (`Synopsis`, `Custom`) it started from - and then **revised on 2026-07-28** by the follow-up plan
+`analysis-repair-coverage-followups-2026-07-28` (`f1` adjudicated `BookOverview`, `c1` measured `Custom`, `c2`
+closed the profile path's dynamic half, `c3` added classifier rule (7b), `q2` measured all of it and `f2`
+enabled `Synopsis`). **Ten of the twelve members are now Repaired** - nine of them through the dispatch
+switches, plus `BookReview` through its own engine hook - **and two are DeliberatelyExcluded (`Custom`,
+`Proofread`).**
+
+> **There are THREE per-type dispatch switches, not two** (`be-c01`, 2026-07-28). `GlossaryRepairPass.Apply`
+> (deterministic glossary stage) and `DynamicTermRepairService.ApplyAsync` (span-scoped dynamic stage) both
+> run under the shipped `GuardOnly=true`; `AnalysisRepairService.RepairAnalysisAsync` (value-scoped LLM
+> stage) is the third and runs only in state (3), `GuardOnly=false`. All three sit behind the SAME
+> `AnalysisRepairGate.Evaluate` allowlist, so one `PerType` key opens the gate onto all three. Eight of the
+> nine dispatch-repaired types are arms in all three; **`Synopsis` is deliberately in the two deterministic
+> ones only** - see its row below.
 
 | `AnalysisType` | verdict | reason |
 |---|---|---|
 | `Proofread` | DeliberatelyExcluded, by design | Output quotes verbatim manuscript spans (`original`/`suggested`/`span`); repairing them would corrupt the suggestion diff. Stays ABSENT from `PerType` rather than explicit-`false` - see the note at the end of `4.2`. |
-| `LineEdit` | Repaired | dispatch arm in both switches; real producer seam confirmed |
-| `LinguisticAnalysis` | Repaired | dispatch arm in both switches; real producer seam confirmed |
-| `LiteraryAnalysis` | Repaired | dispatch arm in both switches; real producer seam confirmed |
-| `BookOverview` | Repaired, but a NO-OP on the profile path | `"BookOverview": true` is a dispatch target in all three switches, but its only real producer (`BuildBookProfileAsync` via `RunRawAsync(structuredJson: null)`) blank-guards BOTH stages to a no-op, and its one repairable field (`Summary`) is discarded before persistence anyway - the key is not wrong, just unreachable on the product path (an unadvertised direct `POST /analyze` with `analysisType=BookOverview` DOES get it repaired). **Dead config on the profile path**, not a hole - a different defect with a different fix (none, since there is nothing left to repair once `Summary` is discarded). |
-| `Synopsis` | DeliberatelyExcluded, measured HALT | `q1` measured 83% preservation (5/6) on the shipped LOCAL tier against the >= 90% bar; over-rewrite 0, cleaning 100% - the bar is a conjunction and the precision half failed. Explicit `"Synopsis": false` in `PerType` in both files. See `4.2` below. |
-| `CharacterAnalysis` | Repaired, but HALF-COVERED on the profile path | glossary-only on `BookProfile.CharactersJson` via `RepairStructuredProfileJson`; the dynamic span-scoped stage never runs there, unlike `BookReview`'s two-stage hook. A deferred follow-up (mirror `BookReviewService`'s two-stage hook onto the profile hook), not fixed by this plan. |
-| `StoryAnalysis` | Repaired, but HALF-COVERED on the profile path | identical shape to `CharacterAnalysis`, same deferred follow-up |
-| `BookReview` | Repaired | via its own engine hooks (glossary + dynamic), NOT a dispatch-switch arm - it is deliberately in neither switch |
-| `Summarization` | Repaired | dispatch arm in both switches; real producer seam confirmed |
-| `QA` | Repaired | dispatch arm in both switches; real producer seam confirmed |
-| `Custom` | DeliberatelyExcluded, by decision | its instruction is user-authored, so its output is legitimately English / bilingual / quoted / tabular in an unbounded fraction of runs, and the layer makes one uncapped sequential model call per foreign WORD. Explicit `"Custom": false` in `PerType` in both files. See `4.2` below. |
+| `LineEdit` | Repaired | dispatch arm in all three switches; real producer seam confirmed |
+| `LinguisticAnalysis` | Repaired | dispatch arm in all three switches; real producer seam confirmed |
+| `LiteraryAnalysis` | Repaired | dispatch arm in all three switches; real producer seam confirmed |
+| `BookOverview` | Repaired, but a NO-OP on the profile path (f1, KEEP + document) | `"BookOverview": true` is a dispatch target in all three switches, but its only real producer (`BuildBookProfileAsync` via `RunRawAsync(structuredJson: null)`) blank-guards BOTH stages to a no-op, and its one repairable field (`Summary`) is discarded before persistence anyway - the key is not wrong, just unreachable on the product path. It is NOT dead on every path, which is why the key is KEPT rather than removed: `AnalysisController.TryParseAnalysisType` (`AnalysisController.cs:151-156`) is a bare `Enum.TryParse`, so a request carrying `analysisType:"BookOverview"` resolves at `ResolveAnalysisParamsAsync` (:131-132) and reaches `UnifiedAnalysisService.RunAsync` (`AnalysisController.cs:66`) - the PERSISTED, structured-JSON-producing seam, where `TryParseStructured` (`UnifiedAnalysisService.cs:2322`) parses a real `BookOverviewResult` and the SAME glossary arm genuinely repairs `Summary`. Removing the key would silently disable that reachable (if unadvertised) path, which is strictly worse than a documented no-op on the profile path - see the plan's `## f1 decision`. **Dead config on the profile path only**, pinned at both seams by `Pagedraft.Api.Tests/BookOverviewRepairPathAsymmetryTests.cs` (`RunAsync_BookOverview_UnderTheShippedConfig_RepairsSummary` / `RunRawAsync_BookOverview_UnderTheShippedConfig_LeavesLeakUntouched`), not a hole - a different defect with a different fix (none, since there is nothing left to repair once `Summary` is discarded). |
+| `Synopsis` | **Repaired since `f2` (2026-07-28)** - was a measured HALT, now a measured PASS | `q1` HALTED it at 83% preservation (5/6) with 1 false positive (the repair model TRANSLITERATED `Chekhov` -> `צ'כוב` at a paragraph head), against the conjunction bar (preservation >= 90% AND over-rewrite exactly 0). `c3` then landed **classifier rule (7b)** - a Title-Case Latin run at a LINE HEAD (any hard line break, blank line NOT required - see `be-c03` in `4.2`) is LEAVE, additive by construction - and `q2` re-measured **on q1's own fixtures**: preservation **100% (6/6)**, false positives **0**, over-rewrite **0**, cleaning **100% (3/3)**, LOCAL `Ollama \| gemma4:12b` with cloud `gemma-4-31b-it` identical, and **zero** recall cost on the shipped eight. `f2` wired it: `"Synopsis": true` in both files plus a **PLAIN-TEXT** dispatch arm in the two DETERMINISTIC switches (`TryParseStructured` returns null for Synopsis, so the whole prose value is the repairable surface - the same shape as `Summarization`, NOT a structured DTO). Because the arm is plain-text, this covers BOTH producer paths: the profile build (`BuildBookProfileAsync` -> `RunRawAsync(structuredJson: null)` -> `CompleteDeferredRepairAsync`) and a direct `POST /analyze`. **It is the one Repaired type whose routed model differs from `TermRepair`'s** (`Summarization` -> qwen3.5:9b vs gemma4:12b), so a LEAKING synopsis costs a cross-model GPU swap - accepted knowingly, see `4.2` and `19.4`. **DELIBERATELY NOT an arm in the THIRD switch** (`AnalysisRepairService.RepairAnalysisAsync`, the value-scoped LLM stage behind `GuardOnly=false`) - `be-c01`, 2026-07-28: that stage never consults `ForeignRunClassifier`, so rule (7b), the deterministic LEAVE that q2's 100% preservation is a property of, cannot protect it; it hands the WHOLE value to the model, and its validator (no NEW Latin run, length ratio 0.6-1.6) does not catch a transliteration, which REMOVES a Latin run and barely moves the length. The only measurement of a repair model rewriting Synopsis prose is q1's 83% / 1-FP HALT, so an arm there would put the failing configuration one config line away. The exclusion is NAMED at that switch's `default:` arm (with its reversal condition: re-run the 18.2 gate through that service, or give it a rule-(7b) equivalent) and pinned by `AnalysisRepairExclusionRegressionTests.ShippedSynopsis_IsDeliberatelyOutsideTheValueScopedLlmStage`. This makes Synopsis the SECOND "Repaired but outside the value-scoped stage" case after `BookReview` - see the `GuardOnly` asymmetry note in `4.2`. |
+| `CharacterAnalysis` | Repaired, and **FULLY covered on the profile path since `c2`** | was glossary-only on `BookProfile.CharactersJson`; `c2` (2026-07-28) made `RepairStructuredProfileJson` **two-stage + instance + async** (`RepairStructuredProfileJsonAsync<T>`), mirroring `BookReviewService`'s engine hook one-for-one (glossary gated by `RunsGlossary()`, dynamic by `RunsDynamic()`, entity set from `IBookEntityProvider`, per-stage fail-safe). Measured by `q2` scope (i): persisted-JSON cleaning **10/10** (pre-`c2` **0/10**), preservation **18/18**, over-rewrite **0**. **NO GPU-swap surface added** - see `4.2`. |
+| `StoryAnalysis` | Repaired, and **FULLY covered on the profile path since `c2`** | identical shape to `CharacterAnalysis`; same hook, same measurement (both types are in the same `q2` scope (i) corpus) |
+| `BookReview` | Repaired | via its own engine hooks (glossary + dynamic), NOT a dispatch-switch arm - it is deliberately in none of the three switches |
+| `Summarization` | Repaired | plain-text dispatch arm in all three switches; real producer seam confirmed |
+| `QA` | Repaired | dispatch arm in all three switches; real producer seam confirmed |
+| `Custom` | DeliberatelyExcluded, by decision (`d1`), **reasoning NARROWED by `c1`'s measurement** | its instruction is user-authored, so its output is legitimately English / bilingual / quoted / tabular, and the layer makes one uncapped sequential model call per foreign WORD. `c1` then ran `d1`'s own falsifier over the real `AnalysisResults` corpus: **n = 16 rows / 6 distinct instructions / 1 user / 2 books**, Hebrew script fraction **1.0000 on every row**, max offline REPAIR-classified run count **0**, rows with >= 1 repair run **0/16 (Wilson 95% CI 0.0-19.4%)**. So the BENEFIT side is empty on real data, not just the cost side unsampled. **The exclusion is enforced STRUCTURALLY, not by this key:** `Custom` has no dispatch arm in ANY of the three switches - `GlossaryRepairPass.Apply`, `DynamicTermRepairService.ApplyAsync` or `AnalysisRepairService.RepairAnalysisAsync` (all three drop it into their fallback arm), so flipping `"Custom": false` -> `true` today would change nothing at all. Explicit `"Custom": false` in `PerType` in both files documents the intent. See `4.2` below. |
 
 **The outer `PerType` key is necessary but NOT sufficient.** A type absent from a non-empty `PerType` map is
 skipped at the FIRST gate - `UnifiedAnalysisService.ApplyAnalysisRepairAsync`'s call into
@@ -278,7 +294,7 @@ skipped at the FIRST gate - `UnifiedAnalysisService.ApplyAnalysisRepairAsync`'s 
 SILENT: no log line at all, so a missing key was indistinguishable from a clean run. It is now Debug-logged,
 naming the type AND the closing sub-condition (`NullConfig` / `Disabled` / `PerTypeExcluded`). A production
 run emits at most ONE such line per repair site: `UnifiedAnalysisService.ApplyAnalysisRepairAsync`,
-`BookIntelligenceService.RepairStructuredProfileJson`, and `BookReviewService.BuildBookReviewAsync`'s single
+`BookIntelligenceService.RepairStructuredProfileJsonAsync`, and `BookReviewService.BuildBookReviewAsync`'s single
 per-build LAYER gate, which covers its glossary AND dynamic hooks in one line naming both stages. (There is a
 fourth `Evaluate` call - `ApplyGlossaryToFindings`' own internal gate - kept as defence-in-depth for direct
 callers; the layer gate short-circuits ahead of it on the engine path, so it logs only when driven directly.)
@@ -291,56 +307,295 @@ callers; the layer gate short-circuits ahead of it on the engine path, so it log
 > mirroring `ApplyAnalysisRepairAsync`. `ApplyGlossaryToFindings` KEEPS its own identical internal gate as
 > defence-in-depth for direct callers/tests; on the engine path the hoist short-circuits ahead of it.
 
-Beyond that gate,
-`DynamicTermRepairService.ApplyAsync` and `GlossaryRepairPass.Apply` EACH carry their OWN per-type dispatch
-switch (the same eight arms in both: Summarization, LiteraryAnalysis, LinguisticAnalysis, LineEdit,
-BookOverview, CharacterAnalysis, StoryAnalysis, QA - `BookReview` is in neither, by design, since it runs on
-its own engine-hook path), and a `PerType` key with no matching arm in one or both is dead config that opens
-a gate onto a no-op (`"BookOverview": true` on the profile path is the shipped example above). Conversely, a
-dispatch arm with no `PerType` key is unreachable code. Getting either half wrong reproduces this defect
-class.
+Beyond that gate, THREE services EACH carry their OWN per-type dispatch switch:
+
+| # | switch | stage | runs when |
+|---|---|---|---|
+| 1 | `GlossaryRepairPass.Apply` | deterministic glossary | `Mode` is `Glossary` / `GlossaryThenDynamic` |
+| 2 | `DynamicTermRepairService.ApplyAsync` | span-scoped dynamic | `Mode` is `Dynamic` / `GlossaryThenDynamic` |
+| 3 | `AnalysisRepairService.RepairAnalysisAsync` | value-scoped LLM | `GuardOnly=false` only (state (3), NOT shipped) |
+
+Switches 1 and 2 carry **the same NINE arms** since `f2`: Summarization, **Synopsis**, LiteraryAnalysis,
+LinguisticAnalysis, LineEdit, BookOverview, CharacterAnalysis, StoryAnalysis, QA. Switch 3 carries **EIGHT** -
+the same nine minus `Synopsis`, which is a NAMED exclusion there (`be-c01`; the argument and its reversal
+condition are stated at that switch's `default:` arm, summarised in the `Synopsis` row above). `BookReview` is
+in none of the three, by design, since it runs on its own engine-hook path. **Summarization and Synopsis are
+the two PLAIN-TEXT arms** (`RepairPlainText` / `ApplyPlainTextAsync` over `RepairableFields.ForPlainText`);
+the other seven are structured (`RepairStructured<T>` / `ApplyStructuredAsync<T>` over the type's
+`RepairableFields.For` overload).
+That distinction is load-bearing, not cosmetic: a plain-text arm still runs when `structuredJson` is null,
+which is exactly what makes `Synopsis` repairable on the profile-build path where `BookOverview` is a no-op.
+
+A `PerType` key with no matching arm in one or more of the three switches is dead config that opens a gate
+onto a no-op
+(`"BookOverview": true` on the profile path is the shipped example above, and `"Custom"` would be a second one
+if it were ever flipped without adding arms). Conversely, a dispatch arm with no `PerType` key is unreachable
+code. Getting either half wrong reproduces this defect class. A type wired into SOME switches and not others
+is the same defect in partial form: it is acceptable only as a RECORDED decision, which is why
+`AnalysisRepairConfigParityTests.DispatchCoverageFor` now models all three switches and demands a stated
+reason for any uneven coverage.
 
 **The guard against this whole class of hole returning silently:**
 `AnalysisRepairConfigParityTests.EveryAnalysisType_HasAnExplicitRepairCoverageDecision` (h2's
 enum-completeness oracle - a hand-authored decision table over `Enum.GetValues<AnalysisType>()` that THROWS
 for a new enum member with no decision, so it cannot pass vacuously by deriving its expectation from the
-shipped map) plus `AnalysisRepairExclusionRegressionTests` (e1's per-type pins, which drive the real config
-plus the real dispatch switches plus `Custom`'s and `Synopsis`'s actual producer seams, and go RED the
-moment any of the three exclusions is silently enabled).
+shipped map), its sibling `EveryRepairedType_HasAnExplicitDispatchCoverageDecision` (which since `be-c01`
+models ALL THREE switches and, rather than only forcing a hand-written verdict, PARSES the real
+`AnalysisType` arm labels out of each of the three switch sources and fails when the table and the code
+disagree - the half-enable `f2` shipped was invisible to the two-switch version), and
+`AnalysisRepairExclusionRegressionTests` (e1's per-type pins, which drive the real config plus the real
+dispatch switches plus `Custom`'s actual producer seam, and go RED the moment an exclusion is silently
+enabled). Those pins are **symmetric**: when `f2` enabled `Synopsis`, the three "Synopsis is untouched"
+assertions were FLIPPED rather than deleted, into `ShippedSynopsisCoverage_IsWiredAtEveryDeterministicEnablingSurface`
+(allowlist + gate predicate + both DETERMINISTIC dispatch arms, so a half-enable or a silent un-wiring is
+red), `ShippedSynopsis_IsDeliberatelyOutsideTheValueScopedLlmStage` (the opposite direction: the third
+switch must NOT repair Synopsis, with a Summarization control on the same fixture proving that stage was
+live) and
+`ShippedSynopsis_ParagraphHeadProperNoun_NeverReachesTheRepairModel` (the rule-(7b) property that made the
+enable safe, with a value-initial non-vacuity control that DOES reach the model). The profile-path pin
+`BookIntelligenceProfileRepairTests.BuildBookProfileAsync_UnderTheShippedConfig_RepairsSynopsis` was flipped
+the same way.
 
 ### 4.2 What has been measured, and what has not
 
-Only `Synopsis` has been run through the feature's precision instruments since the original nine `PerType`
-types shipped (the bar in section 18.2: preservation >= 90% AND over-rewrite exactly 0, measured with
-`OutputQualityDiagnostic.MeasureLegitimateTermPreservation_LocalVsCloud` /
-`.MeasureDynamicTermRepair_LocalVsCloud`, entity set obtained by calling `BookEntityProvider.GetEntitiesAsync`
-over a real `AppDbContext`):
+The bar throughout is section 18.2's: **preservation >= 90% AND over-rewrite exactly 0**, on the shipped LOCAL
+tier (`Ollama | gemma4:12b`), measured with `OutputQualityDiagnostic.MeasureLegitimateTermPreservation_LocalVsCloud`
+(d6) / `.MeasureDynamicTermRepair_LocalVsCloud` (d5) and, for the profile path, `.MeasureProfilePathTermRepair_Local`,
+with the entity set obtained by CALLING `BookEntityProvider.GetEntitiesAsync` over seeded books - never
+hand-authored. It is a CONJUNCTION: a single over-rewrite is a HALT regardless of preservation.
 
-| type | tier | preservation | false positives | over-rewrite (bar 0) | cleaning | sample size | model | verdict |
+#### `Synopsis`: HALT (q1), then PASS (q2). Both runs, in order.
+
+| run | tier | preservation | FPs | over-rewrite (bar 0) | cleaning | reached model | sample size | verdict |
 |---|---|---|---|---|---|---|---|---|
-| `Synopsis` | LOCAL `Ollama \| gemma4:12b` (shipped TermRepair route) | 83% (5/6) | 1 | 0 | 100% (3/3) | 6 preservation values, 3 cleaning values | gemma4:12b | **HALT** - fails the >= 90% preservation half of the bar |
-| `Synopsis` | CLOUD `OpenRouter \| gemma-4-31b-it` (reported, not relied on) | 83% (5/6), identical | 1, identical | 0 | - | same fixtures | gemma-4-31b-it | same HALT, reproduced |
+| `q1` 2026-07-28 | LOCAL `Ollama \| gemma4:12b` | 83% (5/6) | 1 | 0 | 100% (3/3) | 1 of 6 | 6 preservation + 3 cleaning values | **HALT** - fails the >= 90% half |
+| `q1` 2026-07-28 | CLOUD `gemma-4-31b-it` | 83% (5/6), identical | 1 | 0 | - | 1 of 6 | same fixtures | same HALT, reproduced |
+| **`q2` 2026-07-28** (after `c3`) | **LOCAL `Ollama \| gemma4:12b`** | **100% (6/6)** | **0** | **0** | **100% (3/3)** | **0 of 6** | **the SAME 6 + 3 values, byte-identical** | **PASS** |
+| `q2` 2026-07-28 | CLOUD `gemma-4-31b-it` | 100% (6/6) | 0 | 0 | 100% (3/3) | 0 of 6 | same fixtures | PASS, reproduced |
 
-The single false positive: the repair model TRANSLITERATED a legitimate proper noun (an author referenced
-sentence-initially at a paragraph head) into its Hebrew rendering. It reproduced IDENTICALLY on the cloud
-tier, so it is **structural, not a small-model artifact** - swapping the repair model would not fix it.
+**q2 measures the CHANGE, not a friendlier corpus.** It re-ran `PreservationFixtureBooks.SynopsisCases` /
+`.SynopsisLeakCases` / `SeedSynopsisBook` - the fixtures q1 itself built - with **not one VALUE character
+changed** (only `GatingEntity` metadata and comments, which feed the report's findings line and never a
+preservation / FP / over-rewrite / attribution count).
 
-**Why, structurally, and what a future re-attempt needs.** `ForeignRunClassifier`'s LEAVE rule for
-capitalized names is **mid-sentence-only by design** (sentence-initial capitalization is orthography, not a
-name signal), so a paragraph-INITIAL proper noun falls through to the model unless the per-book entity lever
-catches it first. `BookEntityProvider` harvests entities ONLY from the manuscript - and a synopsis
-legitimately names external authors, works, and places the manuscript, by definition, never mentions (a
-comparison to another author, a transliterated title). **More fixture values would raise the exposed count,
-not lower it** - the gap is a property of the classifier's design and the entity source, not of sample size.
+**What changed between the two runs was one classifier rule.** q1's single false positive was a legitimate
+proper noun TRANSLITERATED at a paragraph head (`Chekhov` -> `צ'כוב`). `ForeignRunClassifier`'s Title-Case
+LEAVE rule (7) is **mid-sentence-only by design** - in English orthography a sentence-initial capital is
+carried by every word, so it is no evidence of a proper noun - and `BookEntityProvider` harvests from the
+manuscript ONLY, so the external authors/works/places a synopsis legitimately names can never enter the
+per-book LEAVE set. `c3` added **rule (7b)**: in a Hebrew-expected value, a Title-Case Latin run whose only
+left-neighbours back to a HARD LINE BREAK are horizontal whitespace or transparent opening punctuation is
+LEAVE. Its argument is deliberately a different KIND from rule (7)'s - not orthographic but **discourse**: a
+completed sentence followed by a deliberate hard line break opens a new discourse unit, which is a planned
+move authored in the target language, and what appears there is a topic-fronted named entity, whereas a
+vocabulary LEAK is an in-flight lexical failure inside a clause the model has already begun
+(`תחושת confusion`). Two positions are deliberately NOT claimed and each has its own
+boundary test: **value-initial** (a short field can plausibly open with a capitalized leak, and there is no
+line boundary to argue from) and **a sentence head mid-line** (rule (7)'s case, unchanged).
 
-**What remains UNMEASURED.** `Custom` was never run through this gate at all - `d1` recommended EXCLUDE on
-premise grounds BEFORE measurement (a user-authored instruction's output is legitimately foreign in an
-unbounded fraction of runs, and the repair layer's cost model has no cap on foreign-run count per value), so
-no adversarial Custom fixture was authored and there is no PASS/HALT row for it; if that exclusion is ever
-revisited, `Custom` has to come back through this gate first. The dynamic span-scoped stage's effect on
-`CharacterAnalysis`/`StoryAnalysis`'s PERSISTED profile JSON is also unmeasured on that specific path (today
-only the glossary stage runs there - see `4.1`); the measured 100%/100%/0 figures for the dynamic stage are
-from the `BookReview`/`RunAsync` seams, not the profile-hook seam.
+> **A LINE head, not a PARAGRAPH head - and the measured corpus does not cover the difference (`be-c03`).**
+> The predicate (`ScriptTokenPredicates.IsLineInitial`) fires on ONE hard line break; it does NOT require a
+> blank line. It was originally described in paragraph terms, which the corpus made easy to miss: **every**
+> value in `PreservationFixtureBooks.SynopsisCases` / `.SynopsisLeakCases` uses `\n\n`, and the d5/d6 corpora
+> (`.LeakCases`, `.Cases`) carry no line break at all - so `q2` scope (iii)'s "zero recall cost" and the
+> model-free pin `Rule7b_SparesNoLeakInEitherD5CleaningCorpus` speak to the **blank-line shape only**. The
+> breadth is nonetheless the right call, because it is what the DATA is: read-only against the runtime DB,
+> **3 of 3** `BookProfiles.Synopsis` values (each ~1.2-1.6k chars with exactly 2 LF and 0 CR) and **32 of 33**
+> `ChunkSummaries.SummaryText` values separate their paragraphs with a **single `\n`** and **ZERO** carry a
+> blank line. Requiring a blank line would make rule (7b) dead on every real Synopsis and Summary value and
+> re-open q1's false positive on exactly the production shape. The honest residual is a **soft wrap that falls
+> right after a sentence terminator**; it is bounded to Title-Case Latin tokens, it can only send FEWER runs
+> to the model, and it is now pinned by
+> `ForeignRunClassifierTests.TitleCaseWord_AfterSingleLineBreakFollowingSentenceEnd_IsLeave` rather than left
+> accidental. Note also that the shapes this breadth is most often suspected of - a soft wrap mid-sentence, a
+> wrapped line, a newline-separated list line - are **already LEAVE without (7b), via rule (7)**, because in
+> each of them the previous line does not end on a sentence terminator, so `IsSentenceInitial` is false and
+> rule (7) fires first. Narrowing (7b) would not recover any of them. (Related correction: rule (7b) is
+> additive over rule (7) by EVALUATION ORDER, not because `IsLineInitial` is a subset of `IsSentenceInitial` -
+> neither predicate contains the other, since `IsSentenceInitial` tests `char.IsWhiteSpace` first and
+> therefore never reaches the `'\n'`/`'\r'` entries in `IsSentenceTerminator`.)
+
+**Rule (7b) is ADDITIVE by construction, and its measured recall cost is ZERO.** It is a new `return Leave`
+placed AFTER rule (7), on a path that previously fell through to `return Repair`, so it converts REPAIR ->
+LEAVE and never the reverse: no run that is LEAVE today becomes REPAIR. Preservation and over-rewrite
+therefore cannot get worse for ANY type (a spared run is never sent to the model, and only a model call can
+rewrite a byte), and the entire blast radius is d5 CLEANING (recall). `q2`'s regression scope measured that
+radius directly and it is empty - see the table below.
+
+> **HOW TO READ `Synopsis`'s 100%.** **0 of the 6 legitimate values reach the model** (attribution: 1
+> entity-gated, 5 classifier-rule-gated, 0 model), so this is a property of the **DETERMINISTIC GATE**, not of
+> `gemma4:12b`. Rule (7b) does not make the model better at preserving proper nouns - **it stops asking it.**
+> The number clears the shipped bar legitimately (the bar is about the OUTPUT, not about who earned it), but
+> *"Synopsis is safe because the model handles it"* would be a FALSE statement. The correct statement is
+> *"Synopsis is safe because the classifier no longer hands these values to the model."* This is the same
+> qualifier section 18.2 already carries for the shipped 21.
+
+**Enabling `Synopsis` was a deliberate cost decision, not a config flip (`f2`).** Precision was never the only
+objection. `Synopsis` routes to `AiTaskType.Summarization` -> **qwen3.5:9b** while `Ai:FeatureModels:TermRepair`
+is **gemma4:12b**, so on this `OLLAMA_MAX_LOADED_MODELS=1` host every LEAKING synopsis costs a cross-model cold
+load (~21.5-34.3 s, asymmetric - section 19.2) plus a load back on the next Summarization-family call. It was
+accepted on four grounds, all measured rather than argued: (1) the cost is bounded to **genuine leaks** - a
+clean synopsis makes ZERO model calls (section 19.1) and q2 measured **0 of 6** legitimate values reaching the
+model, while the 3/3 cleaning cases did; (2) `Synopsis` is produced **once per profile build**, not once per
+chapter like `Summarization` - on this project's 80-chapter corpus that is ~1/80th the production frequency;
+(3) `BuildBookProfileAsync` already interleaves qwen3.5:9b (Synopsis) and gemma4:12b (BookOverview /
+CharacterAnalysis / StoryAnalysis) **generation** in one `Task.WhenAll`, so that path already swaps with zero
+repair involvement; (4) it is the same trade `s4` already ACCEPTED for Line Edit and Summarize (section 19.4),
+re-confirmed by `s5r`. **Kill-switch:** set `"Synopsis": false` in BOTH appsettings files (the dispatch arms
+may stay - the `PerType` gate closes ahead of them).
+
+**Residual risk, stated so it is not forgotten.** Rule (7b) narrows q1's failure class, it does not eliminate
+it: an external proper noun at a **mid-line sentence head** still reaches the repair model, and a synopsis
+is the value shape most likely to contain one. Closing that needs lexical knowledge the layer does not have -
+an English common-noun lexicon (a CLOSED list is the exact failure `LiteraryTermGlossary`'s 23 terms already
+demonstrate at 0/10 on the d5 out-of-glossary corpus), a cross-value entity source harvested from analysis
+OUTPUT rather than the manuscript (non-additive; an over-eager harvest spares real leaks - the be-c04 failure
+mode), or a transliteration-aware validator with a domain exemption (also a closed list). None is cheap and
+none is additive; `c3` took the one position where a purely structural argument was available.
+
+#### `c2`: the persisted profile path (q2 scope (i))
+
+`CharacterAnalysis` / `StoryAnalysis` were allowlisted and dispatchable, yet their PERSISTED profile JSON got
+only the deterministic glossary: `RepairStructuredProfileJson` called `GlossaryRepairPass.RepairFields` and
+nothing else, so the span-scoped dynamic stage - half of the shipped `Mode=GlossaryThenDynamic` - never reached
+`BookProfile.CharactersJson` / `StoryStructureJson`. Since the glossary is a CLOSED 23-term map and the d5
+corpus is real out-of-glossary leaks, that path received **0%** of the cleaning capability the be-c08 gate
+measured. `c2` made the hook **two-stage + instance + async**, mirroring `BookReviewService`'s engine hook
+one-for-one (`RunsGlossary()` / `RunsDynamic()` predicates, `IBookEntityProvider` for the LEAVE set, per-stage
+fail-safe) rather than inventing a third shape.
+
+| sub-scope | corpus | result | over-rewrite (bar 0) | reached model | n |
+|---|---|---|---|---|---|
+| (i-a) CLEANING, persisted JSON | 10 out-of-glossary leaks planted in whitelisted prose fields | **cleaned 10/10 (100%)** - pre-`c2` baseline **0/10** | **0** | 10/10 | 10 |
+| (i-b) PRESERVATION, persisted JSON | 18 Hebrew-direction legitimate values | **18/18 (100%)**, FPs **0** | **0** | **0/18** | 18 |
+
+Read off `BookProfile.CharactersJson` / `StoryStructureJson` after a REAL `BuildBookProfileAsync`, through the
+real `RepairableFields` accessors and the real reserialize. Gate attribution for (i-b): **0 entity-gated, 18
+classifier/detector-rule-gated, 0 model** - so this 100% is a GATE property too.
+
+**NO GPU-SWAP SURFACE IS ADDED BY `c2`, and that is the load-bearing difference from `Synopsis`.** Both
+`CharacterAnalysis` and `StoryAnalysis` route to `AiTaskType.LinguisticAnalysis` -> **gemma4:12b**, the SAME
+model `Ai:FeatureModels:TermRepair` resolves, so a repair there costs no cross-model load at all. This is
+stated in the code (`BookIntelligenceService.RepairStructuredProfileJsonAsync`'s doc comment) so it is not
+re-litigated.
+
+**Three honest limits of scope (i)**, none of which moves the verdict: (1) the 3 **Latin-expected**
+(Hebrew-in-English) shipped cases are STRUCTURALLY unreachable on this path - the hook derives `ExpectedScript`
+from the ANALYSIS language, so a Hebrew profile build cannot exercise that direction - which is why the
+preservation denominator is **18, not 21**, and those 3 are precisely the only entity-load-bearing cases in the
+shipped set. The entity lever is measured as PRESENT and correctly harvested here, but **not load-bearing on
+this path**. (2) The entity-set counts printed in the scope (i) artifact were read AFTER the build, so they
+include names the build itself persisted (be-c03 invalidation + re-harvest); the set the hook USED was the
+smaller pre-build one. That cannot have flattered any number - the extra entries are Hebrew tokens, which
+cannot gate a Latin run in a Hebrew-expected value, and all 10 leaks reached the model anyway. (3) The scope (i)
+instrument, `OutputQualityDiagnostic.MeasureProfilePathTermRepair_Local`, has NO CLOUD arm, unlike its
+`_LocalVsCloud` siblings (`MeasureDynamicTermRepair_LocalVsCloud`, `MeasureLegitimateTermPreservation_LocalVsCloud`,
+and `DumpRealAnalysisOutputs_AndPrototypeRepairPass`): its figures are LOCAL-only (`Ollama | gemma4:12b`) and were
+never reproduced on cloud `gemma-4-31b-it`, unlike scopes (ii) and (iii), for which this section states cloud
+reproduction. The method name is honest and the `c2` table makes no cloud claim, but every other scope in this
+section records cloud reproduction, so the silence reads as an omission rather than a stated limit. It does not
+move the verdict because scope (i)'s cleaning half is the only stochastic component in the whole gate, and it
+came back 10/10; the preservation half is fully deterministically gated, 0 of 18 values reaching the model, so a
+second tier could not have disagreed with it.
+
+**One deliberate behaviour change beyond "add a stage."** Before `c2` the profile hook had **no `Mode` gate at
+all**: with the layer gate open it ran the glossary even under `Mode=Off` and `Mode=Dynamic` - the same
+Mode-contract violation `be-c06` fixed in `BookReviewService`. `Mode=Off` (with `Enabled=true`) is now a strict
+**repair** no-op. The `JsonSerializer.Serialize` reserialize still runs whenever the LAYER gate is open,
+deliberately: it is what strips the model's ```` ```json ```` fence, and the FE parses `profile.charactersJson`
+with a bare `JSON.parse`. A strict BYTE no-op is what a CLOSED layer gate gives (raw string, fence intact),
+unchanged.
+
+#### `c3` regression scope (q2 scope (iii)): the shipped eight, unchanged
+
+`c3` edits SHARED classifier code that every repaired type flows through, so the shipped eight's d5/d6 subsets
+were re-run against the section 18.2 figures of record. The decision rule was fixed in advance: **a regression
+here reverts `c3` regardless of how well `Synopsis` scored.**
+
+| gate | 18.2 figure of record | q2 measured (LOCAL) | delta |
+|---|---|---|---|
+| d5 CLEANING, ARM A (entity-free) | 10/10, over-rewrite 0, **10 model calls** | 10/10, over-rewrite 0, **10 model calls** | **UNCHANGED** |
+| d5 CLEANING, ARM B (real provider set, adversarial book) | 10/10, over-rewrite 0, **10 model calls** | 10/10, over-rewrite 0, **10 model calls** | **UNCHANGED** |
+| d5 leaks SPARED by the entity lever | 0 | **0** | **UNCHANGED** |
+| d6 PRESERVATION | 100% (21/21), FPs 0, over-rewrite 0, 0 reaching the model | 100% (21/21), FPs 0, over-rewrite 0, 0 reaching the model | **UNCHANGED** |
+| d6 gate attribution | 3 entity-gated, 18 rule-gated | 3 entity-gated, 18 rule-gated | **UNCHANGED** |
+
+CLOUD reproduced every row identically. **How the regression signal was attributed, pre-registered before the
+numbers were read:** `c3` is a DETERMINISTIC classifier change, so the only thing it can do to this scope is
+change WHICH runs are sent to the model. The c3-attributable signal is therefore the **model-call / repair-run
+count**, not the stochastic `cleaned` count - model calls held at exactly **10** on both arms and both tiers and
+**0** leaks were spared, so **`c3` cost exactly zero recall on the shipped corpus.** (Had `cleaned` moved while
+model calls held at 10, that would have been model variance, not a `c3` regression.) It is also pinned
+model-free by `ForeignRunClassifierTests.Rule7b_SparesNoLeakInEitherD5CleaningCorpus`.
+
+#### `Custom`: measured on real data, still EXCLUDED
+
+`d1` excluded `Custom` on premise and named its own falsifier; `c1` ran it - **no GPU, no model call**, driving
+the REAL `LatinInHebrewContentDetector.DetectForeignRuns` + `ForeignRunClassifier.RunsToRepair` over the stored
+`ResultText` of every `Custom` row in the runtime DB.
+
+| quantity | count | n | p-hat | Wilson 95% CI |
+|---|---|---|---|---|
+| Custom rows with **>= 1 REPAIR run** (would cost >= 1 model call) | 0 | 16 | 0.0% | **0.0 - 19.4%** |
+| ...restricted to SUBSTANTIVE rows (>= 100 chars) | 0 | 7 | 0.0% | 0.0 - 35.4% |
+| ...per DISTINCT instruction rather than per row | 0 | 6 | 0.0% | 0.0 - 39.0% |
+| Custom rows whose **instruction** was written in English | 3 | 16 | 18.8% | 6.6 - 43.0% |
+| Custom rows whose **output** was foreign-script (the case `d1` protects) | 0 | 16 | 0.0% | **0.0 - 19.4%** |
+
+Hebrew script fraction was a **point mass at 1.0000** - min = max = mean = median, not one Latin letter in
+~10,700 characters across the 16 rows - and the max REPAIR-classified run count was **0**, so the deterministic
+gate would hand the model zero spans on every row. `bookEntities: null` was used deliberately: an entity set can
+only move runs from REPAIR to LEAVE, so these counts are the **upper bound**.
+
+**Verdict: EXCLUDE stands, reasoning NARROWED.** Literally, the data meets `d1`'s stated falsifier trigger
+("overwhelmingly Hebrew with single-digit run counts"), and that is recorded rather than hidden. But meeting the
+trigger does not make a script-ratio gate worth building: with max REPAIR-run count 0, an enabled `Custom`
+repair would clean **nothing** on this corpus, so the measured benefit is exactly zero, while a gate placed in
+front of the SHARED repair would change behaviour for the nine already-measured types and re-open the 18.2
+tables. `d1`'s ground (a) also came back with a result it did not predict: **3 of 16 rows carried an
+English-language instruction and all three still produced Hebrew output**, so the legitimate-foreign-output case
+the exclusion exists to protect occurred 0/16. Ground (b) is CONFIRMED in code (`RepairRunsCoreAsync` awaits one
+router call per REPAIR run, sequentially, with no cap) but **UNSAMPLED in data**.
+
+**A script-ratio gate for `Custom` is an OPEN QUESTION, not a plan.** If it is ever taken up it needs: (1) a
+corpus containing at least one Custom row with a REPAIR-run count >= 1 (none exists, so the gate has no positive
+case); (2) evidence about the English-ANSWER case specifically, since the ratio it would key on has never been
+observed away from 1.0 and its threshold cannot be calibrated; (3) a decision on WHERE it sits - anywhere shared
+re-opens 18.2 for every repaired type and needs the full d5/d6 re-run, while a Custom-only gate is really "a
+Custom dispatch arm with a precondition" and should be scoped and named that way; (4) the two dispatch arms plus
+a plain-text `RepairableFields` surface, since without them the config key is inert.
+
+#### What remains UNMEASURED (read this before quoting anything above)
+
+This list is the fact most likely to rot, so it is stated as a list rather than left implicit.
+
+- **Only THREE of the ten Repaired types have their own per-type measured scope:** `Synopsis` (q1 then q2)
+  and `CharacterAnalysis` / `StoryAnalysis` (q2 scope (i), through the real `BuildBookProfileAsync`). The other
+  **seven - `Summarization`, `LineEdit`, `LinguisticAnalysis`, `LiteraryAnalysis`, `BookOverview`, `QA`,
+  `BookReview` - have NEVER been run through d5/d6 as their own scope.** The 18.2 figures are measured on a
+  **shared fixture corpus of Hebrew prose values** driven through `DynamicTermRepairService`, not per-type
+  through each type's own producer seam: they are evidence that the span-scoped ENGINE preserves and cleans,
+  and they are NOT a per-type PASS for those seven. (`Summarization` has a separate ~3% leak-RATE figure -
+  n = 32, Wilson 95% CI 0.6-15.8%, section 19.4 - which is a different quantity from preservation.)
+- **`Custom`'s pick-frequency remains un-measured.** c1's n = 16 rows / 6 prompts / 1 user / 2 books is one
+  developer's dev-time usage. `Custom` is 10.1% of that DB's stored analyses, but that percentage **must not be
+  quoted as a usage rate**. Nothing licenses "Custom output is always Hebrew" - a true ">= 1 repair run" rate up
+  to ~19% is still consistent with observing zero.
+- **`Custom`'s cost tail is un-sampled.** The "hundreds of sequential calls" scenario is confirmed as a CODE
+  property but has never been reproduced on real data; the ~400-call projection for a 2,433-character English
+  answer is arithmetic from observed row lengths, not a measurement.
+- **The Hebrew-in-English (Latin-expected) direction is unmeasured ON THE PROFILE PATH**, structurally - see
+  scope (i) limit 1 above. It IS measured at the `RunAsync`/`BookReview` seams (the 3 entity-gated cases in
+  18.2).
+- **The `Synopsis` residual class** - an external proper noun at a mid-paragraph sentence head - is a KNOWN
+  live gap, not a measured-clean one. q1's own lesson applies: more fixture values would RAISE the exposed
+  count for that class, not lower it.
+- **Every figure on this page is a single-run point estimate** unless it says otherwise. The methodology warning
+  on `Ai:FeatureModels:_comment_ProofreadModel` applies here too: n >= 3 runs per candidate before any figure is
+  used to justify a MODEL change, and run-to-run stability is a selection criterion in its own right. (The q2
+  rows above are the partial exception in one specific sense: scopes (ii) and (iii) are fully deterministic -
+  0 values reach the model - which is why LOCAL and CLOUD agree byte-for-byte there. The only stochastic
+  component in the whole gate is scope (i)'s cleaning half, 10 real model calls, which came back 10/10.)
 
 **`Mode` (added by the dynamic-term-repair follow-up).** A fourth knob, `Ai:AnalysisRepair.Mode`
 (`Off` | `Glossary` | `Dynamic` | `GlossaryThenDynamic`), selects WHICH repair stage(s) run once
@@ -360,12 +615,27 @@ routing; `Ai:AnalysisRepair.Model` only documents/asserts the intended model at 
 
 > **`GuardOnly` asymmetry (intentional).** Flipping `GuardOnly=false` opts the FOUR analysis-seam
 > f5-wire types (BookOverview/Character/Story/QA) into the value-scoped LLM Stage-2 alongside the
-> original repairable types. **BookReview is the exception:** its engine hook is glossary-ONLY and
-> ignores `GuardOnly` entirely - the whole-book path never makes a per-field LLM repair call. This is
-> deliberate (no extra billed/latency cost on the already-expensive whole-book pass), so do not expect
-> `GuardOnly=false` to add LLM repair to BookReview.
+> original repairable types. **There are TWO exceptions, both deliberate:**
+>
+> - **`BookReview`:** its engine hook is glossary-ONLY and ignores `GuardOnly` entirely - the whole-book
+>   path never makes a per-field LLM repair call. No extra billed/latency cost on the already-expensive
+>   whole-book pass.
+> - **`Synopsis`** (`be-c01`, 2026-07-28): it is Repaired and wired into both DETERMINISTIC dispatch
+>   switches, but has NO arm in `AnalysisRepairService.RepairAnalysisAsync`, so `GuardOnly=false` adds
+>   nothing for it. Stage 2 never consults `ForeignRunClassifier`, so rule (7b) - the deterministic
+>   line-head LEAVE that q2's 100% preservation is a property of, and the entire reason Synopsis
+>   shipped - cannot protect it; it hands the WHOLE value to the model, and its validator does not catch a
+>   transliteration (which removes a Latin run and barely moves the length). The only measurement of a
+>   repair model rewriting Synopsis prose is q1's 83% / 1-FP HALT. See section 4.1's `Synopsis` row, that
+>   switch's `default:` arm for the reversal condition, and the pin
+>   `AnalysisRepairExclusionRegressionTests.ShippedSynopsis_IsDeliberatelyOutsideTheValueScopedLlmStage`.
+>
+> So do not expect `GuardOnly=false` to add LLM repair to BookReview or to Synopsis.
 
-### 4.1 Per-environment / model-tier policy
+### 4.3 Per-environment / model-tier policy
+
+> This heading was numbered `4.1` until 2026-07-28, colliding with the `PerType` decision table above.
+> Every "section 4.1" reference in this document and in the appsettings comments means the DECISION TABLE.
 
 The repair block is **one value per ASP.NET Core environment**: base `appsettings.json` plus an optional
 `appsettings.{Environment}.json` override. The follow-up plan added `appsettings.Production.json`
@@ -378,7 +648,8 @@ tier. The governing principle (leak = small-model artifact) makes this a clean l
 | **Capable cloud** (a tier that does not leak) | true no-op | `Enabled:false` (full no-op), or `GuardOnly:true` with an empty `PerType` |
 
 **Current state:** BOTH `appsettings.json` and `appsettings.Production.json` are glossary-on with a
-BYTE-IDENTICAL `PerType` (all nine types `true`) because **prod still serves the Ollama-LOCAL tier** -
+BYTE-IDENTICAL `PerType` (11 keys: 10 `true`, plus the explicit `"Custom": false`; `Proofread` is deliberately
+ABSENT - see `4.1`) because **prod still serves the Ollama-LOCAL tier** -
 where the deterministic guard earns its keep. The Production block carries an explicit KEEP-IN-SYNC note
 tying it to `Ai:FeatureModels` and instructs: **flip `Enabled` to `false` ONLY when prod actually moves
 `Ai:FeatureModels` to a cloud model that does not leak** - do NOT flip it preemptively; verify the served
@@ -1423,15 +1694,26 @@ plan's `## s4 decision`; the load-bearing reasons:
   ACCEPT verdict stands with no caveat). What changed is the WARRANT for two of the six, not the count:
   Proofread is excluded BY DESIGN (its output quotes verbatim manuscript spans; repairing them would corrupt
   the suggestion diff - section 4) and is never repaired. Custom is now a DELIBERATE, ARGUED exclusion
-  (`## d1 decision`) rather than an accidental omission from `PerType` - its instruction is user-authored, so
-  its output is legitimately foreign in an unbounded fraction of runs, and the repair layer's cost model has
-  no cap on foreign-run count per value; `PerType` now carries an explicit `"Custom": false` (and, for the
-  same "measured, not accidental" reason, `"Synopsis": false`) so the decision is visible at the config
-  surface rather than inferred from a missing line (section 4.1). `Synopsis` - not an editor-picker type; it
-  is produced only on the profile-build path - is a MEASURED HALT (`## q1 quality-gate results`: 83%
-  preservation on the shipped LOCAL tier against a >= 90% bar, with a structural false positive reproduced on
-  the cloud tier - section 4.2), not an unexamined gap. Linguistic and Literary already route to gemma4:12b
-  (Literary indirectly - see 19.5) so a repair there is same-model and swap-free.
+  (`## d1 decision`, with `c1`'s measurement behind it - section 4.2) rather than an accidental omission from
+  `PerType` - its instruction is user-authored, so its output is legitimately foreign in an unbounded fraction
+  of runs, and the repair layer's cost model has no cap on foreign-run count per value; `PerType` carries an
+  explicit `"Custom": false` so the decision is visible at the config surface rather than inferred from a
+  missing line (section 4.1). Linguistic and Literary already route to gemma4:12b (Literary indirectly - see
+  19.5) so a repair there is same-model and swap-free.
+- **`Synopsis` ADDS ONE swap-capable path outside the editor picker, knowingly (`f2`, 2026-07-28) - this
+  supersedes the earlier "`Synopsis` is a MEASURED HALT with `"Synopsis": false`" text that stood here.** q1
+  HALTED it on precision (83% preservation, 1 structural false positive); `c3`'s classifier rule (7b) closed
+  that failure mode and `q2` re-measured **100% (6/6) preservation, 0 false positives, over-rewrite 0** on the
+  same fixtures, so `f2` set `"Synopsis": true` in both files and added the plain-text dispatch arms. Synopsis
+  routes to `Summarization` -> **qwen3.5:9b** against TermRepair's **gemma4:12b**, so a LEAKING synopsis costs
+  one cold load in (~21.5-23.4 s) plus one back out (~17.8-34.3 s) on the next Summarization-family call - the
+  same asymmetric cost priced in 19.2. It stays inside this section's ACCEPT for three measured reasons:
+  a clean synopsis makes **zero** model calls (19.1) and q2 measured **0 of 6** legitimate values reaching the
+  model, so the cost is bounded to genuine leaks; `Synopsis` is produced **once per profile build**, not once
+  per chapter (roughly 1/80th of `Summarization`'s frequency on this project's largest book); and
+  `BuildBookProfileAsync` already interleaves qwen3.5:9b and gemma4:12b **generation** in a single
+  `Task.WhenAll` with zero repair involvement, so the marginal swap surface added is small. Reversible in one
+  config line per file (`"Synopsis": false`). Full reasoning: section 4.2 and the plan's `## f2 outcome`.
 - **In a mixed editing session, task routing itself already dominates the swap budget.** An editor session
   alternating across analysis types already swaps models on every type change, independent of the repair
   layer - measured at roughly 6 minutes of load time across a 20-action mixed session, with ZERO involvement
