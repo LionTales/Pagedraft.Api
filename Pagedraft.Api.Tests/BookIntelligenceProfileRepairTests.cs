@@ -74,7 +74,24 @@ public class BookIntelligenceProfileRepairTests
         { "genre": "פנטזיה", "subGenre": "אפי", "targetAudience": "מבוגרים", "literatureLevel": 3, "estimatedReadingTimeMinutes": 120, "languageRegister": "רשמי", "summary": "סקירה כללית." }
         """;
 
-    private const string SynopsisText = "תקציר קצר של הספר בגוף שלישי.";
+    /// <summary>
+    /// The Synopsis the router returns on the profile build. Deliberately SYNOPSIS-SHAPED (multi-paragraph,
+    /// third person, per PromptFactory.SynopsisHe) and deliberately REPAIRABLE: it carries "(Action)", a
+    /// closed-glossary term (LiteraryTermGlossary.Terms["action"] = "פעולה") that the glossary stage rewrites
+    /// deterministically with zero model calls, plus "Daniel" at a paragraph head — q1's false-positive shape,
+    /// a Title-Case Latin proper noun that is sentence-initial and therefore NOT spared by the classifier's
+    /// mid-sentence rule. Both are there so
+    /// <see cref="BuildBookProfileAsync_UnderTheShippedConfig_LeavesSynopsisByteIdentical"/> is a real
+    /// assertion: if a Synopsis dispatch arm ever existed, this value could not come back unchanged.
+    /// Chosen so UnifiedAnalysisService.SanitizeResponse is the IDENTITY on it, which is what makes
+    /// byte-identity against the model's own string mean "the repair layer did not touch it": single spaces,
+    /// no leading/trailing whitespace, and SINGLE newlines between paragraphs — SanitizeResponse ->
+    /// SyncfusionWatermarkStripper collapses every run of [\r\n]+ to one "\n", so a blank line here would be
+    /// eaten by sanitization and the assertion would fail for a reason that has nothing to do with repair.
+    /// </summary>
+    private const string SynopsisText =
+        "תקציר קצר של הספר בגוף שלישי, ובו (Action) מרכזית שמניעה את העלילה קדימה.\n" +
+        "Daniel הוא הדמות שסביבה נבנה הסיפור, והמסע שלו נמשך עד הפרק האחרון.";
 
     // A QA {answer, citations, confidence} envelope (the shape QAHe requests). The `answer` prose is what the
     // ask card must render; `confidence` is an English enum that must survive. "confidence" is the distinctive
@@ -273,6 +290,65 @@ public class BookIntelligenceProfileRepairTests
         var persisted = await db.AnalysisResults.FirstAsync(a => a.Id == result.Id);
         Assert.Null(persisted.ChapterId);
         Assert.Equal(AnalysisScope.Book, persisted.Scope);
+    }
+
+    // ── e1: SYNOPSIS STAYS UNREPAIRED, pinned at its REAL producer path ──────────────────────────────────
+    //
+    // e1's enable-set came out EMPTY (Custom excluded by d1, Synopsis HALTED by q1), so nothing was wired.
+    // This test is what makes that negative result durable at the seam that would actually change:
+    // BuildBookProfileAsync:524 runs RunRawAsync(concatenated, AnalysisType.Synopsis, ...) and assigns the
+    // result to profile.Synopsis at :538, so if a PerType key + a dispatch arm were added, the value landing
+    // in the column would differ from the model's. See AnalysisRepairExclusionRegressionTests for the
+    // allowlist-level and dispatch-level halves of the same guard (and for Custom / Proofread).
+
+    /// <summary>
+    /// Under the SHIPPED Ai:AnalysisRepair block (loaded from appsettings.json, not hand-authored) the string
+    /// persisted to <c>BookProfile.Synopsis</c> is BYTE-IDENTICAL to what the model returned — the repair layer
+    /// does not touch it.
+    ///
+    /// Non-vacuity is proved by the CONTROL in the same build: the same router, the same Hebrew book and the
+    /// same "(Action)" leak, and there the persisted CharactersJson IS Hebraised (via the profile engine hook).
+    /// So a green here means "the layer ran and skipped Synopsis", never "the layer was off".
+    ///
+    /// WHY Synopsis is skipped, and why this must not be "fixed" by adding the key: q1 measured it on
+    /// 2026-07-28 against the shipped LOCAL tier (Ollama | gemma4:12b) and HALTED it — preservation 83% (5/6)
+    /// against a bar of >= 90% AND over-rewrite exactly 0 (docs/ANALYSIS_OUTPUT_REPAIR.md section 18.2), with
+    /// one false positive: the repair model TRANSLITERATED a legitimate proper noun ("Chekhov") at a paragraph
+    /// head. It reproduced identically on cloud gemma-4-31b-it, so it is STRUCTURAL — a synopsis names authors,
+    /// works and places the manuscript never mentions, so BookEntityProvider cannot harvest them, and
+    /// sentence-initial Title-Case is deliberately not a proper-noun signal (ForeignRunClassifier rule 7). The
+    /// value is also fed back to the model as book-brief context (PromptFactory.cs:457), so a bad rewrite
+    /// compounds forward rather than staying cosmetic.
+    /// </summary>
+    [Fact]
+    public async Task BuildBookProfileAsync_UnderTheShippedConfig_LeavesSynopsisByteIdentical()
+    {
+        // Shipped config = Mode:GlossaryThenDynamic, so the dynamic stage is live; the stub entity provider
+        // keeps it deterministic (empty LEAVE set = the harshest case, nothing spared by the entity lever).
+        using var provider = BuildProvider(
+            BuildRouter(), ShippedAnalysisRepairConfig.Load(), new StubBookEntityProvider());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedHebrewBookAsync(db);
+
+        var profile = await provider.GetRequiredService<BookIntelligenceService>()
+            .BuildBookProfileAsync(bookId, "he", CancellationToken.None);
+
+        // CONTROL first: the repair layer really was live in THIS build (a repaired type on the same path).
+        Assert.DoesNotContain("(Action)", profile.CharactersJson);
+        Assert.Contains("(פעולה)", JsonSerializer
+            .Deserialize<CharacterAnalysisResult>(profile.CharactersJson!, JsonOpts)!.Characters[0].Description);
+
+        Assert.True(string.Equals(SynopsisText, profile.Synopsis, StringComparison.Ordinal),
+            "BookProfile.Synopsis is no longer byte-identical to the model's output, i.e. the repair layer " +
+            "now touches Synopsis.\n" +
+            $"  expected: {SynopsisText}\n" +
+            $"  actual:   {profile.Synopsis}\n" +
+            "q1 HALTED Synopsis on 2026-07-28: preservation 83% (5/6) on the shipped LOCAL tier " +
+            "(Ollama | gemma4:12b) against a bar of >= 90% AND over-rewrite exactly 0, with 1 false positive " +
+            "(a legitimate proper noun TRANSLITERATED at a paragraph head), reproduced identically on cloud " +
+            "gemma-4-31b-it - so it is structural, not a small-model artifact. Do not enable Synopsis by " +
+            "adding the PerType key and a dispatch arm; re-run the d6 preservation gate and clear it first. " +
+            "See the plan's `## q1 quality-gate results` and `## e1 outcome`.");
     }
 
     // ── be-c02: the RunRawAsync bookId seam, asserted at the CALL SITES ──────────────────────────────────
