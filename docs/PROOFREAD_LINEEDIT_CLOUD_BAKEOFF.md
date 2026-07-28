@@ -6,6 +6,19 @@ path the Linguistic harness already has (`docs/LINGUISTIC_MODEL_BAKEOFF.md`). Th
 server** for customers — i.e. it measures the quality ceiling beyond the local hardware budget, not a
 model intended to replace the local-first default today.
 
+> **[2026-07-27] STABILITY EVIDENCE SINCE THIS BAKE-OFF - READ BEFORE TRUSTING THE "KEEP local
+> Dicta-3.0" RECOMMENDATION BELOW.** Two identical full-gold runs (93 cases, same prompt/settings/
+> machine, production temp 0.2, no seed, 2026-07-27) gave local `gemma4:12b` a STABLE F0.5 (0.353 ->
+> 0.361, recall 65% both) but the currently-wired local `DictaLM-3.0` a WIDE swing (F0.5 0.262 -> 0.360,
+> recall 65% -> 85%, precision 23% -> 31%). Run 1 alone reads "gemma4 beats Dicta by 35% on F0.5"; run
+> 2 reads a dead tie with Dicta 20 points BETTER on recall. Full methodology warning:
+> `Ai:FeatureModels:_comment_ProofreadModel` in `Pagedraft.Api/appsettings.json`.
+>
+> VERDICT: KEEP DictaLM-3.0 for Hebrew Proofread pending an n>=3 re-run of both candidates;
+> run-to-run STABILITY is now a selection criterion in its own right and gemma4:12b currently wins it
+> on this evidence, so this is an OPEN question rather than a settled one - not the closed
+> recommendation the table in this document implies.
+
 ## Run metadata
 
 - **Date:** 2026-06-20.

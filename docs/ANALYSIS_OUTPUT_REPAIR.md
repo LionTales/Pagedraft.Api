@@ -481,11 +481,20 @@ LLM stage is never on by default and structure is always held by code.
 **Cloud tier: NOT measured here.** DNS resolves but all outbound HTTPS egress is blocked in this
 environment (HTTP 000), so the configured `AI_OPENROUTER_APIKEY` was unreachable - the cloud columns are
 deliberately left unmeasured rather than fabricated. The documented bake-offs stand as the cloud
-"best-editing-abilities" reference and confirm the inverse-scaling premise (a bigger tier leaks LESS and
-edits BETTER): LinguisticAnalysis cloud `gemma-4-31b-it` **0.900** vs local `gemma4:12b` 0.750
-(`docs/LINGUISTIC_MODEL_BAKEOFF.md`); Proofread cloud `gemma-4-31b-it` **88/100 / overreach 0-2**
+"best-editing-abilities" reference for the inverse-scaling premise (a bigger tier leaks LESS and
+edits BETTER) - but see the correction below before relying on the LinguisticAnalysis half of it;
+Proofread cloud `gemma-4-31b-it` **88/100 / overreach 0-2**
 (`docs/PROOFREAD_LINEEDIT_CLOUD_BAKEOFF.md`). Moving to a cloud tier is the separate quality lever AND
 would let repair go no-op (section 4.1) - a hosting decision orthogonal to this local guard.
+
+> **[2026-07-27] CORRECTION - the LinguisticAnalysis leg of that premise no longer holds.** It used to
+> read "cloud `gemma-4-31b-it` 0.900 vs local `gemma4:12b` 0.750". Both figures came from a superseded
+> **11-case** gold; `linguistic-gold.json` is now **18 cases** with a changed prompt. Re-measured on the
+> current gold, LOCAL `gemma4:12b` scores **0.900 (recall 100%, type-acc 100%, 0 clean FP)** across 3
+> identical runs, and cloud has NOT been run on it at all. So there is currently **no measured
+> local-vs-cloud quality gap for LinguisticAnalysis**, and the inverse-scaling premise rests on the
+> Proofread evidence alone until cloud is re-measured on the current gold. Do not cite a
+> LinguisticAnalysis cloud advantage in a tier or hosting decision without that re-run.
 
 ### 11.1 Residual deferred (type x tier) + follow-ups
 

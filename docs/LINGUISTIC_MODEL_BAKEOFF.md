@@ -1,5 +1,24 @@
 # Linguistic Analysis - Model Bake-off
 
+> **[2026-07-27] THE SCORES BELOW ARE ON SUPERSEDED GOLDS - DO NOT COMPARE THEM TO CURRENT NUMBERS.**
+> This document is not one gold size: the original round (2026-06-14) scored on a 10-case gold, and
+> the gold grew to 11 cases on 2026-06-17 for the Gemma-4 round below - including the widely-cited
+> local `gemma4:12b` 0.750 vs cloud `google/gemma-4-31b-it` 0.900 comparison, which is entirely an
+> 11-case-gold result (both numbers). `linguistic-gold.json` has since grown to **18 cases** (5 clean,
+> 13 planted) and the prompt has changed, so every composite in this document has a different
+> denominator and a different prompt behind it than anything measured today.
+>
+> Re-measured on the CURRENT 18-case gold: local **`gemma4:12b` = composite 0.900, recall 100%,
+> type-accuracy 100%, 0 clean false positives**, reproduced identically across 3 runs. That is the
+> same headline number this document records for cloud `google/gemma-4-31b-it`, but the two were
+> measured on DIFFERENT gold sets and are **not** comparable.
+>
+> Consequences: (1) the "local 0.750 vs cloud 0.900" gap this document is most often cited for
+> **no longer has a basis in measured data**; (2) cloud has NOT been run on the current gold, so it
+> is an unmeasured candidate, not a known upgrade; (3) the current gold is **saturated** for strong
+> models (100/100/0 leaves no headroom), so it cannot discriminate at the top - harder cases are
+> needed before it can justify any model or tier change. Treat the tables below as history.
+
 The **Linguistic** analysis type emits `consistencyIssues`: cross-paragraph register/tense/POV
 shifts. On the old prompt running on local **qwen3.5:9b**, these were false-positive grammar
 nitpicks, all mislabeled `register`. Plan 4 tightened the prompt (cross-paragraph shifts only,
