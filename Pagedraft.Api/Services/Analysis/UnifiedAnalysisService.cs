@@ -2923,7 +2923,7 @@ public class UnifiedAnalysisService
         // h1-observable-gate-skip: those three reasons previously funnelled into the SAME silent return —
         // an operator staring at a skipped type could not tell which of them (each has a different fix:
         // bind the section / flip Enabled / add the type to PerType) closed the gate. AnalysisRepairGate is
-        // the shared predicate (also consulted by BookIntelligenceService.RepairStructuredProfileJson and
+        // the shared predicate (also consulted by BookIntelligenceService.RepairStructuredProfileJsonAsync and
         // BookReviewService's glossary/dynamic hooks) so this can name the reason without a divergent copy.
         // Debug ONLY: a gated-out type is a normal steady state (Proofread is skipped on every proofread
         // run) and must never produce INFO/WARN noise, mirroring the aggregate line's own no-noise-when-

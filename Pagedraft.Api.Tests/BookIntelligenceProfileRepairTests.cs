@@ -292,41 +292,50 @@ public class BookIntelligenceProfileRepairTests
         Assert.Equal(AnalysisScope.Book, persisted.Scope);
     }
 
-    // ── e1: SYNOPSIS STAYS UNREPAIRED, pinned at its REAL producer path ──────────────────────────────────
+    // ── f2: SYNOPSIS IS NOW REPAIRED, pinned at its REAL producer path ───────────────────────────────────
     //
-    // e1's enable-set came out EMPTY (Custom excluded by d1, Synopsis HALTED by q1), so nothing was wired.
-    // This test is what makes that negative result durable at the seam that would actually change:
-    // BuildBookProfileAsync:524 runs RunRawAsync(concatenated, AnalysisType.Synopsis, ...) and assigns the
-    // result to profile.Synopsis at :538, so if a PerType key + a dispatch arm were added, the value landing
-    // in the column would differ from the model's. See AnalysisRepairExclusionRegressionTests for the
-    // allowlist-level and dispatch-level halves of the same guard (and for Custom / Proofread).
+    // e1's enable-set came out EMPTY (Custom excluded by d1, Synopsis HALTED by q1) and this test used to pin
+    // BookProfile.Synopsis as BYTE-IDENTICAL to the model's output. f2 (2026-07-28) enabled Synopsis after q2
+    // re-measured it at 100% (6/6) preservation / 0 FP / 0 over-rewrite on q1's own fixtures, so the pin is
+    // INVERTED rather than deleted: the same seam is asserted to REPAIR now, and it additionally pins the
+    // property that made the enable safe (a paragraph-head proper noun is left alone, deterministically).
+    //
+    // The seam that changed is the real one: BuildBookProfileAsync runs
+    // RunRawAsync(concatenated, AnalysisType.Synopsis, ...) and assigns the result to profile.Synopsis, and
+    // RunRawAsync's second half (CompleteDeferredRepairAsync) calls ApplyAnalysisRepairAsync with
+    // structuredJson: null - which is exactly the shape the new PLAIN-TEXT dispatch arm handles (Synopsis has
+    // no structured payload, so the whole prose value is the repairable surface, mirroring Summarization).
+    // That is why enabling Synopsis covers the PROFILE path as well as the direct POST /analyze path, unlike
+    // BookOverview, whose only repairable field is structured AND is discarded before persistence (f1).
+    // See AnalysisRepairExclusionRegressionTests for the allowlist-level and dispatch-level halves.
 
     /// <summary>
-    /// Under the SHIPPED Ai:AnalysisRepair block (loaded from appsettings.json, not hand-authored) the string
-    /// persisted to <c>BookProfile.Synopsis</c> is BYTE-IDENTICAL to what the model returned — the repair layer
-    /// does not touch it.
+    /// Under the SHIPPED <c>Ai:AnalysisRepair</c> block (loaded from appsettings.json, not hand-authored) the
+    /// string persisted to <c>BookProfile.Synopsis</c> now has its English leak Hebraised — Synopsis is a
+    /// repaired type as of f2.
     ///
-    /// Non-vacuity is proved by the CONTROL in the same build: the same router, the same Hebrew book and the
-    /// same "(Action)" leak, and there the persisted CharactersJson IS Hebraised (via the profile engine hook).
-    /// So a green here means "the layer ran and skipped Synopsis", never "the layer was off".
+    /// TWO assertions, and the second is the load-bearing one:
+    /// (a) the closed-glossary leak <c>(Action)</c> IS rewritten to <c>(פעולה)</c>, proving the plain-text
+    ///     dispatch arm is reached on the PROFILE path (not just at the RunAsync seam);
+    /// (b) <c>Daniel</c>, a Title-Case Latin proper noun at a PARAGRAPH HEAD, survives BYTE-IDENTICAL. That is
+    ///     q1's measured false-positive shape, and ForeignRunClassifier rule (7b) (c3) is what spares it
+    ///     deterministically — 0 model calls. q2 measured that property at 100% (6/6) preservation with 0 of 6
+    ///     values reaching the model, which is what cleared q1's HALT. READ IT AS A GATE PROPERTY: the model is
+    ///     not better at proper nouns, it is simply no longer asked.
     ///
-    /// WHY Synopsis is skipped, and why this must not be "fixed" by adding the key: q1 measured it on
-    /// 2026-07-28 against the shipped LOCAL tier (Ollama | gemma4:12b) and HALTED it — preservation 83% (5/6)
-    /// against a bar of >= 90% AND over-rewrite exactly 0 (docs/ANALYSIS_OUTPUT_REPAIR.md section 18.2), with
-    /// one false positive: the repair model TRANSLITERATED a legitimate proper noun ("Chekhov") at a paragraph
-    /// head. It reproduced identically on cloud gemma-4-31b-it, so it is STRUCTURAL — a synopsis names authors,
-    /// works and places the manuscript never mentions, so BookEntityProvider cannot harvest them, and
-    /// sentence-initial Title-Case is deliberately not a proper-noun signal (ForeignRunClassifier rule 7). The
-    /// value is also fed back to the model as book-brief context (PromptFactory.cs:457), so a bad rewrite
-    /// compounds forward rather than staying cosmetic.
+    /// Non-vacuity: the CONTROL in the same build (persisted CharactersJson, also Hebraised) proves the layer
+    /// was live, and assertion (a) proves Synopsis specifically was not skipped — so (b) cannot pass because
+    /// "the layer was off".
     /// </summary>
     [Fact]
-    public async Task BuildBookProfileAsync_UnderTheShippedConfig_LeavesSynopsisByteIdentical()
+    public async Task BuildBookProfileAsync_UnderTheShippedConfig_RepairsSynopsis()
     {
         // Shipped config = Mode:GlossaryThenDynamic, so the dynamic stage is live; the stub entity provider
-        // keeps it deterministic (empty LEAVE set = the harshest case, nothing spared by the entity lever).
+        // keeps it deterministic (empty LEAVE set = the harshest case, nothing spared by the entity lever, so
+        // the paragraph-head assertion below can ONLY be satisfied by the classifier rule).
+        var router = BuildRouter();
         using var provider = BuildProvider(
-            BuildRouter(), ShippedAnalysisRepairConfig.Load(), new StubBookEntityProvider());
+            router, ShippedAnalysisRepairConfig.Load(), new StubBookEntityProvider());
         var db = provider.GetRequiredService<AppDbContext>();
         var bookId = await SeedHebrewBookAsync(db);
 
@@ -338,17 +347,37 @@ public class BookIntelligenceProfileRepairTests
         Assert.Contains("(פעולה)", JsonSerializer
             .Deserialize<CharacterAnalysisResult>(profile.CharactersJson!, JsonOpts)!.Characters[0].Description);
 
-        Assert.True(string.Equals(SynopsisText, profile.Synopsis, StringComparison.Ordinal),
-            "BookProfile.Synopsis is no longer byte-identical to the model's output, i.e. the repair layer " +
-            "now touches Synopsis.\n" +
-            $"  expected: {SynopsisText}\n" +
-            $"  actual:   {profile.Synopsis}\n" +
-            "q1 HALTED Synopsis on 2026-07-28: preservation 83% (5/6) on the shipped LOCAL tier " +
-            "(Ollama | gemma4:12b) against a bar of >= 90% AND over-rewrite exactly 0, with 1 false positive " +
-            "(a legitimate proper noun TRANSLITERATED at a paragraph head), reproduced identically on cloud " +
-            "gemma-4-31b-it - so it is structural, not a small-model artifact. Do not enable Synopsis by " +
-            "adding the PerType key and a dispatch arm; re-run the d6 preservation gate and clear it first. " +
-            "See the plan's `## q1 quality-gate results` and `## e1 outcome`.");
+        // (a) Synopsis IS repaired on the profile path.
+        Assert.True(profile.Synopsis is not null && profile.Synopsis.Contains("(פעולה)"),
+            "BookProfile.Synopsis still carries the raw English leak, i.e. the repair layer no longer touches " +
+            "Synopsis on the profile path.\n" +
+            $"  expected to contain: (פעולה)\n  actual:   {profile.Synopsis}\n" +
+            "f2 ENABLED Synopsis on 2026-07-28 (PerType key true in both appsettings files + a plain-text " +
+            "dispatch arm in GlossaryRepairPass.Apply and DynamicTermRepairService.ApplyAsync) after q2 " +
+            "cleared the shipped bar: preservation 100% (6/6), 0 false positives, over-rewrite 0, cleaning " +
+            "100% (3/3). If Synopsis is being rolled back, flip the key in BOTH files and update this test " +
+            "plus AnalysisRepairConfigParityTests.DecisionFor. See `## q2 quality-gate results` / `## f2 outcome`.");
+        Assert.DoesNotContain("(Action)", profile.Synopsis!);
+
+        // (b) ...and the PARAGRAPH-HEAD proper noun is spared deterministically - the property that made (a)
+        //     safe to ship. With an empty entity set the ONLY thing that can spare it is classifier rule (7b).
+        Assert.Contains("Daniel", profile.Synopsis!);
+        Assert.DoesNotContain("דניאל", profile.Synopsis!);
+
+        // ...and it never even reached the model. NOTHING in this build makes a TermRepair call: every planted
+        // leak is in-glossary, so the deterministic stage clears them all and the only foreign run the dynamic
+        // stage could have been handed is `Daniel`, which rule (7b) LEAVES. A single TermRepair call here means
+        // the paragraph-head run was sent to the repair model - q1's exact false-positive path.
+        // (The NON-VACUITY control for rule (7b) - a value-INITIAL Latin name on the same dispatch arm that DOES
+        // reach the model - lives in AnalysisRepairExclusionRegressionTests
+        // .ShippedSynopsis_ParagraphHeadProperNoun_NeverReachesTheRepairModel, and the pure-classifier verdicts
+        // are pinned in ForeignRunClassifierTests.)
+        router.Verify(
+            r => r.CompleteAsync(It.Is<AiRequest>(q => q.TaskType == AiTaskType.TermRepair), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "A TermRepair model call was made during this profile build. The only foreign run in the fixture is " +
+            "the paragraph-head proper noun `Daniel`, so this means ForeignRunClassifier rule (7b) stopped " +
+            "sparing it - which is exactly the false positive q1 measured (Chekhov -> צ'כוב) and c3/q2 closed.");
     }
 
     // ── be-c02: the RunRawAsync bookId seam, asserted at the CALL SITES ──────────────────────────────────

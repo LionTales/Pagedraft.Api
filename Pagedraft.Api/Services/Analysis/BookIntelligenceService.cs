@@ -18,6 +18,40 @@ namespace Pagedraft.Api.Services.Analysis;
 ///   - On RefreshProfileAsync, compare Chapter.UpdatedAt vs ChunkSummary.CreatedAt.
 ///   - Only re-summarize chapters where UpdatedAt > ChunkSummary.CreatedAt (stale).
 ///   - After re-summarizing stale chapters, rebuild the full BookProfile.
+///
+/// FILE-SIZE WAIVER (CLAUDE.md's ~700-line soft ceiling) - recorded by f2 (2026-07-28), with the numbers
+/// MEASURED rather than quoted, because the c2 report that recommended this waiver quoted them wrong. A first
+/// pass at this very correction made the identical mistake: it counted the file before this waiver block was
+/// fully written, so it under-reported the total by the length of the block being added.
+///
+/// MEASURED, not asserted: this file is <b>874</b> lines (re-measured by the CLOSING review, after be-f04 also
+/// edited this file; be-f03's own count of 868 went stale the same way c2's did). c2 (the two-stage profile
+/// repair hook) reported the change as "668 -> 760"; the real figures are <b>734 -> 874</b> (`git show
+/// HEAD:...` and `wc -l`; `git diff --numstat` shows +170/-30 against HEAD; 734 + 170 - 30 = 874), so c2
+/// understated both ends. A line count written INSIDE the file it counts is stale the moment anything else in
+/// the file moves - read it as "over the ceiling by roughly this much", never as a current figure. Most of the
+/// lines added since HEAD are
+/// doc comment, not code - c2's repair-hook doc comment plus this waiver paragraph itself (which grew again
+/// when it had to correct its own earlier miscount). The correction matters for one reason beyond arithmetic:
+/// <b>the file was ALREADY 34 lines over the ceiling BEFORE c2</b>, so this is not a c2-created breach that a
+/// c2-sized extraction would fix - the file was already past the ceiling before c2 touched it.
+///
+/// WHY IT IS NOT SPLIT ANYWAY. The single caller of the repair hook is <c>BuildBookProfileAsync</c>, in this
+/// file, and most of the lines added since HEAD are DOC COMMENT, not code - the no-swap rationale
+/// (CharacterAnalysis / StoryAnalysis route to LinguisticAnalysis -> gemma4:12b, the same model TermRepair
+/// resolves, so this hook adds no cross-model GPU-swap surface), the two gates (layer gate then Mode gate),
+/// and the fail-safe contract. Extracting a one-caller helper to move prose out of a line count would separate
+/// that rationale from the build it explains, which is the exact failure mode this subsystem has shipped
+/// before (a rule stated far from the code it governs stops being read).
+///
+/// WHAT A REAL SPLIT WOULD TAKE, if the ceiling is enforced later: the natural seam is CHAPTER SUMMARIZATION
+/// (<c>SummarizeChaptersAsync</c> / <c>SummarizeChaptersCoreAsync</c> and the be-c03 checkpoint-window logic)
+/// versus PROFILE BUILD (<c>BuildBookProfileAsync</c> + the repair hook) versus Q&amp;A. Those three share only
+/// the injected state, not control flow - unlike <see cref="BookReviewService"/>, whose remaining bulk is ONE
+/// sequenced pipeline. That makes this file the EASIER of the two to split, and it is deferred on cost, not on
+/// impossibility. Do not record a "pre-existing waiver" for it without pointing at this paragraph: a claimed
+/// waiver that nobody can find is the false-invariant-comment class be-c09 already had to clean up in
+/// <see cref="BookReviewService"/>.
 /// </summary>
 public class BookIntelligenceService
 {
@@ -26,6 +60,7 @@ public class BookIntelligenceService
     private readonly BookContextAssembler _bookContextAssembler;
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly IBookEntityProvider _bookEntities;
+    private readonly DynamicTermRepairService _dynamicTermRepair;
     private readonly ILogger<BookIntelligenceService> _logger;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -40,6 +75,7 @@ public class BookIntelligenceService
         BookContextAssembler bookContextAssembler,
         IOptions<AiOptions> aiOptions,
         IBookEntityProvider bookEntities,
+        DynamicTermRepairService dynamicTermRepair,
         ILogger<BookIntelligenceService> logger)
     {
         _db = db;
@@ -47,6 +83,7 @@ public class BookIntelligenceService
         _bookContextAssembler = bookContextAssembler;
         _aiOptions = aiOptions;
         _bookEntities = bookEntities;
+        _dynamicTermRepair = dynamicTermRepair;
         _logger = logger;
     }
 
@@ -546,13 +583,22 @@ public class BookIntelligenceService
         // JSON, run the SAME glossary over the whitelisted prose fields IN PLACE, and store CLEAN reserialized JSON.
         // Gated on the repair layer (Enabled + PerType-allows the type) and Hebrew (enforced inside RepairFields);
         // fail-safe — an off gate, an unparseable payload, or ANY repair fault stores the raw string unchanged, so
-        // a repair fault can NEVER break the profile build. BookOverview.Summary is not persisted here and Synopsis
-        // was not in the f5 wired set, so only CharactersJson + StoryStructureJson are repaired.
+        // a repair fault can NEVER break the profile build. This hook only needs to repair CharactersJson +
+        // StoryStructureJson: Synopsis is already covered upstream, by the plain-text dispatch arm on the
+        // RunRawAsync seam that produced it (f2), and BookOverview.Summary is discarded before persistence
+        // (only the five label fields are persisted, see the assignments above).
+        //
+        // c2: the hook is now TWO-stage (glossary THEN dynamic), the same shape BookReviewService's engine hook
+        // has (glossary 5b / dynamic 5c) — see RepairStructuredProfileJsonAsync for the full rationale. Awaited
+        // sequentially rather than via Task.WhenAll: the dynamic stage makes span-scoped model calls, and the
+        // single-GPU host serves them one at a time anyway.
         var repairCfg = _aiOptions.Value.AnalysisRepair;
-        profile.CharactersJson = RepairStructuredProfileJson<CharacterAnalysisResult>(
-            charsTask.Result, language, AnalysisType.CharacterAnalysis, repairCfg, RepairableFields.For, _logger);
-        profile.StoryStructureJson = RepairStructuredProfileJson<StoryAnalysisResult>(
-            storyTask.Result, language, AnalysisType.StoryAnalysis, repairCfg, RepairableFields.For, _logger);
+        profile.CharactersJson = await RepairStructuredProfileJsonAsync<CharacterAnalysisResult>(
+            charsTask.Result, language, AnalysisType.CharacterAnalysis, repairCfg, RepairableFields.For,
+            bookId, _logger, ct);
+        profile.StoryStructureJson = await RepairStructuredProfileJsonAsync<StoryAnalysisResult>(
+            storyTask.Result, language, AnalysisType.StoryAnalysis, repairCfg, RepairableFields.For,
+            bookId, _logger, ct);
 
         profile.Language = language;
         profile.UpdatedAt = DateTimeOffset.UtcNow;
@@ -642,33 +688,70 @@ public class BookIntelligenceService
     }
 
     /// <summary>
-    /// Deterministic English -> Hebrew glossary safety net for a book-level structured-Hebrew-prose analysis
-    /// produced on the profile path (CharacterAnalysis / StoryAnalysis). These types are generated via
+    /// TWO-STAGE repair safety net for a book-level structured-Hebrew-prose analysis produced on the profile
+    /// path (CharacterAnalysis / StoryAnalysis). These types are generated via
     /// <see cref="UnifiedAnalysisService.RunRawAsync"/> with <c>structuredJson: null</c>, so the shipped repair
-    /// layer (<c>ApplyAnalysisRepairAsync</c> -> <see cref="GlossaryRepairPass.Apply"/>) is a strict no-op for
-    /// them — this hook applies the SAME glossary to the persisted JSON, mirroring
-    /// <c>BookReviewService.ApplyGlossaryToFindings</c> (f5-wire JOB 2).
+    /// layer (<c>ApplyAnalysisRepairAsync</c> -> <see cref="GlossaryRepairPass.Apply"/> /
+    /// <see cref="DynamicTermRepairService.ApplyAsync"/>) is a strict no-op for them — this hook applies the SAME
+    /// two stages to the persisted JSON, mirroring <c>BookReviewService</c>'s engine hook (glossary stage 5b via
+    /// <c>ApplyGlossaryToFindings</c>, dynamic stage 5c via <c>GetEntitiesAsync</c> +
+    /// <c>RepairFindingsAsync</c>) rather than inventing a third shape.
+    ///
+    /// c2 — WHY THE SECOND STAGE EXISTS. Until c2 this hook called <see cref="GlossaryRepairPass.RepairFields"/>
+    /// and NOTHING else, so the persisted <c>CharactersJson</c> / <c>StoryStructureJson</c> received only the
+    /// CLOSED 23-term en->he map (<see cref="LiteraryTermGlossary.Terms"/>) and 0% of the span-scoped dynamic
+    /// cleaning that is the other half of the shipped <c>Mode=GlossaryThenDynamic</c>. On the d5 out-of-glossary
+    /// corpus (10 real leaks) the glossary cleans 0/10 by construction and the dynamic stage cleans 10/10, so
+    /// this path was missing the whole measured capability even though both types ARE allowlisted and DO have
+    /// real dispatch arms in <see cref="DynamicTermRepairService.ApplyAsync"/>
+    /// (<c>ApplyStructuredAsync&lt;CharacterAnalysisResult&gt;</c> / <c>&lt;StoryAnalysisResult&gt;</c>).
+    ///
+    /// NO GPU-SWAP SURFACE IS ADDED BY THIS. CharacterAnalysis and StoryAnalysis both route to
+    /// <see cref="AiTaskType.LinguisticAnalysis"/> -> gemma4:12b, which is the SAME model
+    /// <c>Ai:FeatureModels:TermRepair</c> resolves to, so a repair here costs no cross-model load on an
+    /// <c>OLLAMA_MAX_LOADED_MODELS=1</c> host. Do not re-litigate that half; it is still true and load-bearing.
+    ///
+    /// f2 (2026-07-28) — Synopsis is NOT excluded anymore; the rest of this paragraph as it read before f2 is
+    /// stale, do not trust old copies of it. Synopsis routes to <see cref="AiTaskType.Summarization"/> ->
+    /// qwen3.5:9b, a genuine cross-model swap versus TermRepair's gemma4:12b, but q2 re-measured 100% (6/6)
+    /// preservation, 0 false positives, over-rewrite 0 on q1's own fixtures once c3's ForeignRunClassifier rule
+    /// (7b) closed the paragraph-head false positive that produced q1's 83% number. The swap cost is now an
+    /// ACCEPTED, bounded cost (genuine leaks only), not a disqualifying one. See
+    /// <c>docs/ANALYSIS_OUTPUT_REPAIR.md</c> sections 4.2 and 19.4. Net: this hook adds no swap surface for
+    /// either type; Synopsis's own repair path does, and that cost was accepted knowingly, not overlooked.
     ///
     /// Deserializes the raw model output with the SAME fence-tolerant reader <see cref="TryDeserialize{T}"/>
-    /// uses (<see cref="ExtractJson"/> brace-matching skips a leading ```json fence), runs
-    /// <see cref="GlossaryRepairPass.RepairFields"/> over the whitelisted prose accessors IN PLACE, then
-    /// reserializes to CLEAN JSON with the pipeline's camelCase <see cref="JsonOpts"/> (which also strips the
-    /// model's markdown fence — the FE parses <c>profile.charactersJson</c> with a bare <c>JSON.parse</c> that a
-    /// fenced string would break).
+    /// uses (<see cref="ExtractJson"/> brace-matching skips a leading ```json fence), runs the selected stage(s)
+    /// over the whitelisted prose accessors IN PLACE, then reserializes to CLEAN JSON with the pipeline's
+    /// camelCase <see cref="JsonOpts"/> (which also strips the model's markdown fence — the FE parses
+    /// <c>profile.charactersJson</c> with a bare <c>JSON.parse</c> that a fenced string would break).
     ///
-    /// GATE (mirrors <c>ApplyAnalysisRepairAsync</c>): runs only when <see cref="AnalysisRepairGate.Evaluate"/>
-    /// (Enabled + PerType) allows the type; the Hebrew check lives inside
-    /// <see cref="GlossaryRepairPass.RepairFields"/>. FAIL-SAFE: an off gate, an unparseable
-    /// payload, or ANY repair/serialize fault returns the RAW string unchanged, so this can never break the
-    /// profile build (identical to the pre-fix behaviour on every non-repaired path). NO new LLM (glossary only).
+    /// GATES (mirrors <c>ApplyAnalysisRepairAsync</c> and BookReviewService exactly, two independent knobs):
+    ///   • LAYER gate — <see cref="AnalysisRepairGate.Evaluate"/> (null block / Enabled=false / PerType
+    ///     exclusion). Closed => neither stage runs and the RAW string is stored verbatim.
+    ///   • MODE gate — the SHARED predicates <see cref="AnalysisRepairModeExtensions.RunsGlossary"/> /
+    ///     <see cref="AnalysisRepairModeExtensions.RunsDynamic"/>, never a longhand copy. <c>Mode=Glossary</c>
+    ///     is the rollback that reproduces the pre-c2 sequence byte-for-byte; <c>Mode=Off</c> applies NO repair
+    ///     at all (before c2 this hook had no Mode gate whatsoever and ran the glossary even under Mode=Off/
+    ///     Dynamic — the same Mode-contract violation be-c06 fixed in BookReviewService).
+    /// The Hebrew check lives inside <see cref="GlossaryRepairPass.RepairFields"/>; the dynamic stage is
+    /// bidirectional and derives its expected script from the language.
+    ///
+    /// FAIL-SAFE (unchanged contract): an off gate, an unparseable payload, or ANY repair/serialize fault
+    /// returns the RAW string unchanged, so this can never break the profile build. The dynamic stage NEVER
+    /// throws by construction — it returns its swallowed exception as <c>fault</c> precisely so an inner catch
+    /// cannot blind this layer's logger — so that fault is LOGGED here rather than discarded; the value it
+    /// returns alongside is already the fail-safe (original) prose.
     /// </summary>
-    private static string RepairStructuredProfileJson<T>(
+    private async Task<string> RepairStructuredProfileJsonAsync<T>(
         string rawResult,
         string language,
         AnalysisType type,
         AnalysisRepairOptions? cfg,
         Func<T, IReadOnlyList<RepairableField>> accessorsOf,
-        ILogger logger) where T : class
+        Guid bookId,
+        ILogger logger,
+        CancellationToken ct) where T : class
     {
         // Layer gate: a null block, Enabled=false, or a non-empty PerType map that excludes this type is a
         // strict no-op -> store the raw model output verbatim (pre-fix behaviour).
@@ -677,14 +760,21 @@ public class BookIntelligenceService
         // AnalysisRepairGate predicate (also consulted by UnifiedAnalysisService.ApplyAnalysisRepairAsync
         // and BookReviewService's glossary/dynamic hooks), Debug-only — a gated-out type here is a normal
         // steady state (e.g. Mode/PerType excluding it), never INFO/WARN noise.
+        // be-c02 idiom: ONE line for the WHOLE layer, naming BOTH stages, so a closed gate never reads as
+        // "only the dynamic stage was skipped".
         var gateReason = AnalysisRepairGate.Evaluate(cfg, type.ToString());
         if (gateReason != AnalysisRepairGateReason.Allowed)
         {
             logger.LogDebug(
-                "AnalysisRepair: type={Type} gate closed ({Reason}); storing un-repaired raw JSON",
-                type, gateReason);
+                "AnalysisRepair: type={Type} gate closed ({Reason}); skipping BOTH the glossary and the dynamic " +
+                "(span-scoped) stage for book {BookId} ({Lang}) and storing un-repaired raw JSON",
+                type, gateReason, bookId, language);
             return rawResult;
         }
+
+        // repairMode defaults to Off when the block is null (unreachable here — a null block already closed the
+        // gate above — but kept identical to BookReviewService so the two hooks read the same).
+        var repairMode = cfg?.Mode ?? AnalysisRepairMode.Off;
 
         try
         {
@@ -693,19 +783,69 @@ public class BookIntelligenceService
             if (parsed is null)
                 return rawResult;
 
-            // Deterministic glossary over the whitelisted prose fields IN PLACE. RepairFields is itself
-            // Hebrew-gated + guard-gated (a clean field is byte-identical at zero cost; a null collection/element
-            // is never walked). NO new model call.
-            GlossaryRepairPass.RepairFields(accessorsOf(parsed), language);
+            // The whitelisted prose accessors, built ONCE and shared by both stages: every RepairableField
+            // Get/Set closes over `parsed`, so the dynamic stage below reads whatever the glossary wrote.
+            var fields = accessorsOf(parsed);
+
+            // ── STAGE 1: deterministic glossary ──────────────────────────────────────────────────────────
+            // Mirrors BookReviewService 5b. RepairFields is itself Hebrew-gated + guard-gated (a clean field is
+            // byte-identical at zero cost; a null collection/element is never walked). NO model call.
+            if (repairMode.RunsGlossary())
+            {
+                GlossaryRepairPass.RepairFields(fields, language);
+            }
+
+            // ── STAGE 2: dynamic span-scoped repair ──────────────────────────────────────────────────────
+            // Mirrors BookReviewService 5c. The per-book proper-noun LEAVE set is fetched LAZILY, ONLY inside
+            // this gate, so the rollback Mode=Glossary/Off never touches the provider. Passing the analysis
+            // `language` (not the book's stored language) keeps harvest direction and classifier script in
+            // agreement BY CONSTRUCTION — the same final-r02 property BookReviewService relies on.
+            if (repairMode.RunsDynamic())
+            {
+                var bookEntities = await _bookEntities.GetEntitiesAsync(bookId, language, ct).ConfigureAwait(false);
+                var dynamicResult = await _dynamicTermRepair.RepairFieldsAsync(
+                    fields,
+                    DynamicTermRepairService.ExpectedScriptForLanguage(language),
+                    language,
+                    bookEntities,
+                    ct).ConfigureAwait(false);
+
+                // SURFACE the fault instead of discarding it: RepairFieldsAsync is non-throwing by contract and
+                // reports what it swallowed through Fault, so dropping it here would make an always-on layer ship
+                // failures silently (the fail-safe-swallow defect class). The prose it returned is already the
+                // fail-safe original, so this is observability only — never a reason to abandon the repaired JSON.
+                if (dynamicResult.Fault is not null)
+                {
+                    logger.LogWarning(dynamicResult.Fault,
+                        "Book profile dynamic repair reported a fault for type={Type} book {BookId} ({Lang}); " +
+                        "the affected span(s) kept their ORIGINAL text (fail-safe). fieldsScanned={Scanned} " +
+                        "fieldsChanged={Changed} runsFlagged={Flagged} runsRepaired={Repaired} runsReverted={Reverted}",
+                        type, bookId, language, dynamicResult.FieldsScanned, dynamicResult.FieldsChanged,
+                        dynamicResult.RunsFlagged, dynamicResult.RunsRepaired, dynamicResult.RunsReverted);
+                }
+
+                if (dynamicResult.FieldsChanged > 0)
+                {
+                    logger.LogInformation(
+                        "Book profile dynamic repair: cleaned foreign-script leaks in {Changed} of {Scanned} " +
+                        "prose field(s) for type={Type} book {BookId} ({Lang}).",
+                        dynamicResult.FieldsChanged, dynamicResult.FieldsScanned, type, bookId, language);
+                }
+            }
 
             // Reserialize to CLEAN JSON (also strips the model's markdown fence so the FE JSON.parse succeeds).
+            // Done whenever the LAYER gate is open, including under Mode=Off — the fence strip is what keeps the
+            // FE's bare JSON.parse working, and making it conditional on a stage having run would turn the
+            // documented Mode=Off kill-switch into an FE-breaking change.
             return JsonSerializer.Serialize(parsed, JsonOpts);
         }
         catch (Exception ex)
         {
             // FAIL-SAFE: a repair/serialize fault must NEVER break the profile build. Keep the raw string.
+            // Covers the glossary stage, the entity fetch, the reserialize — and, belt-and-braces, an
+            // unforeseen throw out of the dynamic stage (which is non-throwing by contract).
             logger.LogWarning(ex,
-                "Book profile glossary repair threw for type={Type} ({Lang}); storing un-repaired raw JSON (fail-safe).",
+                "Book profile repair threw for type={Type} ({Lang}); storing un-repaired raw JSON (fail-safe).",
                 type, language);
             return rawResult;
         }
