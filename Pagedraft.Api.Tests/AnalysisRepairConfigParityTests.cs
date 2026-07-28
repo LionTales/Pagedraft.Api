@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
@@ -65,11 +66,12 @@ public class AnalysisRepairConfigParityTests
     // that class of hole: it walks EVERY AnalysisType and requires an explicit in-test decision for it,
     // so a NEWLY ADDED enum member with no decision fails loudly instead of silently inheriting "off".
     //
-    // Per-type PIN assertions for the three DeliberatelyExcluded types already live in
-    // AnalysisRepairExclusionRegressionTests.cs (the shipped allowlist, both dispatch switches, and
-    // Custom's/Synopsis's real producer seams) - this file does not restate those; it is the different
-    // guard that a newly added enum value cannot slip through undecided. See that file's class doc for
-    // the per-type assertions, and the plan's `## i1`/`## d1 decision`/`## q1 quality-gate results`
+    // Per-type PIN assertions for the DeliberatelyExcluded types (Custom, Proofread - Synopsis moved OUT of
+    // that set in f2, see its verdict below) already live in AnalysisRepairExclusionRegressionTests.cs (the
+    // shipped allowlist, all three dispatch switches, and Custom's real producer seam) - this file does not
+    // restate those; it is the different guard that a newly added enum value cannot slip through undecided.
+    // See that file's class doc for the per-type assertions, and the plans' `## i1` / `## d1 decision` /
+    // `## q1 quality-gate results` / `## c1 findings` / `## c3 design` / `## q2 quality-gate results`
     // sections for the evidence behind every verdict below.
     // ---------------------------------------------------------------------------------------------
 
@@ -103,7 +105,7 @@ public class AnalysisRepairConfigParityTests
         AnalysisType.LiteraryAnalysis => Repaired(),
 
         // BookOverview: this Repaired() verdict is CORRECT, not an oversight - the key IS
-        // present-and-true in both config files and IS a dispatch arm in both switches (see
+        // present-and-true in both config files and IS a dispatch arm in all three switches (see
         // DispatchCoverageFor below), which is what this verdict asserts. It is however a NO-OP on
         // its only real producer path: BuildBookProfileAsync -> RunRawAsync(structuredJson: null)
         // blank-guards both repair stages to a no-op, and its one repairable field (Summary) is
@@ -117,13 +119,20 @@ public class AnalysisRepairConfigParityTests
         // disable the still-reachable direct-API path and would pre-empt f1's decision.
         AnalysisType.BookOverview => Repaired(),
 
-        AnalysisType.Synopsis => Excluded(
-            "DeliberatelyExcluded - MEASURED HALT (q1, 2026-07-28): preservation 83% (5/6) on the shipped " +
-            "LOCAL tier (Ollama | gemma4:12b) against a bar of >= 90% AND over-rewrite exactly 0. Over-rewrite " +
-            "was 0 and cleaning passed 100% (3/3), but the bar is a conjunction and the precision half " +
-            "failed: the repair model TRANSLITERATED a legitimate proper noun (\"Chekhov\" -> \"צ'כוב\") " +
-            "at a paragraph head, reproduced identically on cloud gemma-4-31b-it, so it is structural, not a " +
-            "small-model artifact. See the plan's `## q1 quality-gate results`."),
+        // Synopsis: Repaired since f2 (2026-07-28), and this verdict SUPERSEDES q1's HALT rather than
+        // overruling it. q1 measured 83% preservation (5/6) with 1 false positive - the repair model
+        // TRANSLITERATED "Chekhov" -> "צ'כוב" at a paragraph head - and correctly HALTED against the §18.2
+        // conjunction (preservation >= 90% AND over-rewrite exactly 0). c3 then landed ForeignRunClassifier
+        // rule (7b) (a Title-Case Latin run at a LINE HEAD is LEAVE - ONE hard line break, a blank line is
+        // deliberately NOT required, be-c03; additive by construction), and q2
+        // RE-MEASURED on q1's OWN fixtures: preservation 100% (6/6), false positives 0, over-rewrite 0,
+        // cleaning 100% (3/3), LOCAL Ollama|gemma4:12b and cloud gemma-4-31b-it identical. Scope (iii) of the
+        // same gate showed ZERO recall cost on the shipped eight (d5 10/10 with model calls held at exactly
+        // 10, d6 21/21). READ THE 100% AS A GATE PROPERTY: 0 of the 6 values reach the model (1 entity-gated,
+        // 5 classifier-rule-gated), so rule (7b) does not make gemma4:12b better at proper nouns - it stops
+        // asking it. See the plan's `## c3 design`, `## q2 quality-gate results` and `## f2 outcome`, and
+        // docs/ANALYSIS_OUTPUT_REPAIR.md sections 4.1 / 4.2.
+        AnalysisType.Synopsis => Repaired(),
 
         AnalysisType.CharacterAnalysis => Repaired(),
         AnalysisType.StoryAnalysis => Repaired(),
@@ -132,19 +141,26 @@ public class AnalysisRepairConfigParityTests
         AnalysisType.QA => Repaired(),
 
         AnalysisType.Custom => Excluded(
-            "DeliberatelyExcluded (d1, 2026-07-28): its instruction is user-authored (req.CustomPrompt), so " +
-            "its output is legitimately English / bilingual / quoted / tabular - which falsifies the repair " +
-            "layer's \"foreign script = model leakage\" premise - and the layer makes ONE sequential model " +
-            "call per foreign WORD with no cap, so a legitimately-English answer would be both silently " +
-            "mistranslated and a several-hundred-call GPU wedge on a single-GPU host. See the plan's " +
-            "`## d1 decision`."),
+            "DeliberatelyExcluded (d1, 2026-07-28; reasoning NARROWED by c1, same date): its instruction is " +
+            "user-authored (req.CustomPrompt), so its output is legitimately English / bilingual / quoted / " +
+            "tabular - which falsifies the repair layer's \"foreign script = model leakage\" premise - and the " +
+            "layer makes ONE sequential model call per foreign WORD with no cap, so a legitimately-English " +
+            "answer would be both silently mistranslated and a several-hundred-call GPU wedge on a single-GPU " +
+            "host. c1 then MEASURED the real corpus: n=16 rows / 6 distinct instructions / 1 user / 2 books, " +
+            "Hebrew script fraction 1.0000 on EVERY row, max offline REPAIR-classified run count 0, rows with " +
+            "at least one repair run 0/16 (Wilson 95% CI 0.0-19.4%) - so enabling Custom would clean NOTHING " +
+            "on the real data. The exclusion is ALSO enforced structurally: Custom has no dispatch arm in " +
+            "ANY of the three switches, so flipping the key alone changes nothing. See the plan's `## d1 decision` and " +
+            "`## c1 findings`."),
 
         _ => throw new ArgumentOutOfRangeException(nameof(type), type,
             $"AnalysisType.{type} was added with NO repair-coverage decision. Add a case to DecisionFor in " +
             "AnalysisRepairConfigParityTests.cs classifying it Repaired (must then be present AND true in " +
             "Ai:AnalysisRepair:PerType in BOTH appsettings.json and appsettings.Production.json - and wire a " +
-            "dispatch arm in GlossaryRepairPass.Apply and DynamicTermRepairService.ApplyAsync, or it is dead " +
-            "config) or DeliberatelyExcluded (must stay absent, or present-and-false, WITH a one-line reason " +
+            "dispatch arm in ALL THREE per-type dispatch switches, GlossaryRepairPass.Apply, " +
+            "DynamicTermRepairService.ApplyAsync and AnalysisRepairService.RepairAnalysisAsync, or record the " +
+            "uneven coverage WITH a reason in DispatchCoverageFor, or it is dead config) or " +
+            "DeliberatelyExcluded (must stay absent, or present-and-false, WITH a one-line reason " +
             "string). See docs/ANALYSIS_OUTPUT_REPAIR.md section 4 and the analysis-repair-pertype-coverage-" +
             "holes plan.")
     };
@@ -156,10 +172,11 @@ public class AnalysisRepairConfigParityTests
     /// exact message, then is fully reverted).
     ///
     /// A Repaired verdict must be present-and-true in BOTH shipped config files. A DeliberatelyExcluded
-    /// verdict must be absent OR present-and-false in BOTH - that tolerance is load-bearing: todo h3 is
-    /// expected to add an explicit "Custom": false (and possibly "Synopsis": false) key to both files as
-    /// the visible-at-the-config-surface form of the exclusion, and this assertion must accept that shape
-    /// without going red.
+    /// verdict must be absent OR present-and-false in BOTH - that tolerance is load-bearing: h3 made the
+    /// exclusions visible at the config surface as an explicit <c>"Custom": false</c> (Proofread stays
+    /// ABSENT, deliberately), and this assertion must accept BOTH shapes without going red. (h3 also added
+    /// <c>"Synopsis": false</c>; f2 flipped that key to <c>true</c> once q2 cleared the §18.2 bar, so
+    /// Synopsis is now a Repaired verdict above - the tolerance is still exercised by Custom and Proofread.)
     /// </summary>
     [Fact]
     public void EveryAnalysisType_HasAnExplicitRepairCoverageDecision()
@@ -182,9 +199,10 @@ public class AnalysisRepairConfigParityTests
                 Assert.True(enabledInBase,
                     $"{typeName} is classified Repaired in AnalysisRepairConfigParityTests.DecisionFor, but " +
                     "appsettings.json's Ai:AnalysisRepair:PerType does not have it present-and-true. Either " +
-                    "wire it (PerType key in both files + a dispatch arm in GlossaryRepairPass.Apply and " +
-                    "DynamicTermRepairService.ApplyAsync) or reclassify it DeliberatelyExcluded here with a " +
-                    "reason.");
+                    "wire it (PerType key in both files + a dispatch arm in each of the three per-type " +
+                    "switches - GlossaryRepairPass.Apply, DynamicTermRepairService.ApplyAsync and " +
+                    "AnalysisRepairService.RepairAnalysisAsync - or a recorded, reasoned exception in " +
+                    "DispatchCoverageFor) or reclassify it DeliberatelyExcluded here with a reason.");
                 Assert.True(enabledInProd,
                     $"{typeName} is classified Repaired in AnalysisRepairConfigParityTests.DecisionFor, but " +
                     "appsettings.Production.json's Ai:AnalysisRepair:PerType does not have it present-and-true " +
@@ -211,74 +229,229 @@ public class AnalysisRepairConfigParityTests
     }
 
     /// <summary>
-    /// The SECOND half of this defect class: an allowlist key can drift apart from the two per-type
-    /// dispatch switches (<c>GlossaryRepairPass.Apply</c>, <c>DynamicTermRepairService.ApplyAsync</c>)
-    /// that actually do the repairing - this shipped once already for <c>BookOverview</c> on its
+    /// The SECOND half of this defect class: an allowlist key can drift apart from the per-type dispatch
+    /// switches that actually do the repairing - this shipped once already for <c>BookOverview</c> on its
     /// profile-build path (i1's investigation; there it stayed a "dead key" rather than a hole only
-    /// because BookOverview's one repairable field is discarded before persistence on that path).
-    /// Reflection over a switch expression's case labels is not practical, so this is a SECOND
-    /// hand-maintained table, mirroring the same fail-loudly idiom as <see cref="DecisionFor"/>: every
-    /// type classified Repaired must resolve through it, and a Repaired type with no entry throws rather
-    /// than passing silently.
+    /// because BookOverview's one repairable field is discarded before persistence on that path), and
+    /// AGAIN for <c>Synopsis</c> in <c>f2</c>, which wired two of the THREE switches (be-c01).
     ///
-    /// Read directly against both switches on 2026-07-28: they carry the identical eight arms
-    /// (Summarization, LiteraryAnalysis, LinguisticAnalysis, LineEdit, BookOverview, CharacterAnalysis,
-    /// StoryAnalysis, QA). <c>BookReview</c> is the one Repaired type that is NOT an arm in either switch
-    /// - both switches' own `_ =&gt;` comments say so ("BookReview is handled on its own path, never
-    /// here") - it is repaired instead through BookReviewService's own glossary + dynamic ENGINE HOOKS
-    /// (BookReviewService.cs:1139 / :1199), so it is recorded here as <see cref="DispatchCoverage.OwnEngineHook"/>
-    /// rather than asserted as a dispatch-switch arm.
+    /// <b>THERE ARE THREE per-type dispatch switches, not two</b> (be-c01, 2026-07-28 - this record modelled
+    /// only the first two until then, which is exactly why it could not see f2's half-enable):
+    ///   (1) <c>GlossaryRepairPass.Apply</c> - the DETERMINISTIC glossary stage, run when
+    ///       <c>Mode</c> is <c>Glossary</c>/<c>GlossaryThenDynamic</c>;
+    ///   (2) <c>DynamicTermRepairService.ApplyAsync</c> - the SPAN-SCOPED dynamic stage, run when
+    ///       <c>Mode</c> is <c>Dynamic</c>/<c>GlossaryThenDynamic</c>;
+    ///   (3) <c>AnalysisRepairService.RepairAnalysisAsync</c> - the VALUE-SCOPED LLM stage, run only when
+    ///       <c>GuardOnly=false</c> (opt-in state (3); <c>GuardOnly=true</c> ships).
+    /// All three are reached from <c>UnifiedAnalysisService.ApplyAnalysisRepairAsync</c> behind the SAME
+    /// <c>AnalysisRepairGate.Evaluate</c> allowlist, so a <c>PerType</c> key opens the gate onto all three.
+    ///
+    /// <b>The verdicts below are VERIFIED, not merely asserted.</b> Reflection over a switch expression's
+    /// case labels is not practical, but the labels can be READ OUT OF THE SOURCE, so
+    /// <see cref="EveryRepairedType_HasAnExplicitDispatchCoverageDecision"/> parses each of the three
+    /// switch bodies and compares the real arm set to the table. A type wired into some switches and not
+    /// others therefore turns this test RED unless the asymmetry is recorded here WITH a reason.
+    ///
+    /// <c>BookReview</c> is the one Repaired type in NONE of the three - all three switches' own
+    /// <c>default</c>/<c>_ =&gt;</c> arms say so - it is repaired instead through BookReviewService's own
+    /// glossary + dynamic ENGINE HOOKS (BookReviewService.cs:1139 / :1199), recorded here as
+    /// <see cref="OwnEngineHook"/>.
     /// </summary>
-    private enum DispatchCoverage { BothSwitches, OwnEngineHook }
+    /// <param name="GlossaryPass">Arm present in <c>GlossaryRepairPass.Apply</c>.</param>
+    /// <param name="DynamicPass">Arm present in <c>DynamicTermRepairService.ApplyAsync</c>.</param>
+    /// <param name="ValueScopedPass">Arm present in <c>AnalysisRepairService.RepairAnalysisAsync</c>.</param>
+    /// <param name="Reason">Required whenever coverage is NOT all three: why this type is covered unevenly
+    /// (or by an engine hook instead). A partial verdict with no reason is the half-enable this oracle exists
+    /// to catch.</param>
+    private readonly record struct DispatchCoverage(
+        bool GlossaryPass, bool DynamicPass, bool ValueScopedPass, string? Reason);
+
+    /// <summary>Wired into all three per-type dispatch switches - the default for a Repaired type.</summary>
+    private static DispatchCoverage AllThreeSwitches() => new(true, true, true, null);
+
+    /// <summary>In NO dispatch switch; repaired through its own engine hook (BookReview).</summary>
+    private static DispatchCoverage OwnEngineHook(string reason) => new(false, false, false, reason);
+
+    /// <summary>Wired into some switches and not others. Legal ONLY with a stated reason.</summary>
+    private static DispatchCoverage PartialCoverage(bool glossary, bool dynamic, bool valueScoped, string reason)
+        => new(glossary, dynamic, valueScoped, reason);
 
     private static DispatchCoverage DispatchCoverageFor(AnalysisType type) => type switch
     {
-        AnalysisType.LineEdit => DispatchCoverage.BothSwitches,
-        AnalysisType.LinguisticAnalysis => DispatchCoverage.BothSwitches,
-        AnalysisType.LiteraryAnalysis => DispatchCoverage.BothSwitches,
+        AnalysisType.LineEdit => AllThreeSwitches(),
+        AnalysisType.LinguisticAnalysis => AllThreeSwitches(),
+        AnalysisType.LiteraryAnalysis => AllThreeSwitches(),
 
-        // BookOverview: BothSwitches is CORRECT - it is a genuine dispatch arm in both
-        // GlossaryRepairPass.Apply and DynamicTermRepairService.ApplyAsync, matching the config key
-        // being present-and-true in both PerType files. That arm is simply never reached on the
-        // profile-build path (BuildBookProfileAsync -> RunRawAsync(structuredJson: null) blank-guards
-        // both stages to a no-op before Summary, its only repairable field, is discarded pre-
-        // persistence), which is why it is a NO-OP there rather than a hole - see
-        // docs/ANALYSIS_OUTPUT_REPAIR.md section 4.1's BookOverview row for the documented asymmetry
-        // (the key IS live on a direct POST /analyze with analysisType=BookOverview). KEEP-vs-REMOVE
-        // of the key is the child plan analysis-repair-coverage-followups-2026-07-28.plan.md's `f1`
-        // todo's call, not this test's - do not reclassify this arm as OwnEngineHook or drop it to
-        // force that decision here.
-        AnalysisType.BookOverview => DispatchCoverage.BothSwitches,
-        AnalysisType.CharacterAnalysis => DispatchCoverage.BothSwitches,
-        AnalysisType.StoryAnalysis => DispatchCoverage.BothSwitches,
-        AnalysisType.Summarization => DispatchCoverage.BothSwitches,
-        AnalysisType.QA => DispatchCoverage.BothSwitches,
-        AnalysisType.BookReview => DispatchCoverage.OwnEngineHook,
+        // BookOverview: all-three is CORRECT - it is a genuine dispatch arm in GlossaryRepairPass.Apply,
+        // DynamicTermRepairService.ApplyAsync AND AnalysisRepairService.RepairAnalysisAsync, matching the
+        // config key being present-and-true in both PerType files. Those arms are simply never reached on
+        // the profile-build path (BuildBookProfileAsync -> RunRawAsync(structuredJson: null) blank-guards
+        // every stage to a no-op before Summary, its only repairable field, is discarded pre-persistence),
+        // which is why it is a NO-OP there rather than a hole - see docs/ANALYSIS_OUTPUT_REPAIR.md section
+        // 4.1's BookOverview row for the documented asymmetry (the key IS live on a direct POST /analyze
+        // with analysisType=BookOverview). KEEP-vs-REMOVE of the key was the child plan
+        // analysis-repair-coverage-followups-2026-07-28.plan.md's `f1` todo's call (KEEP + document), not
+        // this test's - do not reclassify this as OwnEngineHook or drop an arm to force it here.
+        AnalysisType.BookOverview => AllThreeSwitches(),
+        AnalysisType.CharacterAnalysis => AllThreeSwitches(),
+        AnalysisType.StoryAnalysis => AllThreeSwitches(),
+        AnalysisType.Summarization => AllThreeSwitches(),
+
+        // Synopsis: f2 (2026-07-28) added the SECOND plain-text arm to the two DETERMINISTIC switches,
+        // mirroring Summarization exactly - TryParseStructured's `_ => null` arm covers Synopsis, so there is
+        // no structured payload and the whole prose value is the repairable surface
+        // (GlossaryRepairPass.RepairPlainText / DynamicTermRepairService.ApplyPlainTextAsync). Both were
+        // added together, which is half of what this verdict asserts: one arm alone would ship half the
+        // layer under the shipped Mode=GlossaryThenDynamic.
+        //
+        // The value-scoped LLM stage is a NAMED EXCLUSION (be-c01), not a gap. q1 HALTED Synopsis at 83%
+        // preservation with one false positive (the repair model TRANSLITERATED "Chekhov" at a paragraph
+        // head); what cleared the section-18.2 bar in q2 was ForeignRunClassifier rule (7b) turning that
+        // position into a deterministic LEAVE, so 0 of 6 legitimate values reach a model. Rule (7b) is
+        // consulted ONLY by DynamicTermRepairService - AnalysisRepairService never touches the classifier
+        // and hands the WHOLE value to the model - so an arm there would ship precisely the configuration
+        // q1 measured as a HALT, and its validator (no NEW Latin run, length ratio 0.6-1.6) does not catch a
+        // transliteration. Full argument + reversal condition at that switch's `default:` arm; pinned by
+        // AnalysisRepairExclusionRegressionTests.ShippedSynopsis_IsDeliberatelyOutsideTheValueScopedLlmStage.
+        AnalysisType.Synopsis => PartialCoverage(glossary: true, dynamic: true, valueScoped: false,
+            "be-c01 (2026-07-28): DELIBERATELY excluded from the value-scoped LLM stage " +
+            "(AnalysisRepairService.RepairAnalysisAsync). That stage has no ForeignRunClassifier rule-(7b) " +
+            "gate, and rule (7b) is the entire reason Synopsis cleared the section-18.2 bar in q2 - the only " +
+            "measurement of a repair model rewriting Synopsis prose is q1's 83%/1-FP HALT. See that switch's " +
+            "`default:` arm for the argument and the reversal condition."),
+
+        AnalysisType.QA => AllThreeSwitches(),
+        AnalysisType.BookReview => OwnEngineHook(
+            "BookReview is in NONE of the three dispatch switches by design (each one's default/fallback arm " +
+            "says so). It is repaired through BookReviewService's own glossary + dynamic ENGINE HOOKS " +
+            "(BookReviewService.cs:1139 / :1199), and it never runs the value-scoped LLM stage regardless of " +
+            "GuardOnly - the documented `GuardOnly` asymmetry, docs/ANALYSIS_OUTPUT_REPAIR.md section 4.2."),
+
         _ => throw new ArgumentOutOfRangeException(nameof(type), type,
             $"AnalysisType.{type} is classified Repaired in DecisionFor but has no entry in " +
-            "DispatchCoverageFor. Decide whether it is a dispatch arm in BOTH GlossaryRepairPass.Apply and " +
-            "DynamicTermRepairService.ApplyAsync (BothSwitches), or reaches repair through its own engine " +
-            "hook like BookReview (OwnEngineHook), and record which - an allowlist key whose dispatch arm " +
-            "was never added is dead config (docs/ANALYSIS_OUTPUT_REPAIR.md section 4).")
+            "DispatchCoverageFor. Record its coverage across ALL THREE per-type dispatch switches - " +
+            "GlossaryRepairPass.Apply, DynamicTermRepairService.ApplyAsync and " +
+            "AnalysisRepairService.RepairAnalysisAsync - as AllThreeSwitches(), OwnEngineHook(reason) like " +
+            "BookReview, or PartialCoverage(..., reason) if it is deliberately uneven. An allowlist key whose " +
+            "dispatch arm was never added is dead config (docs/ANALYSIS_OUTPUT_REPAIR.md section 4).")
     };
 
     /// <summary>
+    /// The three per-type dispatch switches, as (source file, method marker) pairs the arm-set reader below
+    /// parses. Order matches <see cref="DispatchCoverage"/>'s three booleans.
+    /// </summary>
+    private static readonly (string RelativePath, string StartMarker, string EndMarker)[] DispatchSwitchSources =
+    {
+        (Path.Combine("Pagedraft.Api", "Services", "Analysis", "GlossaryRepairPass.cs"),
+            "return type switch", "_ => NoOp(structuredJson, cleanContent),"),
+        (Path.Combine("Pagedraft.Api", "Services", "Analysis", "DynamicTermRepairService.cs"),
+            "return type switch", "_ => (structuredJson, cleanContent, 0, null),"),
+        (Path.Combine("Pagedraft.Api", "Services", "Analysis", "AnalysisRepairService.cs"),
+            "switch (type)", "default:")
+    };
+
+    /// <summary>
+    /// Reads the ACTUAL <c>AnalysisType</c> arm labels out of one dispatch switch's source, so the table
+    /// above is verified rather than merely asserted. Comment lines are stripped first (the switches carry
+    /// long rationale comments that name other types), then the region between the switch header and its
+    /// default/fallback arm is scanned for <c>AnalysisType.X =&gt;</c> or <c>case AnalysisType.X:</c>.
+    /// </summary>
+    private static HashSet<AnalysisType> ReadDispatchArms(string relativePath, string startMarker, string endMarker)
+    {
+        var path = FindUpward(relativePath);
+        var codeLines = File.ReadAllLines(path)
+            .Where(line =>
+            {
+                var t = line.TrimStart();
+                return !t.StartsWith("//", StringComparison.Ordinal) && !t.StartsWith("*", StringComparison.Ordinal);
+            })
+            .ToList();
+        var source = string.Join("\n", codeLines);
+
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        Assert.True(start >= 0,
+            $"Could not find the dispatch switch header \"{startMarker}\" in {path}. The switch was renamed or " +
+            "restructured; update DispatchSwitchSources so this oracle keeps reading the real arm set.");
+
+        // The header must be UNIQUE in the file. IndexOf takes the FIRST occurrence, so a second switch with
+        // the same header added ABOVE the dispatch switch would silently retarget this parse at a different
+        // switch - the one failure mode of a source-reading oracle that could go wrong QUIETLY rather than red.
+        Assert.True(source.IndexOf(startMarker, start + 1, StringComparison.Ordinal) < 0,
+            $"The dispatch switch header \"{startMarker}\" occurs more than once in {path}, so this oracle can " +
+            "no longer tell which switch it is reading (it takes the first). Give the dispatch switch a unique " +
+            "marker in DispatchSwitchSources before trusting this test.");
+        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
+        Assert.True(end > start,
+            $"Could not find the fallback arm \"{endMarker}\" after the switch header in {path}. Update " +
+            "DispatchSwitchSources so this oracle keeps reading the real arm set.");
+
+        var body = source[start..end];
+        var arms = new HashSet<AnalysisType>();
+        foreach (Match m in Regex.Matches(body, @"(?:case\s+)?AnalysisType\.(\w+)\s*(?:=>|:)"))
+        {
+            if (Enum.TryParse<AnalysisType>(m.Groups[1].Value, out var parsed)) arms.Add(parsed);
+        }
+
+        Assert.True(arms.Count > 0,
+            $"Parsed ZERO dispatch arms out of {path} between \"{startMarker}\" and \"{endMarker}\" - the " +
+            "oracle would pass vacuously. Fix the markers/regex before trusting this test.");
+        return arms;
+    }
+
+    /// <summary>
     /// Forces the same explicit decision as <see cref="EveryAnalysisType_HasAnExplicitRepairCoverageDecision"/>,
-    /// one layer down: every Repaired type must ALSO have a stated dispatch-coverage answer, so a type
-    /// that gets a PerType key but never gets a matching dispatch arm cannot slip through this file
-    /// undecided - the allowlist and the dispatch switches drifting apart is the second half of this
-    /// defect class. This does not re-invoke the switches (GlossaryRepairPassTests.cs and
-    /// AnalysisRepairExclusionRegressionTests.cs already drive them per-type with fixtures); it only
-    /// forces the decision to be recorded and kept in sync by hand, which is strictly better than the
-    /// silence that let BookOverview ship as a dead key.
+    /// one layer down: every Repaired type must ALSO have a stated dispatch-coverage answer across ALL THREE
+    /// switches, so a type that gets a PerType key but never gets a matching arm cannot slip through
+    /// undecided - the allowlist and the dispatch switches drifting apart is the second half of this defect
+    /// class, and it recurred in f2 (Synopsis wired into two switches of three).
+    ///
+    /// be-c01 upgraded this from a hand-maintained claim to a VERIFIED one. It now (a) forces the decision,
+    /// (b) reads the real arm labels out of each of the three switch sources and asserts the table matches,
+    /// and (c) requires a stated REASON for any coverage that is not all three. (b) is what makes it able to
+    /// go red on a half-enable; (c) is what stops a half-enable from being recorded silently.
     /// </summary>
     [Fact]
     public void EveryRepairedType_HasAnExplicitDispatchCoverageDecision()
     {
+        var actualArms = DispatchSwitchSources
+            .Select(s => ReadDispatchArms(s.RelativePath, s.StartMarker, s.EndMarker))
+            .ToArray();
+        var switchNames = new[]
+        {
+            "GlossaryRepairPass.Apply (deterministic glossary stage)",
+            "DynamicTermRepairService.ApplyAsync (span-scoped dynamic stage)",
+            "AnalysisRepairService.RepairAnalysisAsync (value-scoped LLM stage, GuardOnly=false)"
+        };
+
         foreach (var type in Enum.GetValues<AnalysisType>())
         {
             if (!DecisionFor(type).Repaired) continue;
-            _ = DispatchCoverageFor(type); // throws for a Repaired type with no dispatch-coverage decision
+            var coverage = DispatchCoverageFor(type); // throws for a Repaired type with no decision
+            var claimed = new[] { coverage.GlossaryPass, coverage.DynamicPass, coverage.ValueScopedPass };
+
+            // (b) The recorded verdict must match the arms that are ACTUALLY in each switch's source.
+            for (var i = 0; i < claimed.Length; i++)
+            {
+                var present = actualArms[i].Contains(type);
+                Assert.True(claimed[i] == present,
+                    $"DispatchCoverageFor({type}) records {(claimed[i] ? "an arm" : "NO arm")} in " +
+                    $"{switchNames[i]}, but the source {(present ? "HAS" : "does NOT have")} one. Either wire " +
+                    "the arm or update the verdict (and, if the coverage is deliberately uneven, state the " +
+                    "reason via PartialCoverage). An allowlisted type wired into only some of the three " +
+                    "switches ships a fraction of the layer - that is the f2/Synopsis defect this oracle " +
+                    "exists to catch (docs/ANALYSIS_OUTPUT_REPAIR.md section 4.1).");
+            }
+
+            // (c) Anything other than full three-switch coverage must carry a stated reason.
+            if (claimed.Any(c => !c))
+            {
+                Assert.False(string.IsNullOrWhiteSpace(coverage.Reason),
+                    $"{type} is classified Repaired but is NOT wired into all three dispatch switches " +
+                    $"(glossary={coverage.GlossaryPass}, dynamic={coverage.DynamicPass}, " +
+                    $"valueScoped={coverage.ValueScopedPass}) and carries NO reason. Uneven coverage is only " +
+                    "acceptable as a RECORDED decision: use OwnEngineHook(reason) or " +
+                    "PartialCoverage(..., reason) and say why, at the switch that drops it as well.");
+            }
         }
     }
 

@@ -966,9 +966,10 @@ public class UnifiedAnalysisService
         // path — which BookIntelligenceService.SummarizeChaptersAsync persists into ChunkSummary.SummaryText
         // — would skip the shipped glossary repair and leak English that every other summarization run has
         // cleaned. The repair layer is type-aware and fail-safe: for the non-target types RunRawAsync also
-        // serves (BookOverview / Synopsis / CharacterAnalysis / StoryAnalysis) it is a strict no-op that
-        // returns the text byte-identical. Summarization has no structured payload, so the whole text is the
-        // repairable prose (structuredJson: null).
+        // serves (BookOverview / CharacterAnalysis / StoryAnalysis) it is a strict no-op that returns the
+        // text byte-identical. Summarization and Synopsis are the two plain-text types this seam repairs
+        // (structuredJson null for both), while BookOverview / CharacterAnalysis / StoryAnalysis stay strict
+        // no-ops here because their structured arms blank-guard on a null structuredJson.
         // SEAM PARITY (be-c02): the bookId is THREADED FROM THE CALLER, exactly like the persisted seams
         // (RunAsync / RunWithInputAsync / streaming / chunked LineEdit) do — RunRawAsync takes raw inputText
         // rather than a book/chapter target, but every real caller (BookIntelligenceService's

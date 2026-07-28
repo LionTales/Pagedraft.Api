@@ -493,6 +493,14 @@ public class DynamicTermRepairService
                 AnalysisType.Summarization =>
                     await ApplyPlainTextAsync(structuredJson, cleanContent, language, bookEntities, ct).ConfigureAwait(false),
 
+                // Synopsis (f2, 2026-07-28): PLAIN TEXT like Summarization - no structured payload, so the whole
+                // value is the repairable prose. Mirrors GlossaryRepairPass.Apply's Synopsis arm one-for-one (see
+                // its comment for the q2 measurement that cleared q1's HALT and for the cross-model GPU-swap note:
+                // Synopsis -> AiTaskType.Summarization -> qwen3.5:9b, TermRepair -> gemma4:12b, so a LEAKING
+                // synopsis costs one cold swap on a single-GPU host, a clean one costs zero model calls).
+                AnalysisType.Synopsis =>
+                    await ApplyPlainTextAsync(structuredJson, cleanContent, language, bookEntities, ct).ConfigureAwait(false),
+
                 AnalysisType.LiteraryAnalysis =>
                     await ApplyStructuredAsync<LiteraryAnalysisResult>(structuredJson, cleanContent, language, jsonOptions, RepairableFields.For, bookEntities, ct).ConfigureAwait(false),
                 AnalysisType.LinguisticAnalysis =>
@@ -523,7 +531,7 @@ public class DynamicTermRepairService
         }
     }
 
-    /// <summary>Summarization dispatch target: the whole ResultText is the repairable prose. Mirrors
+    /// <summary>Summarization / Synopsis dispatch target: the whole ResultText is the repairable prose. Mirrors
     /// <see cref="GlossaryRepairPass"/>'s RepairPlainText via the SAME <see cref="RepairableFields.ForPlainText"/>
     /// write-back seam, but through <see cref="RepairFieldsAsync"/> (span-scoped model calls) instead of the
     /// closed glossary.</summary>
