@@ -82,6 +82,12 @@ public class LinguisticQualityTests
     // cloud models — that route gates on the OpenRouter API key being present.
     private const string BakeoffProviderEnvVar = "LINGUISTIC_BAKEOFF_PROVIDER";
 
+    // Env var (set to 1/true) to ALSO print the per-case table for each bake-off model, on top of the
+    // aggregate row. Default OFF so the comparison table stays readable. Turn it on when you need to
+    // know WHICH cases separate two models (e.g. after growing the gold), instead of spending another
+    // GPU run on the single-model scorer to find out.
+    private const string BakeoffPerCaseEnvVar = "LINGUISTIC_BAKEOFF_PER_CASE";
+
     // Default bake-off shortlist: models actually pulled on the RTX 4070 laptop (~8 GB VRAM).
     // qwen3.5:9b is the production default; DictaLM is the Hebrew-specialist local model (tag :latest is
     // the locally pulled tag). 24B+ models are intentionally EXCLUDED because they won't fit in 8 GB VRAM.
@@ -133,6 +139,7 @@ public class LinguisticQualityTests
     }
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task LinguisticQuality_RunGoldCases_ReportFalsePositiveRecallTypeAccuracy()
     {
         // Single-model run is Ollama-only, so gate on the Ollama probe.
@@ -215,6 +222,7 @@ public class LinguisticQualityTests
     ///   dotnet test --filter "FullyQualifiedName~LinguisticQuality_ModelBakeoff"
     /// </summary>
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task LinguisticQuality_ModelBakeoff_ReportTable()
     {
         var provider = ResolveBakeoffProvider();
@@ -268,6 +276,10 @@ public class LinguisticQualityTests
         _output.WriteLine($"{"model".PadRight(modelCol)} {"clean-FP",8} {"recall",7} {"type-acc",8} {"composite",9} {"errors",7}  status");
         _output.WriteLine(new string('-', modelCol + 8 + 7 + 8 + 9 + 7 + 12));
 
+        var perCase = ResolveBakeoffPerCase();
+        if (perCase)
+            _output.WriteLine($"[{BakeoffPerCaseEnvVar}] per-case detail ON for every model in this sweep.");
+
         var rows = new List<BakeoffRow>();
         foreach (var model in models)
         {
@@ -277,7 +289,8 @@ public class LinguisticQualityTests
             try
             {
                 var router = CreateRouter(provider, model);
-                score = await ScoreModelAsync(router, cases, perCaseOutput: false);
+                if (perCase) _output.WriteLine($"--- per-case detail: {label} ---");
+                score = await ScoreModelAsync(router, cases, perCaseOutput: perCase);
             }
             catch (Exception ex)
             {
@@ -303,6 +316,25 @@ public class LinguisticQualityTests
                 _output.WriteLine(
                     $"{Truncate(label, modelCol).PadRight(modelCol)} " +
                     $"{"-",8} {"-",7} {"-",8} {"-",9} {"-",7}  {status}");
+            }
+        }
+
+        // With per-case detail ON the rows above are separated by long per-case blocks, so re-print the
+        // comparison table in one piece — that table is the artifact a bake-off is run for.
+        if (perCase)
+        {
+            _output.WriteLine("");
+            _output.WriteLine("=== Comparison table (repeated after the per-case detail) ===");
+            _output.WriteLine($"{"model".PadRight(modelCol)} {"clean-FP",8} {"recall",7} {"type-acc",8} {"composite",9}");
+            foreach (var r in rows)
+            {
+                _output.WriteLine(r.Ok
+                    ? $"{Truncate(r.Model, modelCol).PadRight(modelCol)} " +
+                      $"{r.CleanFalsePositives,8} " +
+                      $"{r.PlantedRecall.ToString("P0", CultureInfo.InvariantCulture),7} " +
+                      $"{r.TypeAccuracy.ToString("P0", CultureInfo.InvariantCulture),8} " +
+                      $"{r.Composite.ToString("F3", CultureInfo.InvariantCulture),9}"
+                    : $"{Truncate(r.Model, modelCol).PadRight(modelCol)} {"-",8} {"-",7} {"-",8} {"-",9}");
             }
         }
 
@@ -576,6 +608,17 @@ public class LinguisticQualityTests
         return models.Length > 0 ? models : DefaultBakeoffModels;
     }
 
+    /// <summary>True when the per-case detail knob is set (1/true/yes, case-insensitive); default false.</summary>
+    private static bool ResolveBakeoffPerCase()
+    {
+        var raw = Environment.GetEnvironmentVariable(BakeoffPerCaseEnvVar);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        raw = raw.Trim();
+        return raw.Equals("1", StringComparison.Ordinal)
+            || raw.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || raw.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Resolve the bake-off provider from the env var; defaults to Ollama.</summary>
     private static string ResolveBakeoffProvider()
     {
@@ -627,7 +670,7 @@ public class LinguisticQualityTests
     /// would reject Hebrew prose-wrapped JSON that production accepts. Returns null on any failure — the
     /// caller treats that as zero issues.
     /// </summary>
-    private static LinguisticAnalysisResult? ParseLinguistic(string content)
+    internal static LinguisticAnalysisResult? ParseLinguistic(string content)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
         var json = UnifiedAnalysisService.ExtractJson(content);
@@ -640,34 +683,6 @@ public class LinguisticQualityTests
         {
             return null;
         }
-    }
-
-    // ─── Bug-fix guard: bake-off parsing uses the SAME extractor as production ───
-    // Always-on (no live model needed). Locks the harness to UnifiedAnalysisService.ExtractJson so
-    // scores reflect real parsing.
-
-    [Fact]
-    public void ParseLinguistic_HebrewProseWrappedJson_ExtractsRealObjectNotPreambleBrace()
-    {
-        // A Hebrew preamble that itself contains balanced braces, then the REAL metrics object.
-        // A first-'{' brace matcher would lock onto {הערה...} and fail; the production extractor
-        // rejects prose-in-braces and finds the real object, so bake-off parsing matches production.
-        const string proseWrapped = """
-            לפניכם ניתוח לשוני {הערה ראשונית: הטקסט תקין}.
-
-            {
-              "grammaticalityScore": 0.95,
-              "summary": "ניתוח תקין.",
-              "deviations": [],
-              "consistencyIssues": []
-            }
-            """;
-
-        var parsed = ParseLinguistic(proseWrapped);
-
-        // The REAL object is parsed (grammaticalityScore round-trips), not the prose {הערה...} brace.
-        Assert.NotNull(parsed);
-        Assert.Equal(0.95, parsed!.GrammaticalityScore, precision: 5);
     }
 
     // ─── Gold loading ───
@@ -746,11 +761,68 @@ public class LinguisticQualityTests
 
     // Appsettings production defaults for Ollama_LinguisticAnalysis — wired here so the harness
     // measures the same params the real API path uses (instead of OllamaProvider's bare fallback of
-    // { Temperature=0.2, NumPredict=2048 }). Kept in sync with appsettings.json manually.
+    // { Temperature=0.2, NumPredict=2048 }). Still separate literals (nothing reads the shipped file at
+    // bake-off time), but no longer hand-policed: HarnessConfigParityTests binds the real appsettings.json
+    // and pins these four against Ai:ProviderSettings:Ollama_LinguisticAnalysis. That pin reads
+    // LinguisticTuningDefaults() below — the DEFAULTS, never the env-overridden values — so setting
+    // LINGUISTIC_* for a sweep cannot turn the parity test red.
     private const double DefaultLinguisticTemperature   = 0.2;
     private const int    DefaultLinguisticNumPredict    = 5120;
     private const int    DefaultLinguisticNumCtx        = 16384;
     private const double DefaultLinguisticRepeatPenalty = 1.2;
+
+    /// <summary>
+    /// The shipped Ollama_LinguisticAnalysis values as this harness restates them, with NO env-var
+    /// overrides applied. <c>internal</c> so the config-parity pin binds this construction rather than a
+    /// second copy of the numbers.
+    /// </summary>
+    internal static ProviderTuningOptions LinguisticTuningDefaults() => new()
+    {
+        Temperature   = DefaultLinguisticTemperature,
+        NumPredict    = DefaultLinguisticNumPredict,
+        NumCtx        = DefaultLinguisticNumCtx,
+        RepeatPenalty = DefaultLinguisticRepeatPenalty
+    };
+
+    /// <summary>
+    /// The <c>Ai:ProviderSettings</c> map the bake-off DI installs for <paramref name="provider"/>, given an
+    /// already-resolved Ollama tuning. <c>internal</c> for the same reason as
+    /// <see cref="LinguisticTuningDefaults"/>: the parity pin resolves THIS dictionary against the shipped
+    /// one instead of restating what it contains.
+    ///
+    /// CLOUD OUTPUT-CAP PARITY (p2-2). Only the OLLAMA key used to be wired, so a NON-Ollama sweep
+    /// resolved NO entry at all and fell through to the ProviderTuningOptions class default
+    /// MaxTokens = 2048 — while the local rows run at NumPredict 5120. That asymmetry is not
+    /// a model difference, it is a harness artifact: a truncated LinguisticAnalysis JSON fails
+    /// ExtractJson and scores as a MISS, so the cloud row would read worse for a reason that has
+    /// nothing to do with the model. Mirror the same budget onto the routed provider's per-task key,
+    /// using the family's own output knob (MaxTokens for the OpenAI-compatible/cloud families,
+    /// NumPredict for Ollama — see ProviderTuningResolver.ResolveOutputTokens, p1-2). This also
+    /// matches what production ships: appsettings' OpenRouter_LinguisticAnalysis is
+    /// { Temperature 0.2, MaxTokens 5120, NumCtx 16384 }, identical to the values written here.
+    /// RepeatPenalty is deliberately NOT mirrored: the OpenAI-compatible payload has no such field
+    /// (p1-3), so writing one would be dead config that reads as configured. Both halves of that claim —
+    /// the identity AND the deliberate omission — are pinned by HarnessConfigParityTests, so this
+    /// docstring no longer asserts them on its own authority.
+    /// </summary>
+    internal static Dictionary<string, ProviderTuningOptions> BuildHarnessProviderSettings(
+        string provider, ProviderTuningOptions linguisticTuning)
+    {
+        var settings = new Dictionary<string, ProviderTuningOptions>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Ollama_LinguisticAnalysis"] = linguisticTuning
+        };
+        if (!provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+        {
+            settings[$"{provider}_LinguisticAnalysis"] = new ProviderTuningOptions
+            {
+                Temperature = linguisticTuning.Temperature,
+                MaxTokens = linguisticTuning.NumPredict,
+                NumCtx = linguisticTuning.NumCtx
+            };
+        }
+        return settings;
+    }
 
     /// <summary>
     /// Build the ProviderTuningOptions for Ollama_LinguisticAnalysis, preferring env-var overrides
@@ -822,11 +894,9 @@ public class LinguisticQualityTests
                 ["LinguisticAnalysis"] = new FeatureModelOptions { Provider = provider, Model = model }
             };
             // Wire ProviderSettings so OllamaProvider.GetTuning resolves Ollama_LinguisticAnalysis
-            // instead of falling through to its bare default { Temperature=0.2, NumPredict=2048 }.
-            opts.ProviderSettings = new Dictionary<string, ProviderTuningOptions>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["Ollama_LinguisticAnalysis"] = linguisticTuning
-            };
+            // instead of falling through to its bare default { Temperature=0.2, NumPredict=2048 }, plus the
+            // cloud mirror for a non-Ollama sweep. See BuildHarnessProviderSettings for both rationales.
+            opts.ProviderSettings = BuildHarnessProviderSettings(provider, linguisticTuning);
         });
         services.AddSingleton<PromptFactory>();
         services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(sp =>
