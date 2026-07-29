@@ -81,38 +81,45 @@ public class AiRouter : IAiRouter
             yield return token;
     }
 
+    /// <summary>
+    /// THE MODEL-TIER SEAM (model-tier-fast-thinking plan, p3-2). This method used to open with
+    /// "Future: experiment/feature-flag override by (UserId, SourceId, TaskType) here"; the tier is that
+    /// override, and it lands here rather than at a new seam.
+    ///
+    /// It is keyed on <see cref="AiRequest.Tier"/>, which the CALLER stamps from the book, NOT on
+    /// <see cref="AiRequest.SourceId"/> - the comment's suggested key. SourceId is heterogeneous (chapterId
+    /// / sceneId / bookId / the literals "repair" and "term-repair" across its assignment sites), so it is
+    /// not a book identifier and cannot be used to look one up. Keeping the tier on the request also keeps
+    /// the router DB-free.
+    ///
+    /// The whole four-rung precedence lives in
+    /// <see cref="LinguisticModelResolver.ResolveForTask(AiOptions, AiTaskType, string?, AiTier)"/>,
+    /// including the language rung this method used to spell out inline. That is deliberate: the resolver
+    /// exists precisely because a staleness gate resolving differently from the router is the failure mode,
+    /// and one implementation cannot drift from itself. An absent tier means
+    /// <see cref="AiTier.Fast"/>, i.e. resolution byte-identical to the pre-tier behaviour.
+    /// </summary>
     private static AiModelSelection ResolveSelection(AiRequest request, AiOptions opt)
     {
-        // Future: experiment/feature-flag override by (UserId, SourceId, TaskType) here
+        var (provider, model) = LinguisticModelResolver.ResolveForTask(
+            opt, request.TaskType, request.Language, request.Tier ?? AiTier.Fast);
 
-        var taskKey = request.TaskType.ToString();
-        var language = request.Language?.Trim() ?? "";
-
-        var isEnglish = language.StartsWith("en", StringComparison.OrdinalIgnoreCase);
-        if (opt.FeatureModels != null &&
-            (request.TaskType == AiTaskType.Proofread || request.TaskType == AiTaskType.LineEdit) &&
-            isEnglish)
-        {
-            var langKey = taskKey + "_en";
-            if (opt.FeatureModels.TryGetValue(langKey, out var featureEn) &&
-                !string.IsNullOrEmpty(featureEn.Provider) && !string.IsNullOrEmpty(featureEn.Model))
-            {
-                return new AiModelSelection { Provider = featureEn.Provider, Model = featureEn.Model };
-            }
-        }
-
-        if (opt.FeatureModels != null && opt.FeatureModels.TryGetValue(taskKey, out var feature) &&
-            !string.IsNullOrEmpty(feature.Provider) && !string.IsNullOrEmpty(feature.Model))
-        {
-            return new AiModelSelection { Provider = feature.Provider, Model = feature.Model };
-        }
-
+        // Last-resort literals preserved from the pre-p3-2 router: they only bite when AiOptions binds a
+        // NULL default (the class initializers are "Ollama" / "qwen2.5:14b"), and the resolver returns the
+        // configured defaults verbatim rather than substituting its own.
         return new AiModelSelection
         {
-            Provider = opt.DefaultProvider ?? "Ollama",
-            Model = opt.DefaultModel ?? "qwen2.5:14b"
+            Provider = provider ?? "Ollama",
+            Model = model ?? "qwen2.5:14b"
         };
     }
+
+    /// <summary>
+    /// Test seam over <see cref="ResolveSelection"/> so the router-vs-resolver agreement can be asserted on
+    /// the ROUTER'S OWN code path for every (task, language, tier) triple without booting a provider.
+    /// </summary>
+    internal static AiModelSelection ResolveSelectionForTest(AiRequest request, AiOptions opt)
+        => ResolveSelection(request, opt);
 
     /// <summary>
     /// For unified analysis flows (LineEdit, LinguisticAnalysis, BookReview, AnalysisRepair, TermRepair), avoid
