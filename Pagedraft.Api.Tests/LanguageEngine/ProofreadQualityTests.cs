@@ -68,13 +68,18 @@ public class ProofreadQualityTests
     private const string OpenRouterBaseUrl = "https://openrouter.ai/api/v1";
 
     // Single-model scorer uses the production default proofread model (Ai:FeatureModels:Proofread),
-    // which is DictaLM-3.0-12B. At ~8 GB VRAM it CPU-spills on the dev box, so the single-model
-    // local Fact is slow (minutes per case) — this is expected.
+    // which is gemma4:12b as of the p2-3 n=5 re-measurement (2026-07-29). It still CPU-spills partially
+    // at ~8 GB VRAM (~30%/70% CPU/GPU), so the single-model local Fact is slow — this is expected.
     //
     // KEEP IN SYNC: this value must match Ai:FeatureModels:Proofread:Model in
     // Pagedraft.Api/appsettings.json (see "_comment_ProofreadModel" key there).
-    // If appsettings changes, update this constant too — they are NOT read from the same source at test time.
-    private const string ProofreadModel = "hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest";
+    // If appsettings changes, update this constant too — they are NOT read from the same source at BAKE-OFF
+    // time (the harness wires its own in-memory config, deliberately, so a sweep can drive any model).
+    // The duplication is no longer HAND-POLICED, though: HarnessConfigParityTests (at the assembly root,
+    // where both standing test filters actually reach) binds the real appsettings.json and goes red if a
+    // model swap touches only one side. That pin references this constant rather than restating its value,
+    // which is why it is `internal` and not `private` — a pin that restates the value binds a look-alike.
+    internal const string ProofreadModel = "gemma4:12b";
 
     // Env var (comma-separated) to override the bake-off model list WITHOUT recompiling.
     private const string BakeoffModelsEnvVar = "PROOFREAD_BAKEOFF_MODELS";
@@ -120,6 +125,7 @@ public class ProofreadQualityTests
     };
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task ProofreadQuality_RunGoldCases_ReportPrecisionRecallFalsePositive()
     {
         if (!await IsOllamaReachableAsync())
@@ -177,6 +183,7 @@ public class ProofreadQualityTests
     ///   dotnet test --filter "FullyQualifiedName~ProofreadQuality_ModelBakeoff"
     /// </summary>
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task ProofreadQuality_ModelBakeoff_ReportTable()
     {
         var defaultProvider = ResolveBakeoffProvider();
@@ -326,30 +333,6 @@ public class ProofreadQualityTests
 
         // Reporting benchmark, not a quality gate — assert only that the run iterated the model list.
         Assert.True(models.Length > 0);
-    }
-
-    /// <summary>
-    /// Skip-gate logic (pure, no network): a missing OpenRouter key must skip the bake-off ONLY when every
-    /// candidate is OpenRouter. A MIXED list keeps running its local Ollama / other-cloud rows (the unkeyed
-    /// OpenRouter rows just record NA) - the regression the old <c>Any(...)</c> gate caused.
-    /// </summary>
-    [Fact]
-    public void ModelBakeoff_MissingOpenRouterKey_SkipsOnlyWhenEveryCandidateIsOpenRouter()
-    {
-        (string Provider, string Model)[] mixed = { ("OpenRouter", "vendor/cloud-model"), ("Ollama", "gemma4:12b") };
-        (string Provider, string Model)[] allOpenRouter = { ("OpenRouter", "vendor/a"), ("OpenRouter", "vendor/b") };
-        (string Provider, string Model)[] allOllama = { ("Ollama", "gemma4:12b"), ("Ollama", "qwen2.5:14b") };
-
-        // The bug: a mixed list with a missing key must NOT skip -> its Ollama rows still run.
-        Assert.False(ShouldSkipForMissingOpenRouterKey(mixed, openRouterKeyPresent: false));
-        // All-OpenRouter with no key => nothing to run => skip cleanly.
-        Assert.True(ShouldSkipForMissingOpenRouterKey(allOpenRouter, openRouterKeyPresent: false));
-        // All-OpenRouter WITH a key => run (do not skip).
-        Assert.False(ShouldSkipForMissingOpenRouterKey(allOpenRouter, openRouterKeyPresent: true));
-        // No OpenRouter candidate at all => the OpenRouter key gate never applies.
-        Assert.False(ShouldSkipForMissingOpenRouterKey(allOllama, openRouterKeyPresent: false));
-        // Empty list => nothing to skip on this gate.
-        Assert.False(ShouldSkipForMissingOpenRouterKey(Array.Empty<(string, string)>(), openRouterKeyPresent: false));
     }
 
     /// <summary>
@@ -577,7 +560,7 @@ public class ProofreadQualityTests
     /// per-candidate try/catch - matching the pre-OpenRouter bake-off behavior. Using <c>Any</c> here (the
     /// old gate) wrongly skipped a mixed list's local rows.
     /// </summary>
-    private static bool ShouldSkipForMissingOpenRouterKey(
+    internal static bool ShouldSkipForMissingOpenRouterKey(
         IReadOnlyList<(string Provider, string Model)> parsed, bool openRouterKeyPresent)
     {
         if (openRouterKeyPresent || parsed.Count == 0) return false;
@@ -667,9 +650,13 @@ public class ProofreadQualityTests
             ["gpt-5.4"] = (2.5m, 15m),
             ["gpt-5"] = (0.625m, 5m),
             ["gpt-5.4-nano"] = (0.20m, 1.25m),
-            // TODO(2026-06-20): pin against the live OpenRouter pricing page before relying on $cost column.
-            // UNVERIFIED placeholder magnitude only — real subset spend is sub-cent regardless of exact rate.
-            ["google/gemma-4-31b-it"] = (0.20m, 0.40m)
+            // VERIFIED 2026-07-29 (p2-2) against the live OpenRouter catalog (GET /api/v1/models):
+            // google/gemma-4-31b-it reports pricing.prompt 0.00000014 and pricing.completion 0.0000004
+            // per token, i.e. $0.14 / $0.40 per 1M, with context_length 262144. The previous 0.20m input
+            // rate was the 2026-06-20 UNVERIFIED placeholder and over-stated input cost by ~43%; the
+            // $cost column is now a real figure rather than a magnitude check. Re-verify if the sweep
+            // ever ranks models on cost — list prices move.
+            ["google/gemma-4-31b-it"] = (0.14m, 0.40m)
         };
 
     /// <summary>Approx USD cost for a model's token totals; 0 when the model has no price entry (Ollama/unknown).</summary>
@@ -855,6 +842,56 @@ public class ProofreadQualityTests
         return CreateRouter(provider, model);
     }
 
+    /// <summary>
+    /// The <c>Ai:ProviderSettings</c> map the bake-off DI installs. Factored out of
+    /// <see cref="CreateRouter(string,string)"/> and made <c>internal</c> so
+    /// <c>HarnessConfigParityTests</c> can pin it against the SHIPPED appsettings entries by resolving the
+    /// very dictionary the harness uses, instead of restating its values in a second place (which would
+    /// bind a look-alike and drift with the real one still unwatched).
+    ///
+    /// PRODUCTION TUNING PARITY (p2-3). Until this todo the harness wired NO ProviderSettings at
+    /// all, so EVERY candidate — local and cloud — ran at the ProviderTuningOptions class defaults
+    /// (Temperature 0.2, NumPredict/MaxTokens 2048, NumCtx 4096, RepeatPenalty 1.1) instead of the
+    /// shipped Ollama_Proofread / OpenRouter_Proofread entries. That was SYMMETRIC (so p2-2's
+    /// local-vs-cloud comparison stayed valid) but NOT production-faithful. Mirror the shipped
+    /// appsettings values here, using each family's own output knob (NumPredict for Ollama,
+    /// MaxTokens for the OpenAI-compatible/cloud families — ProviderTuningResolver.ResolveOutputTokens,
+    /// p1-2).
+    ///
+    /// ONLY ONE RESOLVED VALUE MOVES: the output cap 2048 -> 4096. Shipped Ollama_Proofread is
+    /// { Temperature 0.2, NumPredict 4096 } — it sets no NumCtx and no RepeatPenalty, so both bind
+    /// the class defaults (4096 / 1.1) that the un-wired harness already used, and Temperature 0.2
+    /// equals the class default too. num_predict is a STOP CONDITION, so raising it can only change
+    /// a generation that would otherwise have been truncated at 2048 tokens. It matters for exactly
+    /// one case class, which is why production fidelity was chosen: a repetition loop (the known
+    /// Dicta failure mode behind Ollama_LineEdit's RepeatPenalty 1.3) runs to 4096 in production, so
+    /// measuring at 2048 would UNDER-report that instability.
+    /// </summary>
+    internal static Dictionary<string, ProviderTuningOptions> BuildHarnessProviderSettings(string provider)
+    {
+        var proofreadTuning = new ProviderTuningOptions { Temperature = 0.2, NumPredict = 4096 };
+        var settings = new Dictionary<string, ProviderTuningOptions>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Ollama_Proofread"] = proofreadTuning
+        };
+        if (!provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase))
+        {
+            // Shipped OpenRouter_Proofread is { Temperature 0.2, MaxTokens 4096, NumCtx 4096 } —
+            // byte-identical to what is written here, so this is production fidelity, not a thumb on
+            // the scale. RepeatPenalty is deliberately NOT mirrored: the OpenAI-compatible payload has
+            // no such field (p1-3), so writing one would be dead config that reads as configured. Both
+            // halves of that claim — the identity AND the deliberate omission — are pinned by
+            // HarnessConfigParityTests; this comment no longer asserts them on its own authority.
+            settings[$"{provider}_Proofread"] = new ProviderTuningOptions
+            {
+                Temperature = proofreadTuning.Temperature,
+                MaxTokens = proofreadTuning.NumPredict,
+                NumCtx = proofreadTuning.NumCtx
+            };
+        }
+        return settings;
+    }
+
     private static IAiRouter CreateRouter(string provider, string model)
     {
         // Override Ai:DefaultProvider/DefaultModel AND Ai:FeatureModels:Proofread in the SAME in-memory
@@ -900,6 +937,7 @@ public class ProofreadQualityTests
             {
                 ["Proofread"] = new FeatureModelOptions { Provider = provider, Model = model }
             };
+            opts.ProviderSettings = BuildHarnessProviderSettings(provider);
         });
         services.AddSingleton<PromptFactory>();
         services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(sp =>

@@ -6,18 +6,35 @@ path the Linguistic harness already has (`docs/LINGUISTIC_MODEL_BAKEOFF.md`). Th
 server** for customers — i.e. it measures the quality ceiling beyond the local hardware budget, not a
 model intended to replace the local-first default today.
 
-> **[2026-07-27] STABILITY EVIDENCE SINCE THIS BAKE-OFF - READ BEFORE TRUSTING THE "KEEP local
-> Dicta-3.0" RECOMMENDATION BELOW.** Two identical full-gold runs (93 cases, same prompt/settings/
+> **[2026-07-29] RESOLVED - THE LOCAL HEBREW PROOFREAD MODEL IS NOW `gemma4:12b`, NOT `DictaLM-3.0`.**
+> The 2026-07-27 banner (kept below for history) left the question OPEN pending an n>=3 re-run. That
+> re-run is done at **n=5 per candidate**, all 93 gold cases, 0 errors, nothing capped, under
+> production-faithful tuning (`Ollama_Proofread` NumPredict 4096). Results (min/median/max):
+>
+> | model | F0.5 | precision | recall | fp-rate | overreach |
+> |---|---|---|---|---|---|
+> | **gemma4:12b** | 0.332 / **0.353** / 0.387 | 30 / **32** / 35% | 65 / **65** / 65% | 15 / **18** / 22% | 0/4 all 5 |
+> | DictaLM-3.0 | 0.261 / **0.287** / 0.337 | 23 / **25** / 29% | 70 / **70** / 85% | 31 / **32** / 33% | 0/4 all 5 |
+>
+> Precision and false-positive rate are FULLY DISJOINT in `gemma4:12b`'s favour; recall is FULLY
+> DISJOINT in Dicta's favour. F0.5 - the pre-registered precision-weighted ranking metric - favours
+> `gemma4:12b` 24/25 pairwise. Stability also favours it: recall spread 0 vs Dicta's 15 points.
+> **VERDICT: SWITCHED to `gemma4:12b` for Hebrew Proofread.** Honest limits, the recall regression and
+> the chunking caveat are recorded in `Ai:FeatureModels:_comment_ProofreadModel`
+> (`Pagedraft.Api/appsettings.json`) and in the `## p2 measurement results` -> `p2-3` section of
+> `src/.cursor/plans/_todo/model-tier-fast-thinking-2026-07-28.plan.md`. **LineEdit still routes to
+> DictaLM-3.0 and is NOT covered by this gold** - it needs its own bake-off.
+
+> **[2026-07-27, SUPERSEDED BY THE 2026-07-29 BANNER ABOVE] STABILITY EVIDENCE SINCE THIS BAKE-OFF.**
+> Two identical full-gold runs (93 cases, same prompt/settings/
 > machine, production temp 0.2, no seed, 2026-07-27) gave local `gemma4:12b` a STABLE F0.5 (0.353 ->
-> 0.361, recall 65% both) but the currently-wired local `DictaLM-3.0` a WIDE swing (F0.5 0.262 -> 0.360,
+> 0.361, recall 65% both) but the then-wired local `DictaLM-3.0` a WIDE swing (F0.5 0.262 -> 0.360,
 > recall 65% -> 85%, precision 23% -> 31%). Run 1 alone reads "gemma4 beats Dicta by 35% on F0.5"; run
 > 2 reads a dead tie with Dicta 20 points BETTER on recall. Full methodology warning:
 > `Ai:FeatureModels:_comment_ProofreadModel` in `Pagedraft.Api/appsettings.json`.
 >
-> VERDICT: KEEP DictaLM-3.0 for Hebrew Proofread pending an n>=3 re-run of both candidates;
-> run-to-run STABILITY is now a selection criterion in its own right and gemma4:12b currently wins it
-> on this evidence, so this is an OPEN question rather than a settled one - not the closed
-> recommendation the table in this document implies.
+> VERDICT AT THE TIME: KEEP DictaLM-3.0 for Hebrew Proofread pending an n>=3 re-run of both candidates.
+> That re-run has now happened and reversed this - see the 2026-07-29 banner above.
 
 ## Run metadata
 
