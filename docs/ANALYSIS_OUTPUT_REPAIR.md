@@ -658,9 +658,21 @@ model first. Do NOT assume prod is already cloud.
 **Documented extension point (NOT implemented).** A per-provider/per-model override ON
 `AnalysisRepairOptions` (e.g. a dictionary keyed by provider/model, consulted instead of the flat
 `Enabled`/`GuardOnly`/`PerType`) is only warranted if a SINGLE environment ever serves MULTIPLE tiers at
-once (e.g. free users -> local, paid -> cloud, in the same deployment). Today each environment serves
-exactly one tier, so the per-environment appsettings block is sufficient. This is called out in the
-`AnalysisRepairOptions` xmldoc (`Services/Ai/AiOptions.cs`) and the Production block comment - do not
+once (e.g. free users -> local, paid -> cloud, in the same deployment).
+
+**UPDATE 2026-07-29 - that condition is now MET, and the block still does not change.** The per-book model
+tier (`Book.AiTier`, model-tier-fast-thinking plan phase 3, p3-3) makes one deployment serve BOTH tiers at
+once: an opted-in book's LinguisticAnalysis and Hebrew Proofread route to `OpenRouter /
+google/gemma-4-31b-it` while every other book stays on Ollama. The sentence that used to read "today each
+environment serves exactly one tier" is therefore retired. What still gates building the override is
+EVIDENCE, not the trigger condition: **the cloud-tier leak rate has never been measured** (see 11.1 -
+deferred, blocked on outbound egress), so the "capable cloud -> true no-op" row above remains a documented
+TARGET state, not a measured one. Leaving the guard ON for a cloud-routed book is harmless rather than
+merely tolerated - it gates deterministically before any model call, so a clean field costs zero model
+calls - and flipping the environment-wide `Enabled` to `false` to suit thinking-tier books would disarm the
+guard for every LOCAL book in the same deployment, which is the actual reason the flat block stays. Build
+the override when a cloud leak measurement exists and shows a materially different rate. This is called out
+in the `AnalysisRepairOptions` xmldoc (`Services/Ai/AiOptions.cs`) and the Production block comment - do not
 build it speculatively.
 
 ## 5. Structural fixes (Phase 4)

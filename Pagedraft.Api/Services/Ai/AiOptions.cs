@@ -472,12 +472,28 @@ public static class AnalysisRepairGate
 /// guard-only glossary-on. See appsettings.Production.json for the current prod value and its KEEP-IN-SYNC
 /// note against "Ai:FeatureModels" (the model actually served).
 ///
+/// ONE ENVIRONMENT NOW SERVES TWO TIERS (p3-3) - and the flat block still stands, but for a NARROWER reason
+/// than "cloud was measured". This xmldoc used to say "today each environment serves exactly one tier".
+/// That became FALSE the moment the per-book model tier shipped (<c>Book.AiTier</c>,
+/// model-tier-fast-thinking plan phase 3): a single deployment now routes an opted-in book's
+/// LinguisticAnalysis and Hebrew Proofread to a cloud model while every other book stays local, which is
+/// precisely the multi-tier condition the extension point below was reserved for.
+///
+/// NO CHANGE IS MADE HERE, and the reason is COST, not a cloud leak measurement. Be careful with this: the
+/// cloud-tier leak rate has NEVER been measured (docs/ANALYSIS_OUTPUT_REPAIR.md section 11.1 records it as
+/// DEFERRED, blocked on outbound egress), so nobody may claim the guard is calibrated for the thinking
+/// tier. What IS true is that leaving it ON for a cloud-routed book is harmless: the guard is deterministic
+/// and gates BEFORE any model call, so a clean field costs ZERO model calls, and if the inverse-scaling
+/// premise holds the cloud tier simply produces fewer values for it to act on. The documented target state
+/// for a genuinely non-leaking tier is still the true no-op (<c>Enabled:false</c>) in section 4.1 - it is
+/// just not reachable per-BOOK from a per-ENVIRONMENT block, and flipping the environment-wide value would
+/// disarm the guard for every LOCAL book too. Pinned by <c>AiTierNonTriggeringTests</c>.
+///
 /// EXTENSION POINT (documented here only — NOT implemented; do not add this until it is actually needed):
 /// a per-provider/per-model override ON THIS CLASS (e.g. a Dictionary&lt;string, AnalysisRepairOptions&gt;
-/// keyed by provider/model name, consulted instead of the single flat Enabled/GuardOnly/PerType above) is
-/// only needed if a SINGLE environment ever serves MULTIPLE model tiers at once (e.g. some requests routed
-/// to a cloud model, others to local Ollama, within the same deployment). Today each environment serves
-/// exactly one tier, so the flat per-environment block above is sufficient.
+/// keyed by provider/model name, consulted instead of the single flat Enabled/GuardOnly/PerType above).
+/// The multi-tier trigger condition above is now MET, so what still gates it is evidence: build it when a
+/// cloud-tier leak measurement exists AND shows a materially different rate, not before.
 /// </summary>
 public class AnalysisRepairOptions
 {
