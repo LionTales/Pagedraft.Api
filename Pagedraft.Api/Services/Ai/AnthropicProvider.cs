@@ -27,7 +27,9 @@ public class AnthropicProvider : IAiAnalysisProvider
             throw new InvalidOperationException("Anthropic ApiKey not configured. Set Ai:Providers:Anthropic:ApiKey or AI_ANTHROPIC_APIKEY.");
 
         var model = request.Selection.Model;
-        var tuning = GetTuning("Anthropic");
+        // Per-task tuning ("Anthropic_{TaskType}" → "Anthropic" → class default). Before p1-1 this was
+        // flat-key only, so no task could raise its own cloud limits; see ProviderTuningResolver.
+        var tuning = GetTuning("Anthropic", request.TaskType);
 
         var payload = BuildPayload(model, request, tuning);
 
@@ -99,10 +101,11 @@ public class AnthropicProvider : IAiAnalysisProvider
         => !(model.StartsWith("claude-opus-4-7") || model.StartsWith("claude-opus-4-8")
             || model.StartsWith("claude-fable") || model.StartsWith("claude-mythos"));
 
-    private ProviderTuningOptions GetTuning(string providerName)
-    {
-        if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
-            return t;
-        return new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 2048 };
-    }
+    /// <summary>
+    /// Per-task tuning for this provider. Delegates to <see cref="ProviderTuningResolver.Resolve"/>, the ONE
+    /// implementation of the "{Provider}_{TaskType}" → "{Provider}" → class-default precedence (p1-1). The
+    /// old inline fallback <c>{ Temperature = 0.2, MaxTokens = 2048 }</c> merely restated the class defaults.
+    /// </summary>
+    private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType)
+        => ProviderTuningResolver.Resolve(_options.ProviderSettings, providerName, taskType);
 }

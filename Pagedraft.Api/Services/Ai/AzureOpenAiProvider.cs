@@ -30,7 +30,9 @@ public class AzureOpenAiProvider : IAiAnalysisProvider
             throw new InvalidOperationException("Azure OpenAI Endpoint, DeploymentName, and ApiKey must be configured.");
 
         var baseUrl = endpoint.TrimEnd('/') + "/openai/deployments/" + deployment;
-        var tuning = GetTuning("Azure");
+        // Per-task tuning ("Azure_{TaskType}" → "Azure" → class default). Before p1-1 this was flat-key
+        // only, so no task could raise its own cloud limits; see ProviderTuningResolver.
+        var tuning = GetTuning("Azure", request.TaskType);
         var userContent = request.Instruction + "\n\n" + request.InputText;
 
         var payload = new
@@ -72,10 +74,11 @@ public class AzureOpenAiProvider : IAiAnalysisProvider
         };
     }
 
-    private ProviderTuningOptions GetTuning(string providerName)
-    {
-        if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
-            return t;
-        return new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 2048 };
-    }
+    /// <summary>
+    /// Per-task tuning for this provider. Delegates to <see cref="ProviderTuningResolver.Resolve"/>, the ONE
+    /// implementation of the "{Provider}_{TaskType}" → "{Provider}" → class-default precedence (p1-1). The
+    /// old inline fallback <c>{ Temperature = 0.2, MaxTokens = 2048 }</c> merely restated the class defaults.
+    /// </summary>
+    private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType)
+        => ProviderTuningResolver.Resolve(_options.ProviderSettings, providerName, taskType);
 }

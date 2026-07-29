@@ -172,16 +172,12 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         return $"<system>{request.SystemMessage}</system>\n<user>{userContent}</user>";
     }
 
+    /// <summary>
+    /// Per-task tuning for this provider. Delegates to <see cref="ProviderTuningResolver.Resolve"/>, which
+    /// is now the ONE implementation of the "{Provider}_{TaskType}" → "{Provider}" → class-default
+    /// precedence (p1-1). Behaviour is unchanged: the old inline fallback
+    /// <c>{ Temperature = 0.2, NumPredict = 2048 }</c> merely restated the class defaults.
+    /// </summary>
     private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType = AiTaskType.GenericChat)
-    {
-        if (_options.ProviderSettings != null)
-        {
-            var taskSpecificKey = providerName + "_" + taskType;
-            if (_options.ProviderSettings.TryGetValue(taskSpecificKey, out var taskTuning))
-                return taskTuning;
-        }
-        if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
-            return t;
-        return new ProviderTuningOptions { Temperature = 0.2, NumPredict = 2048 };
-    }
+        => ProviderTuningResolver.Resolve(_options.ProviderSettings, providerName, taskType);
 }

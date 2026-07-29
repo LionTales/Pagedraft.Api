@@ -129,19 +129,15 @@ builder.Services.AddHttpClient("LanguageTool", (sp, client) =>
 });
 builder.Services.AddHttpClient();
 
-// Register AI providers by name for IAiRouter
+// Register AI providers by name for IAiRouter. The map itself lives in AiProviderRegistry so tests can
+// enumerate the registered NAMES (p1-2) — every one of them must carry an output-knob classification in
+// ProviderTuningResolver.KnownOutputKnobs, and a DI lambda is not reachable from a test.
 builder.Services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(sp =>
-{
-    var dict = new Dictionary<string, IAiAnalysisProvider>(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Ollama"] = new OllamaProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>(), sp.GetRequiredService<ILogger<OllamaProvider>>()),
-        ["OpenAI"] = new OpenAiProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
-        ["Azure"] = new AzureOpenAiProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
-        ["Anthropic"] = new AnthropicProvider(sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>()),
-        ["OpenRouter"] = new OpenAiCompatibleProvider("OpenRouter", sp.GetRequiredService<IHttpClientFactory>(), sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<AiOptions>>())
-    };
-    return dict;
-});
+    AiProviderRegistry.Create(
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetRequiredService<IConfiguration>(),
+        sp.GetRequiredService<IOptions<AiOptions>>(),
+        sp.GetRequiredService<ILogger<OllamaProvider>>()));
 builder.Services.AddSingleton<IAiRouter, AiRouter>();
 
 // Language Engine services
