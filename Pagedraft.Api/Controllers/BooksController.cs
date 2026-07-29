@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
+using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
 
@@ -22,6 +23,7 @@ public class BooksController : ControllerBase
     private readonly BookReviewService _bookReview;
     private readonly ChapterBriefService _chapterBrief;
     private readonly AnalysisProgressTracker _progress;
+    private readonly AiTierStatusService _aiTierStatus;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly ILogger<BooksController> _logger;
@@ -34,10 +36,12 @@ public class BooksController : ControllerBase
         BookReviewService bookReview,
         ChapterBriefService chapterBrief,
         AnalysisProgressTracker progress,
+        AiTierStatusService aiTierStatus,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
         ILogger<BooksController> logger)
     {
+        _aiTierStatus = aiTierStatus;
         _db = db;
         _bookIntelligence = bookIntelligence;
         _styleBaseline = styleBaseline;
@@ -81,8 +85,89 @@ public class BooksController : ControllerBase
         var book = await _db.Books.Include(b => b.Chapters.OrderBy(c => c.Order)).FirstOrDefaultAsync(b => b.Id == bookId, ct);
         if (book == null) return NotFound();
         var chapters = book.Chapters.Select(c => new ChapterSummaryDto(c.Id, c.Title, c.PartName, c.Order, c.WordCount, c.UpdatedAt)).ToList();
-        return Ok(new BookDetailDto(book.Id, book.Title, book.Author, book.Language, book.CreatedAt, book.UpdatedAt, chapters));
+        return Ok(new BookDetailDto(
+            book.Id, book.Title, book.Author, book.Language, book.CreatedAt, book.UpdatedAt,
+            AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(book.AiTier)),
+            chapters));
     }
+
+    /// <summary>
+    /// GET the book's model tier plus everything needed to describe it honestly (model-tier-fast-thinking
+    /// plan, p3-4): the stored tier, whether the thinking tier is usable on this deployment at all, whether
+    /// the book is currently FALLING BACK (stored "thinking" but running local), and the per-task route that
+    /// will actually run.
+    ///
+    /// The routes come from <see cref="Services.Ai.LinguisticModelResolver"/>, the same function
+    /// <see cref="Services.Ai.AiRouter"/> resolves through, so "the model the UI said would run" and "the
+    /// model that ran" are one computation rather than two that agree today.
+    /// </summary>
+    [HttpGet("{bookId:guid}/ai-tier")]
+    public async Task<ActionResult<BookAiTierDto>> GetAiTier(Guid bookId, CancellationToken ct)
+    {
+        var book = await _db.Books.AsNoTracking().FirstOrDefaultAsync(b => b.Id == bookId, ct);
+        if (book == null) return NotFound();
+        return Ok(BuildAiTierDto(book));
+    }
+
+    /// <summary>
+    /// PUT the book's model tier. Opt-in only: choosing "thinking" means this unpublished manuscript's text
+    /// is sent to a third-party provider for the two allowlisted tasks.
+    ///
+    /// TWO REJECTIONS, both deliberate:
+    ///   • an unrecognised token is a 400, NOT a defensive parse to "fast". <c>AiTierPolicy.Parse</c> is
+    ///     fail-safe for READS (a legacy row must not throw), but silently storing "fast" because a caller
+    ///     typed "thinkng" would make the UI and the database disagree with no signal anywhere.
+    ///   • "thinking" when the tier is not usable on this deployment is a 409 carrying the readiness reason.
+    ///     Accepting it would let a book advertise a tier that provably cannot route, which is the exact
+    ///     silent-lie this todo exists to close. Switching BACK to "fast" is always allowed.
+    /// </summary>
+    [HttpPut("{bookId:guid}/ai-tier")]
+    public async Task<ActionResult<BookAiTierDto>> UpdateAiTier(
+        Guid bookId, [FromBody] UpdateBookAiTierRequest req, CancellationToken ct)
+    {
+        var book = await _db.Books.FindAsync(new object[] { bookId }, ct);
+        if (book == null) return NotFound();
+
+        var requested = req?.Tier?.Trim() ?? "";
+        AiTier tier;
+        if (string.Equals(requested, AiTierPolicy.ThinkingStoredValue, StringComparison.OrdinalIgnoreCase))
+            tier = AiTier.Thinking;
+        else if (string.Equals(requested, AiTierPolicy.FastStoredValue, StringComparison.OrdinalIgnoreCase))
+            tier = AiTier.Fast;
+        else
+            return BadRequest(new { error = "unrecognizedTier", allowed = new[] { AiTierPolicy.FastStoredValue, AiTierPolicy.ThinkingStoredValue } });
+
+        if (tier == AiTier.Thinking)
+        {
+            var readiness = _aiTierStatus.EvaluateThinkingReadiness(book.Language);
+            if (readiness != AiTierReadiness.Ready)
+                return Conflict(new { error = "thinkingTierUnavailable", reason = ToCamelCase(readiness.ToString()) });
+        }
+
+        book.AiTier = AiTierPolicy.ToStoredValue(tier);
+        book.UpdatedAt = DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+
+        _logger.LogInformation(
+            "Book {BookId} model tier set to {Tier}. Thinking means chapter text for the allowlisted tasks leaves this machine.",
+            bookId, book.AiTier);
+
+        return Ok(BuildAiTierDto(book));
+    }
+
+    private BookAiTierDto BuildAiTierDto(Book book)
+    {
+        var status = _aiTierStatus.Describe(AiTierPolicy.Parse(book.AiTier), book.Language);
+        return new BookAiTierDto(
+            book.Id,
+            AiTierPolicy.ToStoredValue(status.Tier),
+            ToCamelCase(status.ThinkingReadiness.ToString()),
+            status.FallbackActive,
+            status.Routes.Select(r => new BookAiTierRouteDto(r.Task, r.Provider, r.Model, r.UsesTier)).ToList());
+    }
+
+    private static string ToCamelCase(string value) =>
+        string.IsNullOrEmpty(value) ? value : char.ToLowerInvariant(value[0]) + value[1..];
 
     [HttpGet("{bookId:guid}/profile")]
     public async Task<ActionResult<BookProfileDto>> GetProfile(Guid bookId, CancellationToken ct)
@@ -1118,7 +1203,12 @@ public class BooksController : ControllerBase
         s.EstimatedSeconds,
         s.EstimatedUsd);
 
-    private static BookDto ToDto(Book b) => new(b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt);
+    // Normalized on the way out (p3-4): the stored column is a nullable free string so a legacy or
+    // hand-edited row degrades to the local tier instead of throwing, but the wire value is always exactly
+    // "fast" or "thinking". Doing the defensive parse HERE means no client has to own a second copy of it.
+    private static BookDto ToDto(Book b) => new(
+        b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt,
+        AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(b.AiTier)));
 
     private static BookProfileDto ToProfileDto(BookProfile p) => new(
         p.Id,

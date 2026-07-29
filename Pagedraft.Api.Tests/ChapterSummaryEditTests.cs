@@ -911,6 +911,7 @@ public class ChapterSummaryEditTests
         bookReview: null!,
         chapterBrief: provider.GetRequiredService<ChapterBriefService>(),
         progress: provider.GetRequiredService<AnalysisProgressTracker>(),
+        aiTierStatus: null!,
         scopeFactory: provider.GetRequiredService<IServiceScopeFactory>(),
         appLifetime: new TestApplicationLifetime(),
         logger: NullLogger<BooksController>.Instance);

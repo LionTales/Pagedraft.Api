@@ -140,6 +140,11 @@ builder.Services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(
         sp.GetRequiredService<ILogger<OllamaProvider>>()));
 builder.Services.AddSingleton<IAiRouter, AiRouter>();
 
+// The model tier's pre-flight surface (p3-4): resolves each allowlisted task's ACTUAL route through the same
+// LinguisticModelResolver the router uses, and reports whether the thinking tier can route at all on this
+// deployment. Singleton because it holds no per-request state and reads only IOptions/IConfiguration.
+builder.Services.AddSingleton<AiTierStatusService>();
+
 // Language Engine services
 builder.Services.Configure<LanguageToolOptions>(builder.Configuration.GetSection(LanguageToolOptions.SectionName));
 builder.Services.AddSingleton<ILanguageEngineMetrics, LoggingLanguageEngineMetrics>();
