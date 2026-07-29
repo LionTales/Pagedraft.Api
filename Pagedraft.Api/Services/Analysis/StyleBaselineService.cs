@@ -161,6 +161,18 @@ public class StyleBaselineService
         Guid bookId,
         string language,
         CancellationToken ct = default)
+        => await GetStatusAsync(bookId, language, await ResolveBookTierAsync(bookId, ct), ct);
+
+    /// <summary>
+    /// <see cref="GetStatusAsync(Guid, string, CancellationToken)"/> with the book's tier already resolved,
+    /// so a build that calls status twice (pre + post) does not re-query <c>Book.AiTier</c> each time and -
+    /// more importantly - cannot observe a DIFFERENT tier half-way through its own build.
+    /// </summary>
+    private async Task<BookStyleBaselineStatus> GetStatusAsync(
+        Guid bookId,
+        string language,
+        AiTier tier,
+        CancellationToken ct)
     {
         var lang = NormalizeLanguage(language);
 
@@ -188,8 +200,11 @@ public class StyleBaselineService
                 });
 
         // The active LinguisticAnalysis model the freshness gate compares against (config-resolved, shared
-        // resolver). A profile built under a different model is stale, exactly like a timestamp mismatch.
-        var (provider, activeModel) = ResolveLinguisticProviderAndModel();
+        // resolver, at THIS BOOK'S TIER - p3-3). A profile built under a different model is stale, exactly
+        // like a timestamp mismatch, which is how a tier change invalidates this book and only this book.
+        // The PROVIDER moves with the tier too, so the USD estimate below is the estimate for the tier the
+        // build would actually run on rather than always the local (free) one.
+        var (provider, activeModel) = ResolveLinguisticProviderAndModel(tier);
 
         var built = 0;
         var stale = 0;
@@ -289,6 +304,18 @@ public class StyleBaselineService
     {
         var lang = NormalizeLanguage(language);
 
+        // p3-3: resolve the book's tier ONCE for the whole build, and THREAD that one value as an explicit
+        // argument to every site that needs it - the pre-status, the per-chapter rebuilds, the book average,
+        // the post-status and the BookStyleBaseline stamp - so all five agree on which model is active.
+        //
+        // be-c02: two of those five USED to re-read Book.AiTier for themselves
+        // (LoadOrBuildChapterStyleProfileAsync and BuildBookStyleAverageProfileAsync), which made the
+        // "resolve once" claim false at exactly the two sites where a mid-build flip does damage. Both now
+        // take the resolved tier; their `tier` parameter defaults to null (= resolve from the DB) only for
+        // single-shot callers that have none. Pinned by
+        // AiTierStalenessTests.ATierFlipMidBuild_StampsEveryChapterUnderOneModel_AndStillPersistsTheBaseline.
+        var tier = await ResolveBookTierAsync(bookId, ct);
+
         var chapters = await _db.Chapters
             .AsNoTracking()
             .Where(c => c.BookId == bookId)
@@ -300,7 +327,7 @@ public class StyleBaselineService
             .FirstOrDefaultAsync(b => b.BookId == bookId && b.Language == lang, ct);
 
         // Pre-build coverage check (same staleness predicate as GetStatusAsync) to decide idempotency.
-        var preStatus = await GetStatusAsync(bookId, lang, ct);
+        var preStatus = await GetStatusAsync(bookId, lang, tier, ct);
 
         if (jobId.HasValue)
         {
@@ -378,7 +405,7 @@ public class StyleBaselineService
 
         try
         {
-            return await RunBuildAsync(bookId, lang, jobId, chapters, existingBaseline, ct);
+            return await RunBuildAsync(bookId, lang, tier, jobId, chapters, existingBaseline, ct);
         }
         finally
         {
@@ -394,6 +421,7 @@ public class StyleBaselineService
     private async Task<BookStyleBaselineBuildResult> RunBuildAsync(
         Guid bookId,
         string lang,
+        AiTier tier,
         Guid? jobId,
         List<Guid> chapters,
         BookStyleBaseline? existingBaseline,
@@ -429,9 +457,14 @@ public class StyleBaselineService
                     // aborts the whole job - it simply stays stale and is reflected in the final status
                     // (see FailedChapters derived from postStatus below). The try/catch here is defence
                     // against an unexpected throw escaping that contract; we still log + continue.
+                    // be-c02: hand it the tier this build resolved. Left to resolve for itself it would
+                    // read Book.AiTier once PER CHAPTER (41 extra queries on a 40-chapter book) and, worse,
+                    // a flip landing mid-build would route later chapters to a different model than earlier
+                    // ones - two BuiltWithModel values for one build, which the average below then cannot
+                    // reconcile.
                     using var scope = _scopeFactory.CreateScope();
                     var chapterContextService = scope.ServiceProvider.GetRequiredService<IAnalysisContextService>();
-                    await chapterContextService.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, lang, ct);
+                    await chapterContextService.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, lang, ct, tier);
                 }
                 catch (OperationCanceledException)
                 {
@@ -464,10 +497,18 @@ public class StyleBaselineService
         ct.ThrowIfCancellationRequested();
 
         // Recompute the average over the (now-refreshed) chapter profiles via a1's method, then persist.
-        var average = await _contextService.BuildBookStyleAverageProfileAsync(bookId, lang, ct);
+        // be-c02: at the SAME tier the chapters were just built under. This aggregator never rebuilds - it
+        // EXCLUDES rows whose BuiltWithModel is not the active model - so resolving the tier again here
+        // would, after a mid-build flip, drop every profile this build just wrote and return null. That
+        // null short-circuits the persist below, so the build costs its full time (and, on the thinking
+        // tier, real money) and stores nothing, with no exception and no log to say why. p3-3 section 3
+        // named this the riskiest of the three active-model consumers for exactly that reason.
+        var average = await _contextService.BuildBookStyleAverageProfileAsync(bookId, lang, ct, tier);
 
-        // How many chapters now have a fresh profile (post-build truth, reused predicate).
-        var postStatus = await GetStatusAsync(bookId, lang, ct);
+        // How many chapters now have a fresh profile (post-build truth, reused predicate, SAME tier the
+        // build ran under - re-reading it here could observe a tier flipped mid-build and report every
+        // just-built profile as stale).
+        var postStatus = await GetStatusAsync(bookId, lang, tier, ct);
 
         // FailedChapters = chapters that did NOT end up with a fresh profile after the build attempt.
         // Derived from the reused staleness predicate so it captures BOTH thrown failures AND the
@@ -494,7 +535,7 @@ public class StyleBaselineService
             };
         }
 
-        var builtWithModel = ResolveLinguisticModelId();
+        var builtWithModel = ResolveLinguisticModelId(tier);
         var metricsJson = average.MetricsJson;
 
         if (existingBaseline == null)
@@ -558,11 +599,28 @@ public class StyleBaselineService
     /// cost estimate cannot diverge from the model the request is actually routed to.
     /// Delegates to <see cref="LinguisticModelResolver"/> so this and AnalysisContextService share one
     /// definition (cross-model staleness must compare against the SAME active-model resolution).
+    /// <para>
+    /// TIER-AWARE since p3-3. <paramref name="tier"/> is the BOOK's tier, and it is the mechanism by which a
+    /// tier change invalidates a baseline: the value returned here is both what
+    /// <see cref="BookStyleBaseline.BuiltWithModel"/> is STAMPED with on a build and what the status gate
+    /// COMPARES a stored stamp against, so flipping a book's tier makes its persisted baseline read
+    /// <c>BuiltWithDifferentModel</c> and its chapter profiles read stale - for that book only. It defaults
+    /// to <see cref="AiTier.Fast"/>, which resolves byte-identically to the pre-tier behaviour, so the tests
+    /// that call this directly are unaffected.
+    /// </para>
     /// </summary>
-    internal (string provider, string? model) ResolveLinguisticProviderAndModel()
-        => LinguisticModelResolver.Resolve(_aiOptions.Value);
+    internal (string provider, string? model) ResolveLinguisticProviderAndModel(AiTier tier = AiTier.Fast)
+        => LinguisticModelResolver.ResolveForTask(_aiOptions.Value, AiTaskType.LinguisticAnalysis, tier);
 
-    private string? ResolveLinguisticModelId() => ResolveLinguisticProviderAndModel().model;
+    private string? ResolveLinguisticModelId(AiTier tier) => ResolveLinguisticProviderAndModel(tier).model;
+
+    /// <summary>
+    /// This book's model tier, through the shared <see cref="BookAiTierResolver"/> so this service,
+    /// <see cref="AnalysisContextService"/> and <c>UnifiedAnalysisService</c> cannot disagree about which
+    /// tier a book is on. Fail-safe to <see cref="AiTier.Fast"/> on anything unknown.
+    /// </summary>
+    private Task<AiTier> ResolveBookTierAsync(Guid bookId, CancellationToken ct)
+        => BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
 
     // ─── Build estimate helpers (a4) ─────────────────────────────────────────────────────────────
 

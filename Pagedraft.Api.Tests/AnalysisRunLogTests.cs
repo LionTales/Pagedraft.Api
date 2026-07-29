@@ -607,6 +607,7 @@ public class AnalysisRunLogTests
                 "he", // language
                 5, // chunkTargetWords
                 1, // maxParallel
+                AiTier.Fast, // tier - be-c03 made it a required parameter (RunAsync resolves it once)
                 jobId,
                 analysisContext,
                 CancellationToken.None
@@ -715,6 +716,7 @@ public class AnalysisRunLogTests
                 "he", // language
                 1000, // chunkTargetWords (should produce a single chunk)
                 1, // maxParallel
+                AiTier.Fast, // tier - be-c03 made it a required parameter (RunAsync resolves it once)
                 jobId,
                 analysisContext,
                 CancellationToken.None
@@ -793,6 +795,7 @@ public class AnalysisRunLogTests
                 "he", // language
                 5, // chunkTargetWords
                 1, // maxParallel
+                AiTier.Fast, // tier - be-c03 made it a required parameter (RunAsync resolves it once)
                 jobId,
                 analysisContext,
                 CancellationToken.None

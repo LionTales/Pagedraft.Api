@@ -78,6 +78,32 @@ public class UnifiedAnalysisService
     /// <summary>Max characters for a single proofread request. Longer text often causes the model to truncate or generate new content instead of correcting.</summary>
     private const int MaxProofreadInputLength = 10_000;
 
+    /// <summary>
+    /// THE BOOK -> TIER LOOKUP (model-tier-fast-thinking plan, p3-2). The tier is stored per BOOK, and
+    /// <see cref="AiRequest.Tier"/> is a stamped value rather than something the router derives, so exactly
+    /// one place in this service turns a book id into a tier and every AiRequest it builds carries the
+    /// result.
+    ///
+    /// p3-3 moved the implementation to the shared <see cref="BookAiTierResolver"/>, because
+    /// <see cref="AnalysisContextService"/> and <see cref="StyleBaselineService"/> now need the SAME answer
+    /// for the same book: they resolve the ACTIVE model that <c>BuiltWithModel</c> is compared against, and a
+    /// disagreement between "the tier that ran" and "the tier the freshness gate assumes" makes every profile
+    /// read permanently stale. Fail-safe posture (everything unknown -> Fast) is documented there.
+    ///
+    /// Resolved ONCE per run rather than per request, so a 40-chunk proofread costs one query, not forty.
+    /// be-c03 made that literally true for the CHUNKED runs: <see cref="RunAsync"/> reads the tier once and
+    /// PASSES it to <c>RunProofreadChunkedAsync</c> / <c>RunLineEditChunkedAsync</c>, which are private and
+    /// have no other caller. Before that each chunked runner re-read it, and the two reads decided different
+    /// things - the first the chunk SIZE (whose bound reads the routed provider's num_ctx), the second the
+    /// ROUTE - so a flip between them could size for one provider and send to another. That was INERT at the
+    /// shipped values (both tiers resolve Proofread at num_ctx 4096) and the fix is structural.
+    ///
+    /// The other entry points - <c>RunWithInputAsync</c> and <c>RunStreamingAsync</c> - each build a single
+    /// request and so read once by construction.
+    /// </summary>
+    private Task<AiTier> ResolveBookTierAsync(Guid? bookId, CancellationToken ct)
+        => BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+
     private static (string Outcome, string? Note, double? WordSimilarity) ResolveSingleRunOutcome(
         AnalysisType analysisType,
         string inputText,
@@ -324,6 +350,9 @@ public class UnifiedAnalysisService
         var bookId = context.BookId;
         var chapterId = context.ChapterId;
         var sceneId = context.SceneId;
+        // The BOOK's model tier (p3-2), resolved ONCE and used for both the chunk sizing below (the target
+        // depends on the routed provider's window) and the AiRequest stamp further down.
+        var tier = await ResolveBookTierAsync(bookId, ct);
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
@@ -331,8 +360,9 @@ public class UnifiedAnalysisService
             // dense-script (Hebrew) chunk gets fewer words than an English one for the same token footprint and
             // stays inside the model's reliable window. The configured EffectiveProofreadChunkTargetWords is the
             // CEILING (English keeps today's 500); dense scripts shrink from the token math (see helper).
-            var chunkTargetWords = EffectiveChunkTargetWords(
-                opts, AiTaskType.Proofread, language, opts.EffectiveProofreadChunkTargetWords);
+            // Goes through the SHARED accessor so /api/config/analysis-chunk-thresholds cannot drift from what
+            // is chunked here — the client picks async-vs-sync off that endpoint (p1-4).
+            var chunkTargetWords = ProofreadChunkTargetWordsFor(opts, language, tier);
             var maxParallel = Math.Max(1, opts.MaxParallelProofreadChunks);
             var wordCount = WordCount(inputText);
 
@@ -341,7 +371,7 @@ public class UnifiedAnalysisService
                 var effectiveJobId = jobId ?? Guid.NewGuid();
                 return await RunProofreadChunkedAsync(
                     inputText, bookId, chapterId, sceneId, scope, targetId,
-                    customPrompt, language, chunkTargetWords, maxParallel, effectiveJobId, context, ct);
+                    customPrompt, language, chunkTargetWords, maxParallel, tier, effectiveJobId, context, ct);
             }
             if (inputText.Length > MaxProofreadInputLength)
                 throw new InvalidOperationException($"Proofread text is too long ({inputText.Length} characters). Please select a shorter section (e.g. one scene or a few paragraphs). Maximum is {MaxProofreadInputLength:N0} characters.");
@@ -351,9 +381,9 @@ public class UnifiedAnalysisService
         {
             var opts = _aiOptions.Value;
             // Same language-aware sizing as Proofread: EffectiveLineEditChunkTargetWords is the Latin ceiling,
-            // dense scripts shrink from the token math so a Hebrew chunk stays within the model window.
-            var chunkTargetWords = EffectiveChunkTargetWords(
-                opts, AiTaskType.LineEdit, language, opts.EffectiveLineEditChunkTargetWords);
+            // dense scripts shrink from the token math so a Hebrew chunk stays within the model window. Same
+            // shared accessor, same lockstep with the client-facing thresholds endpoint (p1-4).
+            var chunkTargetWords = LineEditChunkTargetWordsFor(opts, language, tier);
             var maxParallel = Math.Max(1, opts.MaxParallelLineEditChunks);
             var wordCount = WordCount(inputText);
 
@@ -362,7 +392,7 @@ public class UnifiedAnalysisService
                 var effectiveJobId = jobId ?? Guid.NewGuid();
                 return await RunLineEditChunkedAsync(
                     inputText, bookId, chapterId, sceneId, scope, targetId,
-                    customPrompt, language, chunkTargetWords, maxParallel, effectiveJobId, context, ct);
+                    customPrompt, language, chunkTargetWords, maxParallel, tier, effectiveJobId, context, ct);
             }
         }
 
@@ -377,6 +407,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = targetId.ToString(),
+            Tier = tier,
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
@@ -558,6 +589,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = bookId?.ToString() ?? chapterId?.ToString() ?? sceneId?.ToString() ?? "",
+            Tier = await ResolveBookTierAsync(bookId, ct),
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
@@ -732,6 +764,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = targetId.ToString(),
+            Tier = await ResolveBookTierAsync(bookId, ct),
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
@@ -1262,7 +1295,8 @@ public class UnifiedAnalysisService
     /// changes HOW OFTEN the reliability guard LEGITIMATELY trips; the <c>ProofreadResultUnreliable</c> semantics
     /// are untouched.
     /// </summary>
-    internal static int EffectiveChunkTargetWords(AiOptions opts, AiTaskType task, string? language, int configuredCeiling)
+    internal static int EffectiveChunkTargetWords(
+        AiOptions opts, AiTaskType task, string? language, int configuredCeiling, AiTier tier = AiTier.Fast)
     {
         var ceiling = configuredCeiling > 0
             ? configuredCeiling
@@ -1284,7 +1318,12 @@ public class UnifiedAnalysisService
         // margin, so overlap tokens do not push any chunk past the window. It is a latent coupling: if the
         // proofread num_ctx were ever dropped well below the current 4096, bound (B) could tighten enough
         // that the uncharged overlap causes actual window overflow.
-        var numCtx = BookContextAssembler.ResolveNumCtxForTask(opts, task);
+        // LANGUAGE- and TIER-aware since p3-2: the window belongs to the provider this (task, language, tier)
+        // actually ROUTES to, not to the bare task key. Before p3-2 the sizer passed neither, so an English
+        // Proofread was sized against the bare "Proofread" entry while the router ran "Proofread_en" - a
+        // divergence that was harmless only because both name the same provider (pinned by p1-4's
+        // ChunkSizerAndRouter_ResolveTheSameWindow_ForAnEnglishProofreadAndLineEdit).
+        var numCtx = BookContextAssembler.ResolveNumCtxForTask(opts, task, language, tier);
         var generationWindow = numCtx
             - Math.Max(0, opts.BookContextPromptReserveTokens)
             - Math.Max(0, opts.BookContextSafetyMarginTokens);
@@ -1296,6 +1335,38 @@ public class UnifiedAnalysisService
         // Take the tighter of the two bounds; always make at least one (small) chunk.
         return Math.Max(1, Math.Min(languageCeiling, wordsThatFitWindow));
     }
+
+    /// <summary>
+    /// THE per-chunk word target Proofread will actually be chunked at, for this language and the CURRENTLY
+    /// ROUTED model's window. Call this rather than <see cref="EffectiveChunkTargetWords"/> directly.
+    ///
+    /// WHY IT EXISTS (model-tier plan, p1-4). Exactly two surfaces must produce this number and they must
+    /// never disagree: <see cref="RunAsync"/>, which decides whether to chunk and at what size, and
+    /// <c>GET /api/config/analysis-chunk-thresholds</c>
+    /// (<see cref="Controllers.ConfigController.GetAnalysisChunkThresholds"/>), which the CLIENT uses to pick
+    /// the async analysis-jobs flow over sync <c>/analyze</c>. If the endpoint returns a larger target than
+    /// RunAsync sizes at, the client picks sync for a chapter the server then chunks, and a long chapter
+    /// mis-routes. Both used to spell out the same three arguments (task + language + the task's configured
+    /// ceiling) at their own call site, so the two could drift apart one argument at a time; now the tuple
+    /// exists once and "in lockstep" is structural rather than a convention.
+    ///
+    /// TIER-SENSITIVE: the target's bound (B) reads
+    /// <see cref="BookContextAssembler.ResolveNumCtxForTask"/>, so anything that changes which provider (and
+    /// therefore which <c>Ai:ProviderSettings</c> entry) Proofread routes to can move this number — see the
+    /// crossover pinned in <c>ChunkThresholdBoundDominanceTests</c>.
+    /// </summary>
+    internal static int ProofreadChunkTargetWordsFor(AiOptions opts, string? language, AiTier tier = AiTier.Fast)
+        => EffectiveChunkTargetWords(opts, AiTaskType.Proofread, language, opts.EffectiveProofreadChunkTargetWords, tier);
+
+    /// <summary>
+    /// THE per-chunk word target LineEdit will actually be chunked at, for this language and the currently
+    /// routed model's window. Same contract, same two surfaces and same tier sensitivity as
+    /// <see cref="ProofreadChunkTargetWordsFor"/> — note it carries its OWN configured ceiling
+    /// (<see cref="AiOptions.EffectiveLineEditChunkTargetWords"/>), which is why this is a separate accessor
+    /// and not one shared "chunk target" helper taking a task.
+    /// </summary>
+    internal static int LineEditChunkTargetWordsFor(AiOptions opts, string? language, AiTier tier = AiTier.Fast)
+        => EffectiveChunkTargetWords(opts, AiTaskType.LineEdit, language, opts.EffectiveLineEditChunkTargetWords, tier);
 
     /// <summary>Splits text into segments of at most targetWords words (word-boundary). Last segment gets lastSegmentSep, others get betweenSep.</summary>
     private static List<(string Text, string Sep)> SplitByWordCount(string text, int targetWords, string lastSegmentSep, string betweenSep)
@@ -1703,6 +1774,16 @@ public class UnifiedAnalysisService
     /// Run LineEdit in chunks with limited parallelism, then merge into one AnalysisResult.
     /// Updates AnalysisProgressTracker for live progress polling.
     /// </summary>
+    /// <param name="tier">
+    /// The book's tier, PASSED IN rather than resolved here (be-c03). Private, and <see cref="RunAsync"/> is
+    /// its only PRODUCTION caller, so the value is always the same one that sized the chunks - see the note
+    /// below.
+    /// BEFORE CHANGING THIS SIGNATURE AGAIN (final-r02): it also has REFLECTIVE callers -
+    /// <c>AnalysisRunLogTests.RunLineEditChunkedAsync_*</c> builds the argument array by POSITION through
+    /// <c>GetMethod(...).Invoke(...)</c>, so a reordered or inserted parameter does NOT fail the build; it
+    /// fails at run time as an argument-count/type mismatch, or worse, binds silently. Grep the test
+    /// assembly for the method name whenever this list changes.
+    /// </param>
     private async Task<AnalysisResult> RunLineEditChunkedAsync(
         string inputText,
         Guid? bookId,
@@ -1714,11 +1795,18 @@ public class UnifiedAnalysisService
         string language,
         int chunkTargetWords,
         int maxParallel,
+        AiTier tier,
         Guid jobId,
         AnalysisContext context,
         CancellationToken ct)
     {
         var taskType = MapToTaskType(AnalysisType.LineEdit);
+        // The book's tier arrives from RunAsync's single read (be-c03) and is stamped on every chunk below.
+        // A long chapter never reaches RunAsync's single-shot request, so a tier stamped only there would
+        // leave every chunked run on the local tier while the UI said otherwise. LineEdit is NOT in
+        // AiTierPolicy.TieredTasks, so the value is inert here today - stamped anyway so the two chunked
+        // paths stay symmetrical and adding LineEdit to the allowlist is a one-line change rather than a hunt
+        // for an unstamped call site.
         var chunks = ChunkForLineEdit(inputText, chunkTargetWords);
 
         string? representativeInstruction;
@@ -1807,6 +1895,7 @@ public class UnifiedAnalysisService
                     TaskType = taskType,
                     Language = language,
                     SourceId = targetId.ToString(),
+                    Tier = tier,
                     JsonMode = true
                 };
 
@@ -1976,6 +2065,16 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>Run proofread in chunks with limited parallelism, then merge into one AnalysisResult. Updates AnalysisProgressTracker for live progress polling.</summary>
+    /// <param name="tier">
+    /// The book's tier, PASSED IN rather than resolved here (be-c03). Private, and <see cref="RunAsync"/> is
+    /// its only PRODUCTION caller, so the value is always the same one that sized the chunks - see the note
+    /// below.
+    /// BEFORE CHANGING THIS SIGNATURE AGAIN (final-r02): it also has REFLECTIVE callers -
+    /// <c>AnalysisRunLogTests.RunProofreadChunkedAsync_*</c> builds the argument array by POSITION through
+    /// <c>GetMethod(...).Invoke(...)</c>, so a reordered or inserted parameter does NOT fail the build; it
+    /// fails at run time as an argument-count/type mismatch, or worse, binds silently. Grep the test
+    /// assembly for the method name whenever this list changes.
+    /// </param>
     private async Task<AnalysisResult> RunProofreadChunkedAsync(
         string inputText,
         Guid? bookId,
@@ -1987,11 +2086,24 @@ public class UnifiedAnalysisService
         string language,
         int chunkTargetWords,
         int maxParallel,
+        AiTier tier,
         Guid jobId,
         AnalysisContext context,
         CancellationToken ct)
     {
         var taskType = MapToTaskType(AnalysisType.Proofread);
+        // The book's tier arrives from RunAsync's single read (be-c03) and is stamped on every chunk below.
+        // THE load-bearing stamp of the two chunked paths: Proofread IS allowlisted, and a long chapter routes
+        // here instead of through RunAsync's single-shot request, so without this a "thinking" book would
+        // silently proofread on the local model for exactly the chapters long enough to matter.
+        //
+        // WHY IT IS A PARAMETER AND NOT A SECOND READ (be-c03). chunkTargetWords was computed from the tier
+        // too - the sizing's bound (B) reads the ROUTED provider's num_ctx - so a re-read here could observe a
+        // tier flipped between the two and size the chunks for one provider while sending them to another.
+        // INERT AT THE SHIPPED VALUES: both tiers resolve Proofread at num_ctx 4096, so the chunk target does
+        // not move with the tier at all (pinned by ChunkThresholdTierParityTests
+        // .TheShippedThinkingTier_DoesNotMoveTheClientFacingThresholds). This is a structural guarantee that
+        // the two decisions cannot disagree, not the repair of a live defect.
         var chunks = ChunkForProofread(inputText, chunkTargetWords);
 
         // Representative instruction for auditing: either the custom prompt (if provided)
@@ -2074,7 +2186,8 @@ public class UnifiedAnalysisService
                     Instruction = instruction,
                     TaskType = taskType,
                     Language = language,
-                    SourceId = targetId.ToString()
+                    SourceId = targetId.ToString(),
+                    Tier = tier
                 };
                 var response = await _router.CompleteAsync(request, ct);
                 var raw = response.Content ?? "";
