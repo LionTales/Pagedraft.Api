@@ -1,7 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Pagedraft.Api.Services.Ai;
-using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
 
 namespace Pagedraft.Api.Controllers;
@@ -27,15 +26,36 @@ public class ConfigController : ControllerBase
     /// when absent (or unknown) the CONSERVATIVE dense sizing is returned, matching
     /// <see cref="UnifiedAnalysisService.EffectiveChunkTargetWords"/>'s unknown-language default — never the
     /// lenient Latin ceiling.
+    ///
+    /// LOCKSTEP (p1-4): this calls the SAME accessors <see cref="UnifiedAnalysisService.RunAsync"/> chunks by
+    /// (<see cref="UnifiedAnalysisService.ProofreadChunkTargetWordsFor"/> /
+    /// <see cref="UnifiedAnalysisService.LineEditChunkTargetWordsFor"/>) rather than restating their task +
+    /// ceiling arguments here, so the two surfaces cannot drift one argument at a time. The sizing also depends
+    /// on the num_ctx of the model the task is ROUTED to, so a future model tier that lowers the Proofread /
+    /// LineEdit window moves both surfaces together — the client must re-fetch on anything that changes the
+    /// route, exactly as it already re-fetches on a language change.
+    ///
+    /// TIER (p3-2). The route is now a function of (language, TIER), because the tier can change which
+    /// provider a task resolves to and therefore which Ai:ProviderSettings window sizes bound (B). The
+    /// parameter is OPTIONAL and parsed defensively — absent or unrecognised means the local (fast) tier, so
+    /// a client that has not been updated keeps getting exactly the numbers it got before. AT THE SHIPPED
+    /// VALUES THE TWO TIERS RETURN THE SAME NUMBERS (OpenRouter_Proofread declares NumCtx 4096, equal to the
+    /// local effective 4096, and the crossover below which the window bound starts binding is 3548), which
+    /// is pinned rather than assumed by <c>ChunkThresholdBoundDominanceTests</c>; the parameter exists so
+    /// that stops being an accident the day a tier entry's window changes.
+    ///
+    /// Deliberately takes a tier TOKEN and not a bookId: this controller has no database dependency and the
+    /// caller already knows its book's tier.
     /// </summary>
     [HttpGet("analysis-chunk-thresholds")]
-    public ActionResult<AnalysisChunkThresholdsDto> GetAnalysisChunkThresholds([FromQuery] string? language = null)
+    public ActionResult<AnalysisChunkThresholdsDto> GetAnalysisChunkThresholds(
+        [FromQuery] string? language = null,
+        [FromQuery] string? tier = null)
     {
         var opts = _aiOptions.Value;
-        var proofread = UnifiedAnalysisService.EffectiveChunkTargetWords(
-            opts, AiTaskType.Proofread, language, opts.EffectiveProofreadChunkTargetWords);
-        var lineEdit = UnifiedAnalysisService.EffectiveChunkTargetWords(
-            opts, AiTaskType.LineEdit, language, opts.EffectiveLineEditChunkTargetWords);
+        var resolvedTier = AiTierPolicy.Parse(tier);
+        var proofread = UnifiedAnalysisService.ProofreadChunkTargetWordsFor(opts, language, resolvedTier);
+        var lineEdit = UnifiedAnalysisService.LineEditChunkTargetWordsFor(opts, language, resolvedTier);
         return Ok(new AnalysisChunkThresholdsDto(proofread, lineEdit));
     }
 }
