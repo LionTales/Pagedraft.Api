@@ -1,7 +1,17 @@
 using Xunit;
 
-namespace Pagedraft.Api.Tests.LanguageEngine;
+// Bound through a using ALIAS, not a namespace import: this file must NOT pull
+// Pagedraft.Api.Tests.LanguageEngine into scope, because that is the namespace the standing
+// deterministic filter excludes and the whole point of this file's location is to be outside it.
+using ProofreadQualityTests = Pagedraft.Api.Tests.LanguageEngine.ProofreadQualityTests;
 
+namespace Pagedraft.Api.Tests;
+
+// LIVES AT THE TEST PROJECT ROOT ON PURPOSE. The Pagedraft.Api.Tests.LanguageEngine namespace is the one
+// the standing deterministic filter EXCLUDES (FullyQualifiedName!~Pagedraft.Api.Tests.LanguageEngine),
+// because that folder holds the live-GPU harnesses. While this class sat in that namespace its 6 tests ran
+// in NEITHER standing filter. Do not move it back; see LiveHarnessNamespaceGuardTests.
+//
 // SCOPE: This class unit-tests the OVERREACH-SCORING primitive used by the proofread bake-off —
 // ProofreadQualityTests.ForbiddenMatch (the precision gate that decides whether a meaning-changing
 // rewrite of the right word counts as overreach) together with the production normalization it is

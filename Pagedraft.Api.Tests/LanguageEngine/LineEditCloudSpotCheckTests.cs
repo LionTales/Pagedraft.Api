@@ -81,6 +81,7 @@ public class LineEditCloudSpotCheckTests
     };
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task LineEditCloudSpotCheck_RunShortHebrewPassages_PrintForRubricReview()
     {
         var provider = Environment.GetEnvironmentVariable(ProviderEnvVar) is { Length: > 0 } p ? p.Trim() : DefaultProvider;

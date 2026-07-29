@@ -2,8 +2,20 @@ using System;
 using System.Linq;
 using Xunit;
 
-namespace Pagedraft.Api.Tests.LanguageEngine;
+// Bound through using ALIASES, not a namespace import: this file must NOT pull
+// Pagedraft.Api.Tests.LanguageEngine into scope, because that is the namespace the standing
+// deterministic filter excludes and the whole point of this file's location is to be outside it.
+using ProofreadQualityTests = Pagedraft.Api.Tests.LanguageEngine.ProofreadQualityTests;
+using HebrewRegressionCase = Pagedraft.Api.Tests.LanguageEngine.HebrewRegressionCase;
 
+namespace Pagedraft.Api.Tests;
+
+// LIVES AT THE TEST PROJECT ROOT ON PURPOSE. The Pagedraft.Api.Tests.LanguageEngine namespace is the one
+// the standing deterministic filter EXCLUDES (FullyQualifiedName!~Pagedraft.Api.Tests.LanguageEngine),
+// because that folder holds the live-GPU harnesses. While this class sat in that namespace its 7 tests ran
+// in NEITHER standing filter, which defeated its own stated purpose of failing fast without a model. Do not
+// move it back; see LiveHarnessNamespaceGuardTests.
+//
 // SCOPE: Deterministic, NO-MODEL smoke test for the English proofread gold (proofread-gold-en.json).
 // The bake-off that consumes this gold (ProofreadQuality_ModelBakeoff_ReportTable) is skip-by-default
 // and would NOT catch a malformed English gold in CI. This class fails fast — without Ollama / any

@@ -3,11 +3,19 @@ using Microsoft.Extensions.Options;
 using Pagedraft.Api.Services.Analysis.Hebrew;
 using Xunit;
 
-namespace Pagedraft.Api.Tests.LanguageEngine;
+namespace Pagedraft.Api.Tests;
 
 /// <summary>
 /// Deterministic tests for the Hebrew ktiv-male (full-spelling) copyedit check. No LLM/Ollama/GPU
 /// dependency: the checker is a pure dictionary/rule lookup, so every case here runs offline and fast.
+///
+/// LIVES AT THE TEST PROJECT ROOT ON PURPOSE, not next to the proofread bake-off harness it belongs to
+/// by subject. The <c>Pagedraft.Api.Tests.LanguageEngine</c> namespace is the one the standing
+/// deterministic filter EXCLUDES (<c>FullyQualifiedName!~Pagedraft.Api.Tests.LanguageEngine</c>),
+/// because that folder holds the live-GPU harnesses. While this class sat in that namespace its 30
+/// tests ran in NEITHER standing filter, even though they are the deterministic half of the SHIPPED
+/// proofread path. Do not move it back. See <c>LiveHarnessNamespaceGuardTests</c>, which fails
+/// the build if a deterministic class is added to that folder again.
 /// </summary>
 public class KtivMaleCheckerTests
 {
