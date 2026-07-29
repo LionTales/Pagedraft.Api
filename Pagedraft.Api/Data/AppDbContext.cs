@@ -34,6 +34,9 @@ public class AppDbContext : DbContext
             e.Property(x => x.Title).HasMaxLength(500).IsRequired();
             e.Property(x => x.Author).HasMaxLength(200);
             e.Property(x => x.Language).HasMaxLength(10);
+            // Model tier (p3-2). Nullable = fast; a stored value is parsed defensively by AiTierPolicy.Parse,
+            // so widening the enum later cannot break an existing row.
+            e.Property(x => x.AiTier).HasMaxLength(20);
             e.HasMany(x => x.Chapters).WithOne(x => x.Book).HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
         });
 
