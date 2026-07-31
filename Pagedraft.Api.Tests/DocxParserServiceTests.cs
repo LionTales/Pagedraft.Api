@@ -219,6 +219,55 @@ public class DocxParserServiceTests
         Assert.Null(chapter.PartName);
     }
 
+    [Fact]
+    public void SplitIntoChapters_ExcludesTrailingSectionProperties_FromLastChapterBody()
+    {
+        // Real Word manuscripts end the body with sectPr (often carrying a footerReference rId).
+        // That chrome must not land in any chapter's BodyElements — otherwise SFDT conversion
+        // of the last chapter fails with the generic "could not be parsed" import error.
+        using var docx = BuildDocxWithSectionProperties(
+            footerRelationshipId: "rId99",
+            ("Heading1", "פרק אחרון"),
+            (null, "גוף הפרק האחרון עם הערת שוליים במסמך."));
+
+        var result = new DocxParserService().SplitIntoChapters(docx);
+
+        var chapter = Assert.Single(result);
+        Assert.Equal("פרק אחרון", chapter.Title);
+        Assert.DoesNotContain(chapter.BodyElements, e => e is SectionProperties);
+        Assert.Contains(chapter.BodyElements, e => e is Paragraph);
+    }
+
+    [Fact]
+    public void SplitIntoChapters_ProseOnlyDocument_ExcludesSectionProperties()
+    {
+        // No Heading1 / Hebrew markers → FlushChapter emits untitled "Chapter"; sectPr must still be dropped.
+        using var docx = BuildDocxWithSectionProperties(
+            footerRelationshipId: "rId11",
+            (null, "פסקה יחידה בלי כותרת פרק."));
+
+        var result = new DocxParserService().SplitIntoChapters(docx);
+
+        var chapter = Assert.Single(result);
+        Assert.Equal("Chapter", chapter.Title);
+        Assert.DoesNotContain(chapter.BodyElements, e => e is SectionProperties);
+        Assert.Contains(chapter.BodyElements, e => e is Paragraph);
+    }
+
+    [Fact]
+    public void SplitIntoChapters_OnlySectionProperties_FallbackExcludesSectionProperties()
+    {
+        // Body is only Word's trailing sectPr → after skipping it the splitter hits the
+        // empty-document fallback ("Chapter 1") and must not re-introduce sectPr there either.
+        using var docx = BuildDocxWithSectionProperties(footerRelationshipId: "rId11");
+
+        var result = new DocxParserService().SplitIntoChapters(docx);
+
+        var chapter = Assert.Single(result);
+        Assert.Equal("Chapter 1", chapter.Title);
+        Assert.Empty(chapter.BodyElements);
+    }
+
     /// <summary>Builds a minimal valid DOCX in memory from (paragraph-style-id, text) tuples.</summary>
     private static MemoryStream BuildDocx(params (string? StyleId, string Text)[] paragraphs)
     {
@@ -240,6 +289,38 @@ public class DocxParserServiceTests
         }
 
         // ToArray() is valid even after the package is disposed; return a fresh readable stream.
+        return new MemoryStream(build.ToArray());
+    }
+
+    /// <summary>
+    /// Like <see cref="BuildDocx"/> but appends a trailing body sectPr with a footerReference,
+    /// matching real Word packages that break SFDT conversion when the rId is cloned without the part.
+    /// </summary>
+    private static MemoryStream BuildDocxWithSectionProperties(
+        string footerRelationshipId,
+        params (string? StyleId, string Text)[] paragraphs)
+    {
+        using var build = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(build, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            var body = new Body();
+            foreach (var (styleId, text) in paragraphs)
+            {
+                var para = new Paragraph();
+                if (!string.IsNullOrEmpty(styleId))
+                    para.ParagraphProperties = new ParagraphProperties(new ParagraphStyleId { Val = styleId });
+                para.AppendChild(new Run(new Text(text) { Space = SpaceProcessingModeValues.Preserve }));
+                body.AppendChild(para);
+            }
+            body.AppendChild(new SectionProperties(
+                new FooterReference { Type = HeaderFooterValues.Default, Id = footerRelationshipId },
+                new PageSize { Width = 11906, Height = 16838 },
+                new PageMargin { Top = 1440, Right = 1800, Bottom = 907, Left = 1800 }));
+            main.Document = new Document(body);
+            main.Document.Save();
+        }
+
         return new MemoryStream(build.ToArray());
     }
 }
