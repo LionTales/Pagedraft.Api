@@ -17,3 +17,6 @@
 *.cache
 **/TestResults/
 
+### Local plan/review scratch (not shipped)
+.cursor/
+
