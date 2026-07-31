@@ -28,6 +28,13 @@ public class DocxParserService
 
         foreach (var element in body.ChildElements)
         {
+            // Word always ends the body with sectPr (page size/margins + optional header/footer
+            // relationship ids). That is document chrome, not chapter prose — never fold it into a
+            // chapter segment. Cloning sectPr into the minimal SFDT package keeps dangling rIds and
+            // makes Syncfusion throw during import of otherwise-valid manuscripts.
+            if (element is SectionProperties)
+                continue;
+
             var para = element as Paragraph;
             var text = para != null ? GetParagraphText(para) : null;
             var style = para != null ? GetParagraphStyle(para) : null;
@@ -106,13 +113,16 @@ public class DocxParserService
 
         if (segments.Count == 0)
         {
-            // Fallback: entire document as one chapter
+            // Fallback: entire document as one chapter (still exclude trailing sectPr).
             segments.Add(new RawChapterSegment
             {
                 Title = "Chapter 1",
                 PartName = null,
                 Order = 0,
-                BodyElements = body.ChildElements.Select(e => e.CloneNode(true)).ToList()
+                BodyElements = body.ChildElements
+                    .Where(e => e is not SectionProperties)
+                    .Select(e => e.CloneNode(true))
+                    .ToList()
             });
         }
 

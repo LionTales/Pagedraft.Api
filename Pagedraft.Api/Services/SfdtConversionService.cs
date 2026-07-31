@@ -37,13 +37,20 @@ public class SfdtConversionService
         {
             return BuildSfdtFromBodyElements(bodyElements);
         }
-        catch (NullReferenceException)
+        catch (NullReferenceException ex)
         {
+            _logger?.LogWarning(ex,
+                "ConvertToSfdt hit NullReferenceException while building SFDT from {Count} body elements.",
+                bodyElements.Count);
             throw new InvalidOperationException(
-                "This document could not be parsed. It may contain unsupported elements (e.g. equations, content controls, or special formatting). Try saving a copy with simpler formatting or paste the content into a new document.");
+                "This document could not be parsed. It may contain unsupported elements (e.g. equations, content controls, or special formatting). Try saving a copy with simpler formatting or paste the content into a new document.",
+                ex);
         }
         catch (Exception ex) when (ex.GetType().FullName?.StartsWith("Syncfusion.", StringComparison.Ordinal) == true)
         {
+            _logger?.LogWarning(ex,
+                "ConvertToSfdt hit Syncfusion exception while building SFDT from {Count} body elements.",
+                bodyElements.Count);
             throw new InvalidOperationException(
                 "This document could not be parsed. It may contain unsupported elements (e.g. equations, content controls, or special formatting). Try saving a copy with simpler formatting or paste the content into a new document.",
                 ex);
@@ -91,8 +98,16 @@ public class SfdtConversionService
         using (var doc = WordprocessingDocument.Create(stream, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
         {
             var mainPart = doc.AddMainDocumentPart();
+            // Drop SectionProperties: Word's trailing body sectPr often carries header/footer
+            // relationship ids. Those parts are not copied into this minimal package, and
+            // Syncfusion NullRefs (or throws) when it tries to resolve them. Page layout is
+            // irrelevant to chapter SFDT — prose paragraphs/tables are what matter.
+            var safeElements = bodyElements
+                .Where(e => e is not SectionProperties)
+                .Select(e => (OpenXmlElement)e.CloneNode(true))
+                .ToArray();
             mainPart.Document = new DocumentFormat.OpenXml.Wordprocessing.Document(
-                new Body(bodyElements.Select(e => (OpenXmlElement)e.CloneNode(true)).ToArray())
+                new Body(safeElements)
             );
             mainPart.Document.Save();
         }

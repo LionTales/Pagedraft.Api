@@ -152,6 +152,44 @@ public class SfdtRoundTripAndSceneSplitTests
     // ── Robustness / guard tests ──────────────────────────────────────────────────────────────
 
     [Fact]
+    public void ConvertToSfdt_BodyEndingWithSectionPropertiesFooterRef_DoesNotThrow()
+    {
+        // Regression: Word's trailing body sectPr often carries footerReference rIds. Cloning that
+        // into BuildMinimalDocx without the footer part made Syncfusion NRE and the import API
+        // return "This document could not be parsed..." for otherwise-valid Hebrew manuscripts.
+        var body = new System.Collections.Generic.List<DocumentFormat.OpenXml.OpenXmlElement>
+        {
+            new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                new DocumentFormat.OpenXml.Wordprocessing.Run(
+                    new DocumentFormat.OpenXml.Wordprocessing.Text("אחרית דבר")
+                    { Space = DocumentFormat.OpenXml.SpaceProcessingModeValues.Preserve })),
+            new DocumentFormat.OpenXml.Wordprocessing.Paragraph(
+                new DocumentFormat.OpenXml.Wordprocessing.Run(
+                    new DocumentFormat.OpenXml.Wordprocessing.Text("פסקת סיום של הספר.")
+                    { Space = DocumentFormat.OpenXml.SpaceProcessingModeValues.Preserve })),
+            new DocumentFormat.OpenXml.Wordprocessing.SectionProperties(
+                new DocumentFormat.OpenXml.Wordprocessing.FooterReference
+                {
+                    Type = DocumentFormat.OpenXml.Wordprocessing.HeaderFooterValues.Default,
+                    Id = "rId11"
+                },
+                new DocumentFormat.OpenXml.Wordprocessing.PageSize { Width = 11906, Height = 16838 },
+                new DocumentFormat.OpenXml.Wordprocessing.PageMargin
+                {
+                    Top = 1440, Right = 1800, Bottom = 907, Left = 1800
+                })
+        };
+
+        var result = _sfdt.ConvertToSfdt(body);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.SfdtJson));
+        Assert.True(result.WordCount > 0, $"Expected WordCount > 0, got {result.WordCount}");
+        var analyzerText = SyncfusionWatermarkStripper.StripSyncfusionWatermark(result.PlainText);
+        Assert.Contains("אחרית דבר", analyzerText);
+        Assert.Contains("פסקת סיום", analyzerText);
+    }
+
+    [Fact]
     public void CreateMinimalSfdtFromText_ControlCharInInput_DoesNotThrow_AndReturnsNonEmptySfdt()
     {
         // A raw STX (0x02) control character is invalid in XML 1.0 and will cause OpenXml /
