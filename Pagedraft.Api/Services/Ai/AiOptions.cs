@@ -142,13 +142,13 @@ public class AiOptions
     /// error. Clamped to &gt;= 0.</summary>
     public int BookContextSafetyMarginTokens { get; set; } = 512;
 
-    /// <summary>Output reservation used when the consuming task's NumPredict is unknown (&lt;= 0).</summary>
+    /// <summary>Output reservation used when the consuming task's output cap is unknown (&lt;= 0).</summary>
     private const int DefaultOutputReserveTokens = 2048;
 
     /// <summary>
     /// Resolves the effective token budget for the whole-book context. When
     /// <see cref="BookContextTokenBudget"/> is positive it wins verbatim; otherwise it is derived to leave
-    /// room for the model's OUTPUT (<paramref name="numPredict"/>) plus the prompt/system overhead
+    /// room for the model's OUTPUT (<paramref name="outputReserveTokens"/>) plus the prompt/system overhead
     /// (<see cref="BookContextPromptReserveTokens"/>) plus a safety margin
     /// (<see cref="BookContextSafetyMarginTokens"/>), so input + output can never exceed the window — Ollama
     /// silently TRUNCATES past num_ctx, which caused the whole-book review's "no dimension yielded findings"
@@ -157,8 +157,11 @@ public class AiOptions
     /// positive minimum so the BookBrief alone can always be attempted.
     /// </summary>
     /// <param name="numCtx">The active task model's context window (Ollama num_ctx) in tokens.</param>
-    /// <param name="numPredict">The consuming task's output reservation (Ollama num_predict); &lt;= 0 uses a default.</param>
-    public int EffectiveBookContextTokenBudget(int numCtx, int numPredict = 0)
+    /// <param name="outputReserveTokens">The consuming task's output reservation — <c>num_predict</c> on Ollama,
+    /// <c>max_tokens</c> on the cloud families; resolve it through
+    /// <see cref="Analysis.BookContextAssembler.ResolveOutputReserveForTask"/> rather than naming a field, or a
+    /// cloud-routed task reserves the wrong number (p1-2). &lt;= 0 uses a default.</param>
+    public int EffectiveBookContextTokenBudget(int numCtx, int outputReserveTokens = 0)
     {
         if (BookContextTokenBudget > 0)
             return BookContextTokenBudget;
@@ -166,14 +169,14 @@ public class AiOptions
         var ctx = numCtx > 0 ? numCtx : 4096; // mirror ProviderTuningOptions.NumCtx default
 
         // Reserve OUTPUT + prompt overhead + margin so input (context + prompt) + output fits the window.
-        // With the defaults (BookContextBudgetFraction=0.5, BookReview NumCtx=16384, NumPredict=6144,
+        // With the defaults (BookContextBudgetFraction=0.5, BookReview NumCtx=16384, output reserve=6144,
         // and other book-context consumers also at 16384), byFraction=8192 is <= byReserve for every
-        // current consumer, so byReserve is DEFENSE-IN-DEPTH that only activates when numPredict is large
-        // enough that byReserve < byFraction (roughly numPredict > ctx*(1-fraction) - promptReserve -
+        // current consumer, so byReserve is DEFENSE-IN-DEPTH that only activates when the output reserve is
+        // large enough that byReserve < byFraction (roughly reserve > ctx*(1-fraction) - promptReserve -
         // safetyMargin, i.e. > ~6144 at these settings). The language-aware token estimate in
         // BookContextAssembler (Hebrew ~2 chars/token) is the load-bearing fix for the "no dimension
         // yielded findings" truncation; this reservation guards future configs.
-        var output = numPredict > 0 ? numPredict : DefaultOutputReserveTokens;
+        var output = outputReserveTokens > 0 ? outputReserveTokens : DefaultOutputReserveTokens;
         var byReserve = ctx - output - Math.Max(0, BookContextPromptReserveTokens) - Math.Max(0, BookContextSafetyMarginTokens);
 
         // Additional upper bound: the context never claims more than a configured share of the window.
@@ -469,12 +472,28 @@ public static class AnalysisRepairGate
 /// guard-only glossary-on. See appsettings.Production.json for the current prod value and its KEEP-IN-SYNC
 /// note against "Ai:FeatureModels" (the model actually served).
 ///
+/// ONE ENVIRONMENT NOW SERVES TWO TIERS (p3-3) - and the flat block still stands, but for a NARROWER reason
+/// than "cloud was measured". This xmldoc used to say "today each environment serves exactly one tier".
+/// That became FALSE the moment the per-book model tier shipped (<c>Book.AiTier</c>,
+/// model-tier-fast-thinking plan phase 3): a single deployment now routes an opted-in book's
+/// LinguisticAnalysis and Hebrew Proofread to a cloud model while every other book stays local, which is
+/// precisely the multi-tier condition the extension point below was reserved for.
+///
+/// NO CHANGE IS MADE HERE, and the reason is COST, not a cloud leak measurement. Be careful with this: the
+/// cloud-tier leak rate has NEVER been measured (docs/ANALYSIS_OUTPUT_REPAIR.md section 11.1 records it as
+/// DEFERRED, blocked on outbound egress), so nobody may claim the guard is calibrated for the thinking
+/// tier. What IS true is that leaving it ON for a cloud-routed book is harmless: the guard is deterministic
+/// and gates BEFORE any model call, so a clean field costs ZERO model calls, and if the inverse-scaling
+/// premise holds the cloud tier simply produces fewer values for it to act on. The documented target state
+/// for a genuinely non-leaking tier is still the true no-op (<c>Enabled:false</c>) in section 4.1 - it is
+/// just not reachable per-BOOK from a per-ENVIRONMENT block, and flipping the environment-wide value would
+/// disarm the guard for every LOCAL book too. Pinned by <c>AiTierNonTriggeringTests</c>.
+///
 /// EXTENSION POINT (documented here only — NOT implemented; do not add this until it is actually needed):
 /// a per-provider/per-model override ON THIS CLASS (e.g. a Dictionary&lt;string, AnalysisRepairOptions&gt;
-/// keyed by provider/model name, consulted instead of the single flat Enabled/GuardOnly/PerType above) is
-/// only needed if a SINGLE environment ever serves MULTIPLE model tiers at once (e.g. some requests routed
-/// to a cloud model, others to local Ollama, within the same deployment). Today each environment serves
-/// exactly one tier, so the flat per-environment block above is sufficient.
+/// keyed by provider/model name, consulted instead of the single flat Enabled/GuardOnly/PerType above).
+/// The multi-tier trigger condition above is now MET, so what still gates it is evidence: build it when a
+/// cloud-tier leak measurement exists AND shows a materially different rate, not before.
 /// </summary>
 public class AnalysisRepairOptions
 {

@@ -4,7 +4,7 @@ using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Analysis;
 using Xunit;
 
-namespace Pagedraft.Api.Tests.LanguageEngine;
+namespace Pagedraft.Api.Tests;
 
 /// <summary>
 /// Deterministic tests for <see cref="UnifiedAnalysisService.MergeKtivMaleIntoProofread"/>, the
@@ -15,6 +15,10 @@ namespace Pagedraft.Api.Tests.LanguageEngine;
 /// The governing rule is that the DETERMINISTIC ktiv normative spelling WINS a same-word conflict, so
 /// a (possibly wrong) LLM rewrite touching the same token can never silently suppress the correct
 /// spelling - the live regression these tests guard against.
+///
+/// LIVES AT THE TEST PROJECT ROOT ON PURPOSE. The <c>Pagedraft.Api.Tests.LanguageEngine</c> namespace is
+/// the one the standing deterministic filter EXCLUDES, so while this class sat there it ran in NEITHER
+/// standing filter. Do not move it back; see <c>LiveHarnessNamespaceGuardTests</c>.
 /// </summary>
 public class KtivMaleMergeTests
 {

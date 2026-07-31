@@ -453,6 +453,7 @@ public class ActiveAnalysisJobsTests
             bookReview: null!,
             chapterBrief: null!,
             progress: tracker,
+            aiTierStatus: null!,
             scopeFactory: scopeFactoryMock.Object,
             appLifetime: appLifetimeMock.Object,
             logger: NullLogger<BooksController>.Instance);

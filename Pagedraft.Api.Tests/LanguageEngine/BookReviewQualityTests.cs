@@ -133,6 +133,7 @@ public class BookReviewQualityTests
     /// planted-recall + precision. Skip-by-default via the Ollama probe.
     /// </summary>
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task BookReviewQuality_RunGoldCases_PerDimensionVsSingleCombined()
     {
         if (!await IsOllamaReachableAsync())

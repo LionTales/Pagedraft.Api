@@ -42,12 +42,22 @@ public interface IAnalysisContextService
     /// reuse the same LLM-backed linguistic computation that produces LinguisticAnalysisResult and are
     /// stored as JSON on <see cref="Models.ChapterStyleProfile.MetricsJson"/>.
     /// </summary>
+    /// <param name="tier">
+    /// be-c02: the book's ALREADY-RESOLVED model tier, when the caller holds one. Pass it from any caller
+    /// that spans more than one profile build (the style-baseline build is the only one today) so every
+    /// chapter is routed to, and stamped with, the SAME model: left to resolve for itself this method
+    /// re-reads <c>Book.AiTier</c> per call, and a user flipping the tier mid-build then stamps half the
+    /// chapters under one model and half under the other. <c>null</c> (the default) means "resolve from the
+    /// database", which is the pre-be-c02 behaviour and the right choice for a single-shot caller.
+    /// It sits after <paramref name="ct"/> deliberately, so every existing positional caller is unchanged.
+    /// </param>
     /// <returns>The cached or newly built profile, or null when chapter text is unavailable or the build fails.</returns>
     Task<Models.ChapterStyleProfile?> LoadOrBuildChapterStyleProfileAsync(
         Guid bookId,
         Guid chapterId,
         string language,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        AiTier? tier = null);
 
     /// <summary>
     /// Builds a synthetic book-wide style baseline: the per-metric mean of the numeric syntax/morphology
@@ -56,6 +66,14 @@ public interface IAnalysisContextService
     /// (existing rows benefit from staleness self-refresh only). Used as the [CHAPTER_STYLE_BASELINE]
     /// reference at Chapter scope so a chapter is compared against the book average rather than itself.
     /// </summary>
+    /// <param name="tier">
+    /// be-c02: the book's ALREADY-RESOLVED model tier, when the caller holds one. This aggregator never
+    /// rebuilds - it EXCLUDES rows built under a different model - so a caller that has just built profiles
+    /// must average them at the tier they were built under. Resolving it again here after a mid-build tier
+    /// flip drops every row the build just wrote and returns null, silently, with no error and no log.
+    /// <c>null</c> (the default) means "resolve from the database", the pre-be-c02 behaviour.
+    /// It sits after <paramref name="ct"/> deliberately, so every existing positional caller is unchanged.
+    /// </param>
     /// <returns>
     /// A synthetic (unpersisted) profile whose MetricsJson holds the averaged metrics, or null when fewer
     /// than two chapters have a usable profile (a single-chapter "average" is not a meaningful reference).
@@ -63,5 +81,6 @@ public interface IAnalysisContextService
     Task<Models.ChapterStyleProfile?> BuildBookStyleAverageProfileAsync(
         Guid bookId,
         string language,
-        CancellationToken ct = default);
+        CancellationToken ct = default,
+        AiTier? tier = null);
 }

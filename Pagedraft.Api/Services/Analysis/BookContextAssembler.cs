@@ -218,62 +218,213 @@ public class BookContextAssembler
     /// let the context overflow the consumer's window, where Ollama silently truncates. When several tasks
     /// share one assembly (BookIntelligenceService reuses the same text across routes) we budget to the
     /// SMALLEST window so the context fits the tightest consumer. With no task supplied we fall back to
-    /// Summarization (the task the briefs were built under). The NumCtx lookup mirrors
-    /// <see cref="OllamaProvider"/>'s tuning precedence: provider+task key, then provider key, then the
-    /// ProviderTuningOptions default.
+    /// Summarization (the task the briefs were built under). The NumCtx lookup goes through
+    /// <see cref="ProviderTuningResolver"/> — the SHARED implementation of the provider+task key → provider
+    /// key → ProviderTuningOptions-default precedence that every provider also uses at request time.
     /// </summary>
-    public int ResolveBudgetTokens(IReadOnlyCollection<AiTaskType>? consumingTasks = null)
+    /// <param name="tier">
+    /// The BOOK's model tier (p3-2). Load-bearing rather than cosmetic: the tuning key is
+    /// <c>{Provider}_{TaskType}</c> and the PROVIDER comes from
+    /// <see cref="LinguisticModelResolver.ResolveForTask(AiOptions, AiTaskType, string?, AiTier)"/>,
+    /// so a tier that moves a task to another provider moves that task's window and output reservation with
+    /// it. Defaults to <see cref="AiTier.Fast"/>, which resolves exactly as before the tier existed.
+    ///
+    /// EVERY caller takes that default today - <see cref="AssembleAsync"/>, <see cref="AssembleWindowsAsync"/>,
+    /// both <c>BookReviewDigests</c> budget derivations and <c>BookReviewService.PlanContinuityReduce</c> - so
+    /// the BUDGET is sized on the Fast route regardless of the book's tier. That is a DELIBERATE, pinned no-op
+    /// (parent plan p3-3 correction 4 / p3-4 correction 6, pinned by
+    /// <c>TheWholeBookBudget_IsUnmovedByTheTier_AtTheShippedValues</c>): threading the tier here would reach
+    /// BookIntelligenceService and the BookReview windowed path, both outside the tier's GO'd scope. The
+    /// OBSERVABILITY half does NOT share that limitation - see
+    /// <see cref="WarnIfWholeBookWindowIsUnsized"/>, which evaluates every tier rather than this one.
+    /// </param>
+    public int ResolveBudgetTokens(
+        IReadOnlyCollection<AiTaskType>? consumingTasks = null,
+        AiTier tier = AiTier.Fast)
     {
         var opt = _aiOptions.Value;
         var tasks = consumingTasks is { Count: > 0 }
             ? consumingTasks
             : new[] { AiTaskType.Summarization };
-        var numCtx = tasks.Min(t => ResolveNumCtxForTask(opt, t));
+        var numCtx = tasks.Min(t => ResolveNumCtxForTask(opt, t, language: null, tier));
         // Reserve the LARGEST output among the consuming tasks so the tightest window still leaves room for
-        // that task's generated output (input + output must fit num_ctx, else Ollama truncates the output).
-        var numPredict = tasks.Max(t => ResolveNumPredictForTask(opt, t));
-        return opt.EffectiveBookContextTokenBudget(numCtx, numPredict);
+        // that task's generated output (input + output must fit num_ctx, else the model's answer truncates).
+        // The reservation is PROVIDER-AWARE (p1-2): num_predict on Ollama, max_tokens on the cloud families.
+        var outputReserve = tasks.Max(t => ResolveOutputReserveForTask(opt, t, language: null, tier));
+        var budget = opt.EffectiveBookContextTokenBudget(numCtx, outputReserve);
+        WarnIfWholeBookWindowIsUnsized(opt, tasks, budget, tier);
+        return budget;
     }
 
     /// <summary>
-    /// Active-model context window (num_ctx) for a task, mirroring OllamaProvider.GetTuning's key precedence:
-    /// "{provider}_{task}" → "{provider}" → ProviderTuningOptions default. The tuning key uses the provider
-    /// NAME (resolved via the shared resolver), exactly as the provider does at request time. Public so other
+    /// A whole-book context window at or below this is treated as UNSIZED rather than chosen: it is the bare
+    /// <see cref="ProviderTuningOptions"/> class default, which a bound tuning entry supplies whenever it
+    /// simply OMITS NumCtx. Bound options cannot distinguish "nobody set it" from "somebody set 4096", and on
+    /// the whole-book path the two are equally wrong, so the value itself is the signal.
+    /// </summary>
+    private static readonly int UnsizedWholeBookNumCtx = new ProviderTuningOptions().NumCtx;
+
+    /// <summary>
+    /// De-duplication keys for <see cref="WarnIfWholeBookWindowIsUnsized"/>, so a windowed review that derives
+    /// the budget once per window logs the misconfiguration ONCE rather than once per call. Instance-scoped
+    /// (the assembler is AddScoped and one instance serves a whole review build) and concurrent because the
+    /// windowed path fans out.
+    ///
+    /// The key is the ROUTE - <c>{provider}|{task}|{numCtx}</c> - and deliberately carries NO tier, even though
+    /// the emitter now evaluates every tier. Two tiers that resolve the SAME provider for a task (which is every
+    /// task outside <see cref="AiTierPolicy.TieredTasks"/>, and any tiered task whose tier key names the same
+    /// provider) describe ONE misconfiguration with ONE fix - the same <c>Ai:ProviderSettings:{Provider}_{Task}</c>
+    /// entry - so keying by tier would print the identical remedy twice. The message names the tier(s) that
+    /// reach the route instead.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _warnedUnsizedWindows = new();
+
+    /// <summary>
+    /// EVERY tier the emitter checks. Read off the enum rather than hand-listed, so a third tier is covered the
+    /// day it is declared instead of the day somebody remembers this method.
+    /// </summary>
+    private static readonly AiTier[] AllTiers = Enum.GetValues<AiTier>();
+
+    /// <summary>
+    /// RUNTIME OBSERVABILITY for the silent-default hole (model-tier plan, p1-3). p1-3 adds the per-task cloud
+    /// tuning entries and a build-time guard test that fails if one goes missing, but a guard test cannot see a
+    /// MISCONFIGURED DEPLOYMENT: an appsettings.Production override, an environment variable, or a provider
+    /// wired at runtime can still route a whole-book task at a provider with no sized window, and the resulting
+    /// failure is invisible (prompt truncated -> unparseable model output -> job reports success with nothing
+    /// found). This makes that state loud instead.
+    ///
+    /// WHY HERE AND NOT INSIDE THE RESOLVER. <see cref="ProviderTuningResolver"/> is called for EVERY task on
+    /// every request, and 4096 is a perfectly legitimate resolved window for the CHUNKED tasks - the shipped
+    /// Ollama_Proofread / Ollama_LineEdit entries resolve exactly that on purpose. Warning there would fire
+    /// constantly on a correct config and train everyone to ignore it. <see cref="ResolveBudgetTokens"/> is by
+    /// construction the WHOLE-BOOK path, where a class-default window is always a misconfiguration, so the
+    /// warning is scoped to it and de-duplicated per (provider, task, num_ctx) rather than emitted per lookup.
+    /// Non-throwing and cheap by design: this is observability, not a gate.
+    ///
+    /// WHY IT EVALUATES EVERY TIER AND NOT <paramref name="sizingTier"/> (fixes review P2-5, the
+    /// emitter-reachability trap). <see cref="ResolveBudgetTokens"/>'s tier parameter defaults to
+    /// <see cref="AiTier.Fast"/> and EVERY caller takes that default, deliberately (see the parameter's
+    /// doc). If the emitter checked only the tier it was handed, then the day a whole-book task joins
+    /// <see cref="AiTierPolicy.TieredTasks"/>, the signal added specifically to make the silent 4096-collapse
+    /// loud would resolve the FAST provider and stay silent about the THINKING route - i.e. it would miss
+    /// exactly the misconfiguration it exists to catch. Because this is OBSERVABILITY, the two error
+    /// directions are not symmetric: an extra warning about a route no book uses yet costs a log line, while a
+    /// missing one costs a green-looking job with 0 findings. So the emitter is TIER-INDEPENDENT: it checks
+    /// every <see cref="AiTier"/> and warns for any route that is unsized, whichever tier reaches it. That
+    /// also makes the emitter correct without threading the tier through <see cref="AssembleAsync"/> /
+    /// <see cref="AssembleWindowsAsync"/>, which is out of the tier feature's GO'd scope.
+    /// <paramref name="sizingTier"/> is still named in the message, because the reported budget was derived on
+    /// THAT route and a reader must not read it as the budget of the route being warned about.
+    /// </summary>
+    private void WarnIfWholeBookWindowIsUnsized(
+        AiOptions opt, IReadOnlyCollection<AiTaskType> tasks, int budget, AiTier sizingTier)
+    {
+        foreach (var task in tasks)
+        {
+            // Group by the ROUTE (provider + resolved window), which is exactly the de-duplication key, so a
+            // task whose tiers share a provider yields ONE warning naming both tiers rather than two identical
+            // ones, and a task the tier really moves yields one warning per unsized route.
+            var unsizedRoutes = AllTiers
+                .Select(t => (
+                    Tier: t,
+                    NumCtx: ResolveNumCtxForTask(opt, task, language: null, t),
+                    Route: LinguisticModelResolver.ResolveForTask(opt, task, language: null, t)))
+                .Where(x => x.NumCtx <= UnsizedWholeBookNumCtx)
+                .GroupBy(x => (x.Route.provider, x.NumCtx));
+
+            foreach (var route in unsizedRoutes)
+            {
+                var (provider, taskNumCtx) = route.Key;
+                if (!_warnedUnsizedWindows.TryAdd($"{provider}|{task}|{taskNumCtx}", 0)) continue;
+
+                var tiers = string.Join("/", route.Select(x => x.Tier.ToString()));
+                var models = string.Join("/", route.Select(x => x.Route.model ?? "(default)").Distinct());
+
+                _logger.LogWarning(
+                    "BookContextAssembler: whole-book task {Task} routes to provider {Provider} (model {Model}) on the " +
+                    "{Tiers} tier(s) with a context window of {NumCtx} tokens, which is at or below the " +
+                    "ProviderTuningOptions class default ({ClassDefault}) - i.e. no Ai:ProviderSettings entry sized " +
+                    "this task's window for this provider, so the lookup bound the class default instead of falling " +
+                    "through. This build capped its assembled book context at {Budget} tokens (derived on the " +
+                    "{SizingTier} route). On a multi-chapter book that overflows the prompt, the provider truncates " +
+                    "it, the model returns unparseable output, and the job still reports success with 0 findings. Add " +
+                    "an Ai:ProviderSettings:{ExpectedKey} entry with an explicit NumCtx sized to that model's real " +
+                    "window.",
+                    task, provider, models, tiers, taskNumCtx, UnsizedWholeBookNumCtx, budget, sizingTier,
+                    ProviderTuningResolver.TaskKey(provider, task));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Active-model context window (num_ctx) for a task, resolved through <see cref="ProviderTuningResolver"/>
+    /// — the SINGLE implementation of the "{provider}_{task}" → "{provider}" → ProviderTuningOptions-default
+    /// precedence, shared with every provider's own request-time lookup (p1-1; it used to be spelled out
+    /// longhand here AND in OllamaProvider.GetTuning). The tuning key uses the provider NAME resolved via
+    /// <see cref="LinguisticModelResolver"/>, exactly as the router routes the task. Public so other
     /// budget-aware sizers (e.g. the language-aware proofread/LineEdit chunker in
     /// <see cref="UnifiedAnalysisService"/>) resolve a task's context window through the SAME precedence
     /// rather than duplicating it.
+    ///
+    /// NOTE the FIELD-level rung semantics (<see cref="ProviderTuningResolver.ResolvePositiveInt"/>): unlike a
+    /// provider's whole-entry lookup, a rung whose NumCtx is unset (&lt;= 0) FALLS THROUGH here.
     /// </summary>
     public static int ResolveNumCtxForTask(AiOptions opt, AiTaskType task)
+        => ResolveNumCtxForTask(opt, task, language: null, AiTier.Fast);
+
+    /// <summary>
+    /// LANGUAGE- AND TIER-AWARE overload (p3-2). Both arguments matter for the same reason: the tuning key
+    /// is built from the RESOLVED PROVIDER, and the provider is chosen by a precedence whose first two rungs
+    /// are the language key (<c>Proofread_en</c>) and the tier key (<c>Proofread_thinking</c>). Passing
+    /// neither - the 2-arg overload above - resolves the bare task key, which is what every whole-book
+    /// consumer wants and what the pre-p3-2 code did.
+    ///
+    /// The LANGUAGE argument also closes a divergence p1-4 found and pinned as harmless-today
+    /// (<c>ChunkThresholdEndpointParityTests.ChunkSizerAndRouter_ResolveTheSameWindow_ForAnEnglishProofreadAndLineEdit</c>):
+    /// the chunk sizer used to size English Proofread/LineEdit against the BARE key's provider while the
+    /// router ran the <c>_en</c> entry's provider. They agree today only because both name Ollama. Now the
+    /// sizer resolves through the same precedence, so they agree by construction.
+    /// </summary>
+    public static int ResolveNumCtxForTask(AiOptions opt, AiTaskType task, string? language, AiTier tier)
     {
-        var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task);
-        var settings = opt.ProviderSettings;
-        if (settings != null)
-        {
-            if (settings.TryGetValue($"{provider}_{task}", out var taskTuning) && taskTuning.NumCtx > 0)
-                return taskTuning.NumCtx;
-            if (settings.TryGetValue(provider, out var providerTuning) && providerTuning.NumCtx > 0)
-                return providerTuning.NumCtx;
-        }
-        return new ProviderTuningOptions().NumCtx; // 4096, same fallback the provider uses
+        var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task, language, tier);
+        // FIELD-level precedence (ProviderTuningResolver.ResolvePositiveInt): a rung whose NumCtx is <= 0
+        // falls through instead of winning. Note this fall-through is DORMANT at today's class defaults —
+        // NumCtx defaults to 4096, which is > 0, so an entry that merely OMITS NumCtx (e.g. Ollama_Proofread,
+        // which sets only NumPredict) still resolves 4096 here, exactly matching the num_ctx OllamaProvider
+        // sends for that task. The guard only bites on an explicit `"NumCtx": 0`. Final fallback is 4096.
+        return ProviderTuningResolver.ResolvePositiveInt(opt.ProviderSettings, provider, task, t => t.NumCtx);
     }
 
     /// <summary>
-    /// Active-model output reservation (num_predict) for a task, mirroring the NumCtx precedence:
-    /// "{provider}_{task}" → "{provider}" → ProviderTuningOptions default (2048). Used to reserve output
-    /// headroom in the book-context budget so input + output fit the window.
+    /// Active-model OUTPUT RESERVATION for a task — the number of tokens the provider that will actually run
+    /// this task may generate — through the same <see cref="ProviderTuningResolver"/> precedence as the NumCtx
+    /// sibling: "{provider}_{task}" → "{provider}" → the field's ProviderTuningOptions default. Used to reserve
+    /// output headroom in the book-context budget so input + output fit the window.
+    ///
+    /// PROVIDER-AWARE SINCE p1-2, and that is the whole point of this method. The reservation must equal what
+    /// the provider will REQUEST, and the two provider families name that number differently: Ollama sends
+    /// <c>num_predict</c> (ProviderTuningOptions.NumPredict), the cloud families send <c>max_tokens</c>
+    /// (ProviderTuningOptions.MaxTokens). Each appsettings entry sets only its own family's field, so reading
+    /// NumPredict unconditionally — as this method did before p1-2 — silently returned the 2048 CLASS DEFAULT
+    /// for a cloud-routed task whose entry said MaxTokens 5120, under-reserving output headroom by 3072 tokens
+    /// on every cloud call. <see cref="ProviderTuningResolver.ResolveOutputTokens"/> picks the right field;
+    /// do NOT name a field here. Public so other budget sizers resolve the reservation through the SAME
+    /// accessor instead of re-deriving it.
     /// </summary>
-    private static int ResolveNumPredictForTask(AiOptions opt, AiTaskType task)
+    public static int ResolveOutputReserveForTask(AiOptions opt, AiTaskType task)
+        => ResolveOutputReserveForTask(opt, task, language: null, AiTier.Fast);
+
+    /// <summary>
+    /// Language- and tier-aware counterpart of <see cref="ResolveNumCtxForTask(AiOptions, AiTaskType, string?, AiTier)"/>,
+    /// for the same reason: the output knob is read off the entry the RESOLVED PROVIDER owns, and a tier can
+    /// change that provider (and with it the family, hence which of NumPredict / MaxTokens is the knob).
+    /// </summary>
+    public static int ResolveOutputReserveForTask(
+        AiOptions opt, AiTaskType task, string? language, AiTier tier)
     {
-        var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task);
-        var settings = opt.ProviderSettings;
-        if (settings != null)
-        {
-            if (settings.TryGetValue($"{provider}_{task}", out var taskTuning) && taskTuning.NumPredict > 0)
-                return taskTuning.NumPredict;
-            if (settings.TryGetValue(provider, out var providerTuning) && providerTuning.NumPredict > 0)
-                return providerTuning.NumPredict;
-        }
-        return new ProviderTuningOptions().NumPredict; // 2048, same fallback the provider uses
+        var (provider, _) = LinguisticModelResolver.ResolveForTask(opt, task, language, tier);
+        return ProviderTuningResolver.ResolveOutputTokens(opt.ProviderSettings, provider, task);
     }
 
     /// <summary>

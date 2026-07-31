@@ -117,6 +117,7 @@ public class RepairQualityTests
         "'לא' אם המשמעות שונתה, אבדה או עוותה.";
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task RepairQuality_RunGoldCases_ReportScores()
     {
         if (!await IsOllamaReachableAsync())

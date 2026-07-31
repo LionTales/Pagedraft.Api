@@ -66,6 +66,7 @@ public class LinguisticDecompProbeTests
     private static readonly PromptFactory _promptFactory = new();
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task LinguisticDecompProbe_LongInputs_SinglePassVsDecomposition()
     {
         if (!await IsOllamaReachableAsync())

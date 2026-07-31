@@ -41,17 +41,23 @@ public class OpenAiCompatibleProvider : IAiAnalysisProvider
             throw new InvalidOperationException($"{_providerName} BaseUrl not configured. Set Ai:Providers:{_providerName}:BaseUrl.");
 
         var nameUpper = _providerName.ToUpperInvariant();
-        var apiKey = _config[$"Ai:Providers:{_providerName}:ApiKey"];
         // Treat an unset value OR an uninterpolated committed placeholder (e.g. "__AI_OPENROUTER_APIKEY__")
         // as "no key in config" and fall back to the environment variable. The placeholder is non-empty, so
         // without this guard it would be sent verbatim as the Bearer token and rejected (401).
-        if (string.IsNullOrWhiteSpace(apiKey) || (apiKey.StartsWith("__") && apiKey.EndsWith("__")))
-            apiKey = Environment.GetEnvironmentVariable($"AI_{nameUpper}_APIKEY");
+        // EXTRACTED (p3-4) into ProviderCredentials so the model tier's pre-flight "is the cloud provider
+        // actually configured?" check reads the key the SAME way this call does - a second copy would let
+        // the UI promise a tier that then throws here, which is exactly the silent-lie class this todo exists
+        // to close. Behaviour is unchanged: includeLegacySection defaults to false, matching the inline copy.
+        var apiKey = ProviderCredentials.ResolveApiKey(_config, _providerName);
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new InvalidOperationException($"{_providerName} ApiKey not configured. Set Ai:Providers:{_providerName}:ApiKey or AI_{nameUpper}_APIKEY.");
 
         var model = request.Selection.Model;
-        var tuning = GetTuning(_providerName);
+        // Per-task tuning ("{Provider}_{TaskType}" → "{Provider}" → class default). Before p1-1 this looked
+        // up the FLAT provider key only, so no cloud task could raise its own limits — a cloud-routed
+        // BookReview ran on the generic OpenRouter entry while the local path reserved Ollama_BookReview's
+        // far larger window. Adding a "{_providerName}_{task}" entry to Ai:ProviderSettings now takes effect.
+        var tuning = GetTuning(_providerName, request.TaskType);
 
         var payload = OpenAiProvider.BuildPayload(model, request, tuning);
 
@@ -96,10 +102,12 @@ public class OpenAiCompatibleProvider : IAiAnalysisProvider
         };
     }
 
-    private ProviderTuningOptions GetTuning(string providerName)
-    {
-        if (_options.ProviderSettings != null && _options.ProviderSettings.TryGetValue(providerName, out var t))
-            return t;
-        return new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 2048 };
-    }
+    /// <summary>
+    /// Per-task tuning for this provider. Delegates to <see cref="ProviderTuningResolver.Resolve"/>, the ONE
+    /// implementation of the "{Provider}_{TaskType}" → "{Provider}" → class-default precedence (p1-1). The
+    /// old inline fallback <c>{ Temperature = 0.2, MaxTokens = 2048 }</c> merely restated the class defaults,
+    /// so the only behaviour CHANGE here is the newly honoured task rung.
+    /// </summary>
+    private ProviderTuningOptions GetTuning(string providerName, AiTaskType taskType)
+        => ProviderTuningResolver.Resolve(_options.ProviderSettings, providerName, taskType);
 }

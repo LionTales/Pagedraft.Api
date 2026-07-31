@@ -25,6 +25,21 @@ using Xunit.Abstractions;
 
 namespace Pagedraft.Api.Tests.LanguageEngine;
 
+/// <summary>
+/// ENVIRONMENT-DEPENDENT what is left of the Hebrew regression harness: the detect stage really calls
+/// LanguageTool at <c>localhost:8081</c>. It needs no model and no GPU, but on a machine without
+/// LanguageTool running it does not fail - it TOLERATES the timeout, at a measured cost of 41 SECONDS
+/// (2026-07-29, LanguageTool down). That is why this class stays in the excluded
+/// <c>Pagedraft.Api.Tests.LanguageEngine</c> namespace instead of joining the ~5s standing deterministic
+/// suite: adding it would multiply that gate's runtime by ~9 and make it silently
+/// environment-sensitive.
+///
+/// The two assertions here that were genuinely OFFLINE (the gold's JSON shape, and the pure
+/// <c>HebrewNormalizeEngine</c> stage - 38ms and 43ms measured) were SPLIT OUT to
+/// <see cref="Pagedraft.Api.Tests.HebrewRegressionOfflineTests"/> at the test project root, where the
+/// standing deterministic filter reaches them. They share this class's loader rather than copying it.
+/// Do not re-add an offline assertion here; add it there.
+/// </summary>
 public class HebrewRegressionTests
 {
     private readonly ITestOutputHelper _output;
@@ -34,41 +49,21 @@ public class HebrewRegressionTests
         _output = output;
     }
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    internal static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    /// <summary>
+    /// The ONLY test left in this class that touches the network: it drives the detect stage, which calls
+    /// LanguageTool at <c>localhost:8081</c> and tolerates the timeout when it is down. MEASURED 41s with
+    /// LanguageTool down. Marked so the namespace guard
+    /// (<c>LiveHarnessNamespaceGuardTests</c>) can see WHY this class is excluded rather than
+    /// inferring it from the folder it sits in.
+    /// </summary>
     [Fact]
-    public void LoadHebrewRegressionJson_ExistsAndDeserializes()
-    {
-        var path = GetTestDataPath();
-        Assert.True(File.Exists(path), $"Test data file not found: {path}");
-        var json = File.ReadAllText(path);
-        var cases = JsonSerializer.Deserialize<HebrewRegressionCase[]>(json, JsonOptions);
-        Assert.NotNull(cases);
-        Assert.NotEmpty(cases);
-    }
-
-    [Fact]
-    public async Task NormalizeStage_MatchesExpected_ForCasesWithExpectedNormalized()
-    {
-        var cases = LoadCases();
-        var engine = CreateNormalizeEngine();
-
-        foreach (var c in cases)
-        {
-            if (string.IsNullOrEmpty(c.ExpectedNormalized)) continue;
-
-            var normalized = await engine.NormalizeAsync(c.Input, c.Language);
-            Assert.True(
-                normalized == c.ExpectedNormalized,
-                $"Case {c.Id}: Expected normalized \"{c.ExpectedNormalized}\", got \"{normalized}\".");
-        }
-    }
-
-    [Fact]
+    [Trait("Category", "EnvironmentDependent")]
     public async Task FullPipeline_NormalizeAndDetect_ReturnsResult_ForAllCases()
     {
         var cases = LoadCases();
@@ -122,6 +117,7 @@ public class HebrewRegressionTests
 
     /// <summary>Optional benchmark: run regression cases and report latency. Run with dotnet test --filter "BenchmarkRegression".</summary>
     [Fact(Skip = "Optional benchmark - run manually when comparing models or measuring latency")]
+    [Trait("Category", "EnvironmentDependent")]
     public async Task BenchmarkRegression_RunAllCases_ReportLatency()
     {
         var cases = LoadCases();
@@ -165,7 +161,7 @@ public class HebrewRegressionTests
         _output.WriteLine($"  Full pipeline (normalize+detect) total: {totalSw.ElapsedMilliseconds} ms ({totalSw.ElapsedMilliseconds * 1.0 / cases.Length:F0} ms/case)");
     }
 
-    private static HebrewRegressionCase[] LoadCases()
+    internal static HebrewRegressionCase[] LoadCases()
     {
         var path = GetTestDataPath();
         if (!File.Exists(path))
@@ -175,13 +171,13 @@ public class HebrewRegressionTests
         return cases ?? Array.Empty<HebrewRegressionCase>();
     }
 
-    private static string GetTestDataPath()
+    internal static string GetTestDataPath()
     {
         var baseDir = AppContext.BaseDirectory;
         return Path.Combine(baseDir, "TestData", "hebrew-regression.json");
     }
 
-    private static INormalizeEngine CreateNormalizeEngine()
+    internal static INormalizeEngine CreateNormalizeEngine()
     {
         return new HebrewNormalizeEngine();
     }

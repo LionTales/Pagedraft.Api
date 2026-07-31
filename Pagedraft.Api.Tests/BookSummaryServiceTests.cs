@@ -514,6 +514,7 @@ public class BookSummaryServiceTests
             bookReview: null!,
             chapterBrief: null!,
             progress: progress,
+            aiTierStatus: null!,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);

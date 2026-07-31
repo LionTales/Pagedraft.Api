@@ -3,9 +3,15 @@ using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Xunit;
 
-namespace Pagedraft.Api.Tests.LanguageEngine;
+namespace Pagedraft.Api.Tests;
 
 /// <summary>
+/// LIVES AT THE TEST PROJECT ROOT ON PURPOSE. This class is deterministic, but it used to sit in
+/// <c>LanguageEngine/</c>, the folder whose namespace the standing deterministic filter EXCLUDES. It was
+/// only ever reached because the standing NARROW filter happens to carry a <c>~ProviderPayload</c> term,
+/// i.e. it ran by coincidence of its own name rather than by any rule. Moved 2026-07-29 so the
+/// deterministic suite covers it too; the class name is unchanged, so the narrow filter still reaches it.
+///
 /// Pins the per-model-family payload shape for the cloud providers so a refactor can't silently
 /// reintroduce a 400 (e.g. sending `temperature` to a Claude Opus model, or `max_tokens` to gpt-5).
 /// These assert against the in-memory payload dictionary that <c>BuildPayload</c> returns — no network,

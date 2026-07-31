@@ -47,6 +47,7 @@ public class AnalysisRepairSmokeTests
         "הקצב מהיר וה-tension עולה בהדרגה עד ל-climax של הקרב.";
 
     [Fact]
+    [Trait("Category", "LiveModel")]
     public async Task RepairField_OnScrambledProbe_RoutesToGemma_AndReducesLatin_StaysHebrew()
     {
         if (!await IsOllamaReachableAsync())

@@ -206,21 +206,48 @@ public class AnalysisContextService : IAnalysisContextService
     /// <see cref="ChapterStyleProfile.MetricsJson"/>, persist, and return the new row.
     /// Degrades gracefully (returns null) when the chapter has no analysable text or the LLM call fails.
     /// </summary>
+    /// <param name="tier">
+    /// be-c02: the book's already-resolved tier, or null to resolve it from the database (the default,
+    /// and the pre-be-c02 behaviour). See <see cref="IAnalysisContextService"/> for why a multi-chapter
+    /// caller must pass its own value rather than let each call re-read the column.
+    /// </param>
     public async Task<ChapterStyleProfile?> LoadOrBuildChapterStyleProfileAsync(
         Guid bookId,
         Guid chapterId,
         string language,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        AiTier? tier = null)
     {
         // Normalize to the canonical cache key (e.g. "en-US" → "en") so this row lands in the SAME slot
         // whether built inline here or by the background StyleBaselineService.
         var lang = BaselineLanguageResolver.Normalize(language);
 
+        // p3-3: the BOOK's model tier. Used for BOTH halves of the atomic pairing below - the request the
+        // rebuild sends, and the active model the freshness gate compares against. See
+        // ActiveLinguisticModelFor for why the two must move together.
+        // be-c02: PREFER the caller's already-resolved value. A caller that spans several chapters
+        // (StyleBaselineService's build) resolves the tier once and threads it here, so a flip that lands
+        // mid-build cannot stamp its chapters under two different models. Only when no tier is supplied do
+        // we read the column ourselves - today that is the inline BuildContextAsync path, which builds ONE
+        // profile per call.
+        // final-r02, stated so the next reader does not over-read the line above: "no tier supplied" is NOT
+        // the same as "only one tier read in the whole operation". BuildContextAsync is reached from
+        // UnifiedAnalysisService.RunAsync, which resolves the book's tier again for its own request, so a
+        // Scene/Chapter-scope LinguisticAnalysis run still reads Book.AiTier twice and a flip between the two
+        // gates this baseline at one tier while the analysis request routes at the other. That is BOUNDED -
+        // the only consequence is that this chapter's profile reads stale on the next run and rebuilds once,
+        // which is the freshness gate working - and threading it would mean widening BuildContextAsync, which
+        // p3-3 deferred deliberately. What is NOT bounded, and is what this parameter exists for, is the
+        // multi-chapter build above.
+        var effectiveTier = tier ?? await BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+
         // The active LinguisticAnalysis model the deviations would be compared against (config-resolved,
-        // same resolution AiRouter uses). A profile built under a DIFFERENT model must not be served as a
-        // baseline: comparing metrics across models is apples-to-oranges, so a model mismatch is treated
-        // exactly like timestamp staleness (rebuild, or null when a rebuild is impossible).
-        var activeModel = ActiveLinguisticModel;
+        // same resolution AiRouter uses, at THIS BOOK's tier). A profile built under a DIFFERENT model must
+        // not be served as a baseline: comparing metrics across models is apples-to-oranges, so a model
+        // mismatch is treated exactly like timestamp staleness (rebuild, or null when a rebuild is
+        // impossible). A tier change therefore invalidates this book's profiles through the EXISTING gate -
+        // no separate invalidation pass exists or is needed.
+        var activeModel = ActiveLinguisticModelFor(effectiveTier);
 
         try
         {
@@ -264,7 +291,7 @@ public class AnalysisContextService : IAnalysisContextService
 
             // 4. Cache miss OR stale (timestamp or model): (re)compute chapter-level metrics from the
             // CURRENT text. The build also reports the model actually used, which we stamp below.
-            var built = await ComputeChapterLinguisticMetricsAsync(chapterText, lang, ct);
+            var built = await ComputeChapterLinguisticMetricsAsync(chapterText, lang, effectiveTier, ct);
             if (built == null)
                 // Rebuild failed. We only reach here on a cache miss (existing == null) or a STALE
                 // profile (step 3 already returned a fresh one), so `existing` is never current. Return
@@ -364,10 +391,16 @@ public class AnalysisContextService : IAnalysisContextService
     /// the user must run the explicit Build/Refresh baseline job to repopulate - the intended consented
     /// degradation, not an inline rebuild storm.
     /// </summary>
+    /// <param name="tier">
+    /// be-c02: the book's already-resolved tier, or null to resolve it from the database (the default,
+    /// and the pre-be-c02 behaviour). A caller that has JUST built the profiles it is about to average
+    /// must pass the tier it built them under - see the note on the resolve below.
+    /// </param>
     public async Task<ChapterStyleProfile?> BuildBookStyleAverageProfileAsync(
         Guid bookId,
         string language,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        AiTier? tier = null)
     {
         // Normalize to the canonical cache key (e.g. "en-US" → "en") so the rows aggregated here are the
         // SAME ones the builder and status endpoints key, keeping inline and background paths in one slot.
@@ -377,8 +410,15 @@ public class AnalysisContextService : IAnalysisContextService
         {
             // The active LinguisticAnalysis model the deviations are compared against. A profile built under
             // a DIFFERENT model is excluded (cross-model metrics are apples-to-oranges); this is the same
-            // active-model resolution the (re)build gate uses.
-            var activeModel = ActiveLinguisticModel;
+            // active-model resolution the (re)build gate uses, at the SAME book tier (p3-3) - resolving it
+            // untiered here would exclude every profile a thinking-tier book just built.
+            // be-c02: and for the same reason it must prefer the CALLER's tier when one is supplied. This
+            // aggregator EXCLUDES rather than rebuilds, so re-reading Book.AiTier here after a mid-build
+            // flip drops every row that build just wrote and returns null - no exception, no log, and the
+            // caller's baseline is simply never persisted. Only a caller with no tier of its own (the
+            // inline Chapter-scope read) falls through to the database read.
+            var effectiveTier = tier ?? await BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+            var activeModel = ActiveLinguisticModelFor(effectiveTier);
 
             // 1. Read the persisted profile rows for (bookId, lang) WITH the fields needed to judge
             // freshness. AsNoTracking: this is a pure read; we never mutate or persist anything here.
@@ -498,10 +538,23 @@ public class AnalysisContextService : IAnalysisContextService
     /// re-resolving it from config. Under normal config these agree (the provider sets Model from the
     /// same resolved selection), but the router-reported value is the most accurate.
     /// </para>
+    /// <para>
+    /// TIER (p3-3), and this is HALF OF AN ATOMIC PAIRING - do not change one half without the other. The
+    /// request is stamped with the book's <see cref="AiTier"/> so the rebuild runs on the model the book is
+    /// actually on; the model it comes back with is stamped into
+    /// <c>ChapterStyleProfile.BuiltWithModel</c>, which
+    /// <see cref="ChapterStyleProfileFreshness.IsFresh"/> compares against
+    /// <see cref="ActiveLinguisticModelFor"/>. Stamping the request WITHOUT making the gate tier-aware would
+    /// make every thinking-tier book's profiles permanently stale (the cloud stamp never equals the local
+    /// active model) - one extra LLM call per chapter per analysis, forever. Making the gate tier-aware
+    /// WITHOUT stamping the request is the same failure mirrored. p3-2 deliberately deferred this stamp to
+    /// p3-3 for exactly that reason.
+    /// </para>
     /// </summary>
     private async Task<(LinguisticAnalysisResult Metrics, string? Model)?> ComputeChapterLinguisticMetricsAsync(
         string text,
         string language,
+        AiTier tier,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -516,7 +569,10 @@ public class AnalysisContextService : IAnalysisContextService
             Language = language,
             // JsonMode = true mirrors the main LinguisticAnalysis path (UnifiedAnalysisService line 357)
             // so the baseline build uses the same Ollama format=json path for reliable JSON parsing.
-            JsonMode = true
+            JsonMode = true,
+            // p3-3: the book's tier, so this baseline build routes to the SAME model the user-facing
+            // LinguisticAnalysis run routes to. See the atomic-pairing note on this method.
+            Tier = tier
         };
 
         AiResponse response;
@@ -553,8 +609,9 @@ public class AnalysisContextService : IAnalysisContextService
             if (metrics == null)
                 return null;
             // Prefer the router-reported model (the model actually used); fall back to the config-resolved
-            // active model if a provider left it blank, so BuiltWithModel is never null when we DID build.
-            var model = string.IsNullOrWhiteSpace(response.Model) ? ActiveLinguisticModel : response.Model;
+            // active model AT THIS BOOK'S TIER if a provider left it blank, so BuiltWithModel is never null
+            // when we DID build - and so the fallback stamp still satisfies the tier-aware freshness gate.
+            var model = string.IsNullOrWhiteSpace(response.Model) ? ActiveLinguisticModelFor(tier) : response.Model;
             return (metrics, model);
         }
         catch (JsonException)
@@ -564,11 +621,27 @@ public class AnalysisContextService : IAnalysisContextService
     }
 
     /// <summary>
-    /// The resolved active LinguisticAnalysis model id from config (same resolution AiRouter uses, via the
-    /// shared <see cref="LinguisticModelResolver"/>). Used as the cross-model staleness comparison target
-    /// and as a fallback stamp value. May be null only when DefaultModel itself is null/empty.
+    /// The resolved active LinguisticAnalysis model id from config for a given BOOK TIER (same resolution
+    /// AiRouter uses, via the shared <see cref="LinguisticModelResolver"/>). Used as the cross-model
+    /// staleness comparison target and as a fallback stamp value. May be null only when DefaultModel itself
+    /// is null/empty.
+    /// <para>
+    /// p3-3 made this TIER-AWARE, and that is what performs the tier's cache invalidation - there is no
+    /// separate invalidation pass. Because the shared gate
+    /// (<see cref="ChapterStyleProfileFreshness.IsFresh"/>) is a per-row
+    /// <c>BuiltWithModel == activeModel</c> comparison, moving a book to the thinking tier changes the
+    /// right-hand side for THAT BOOK ONLY: its profiles and its <c>BookStyleBaseline</c> read STALE and
+    /// rebuild once, every other book's rows are untouched, and the FE's existing
+    /// <c>builtWithDifferentModel</c> Refresh affordance renders it. On <see cref="AiTier.Fast"/> this
+    /// resolves byte-identically to the pre-tier behaviour.
+    /// </para>
+    /// <para>
+    /// PAIRED WITH the request stamp in <see cref="ComputeChapterLinguisticMetricsAsync"/> - see the atomic
+    /// pairing note there; the two must never move separately.
+    /// </para>
     /// </summary>
-    private string? ActiveLinguisticModel => LinguisticModelResolver.ResolveModel(_aiOptions.Value);
+    private string? ActiveLinguisticModelFor(AiTier tier) =>
+        LinguisticModelResolver.ResolveModelForTask(_aiOptions.Value, AiTaskType.LinguisticAnalysis, tier);
 
     /// <summary>
     /// Freshness gate for a cached profile against the current chapter + active model. Delegates to the
