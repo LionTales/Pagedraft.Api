@@ -3462,14 +3462,17 @@ public class UnifiedAnalysisService
     // pure deletions - scattered legit deletions never form such a run. Thresholds are conservative to avoid
     // flagging normal proofreads (which are mostly replacements, similar length).
     private const double ProofreadShortOutputRatio = 0.9;        // output < 90% of input length => possible omission
-    private const int    ProofreadMinContiguousDeletions = 6;    // a run of >= 6 adjacent pure deletions => candidate dropped span
-    private const int    ProofreadMinDroppedSpanChars = 60;      // or a run spanning >= 60 input chars => a span was dropped
-    // A high-COUNT contiguous run only signals a dropped passage when it actually REMOVES a substantial
-    // amount of text. Hebrew proofreading (ktiv-male full-spelling + punctuation) legitimately produces many
-    // adjacent single-char deletions that cluster into a run of >= 6 while together deleting only a handful of
-    // characters - that is normal copyediting, NOT an omission. The count branch therefore also requires the
-    // run's total deleted characters to reach this floor; a genuinely dropped clause deletes well past it, a
-    // cluster of micro-edits does not. (Observed false positive: 8 adjacent deletions removing 19 chars total.)
+    private const int    ProofreadMinDroppedSpanChars = 60;      // a run spanning >= 60 input chars => a span was dropped
+    // The DELETED-CHARACTER floor is what distinguishes a dropped passage from normal copyediting. Hebrew
+    // proofreading (ktiv-male full-spelling + punctuation) legitimately produces many adjacent single-char
+    // deletions that together remove only a handful of characters - that is not an omission. A genuinely
+    // dropped clause deletes well past this floor. (Observed false positive: 8 adjacent deletions removing
+    // 19 chars total.)
+    //
+    // This is deliberately NOT also gated on a minimum deletion COUNT. SuggestionDiffService emits one
+    // suggestion per contiguous edit, so a dropped clause can arrive as a SINGLE wide pure deletion rather
+    // than the per-word run this check originally assumed; requiring 6+ separate deletions made an omission
+    // invisible precisely when the diff described it most cleanly. The character floor holds either way.
     private const int    ProofreadMinRunDeletedChars = 35;
     // Two pure deletions are "contiguous" when only a small gap (a space/comma) separates them in the input.
     private const int    ProofreadDeletionContiguityGap = 3;
@@ -3477,6 +3480,27 @@ public class UnifiedAnalysisService
     // characters - i.e. the text vanished SILENTLY. Scattered legit deletions each surface as a suggestion
     // that accounts for the chars it removed, so however many there are they never trip the length backstop.
     private const double ProofreadAccountedShrinkRatio = 0.5;
+
+    // Removing an accidentally DUPLICATED sentence is a legitimate proofreading correction, not content
+    // loss - and it looks identical to a dropped passage by size alone: one wide, contiguous pure deletion.
+    // The two are distinguishable by whether the text SURVIVES: a de-duplication leaves its twin in the
+    // output, a genuine omission leaves nothing. Only spans long enough to actually trip the dropped-span
+    // thresholds are exempted, so a short common word deleted elsewhere in the text cannot excuse itself.
+    private const int ProofreadMinDedupExemptChars = 20;
+
+    // NOTE on the comparison axis: a suggestion's OriginalText comes off the diff, which runs on
+    // NORMALIZED text (TextNormalization.NormalizeTextForAnalysis collapses each \r/\n to a space and
+    // drops bidi controls), whereas the model's raw output still carries its line breaks. Comparing the
+    // two directly made the Contains fail for any duplicated span spanning a line break - i.e. exactly
+    // the multi-paragraph duplicate this exemption exists for - so the run was still flagged unreliable.
+    // Both sides must therefore be on the normalized axis. The caller passes the ALREADY-normalized
+    // output so the long string is normalized once per run rather than once per suggestion.
+    private static bool IsDeduplicationNotContentLoss(AnalysisSuggestion deletion, string normalizedOutput)
+    {
+        var deleted = TextNormalization.NormalizeTextForAnalysis(deletion.OriginalText ?? string.Empty).Trim();
+        if (deleted.Length < ProofreadMinDedupExemptChars) return false;
+        return !string.IsNullOrEmpty(normalizedOutput) && normalizedOutput.Contains(deleted, StringComparison.Ordinal);
+    }
 
     internal static bool ProofreadDroppedContent(string input, string output, ICollection<AnalysisSuggestion> suggestions)
     {
@@ -3509,21 +3533,32 @@ public class UnifiedAnalysisService
         // (b) contiguity check: order the pure-deletion suggestions (SuggestedText blank) by StartOffset and
         // walk them, accumulating a run while each deletion is offset-adjacent to the previous one. A null
         // StartOffset/EndOffset cannot be placed on the input axis, so such a suggestion BREAKS the current
-        // run (it is skipped, and the next deletion starts a fresh run). Track the longest run's deletion
-        // COUNT and its covered character span (lastEnd - firstStart).
+        // run (it is skipped, and the next deletion starts a fresh run). Track the run's DELETED-CHARACTER
+        // total and its covered character span (lastEnd - firstStart); the deletion count is only a
+        // "has a run started" flag, not a criterion (see the ProofreadMinRunDeletedChars note above).
+        // Hoisted out of the predicate below: the de-duplication exemption matches against the normalized
+        // output, and normalizing a whole chapter once per suggestion inside the .Where would rescan the
+        // string N times. Computed once per call so every suggestion sees the same normalized text. It
+        // sits after the cheap early returns, but note it IS paid whenever any suggestion survives them,
+        // including when none of them turns out to be a pure deletion.
+        var normalizedOutput = TextNormalization.NormalizeTextForAnalysis(output ?? string.Empty);
+
         var deletions = suggestions
             .Where(s => string.IsNullOrWhiteSpace(s.SuggestedText))
             .Where(s => s.StartOffset.HasValue && s.EndOffset.HasValue)
+            .Where(s => !IsDeduplicationNotContentLoss(s, normalizedOutput))
             .OrderBy(s => s.StartOffset!.Value)
             .ToList();
         if (deletions.Count == 0) return false;
 
-        // Walk the ordered deletions, maintaining the CURRENT contiguous run's deletion count, its covered
-        // span (lastEnd - firstStart), and the total characters it actually deletes (sum of each deletion's
-        // length). A run signals a dropped passage when EITHER (i) it removes enough characters across enough
-        // adjacent deletions - many tiny micro-edits that together delete almost nothing do NOT qualify - OR
-        // (ii) a single/few deletions cover a wide span. Checked per-run so the count and the deleted-char
-        // total always describe the SAME run.
+        // Walk the ordered deletions, maintaining the CURRENT contiguous run's covered span (lastEnd -
+        // firstStart) and the total characters it actually deletes (sum of each deletion's length). A run
+        // signals a dropped passage when EITHER (i) it removes enough characters - many tiny micro-edits
+        // that together delete almost nothing do NOT qualify, however many of them there are - OR (ii) it
+        // covers a wide enough span, however few deletions make it up. Both are checked per-run so the two
+        // totals always describe the SAME run. runCount is NOT a criterion; it only marks that a run is
+        // open (a one-deletion run is a legitimate dropped clause, which is why the old 6-deletion gate
+        // was removed).
         var runCount = 0;
         var runFirstStart = 0;
         var runDeletedChars = 0;
@@ -3548,7 +3583,7 @@ public class UnifiedAnalysisService
             }
 
             var runSpanChars = end - runFirstStart;
-            if ((runCount >= ProofreadMinContiguousDeletions && runDeletedChars >= ProofreadMinRunDeletedChars)
+            if (runDeletedChars >= ProofreadMinRunDeletedChars
                 || runSpanChars >= ProofreadMinDroppedSpanChars)
                 return true;
 
