@@ -357,10 +357,15 @@ public class ProofreadUnreliableSignalTests
             ct: CancellationToken.None);
 
         // 10 scattered single-word deletions, none contiguous => not a dropped span => reliable.
-        var pureDeletions = result.Suggestions.Count(s => string.IsNullOrWhiteSpace(s.SuggestedText));
         Assert.False(result.ProofreadResultUnreliable);
-        Assert.True(pureDeletions >= 8,
-            $"expected ~10 scattered pure deletions, observed {pureDeletions} (control still exercises a real deletion flood)");
+
+        // Fixture guard: this really is a deletion flood. Counted as net-shrinking suggestions rather than
+        // strictly blank-suggestion ones - a removal surfaces either as a pure deletion ("מאוד " -> "") or,
+        // when the diff span also covers the preceding word, as an equivalent shrinking replacement
+        // ("בקול רם" -> "בקול"). Both remove exactly one doubled word; only the granularity differs.
+        var netRemovals = result.Suggestions.Count(s => (s.SuggestedText?.Length ?? 0) < (s.OriginalText?.Length ?? 0));
+        Assert.True(netRemovals >= 8,
+            $"expected ~10 scattered removals, observed {netRemovals} (control still exercises a real deletion flood)");
     }
 
     /// <summary>
@@ -426,10 +431,13 @@ public class ProofreadUnreliableSignalTests
 
         // Scattered deletions account for the shrink (each is a reviewable suggestion) => signal (a) must NOT
         // fire, and they are not contiguous => signal (b) must NOT fire => reliable.
-        var pureDeletions = result.Suggestions.Count(s => string.IsNullOrWhiteSpace(s.SuggestedText));
         Assert.False(result.ProofreadResultUnreliable);
-        Assert.True(pureDeletions >= 8,
-            $"expected ~10 scattered pure deletions, observed {pureDeletions}");
+
+        // Fixture guard: see the sibling control above for why removals are counted as net-shrinking
+        // suggestions rather than strictly blank-suggestion ones.
+        var netRemovals = result.Suggestions.Count(s => (s.SuggestedText?.Length ?? 0) < (s.OriginalText?.Length ?? 0));
+        Assert.True(netRemovals >= 8,
+            $"expected ~10 scattered removals, observed {netRemovals}");
     }
 
     /// <summary>
@@ -776,5 +784,85 @@ public class ProofreadUnreliableSignalTests
         var deletions = new[] { Deletion(100, 130) };
 
         Assert.False(UnifiedAnalysisService.ProofreadDroppedContent(text, text, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_DuplicatedSentenceRemoved_NotFlagged()
+    {
+        // Observed on a live run: the model removed an accidentally duplicated sentence - a legitimate
+        // correction the proofread prompt is meant to make. By size it is indistinguishable from a dropped
+        // passage (one wide contiguous deletion), so the whole result was reported unreliable. The surviving
+        // twin in the OUTPUT is what separates de-duplication from content loss.
+        const string sentence = "נעמי הביטה החוצה, אל הרחוב הרטוב, וחשבה על כל מה שלא נאמר. ";
+        var input = "הם ישבו בבית-הקפה שליד מגדל השעון. " + sentence + sentence + "בחוץ ירד גשם קל.";
+        var output = "הם ישבו בבית-הקפה שליד מגדל השעון. " + sentence + "בחוץ ירד גשם קל.";
+        var start = input.IndexOf(sentence, StringComparison.Ordinal);
+
+        var deletions = new[]
+        {
+            new AnalysisSuggestion
+            {
+                StartOffset = start,
+                EndOffset = start + sentence.Length,
+                SuggestedText = string.Empty,
+                OriginalText = sentence
+            }
+        };
+
+        Assert.False(UnifiedAnalysisService.ProofreadDroppedContent(input, output, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_DuplicatedSpanWithLineBreak_NotFlagged()
+    {
+        // The likelier real-world shape of an accidental duplicate is a MULTI-PARAGRAPH span, so the
+        // duplicated text contains a hard line break. A suggestion's OriginalText comes off the diff and is
+        // therefore already NORMALIZED (each \n collapsed to a space), while the model's raw output still
+        // carries the break - so comparing them directly could never match and the de-duplication exemption
+        // silently did not apply, flagging the run unreliable. Both sides must be normalized before the
+        // containment test.
+        const string rawSpan = "נעמי הביטה החוצה, אל הרחוב הרטוב.\nהיא חשבה על כל מה שלא נאמר בחדר ההוא. ";
+        var normalizedSpan = rawSpan.Replace("\n", " ");
+        var input = "הם ישבו בבית-הקפה שליד מגדל השעון. " + rawSpan + rawSpan + "בחוץ ירד גשם קל.";
+        var output = "הם ישבו בבית-הקפה שליד מגדל השעון. " + rawSpan + "בחוץ ירד גשם קל.";
+        var start = input.IndexOf(rawSpan, StringComparison.Ordinal);
+
+        var deletions = new[]
+        {
+            new AnalysisSuggestion
+            {
+                StartOffset = start,
+                EndOffset = start + rawSpan.Length,
+                SuggestedText = string.Empty,
+                // As produced by the diff: normalized, line break already collapsed to a space.
+                OriginalText = normalizedSpan
+            }
+        };
+
+        Assert.False(UnifiedAnalysisService.ProofreadDroppedContent(input, output, deletions));
+    }
+
+    [Fact]
+    public void ProofreadDroppedContent_UniqueSentenceDropped_StillFlagged()
+    {
+        // Control for the de-duplication exemption: a dropped sentence that does NOT survive anywhere in
+        // the output is real content loss and must still be flagged.
+        const string dropped = "הוא הביט בה בשתיקה ארוכה ולא מצא את המילים. ";
+        var input = "הם ישבו בבית-הקפה שליד מגדל השעון. " + dropped + "בחוץ ירד גשם קל.";
+        var output = "הם ישבו בבית-הקפה שליד מגדל השעון. " + "בחוץ ירד גשם קל.";
+        var start = input.IndexOf(dropped, StringComparison.Ordinal);
+
+        var deletions = new[]
+        {
+            new AnalysisSuggestion
+            {
+                StartOffset = start,
+                EndOffset = start + dropped.Length,
+                SuggestedText = string.Empty,
+                OriginalText = dropped
+            }
+        };
+
+        Assert.True(UnifiedAnalysisService.ProofreadDroppedContent(input, output, deletions));
     }
 }

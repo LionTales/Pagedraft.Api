@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
+using DiffPlex;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Analysis;
@@ -42,6 +44,489 @@ public class SuggestionDiffServiceTests
         var s = Assert.Single(suggestions);
         Assert.Equal("ל הראות", s.OriginalText);
         Assert.Equal("להראות", s.SuggestedText);
+    }
+
+    /// <summary>
+    /// Apply every suggestion back onto the normalized original (highest offset first so earlier
+    /// offsets stay valid). This is the invariant that matters in production: the editor applies
+    /// suggestions INDIVIDUALLY by offset, so the suggestion set - not just resultText - must be
+    /// able to reproduce the corrected text. A suggestion set that cannot is actively corrupting.
+    /// </summary>
+    private static string ApplyAllSuggestions(string original, IEnumerable<AnalysisSuggestion> suggestions)
+    {
+        var text = TextNormalization.NormalizeTextForAnalysis(original);
+        foreach (var s in suggestions.OrderByDescending(x => x.StartOffset!.Value))
+        {
+            var start = s.StartOffset!.Value;
+            var end = s.EndOffset!.Value;
+            text = text[..start] + s.SuggestedText + text[end..];
+        }
+        return text;
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_DuplicatedWordRemoved_SuggestionsReconstructResult()
+    {
+        // Live leak (proofread fixture): the model removed a duplicated "היא". DiffPlex's minimal
+        // character diff does not align on a word boundary for a repeated token, and the forced
+        // one-word split then emitted "היא"→"י" plus "ידעה"→"דעה" - applying those individually
+        // produced "י דעה", corrupting the sentence. The suggestion set must reconstruct the result.
+        const string original = "היא היא ידעה שהיום הזה יהיה ארוך.";
+        const string result = "היא ידעה שהיום הזה יהיה ארוך.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_BracketedNoteRemoved_SuggestionsReconstructResult()
+    {
+        // Live leak (proofread fixture): removing a leftover editorial note "[לבדוק את התאריך]"
+        // fragmented into "לכתוב"→"לכתו", "לבדוק"→"ב", "את"→"", "התאריך"→"", which mangles the
+        // adjacent word when applied. A whole-word deletion is not a whitespace-only join, so the
+        // splitter's existing join special-case did not protect it.
+        const string original = "התיישבה ליד השולחן והתחילה לכתוב [לבדוק את התאריך]. המילים באו לאט.";
+        const string result = "התיישבה ליד השולחן והתחילה לכתוב. המילים באו לאט.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
+    }
+
+    /// <summary>
+    /// Every emitted suggestion must be APPLICABLE, not merely arithmetically consistent. A zero-width
+    /// span (StartOffset == EndOffset, OriginalText "") is inert in production: the client anchors a
+    /// suggestion by searching the document for OriginalText, and suggestion-anchor.service.ts marks an
+    /// empty needle stale, after which editor-page.component.ts computes idx = -1, warns, and returns -
+    /// so the Apply button silently does nothing.
+    ///
+    /// WHY THE EXISTING TESTS WERE BLIND to this: both of the invariants they pin are SATISFIED by a
+    /// degenerate suggestion. ApplyAllSuggestions reconstructs the result correctly, because splicing
+    /// the suggested text into a zero-width range (inserting at [4,4)) is arithmetically the right
+    /// answer; and the offset-integrity check compares normOrig[4..4] ("") to OriginalText ("") and
+    /// passes trivially. Reconstruction is NECESSARY but NOT SUFFICIENT - the set must additionally
+    /// consist of spans the editor can actually locate.
+    /// </summary>
+    private static void AssertNoDegenerateSuggestions(IEnumerable<AnalysisSuggestion> suggestions)
+    {
+        // Assert.All over an EMPTY collection passes, so a caller whose input stopped producing
+        // suggestions would silently turn this whole check into a no-op. Every current caller already
+        // asserts non-emptiness itself; this makes the helper carry that requirement so a future one
+        // cannot forget it.
+        Assert.NotEmpty(suggestions);
+
+        Assert.All(suggestions, s =>
+        {
+            Assert.False(
+                s.StartOffset!.Value == s.EndOffset!.Value,
+                $"zero-width span [{s.StartOffset}-{s.EndOffset}] for suggested text '{s.SuggestedText}' " +
+                "can never be applied (the client cannot anchor an empty OriginalText)");
+            Assert.False(
+                string.IsNullOrEmpty(s.OriginalText),
+                $"empty OriginalText at [{s.StartOffset}-{s.EndOffset}] for suggested text " +
+                $"'{s.SuggestedText}' can never be applied (the client anchors by searching for it)");
+        });
+    }
+
+    [Theory]
+    [InlineData("היא היא ידעה שהיום הזה יהיה ארוך.", "היא ידעה שהיום הזה יהיה ארוך.")]
+    [InlineData("התיישבה ליד השולחן והתחילה לכתוב [לבדוק את התאריך]. המילים באו לאט.",
+                "התיישבה ליד השולחן והתחילה לכתוב. המילים באו לאט.")]
+    [InlineData("שירה התחילה ל הראות סימני לחץ.", "שירה התחילה להראות סימני לחץ.")]
+    // Pure INSERTIONS: the added word's span expands to the following word, whose entire content is
+    // also the shared trailing run, so the affix trim used to consume the original side completely and
+    // emit [4,4) "" => "xyz ". These rows pin the non-degeneracy back-off (be-c01).
+    [InlineData("abc def", "abc xyz def")]
+    [InlineData("hello world", "hello brave world")]
+    [InlineData("שלום עולם", "שלום גדול עולם")]
+    public void ComputeProofreadSuggestions_OriginalTextAlwaysMatchesItsOwnOffsets(string original, string result)
+    {
+        // The editor re-anchors a suggestion by searching for OriginalText (suggestionAnchorService
+        // .relocateOne), so OriginalText MUST be exactly the normalized slice its offsets point at.
+        // If they disagree, the apply path relocates onto the wrong span.
+        var normOrig = TextNormalization.NormalizeTextForAnalysis(original);
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        Assert.NotEmpty(suggestions);
+
+        Assert.All(suggestions, s =>
+        {
+            Assert.Equal(normOrig[s.StartOffset!.Value..s.EndOffset!.Value], s.OriginalText);
+        });
+
+        // Offset integrity alone is trivially true for a zero-width span, so also require applicability.
+        AssertNoDegenerateSuggestions(suggestions);
+
+        // And the set must still reproduce the corrected text after the trim backs off.
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_InsertedWord_AnchorsOnTheFollowingWordNotAZeroWidthSpan()
+    {
+        // be-c01: "abc def" -> "abc xyz def" emitted [4,4) "" => "xyz ", an un-appliable suggestion.
+        // The correct output anchors on the whole following word so the client can find it.
+        const string original = "abc def";
+        const string result = "abc xyz def";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        var s = Assert.Single(suggestions);
+        Assert.Equal("def", s.OriginalText);
+        Assert.Equal("xyz def", s.SuggestedText);
+        Assert.Equal(4, s.StartOffset);
+        Assert.Equal(7, s.EndOffset);
+        AssertNoDegenerateSuggestions(suggestions);
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
+    }
+
+    [Fact]
+    public void ComputeProofreadSuggestions_LiveHebrewProofreadFixture_SuggestionSetReconstructsResult()
+    {
+        // The full live case this fix came from: a planted-error Hebrew proofread fixture and the
+        // model's actual returned text. Every correction the model made must be individually
+        // applicable, because the editor applies suggestions one at a time. Before the fix this set
+        // contained "היא"→"י", "ידעה"→"דעה" and a four-way fragmentation of the "[לבדוק את התאריך]"
+        // removal, none of which reconstruct the corrected chapter.
+        const string original =
+            "הבוקר בקיסריה התחיל באפור. נעמי הסתלכה מבעד לחלון וראתה את הים נבלע בערפל. היא היא ידעה שהיום הזה יהיה ארוך\n" +
+            "על השולחן חיכה עתון ישן ,ולידו כוס תה שהתקררה. סבסטיאן השאיר פתק: \"אני חוזר בשמונה\". נעמי קרא אותו פעמיים ולא הבינה מדוע דווקא בשמונה..\n" +
+            "היא נכנסה החדר הפנימי, פתחה את המגירה ומצאה שם צרור מכתבים. TODO: להוסיף כאן תיאור של המגירה. המכתב העליון היה מ־1998, והדיו כבר דהה. היא הפכה את המעטפות אחת אחת, ומצאה בין השורות שם שלא ראתה שנים רבות. “לא ייתכן שהוא שמר את זה כל השנים,” לחשה לעצמה.\n" +
+            "בחוץ נשמעו צעדים. לרגע חשבה שהיא לבדה בבית. נעמי הסתובבה מהר מדי והפילה את הכוס. הכוס נשברה לרסיסים!! היא רכנה לאסוף את השברים, וכשהיאא הרימה את הראש עמד סבסטין בפתח.\n" +
+            "\"מה את עושה כאן?\" שאל בשקט.\n" +
+            "'חיפשתי את המפתחות,' ענתה.\n" +
+            "הם ישבו בבית-הקפה שליד מגדל השעון, אותו בית–הקפה שבו נפגשו לראשונה לפני שלוש שנים. המלצרית הביאה שתי כוסות מים בלי לשאול. נעמי הביטה החוצה, אל הרחוב הרטוב, וחשבה על כל מה שלא נאמר. נעמי הביטה החוצה, אל הרחוב הרטוב, וחשבה על כל מה שלא נאמר.\n" +
+            "\"תגידי,\" אמר לבסוף, \"את עדיין כועסת ?\"\n" +
+            "היא לא ענתה. הרוח נשבה מן   הים והזיזה את המפית מן השולחן. בקסריה, חשבה, אפילו הרוח יודעת לשתוק.\n" +
+            "היא לא הדליקה את האור. החדר היה חשוך ורק פס אור אחד חדר מבעד לתרי\n" +
+            "בערב חזרה הביתה לבדה. היא הדליקה את המנורה, התיישבה ליד השולחן והת- חילה לכתוב [לבדוק את התאריך]. המילים באו לאט,, אחת אחת, כאילו כל אחת מהן שקלה מליון טון…. בסוף העמוד כתבה משפט אחד בלבד: \"אני עוד לא יודעת אם אני סולחת לך\" — ואז כיבתה את האור והלכהאל המיטה.";
+
+        const string result =
+            "הבוקר בקיסריה התחיל באפור. נעמי הסתלכה מבעד לחלון וראתה את הים נבלע בערפל. היא ידעה שהיום הזה יהיה ארוך.\n" +
+            "על השולחן חיכה עיתון ישן, ולידו כוס תה שהתקררה. סבסטיאן השאיר פתק: \"אני חוזר בשמונה\". נעמי קרא אותו פעמיים ולא הבינה מדוע דווקא בשמונה...\n" +
+            "היא נכנסה לחדר הפנימי, פתחה את המגירה ומצאה שם צרור מכתבים. TODO: להוסיף כאן תיאור של המגירה. המכתב העליון היה מ-1998, והדיו כבר דהה. היא הפכה את המעטפות אחת אחת, ומצאה בין השורות שם שלא ראתה שנים רבות. \"לא ייתכן שהוא שמר את זה כל השנים,\" לחשה לעצמה.\n" +
+            "בחוץ נשמעו צעדים. לרגע חשבה שהיא לבדה בבית. נעמי הסתובבה מהר מדי והפילה את הכוס. הכוס נשברה לרסיסים! היא רכנה לאסוף את השברים, וכשהיא הרימה את הראש עמד סבסטיאן בפתח.\n" +
+            "\"מה את עושה כאן?\" שאל בשקט.\n" +
+            "\"חיפשתי את המפתחות,\" ענתה.\n" +
+            "הם ישבו בבית-הקפה שליד מגדל השעון, אותו בית-הקפה שבו נפגשו לראשונה לפני שלוש שנים. המלצרית הביאה שתי כוסות מים בלי לשאול. נעמי הביטה החוצה, אל הרחוב הרטוב, וחשבה על כל מה שלא נאמר. נעמי הביטה החוצה, אל הרחוב הרטוב, וחשבה על כל מה שלא נאמר.\n" +
+            "\"תגידי,\" אמר לבסוף, \"את עדיין כועסת?\"\n" +
+            "היא לא ענתה. הרוח נשבה מן הים והזיזה את המפית מן השולחן. בקיסריה, חשבה, אפילו הרוח יודעת לשתוק.\n" +
+            "היא לא הדליקה את האור. החדר היה חשוך ורק פס אור אחד חדר מבעד לתרי.\n" +
+            "בערב חזרה הביתה לבדה. היא הדליקה את המנורה, התיישבה ליד השולחן והתחילה לכתוב. המילים באו לאט, אחת אחת, כאילו כל אחת מהן שקלה מליון טון... בסוף העמוד כתבה משפט אחד בלבד: \"אני עוד לא יודעת אם אני סולחת לך\" – ואז כיבתה את האור והלכה אל המיטה.";
+
+        var suggestions = _sut.ComputeProofreadSuggestions(original, result);
+
+        Assert.NotEmpty(suggestions);
+
+        // Offsets and text agree, so the editor's relocate-by-OriginalText apply path is sound.
+        var normOrig = TextNormalization.NormalizeTextForAnalysis(original);
+        Assert.All(suggestions, s =>
+            Assert.Equal(normOrig[s.StartOffset!.Value..s.EndOffset!.Value], s.OriginalText));
+
+        // Every correction must also be APPLICABLE, not just reconstructible (see the helper's note).
+        AssertNoDegenerateSuggestions(suggestions);
+
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
+    }
+
+    /// <summary>
+    /// Inputs that stress the merge step from every direction the be-c03 investigation probed:
+    /// repeated tokens, independent edits close enough to merge across the 1-character gap, edits
+    /// pinned to the very first/last character (including leading/trailing whitespace), a diff block
+    /// straddling what would otherwise be a merged boundary, insertions, whitespace-run collapse and
+    /// expansion, whole-clause deletion, and punctuation-adjacent insertion.
+    /// </summary>
+    private static readonly (string Original, string Result)[] MergeBoundaryCorpus =
+    {
+        // repeated tokens - the shape that made DiffPlex's minimal diff cross word boundaries
+        ("היא היא ידעה שהיום הזה יהיה ארוך.", "היא ידעה שהיום הזה יהיה ארוך."),
+        ("the the cat sat", "the cat sat"),
+        ("aa aa aa bb", "aa aa bb"),
+        ("abab abab", "abab"),
+        // adjacent independent edits, within MergeGapThreshold of each other
+        ("ab cd", "xb yd"),
+        ("a b c", "x y z"),
+        ("aa bb cc", "az bz cz"),
+        ("one two three", "onx twx thrxe"),
+        // edits pinned to the string boundaries
+        ("abc def", "xbc def"),
+        ("abc def", "abc dex"),
+        ("abc def", "xabc defy"),
+        (" abc", "x abc"),
+        ("abc ", "abc x"),
+        ("  abc  ", "  xabc  "),
+        ("a", "b"),
+        ("a b", "b a"),
+        // a diff block straddling a would-be merged boundary (the space between two words)
+        ("aaa bbb ccc", "aaabbb ccc"),
+        ("aaa bbb ccc", "aaa bbbccc"),
+        ("ל הראות", "להראות"),
+        ("שירה התחילה ל הראות סימני לחץ.", "שירה התחילה להראות סימני לחץ."),
+        // insertions
+        ("abc def", "abc xyz def"),
+        ("hello world", "hello brave world"),
+        ("שלום עולם", "שלום גדול עולם"),
+        // whitespace runs
+        ("מן   הים", "מן הים"),
+        ("a   b", "a b"),
+        ("a b", "a   b"),
+        // whole-clause deletion
+        ("התיישבה ליד השולחן והתחילה לכתוב [לבדוק את התאריך]. המילים באו לאט.",
+         "התיישבה ליד השולחן והתחילה לכתוב. המילים באו לאט."),
+        ("first. second sentence should be removed. third.", "first. third."),
+        // punctuation-adjacent insertion
+        ("בשמונה..", "בשמונה..."),
+        ("hi there", "hi, there"),
+        ("ok", "ok."),
+    };
+
+    /// <summary>
+    /// Independent forward-walk alignment oracle over the diff blocks, deliberately built the OTHER
+    /// way round from <c>OrigToResultPos</c> (which accumulates a per-position delta): walk A and B in
+    /// lockstep, mapping each unchanged run 1:1 and each block's deleted range onto its inserted range.
+    ///
+    /// <c>lo[i]</c> is the result position for original position i EXCLUDING a pure insertion sitting
+    /// exactly at i; <c>hi[i]</c> INCLUDES it (the two answers <c>includeInsertionAtPos</c> chooses
+    /// between). <c>-1</c> marks a position STRICTLY inside a deleted range, where no exact answer
+    /// exists and <c>OrigToResultPos</c> has to interpolate.
+    /// </summary>
+    private static (int[] Lo, int[] Hi) BuildAlignmentOracle(int origLength, IList<DiffPlex.Model.DiffBlock> blocks)
+    {
+        var lo = new int[origLength + 1];
+        var hi = new int[origLength + 1];
+        var pinned = new bool[origLength + 1]; // finalized at a block edge - a later run must not clobber it
+
+        var a = 0;
+        var b = 0;
+        foreach (var blk in blocks)
+        {
+            if (blk.DeleteCountA == 0 && blk.InsertCountB == 0) continue;
+
+            // Guard the oracle's own assumption about DiffPlex: unchanged runs are equal-length in A and B.
+            Assert.Equal(b + (blk.DeleteStartA - a), blk.InsertStartB);
+
+            // Unchanged run [a, DeleteStartA] maps 1:1.
+            for (var i = a; i <= blk.DeleteStartA; i++)
+            {
+                if (pinned[i]) continue;
+                lo[i] = b + (i - a);
+                hi[i] = lo[i];
+            }
+
+            var blockStartB = blk.InsertStartB;
+
+            // At the block's start: lo excludes an insertion attached here, hi includes it. A block that
+            // also DELETES owns its insert outright, so both answers coincide there.
+            lo[blk.DeleteStartA] = blockStartB;
+            hi[blk.DeleteStartA] = blk.DeleteCountA == 0 ? blockStartB + blk.InsertCountB : blockStartB;
+            pinned[blk.DeleteStartA] = true;
+
+            if (blk.DeleteCountA > 0)
+            {
+                // Strictly inside a deleted range there is no exact answer.
+                for (var i = blk.DeleteStartA + 1; i < blk.DeleteStartA + blk.DeleteCountA; i++)
+                {
+                    lo[i] = -1;
+                    hi[i] = -1;
+                    pinned[i] = true;
+                }
+
+                var deleteEnd = blk.DeleteStartA + blk.DeleteCountA;
+                lo[deleteEnd] = blockStartB + blk.InsertCountB;
+                hi[deleteEnd] = lo[deleteEnd];
+                pinned[deleteEnd] = true;
+            }
+
+            a = blk.DeleteStartA + blk.DeleteCountA;
+            b = blk.InsertStartB + blk.InsertCountB;
+        }
+
+        for (var i = a; i <= origLength; i++)
+        {
+            if (pinned[i]) continue;
+            lo[i] = b + (i - a);
+            hi[i] = lo[i];
+        }
+
+        return (lo, hi);
+    }
+
+    /// <summary>
+    /// be-c03. `ComputeProofreadSuggestions` exempts WHOLE merged ranges from the two pathological
+    /// guards (origLen > 40 && sugLen &lt;= 8, origLen > 25 && sugLen == 0) because a whole range's
+    /// mapping into the result text is exact - so a giant-original/tiny-suggestion shape is a real
+    /// large deletion there, not a misalignment to be suppressed. Nothing else verifies a whole range
+    /// (SubRangesReproduceResult only decides SPLIT vs WHOLE), so if that exemption rested on a comment
+    /// the safety net and the verification would not overlap at all. This test IS the verification.
+    ///
+    /// It asserts, over the corpus plus a seeded randomized sweep:
+    ///   (a) no merged boundary falls STRICTLY inside a diff block's deleted range, and
+    ///   (b) OrigToResultPos at those boundaries agrees with an independent alignment oracle,
+    /// which together mean the whole-range mapping is exact. The investigation behind this (see the
+    /// plan's `## Investigation findings`) found no counterexample in ~679k input pairs, including
+    /// exhaustive sweeps over 3-4 character alphabets; this pins the property so a future change to
+    /// the expansion or the merge cannot quietly invalidate the exemption.
+    /// </summary>
+    [Fact]
+    public void MergedRangeBoundaries_NeverFallInsideADiffBlock()
+    {
+        // Coverage counters - a sweep that never builds the interesting shapes would pass vacuously.
+        var boundariesChecked = 0;
+        var boundaryOnBlockEdge = 0;
+        var gapMerges = 0;
+        var pureInsertionAtRangeStart = 0;
+        var pureInsertionAtRangeEnd = 0;
+        var blockStrictlyInsideRange = 0;
+
+        void Check(string original, string result)
+        {
+            if (string.IsNullOrWhiteSpace(original) || string.IsNullOrWhiteSpace(result)) return;
+
+            var normOrig = TextNormalization.NormalizeTextForAnalysis(original);
+            var normResult = TextNormalization.NormalizeTextForAnalysis(result);
+
+            var diff = new Differ().CreateCharacterDiffs(normOrig, normResult, ignoreCase: false, ignoreWhitespace: false);
+            if (diff.DiffBlocks.Count == 0) return;
+
+            var merged = SuggestionDiffService.BuildMergedWordRanges(normOrig, diff.DiffBlocks);
+            if (merged.Count == 0) return;
+
+            var (lo, hi) = BuildAlignmentOracle(normOrig.Length, diff.DiffBlocks);
+
+            // Ranges must come out sorted and separated by MORE than the merge gap - anything closer
+            // should have been merged, so seeing it would mean the merge step did not run to fixpoint.
+            for (var i = 1; i < merged.Count; i++)
+            {
+                Assert.True(
+                    merged[i].Start > merged[i - 1].End + 1,
+                    $"merged ranges overlap, touch, or sit within the merge gap: {merged[i - 1]} then " +
+                    $"{merged[i]} (orig='{Escape(normOrig)}' result='{Escape(normResult)}')");
+            }
+
+            foreach (var (mStart, mEnd) in merged)
+            {
+                Assert.True(0 <= mStart && mStart < mEnd && mEnd <= normOrig.Length,
+                    $"merged range [{mStart},{mEnd}) out of range for '{Escape(normOrig)}'");
+
+                // Did this range actually absorb SEVERAL diff blocks separated by unchanged text? That
+                // is the "adjacent independent edits merged across the gap" shape the invariant is
+                // riskiest for, so the sweep has to keep producing it.
+                var blocksInRange = diff.DiffBlocks
+                    .Where(k => (k.DeleteCountA > 0 || k.InsertCountB > 0)
+                                && k.DeleteStartA >= mStart && k.DeleteStartA + k.DeleteCountA <= mEnd)
+                    .OrderBy(k => k.DeleteStartA)
+                    .ToList();
+                for (var i = 1; i < blocksInRange.Count; i++)
+                {
+                    if (blocksInRange[i].DeleteStartA
+                        > blocksInRange[i - 1].DeleteStartA + blocksInRange[i - 1].DeleteCountA)
+                    {
+                        gapMerges++;
+                        break;
+                    }
+                }
+
+                foreach (var blk in diff.DiffBlocks)
+                {
+                    if (blk.DeleteCountA == 0 && blk.InsertCountB == 0) continue;
+                    var x = blk.DeleteStartA;
+                    var y = x + blk.DeleteCountA;
+
+                    if (x == mStart || y == mStart || x == mEnd || y == mEnd) boundaryOnBlockEdge++;
+                    if (blk.DeleteCountA == 0 && x == mStart) pureInsertionAtRangeStart++;
+                    if (blk.DeleteCountA == 0 && x == mEnd) pureInsertionAtRangeEnd++;
+                    if (blk.DeleteCountA > 0 && mStart < x && y < mEnd) blockStrictlyInsideRange++;
+
+                    // (a) THE INVARIANT the guard exemption rests on.
+                    Assert.False(x < mStart && mStart < y,
+                        $"merged range START {mStart} falls INSIDE diff block [{x},{y}) - " +
+                        $"OrigToResultPos must interpolate, so the whole-range mapping is NOT exact " +
+                        $"and the pathological-guard exemption is unsafe. orig='{Escape(normOrig)}' result='{Escape(normResult)}'");
+                    Assert.False(x < mEnd && mEnd < y,
+                        $"merged range END {mEnd} falls INSIDE diff block [{x},{y}) - " +
+                        $"OrigToResultPos must interpolate, so the whole-range mapping is NOT exact " +
+                        $"and the pathological-guard exemption is unsafe. orig='{Escape(normOrig)}' result='{Escape(normResult)}'");
+                }
+
+                // (b) and therefore the production mapping matches the independent oracle exactly.
+                Assert.True(lo[mStart] >= 0 && hi[mEnd] >= 0,
+                    $"oracle has no exact mapping for [{mStart},{mEnd}) - boundary inside a deleted range");
+                var mappedStart = SuggestionDiffService.OrigToResultPos(mStart, diff.DiffBlocks);
+                var mappedEnd = SuggestionDiffService.OrigToResultPos(mEnd, diff.DiffBlocks, includeInsertionAtPos: true);
+                Assert.True(lo[mStart] == mappedStart,
+                    $"range START {mStart} of [{mStart},{mEnd}): oracle says {lo[mStart]}, OrigToResultPos says " +
+                    $"{mappedStart}. orig='{Escape(normOrig)}' result='{Escape(normResult)}' blocks=[" +
+                    string.Join(",", diff.DiffBlocks.Select(k => $"(dA={k.DeleteStartA},dC={k.DeleteCountA},iB={k.InsertStartB},iC={k.InsertCountB})")) + "]");
+                Assert.True(hi[mEnd] == mappedEnd,
+                    $"range END {mEnd} of [{mStart},{mEnd}): oracle says {hi[mEnd]}, OrigToResultPos says " +
+                    $"{mappedEnd}. orig='{Escape(normOrig)}' result='{Escape(normResult)}' blocks=[" +
+                    string.Join(",", diff.DiffBlocks.Select(k => $"(dA={k.DeleteStartA},dC={k.DeleteCountA},iB={k.InsertStartB},iC={k.InsertCountB})")) + "]");
+                Assert.True(hi[mEnd] <= normResult.Length,
+                    $"mapped end {hi[mEnd]} past result length {normResult.Length}");
+                boundariesChecked += 2;
+            }
+        }
+
+        foreach (var (original, result) in MergeBoundaryCorpus)
+            Check(original, result);
+
+        // Randomized sweep. Fixed seed so a failure is reproducible; a mix of independently random
+        // pairs (adversarial, dense diffs) and small mutations (the realistic proofread shape).
+        var rnd = new Random(20260801);
+        const string alphabet = "aab c.,\nב";
+        for (var i = 0; i < 20_000; i++)
+        {
+            var original = RandomText(rnd, alphabet, 1 + rnd.Next(14));
+            var result = i % 2 == 0
+                ? RandomText(rnd, alphabet, 1 + rnd.Next(14))
+                : MutateText(rnd, original, alphabet);
+            Check(original, result);
+        }
+
+        // Non-vacuity: the sweep must actually have produced the adversarial configurations.
+        Assert.True(boundariesChecked > 10_000, $"only {boundariesChecked} boundaries checked");
+        Assert.True(boundaryOnBlockEdge > 1_000, $"only {boundaryOnBlockEdge} boundary/block-edge coincidences");
+        Assert.True(gapMerges > 100, $"only {gapMerges} ranges absorbed several gap-separated diff blocks");
+        Assert.True(pureInsertionAtRangeStart > 100, $"only {pureInsertionAtRangeStart} pure insertions at a range start");
+        Assert.True(pureInsertionAtRangeEnd > 100, $"only {pureInsertionAtRangeEnd} pure insertions at a range end");
+        Assert.True(blockStrictlyInsideRange > 100, $"only {blockStrictlyInsideRange} blocks strictly inside a range");
+    }
+
+    private static string Escape(string s) => s.Replace("\n", "\\n").Replace("\r", "\\r");
+
+    private static string RandomText(Random rnd, string alphabet, int length)
+    {
+        var sb = new StringBuilder(length);
+        for (var i = 0; i < length; i++) sb.Append(alphabet[rnd.Next(alphabet.Length)]);
+        return sb.ToString();
+    }
+
+    private static string MutateText(Random rnd, string text, string alphabet)
+    {
+        var sb = new StringBuilder(text);
+        var edits = 1 + rnd.Next(3);
+        for (var i = 0; i < edits; i++)
+        {
+            if (sb.Length == 0) break;
+            var op = rnd.Next(3);
+            var pos = rnd.Next(sb.Length);
+            if (op == 0) sb.Insert(pos, alphabet[rnd.Next(alphabet.Length)]);
+            else if (op == 1) sb.Remove(pos, 1);
+            else sb[pos] = alphabet[rnd.Next(alphabet.Length)];
+        }
+        return sb.ToString();
     }
 
     [Fact]
@@ -111,6 +596,12 @@ public class SuggestionDiffServiceTests
         var suggestions = _sut.ComputeProofreadSuggestions(original, result);
 
         Assert.Contains(suggestions, s => string.IsNullOrEmpty(s.SuggestedText?.Trim()));
+
+        // The old per-word split satisfied the assertion above while leaving the spaces BETWEEN the
+        // deleted words behind ("First sentence.    Third sentence."), so also pin the reconstruction.
+        Assert.Equal(
+            TextNormalization.NormalizeTextForAnalysis(result),
+            ApplyAllSuggestions(original, suggestions));
     }
 
     [Fact]

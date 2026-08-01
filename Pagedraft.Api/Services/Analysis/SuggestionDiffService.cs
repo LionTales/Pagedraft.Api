@@ -9,8 +9,30 @@ using Pagedraft.Api.Services;
 namespace Pagedraft.Api.Services.Analysis;
 
 /// <summary>
-/// Computes proofread and line-edit suggestions on the server, mirroring the existing
-/// frontend proofread-diff.ts behavior as closely as possible.
+/// Computes proofread and line-edit suggestions on the server.
+///
+/// This is the canonical producer of proofread suggestions. The frontend proofread-diff.ts is a
+/// FALLBACK used only when a result carries no server suggestions, and it is no longer a mirror of
+/// this code: it runs diff-match-patch with semantic cleanup (which pre-aligns edits to word-ish
+/// boundaries) whereas this runs a raw DiffPlex character diff and aligns the spans itself. Do not
+/// assume a change here is reflected there, or vice versa.
+///
+/// Correctness contract: the editor applies suggestions INDIVIDUALLY by offset, so EVERY emitted
+/// suggestion must be exactly the correction the diff implies for its own span - a set that only
+/// describes the change collectively is actively destructive when accepted one item at a time. Two
+/// halves enforce that, and a change to span construction must keep both:
+///  - SPLIT ranges: boundaries can land inside a diff block, so every candidate split is verified
+///    against resultText (SubRangesReproduceResult) and falls back to the whole range when it fails.
+///  - WHOLE merged ranges: their boundaries provably never land inside a diff block, so their mapping
+///    is exact (BuildMergedWordRanges' BOUNDARY INVARIANT, pinned by
+///    SuggestionDiffServiceTests.MergedRangeBoundaries_NeverFallInsideADiffBlock).
+///
+/// Note the contract is per-suggestion, NOT "the set reproduces resultText in full": the meaningful/
+/// pathological filters may DROP a correction, which is safe (it leaves the original text in place)
+/// and does happen - a whitespace-only change filtered as a span artifact, or a pure insertion whose
+/// span expands to zero width at a string edge. The reconstruction tests below assert full reproduction
+/// on real proofread-shaped fixtures, where those drops do not arise; they are a strong regression net,
+/// not the definition of the contract.
 /// </summary>
 public class SuggestionDiffService
 {
@@ -54,39 +76,136 @@ public class SuggestionDiffService
         if (diff.DiffBlocks.Count == 0)
             return new List<AnalysisSuggestion>();
 
+        // Steps 1-2: expand each diff block to word boundaries, then merge overlapping/adjacent ranges.
+        var merged = BuildMergedWordRanges(normOrig, diff.DiffBlocks);
+
+        if (merged.Count == 0)
+            return new List<AnalysisSuggestion>();
+
+        // Step 3: split any oversized merged range back into individual diff-block-aligned sub-ranges.
+        var ranges = SplitOversizedRanges(merged, diff.DiffBlocks, normOrig, normResult);
+
+        // Step 4: build cumulative delta via diff blocks to map original positions to result positions.
+        var blocks = diff.DiffBlocks;
+
+        // Step 5: map each merged original word range to the result and build suggestions.
+        var suggestions = new List<AnalysisSuggestion>();
+        foreach (var (wStart, wEnd, isWholeRange) in ranges)
+        {
+            var origWord = normOrig[wStart..wEnd];
+
+            var rStart = OrigToResultPos(wStart, blocks);
+            var rEnd = OrigToResultPos(wEnd, blocks, includeInsertionAtPos: true);
+
+            rStart = Math.Max(0, Math.Min(rStart, normResult.Length));
+            rEnd = Math.Max(rStart, Math.Min(rEnd, normResult.Length));
+
+            var sugWord = rStart < rEnd ? normResult[rStart..rEnd] : string.Empty;
+
+            if (string.Equals(origWord, sugWord, StringComparison.Ordinal))
+                continue;
+
+            // Shrink the span to its minimal differing core by dropping whole words common to both
+            // sides. A character diff can fuse an unchanged neighbour into the range - deleting a
+            // sentence yields "Second ... removed. Third" -> "Third" - which is correct but unreadable
+            // as a suggestion. Cuts are made only at a word boundary on BOTH sides, so a word-join
+            // correction ("ל הראות" -> "להראות") is never reduced to a cryptic "ל " -> "ל".
+            var (trimStart, trimEnd, trimmedSug) = TrimCommonWholeWordAffixes(normOrig, wStart, wEnd, sugWord);
+            // Backstop, unreachable by construction: the trim's NON-DEGENERACY back-off guarantees a
+            // non-empty original span. Kept - and written as >= rather than the narrower "empty span AND
+            // empty suggestion" - because a zero-width span fails SILENTLY in the client (empty needle =>
+            // stale => Apply is a no-op), so it must never escape even if the trim is changed later.
+            if (trimStart >= trimEnd)
+                continue;
+
+            var spanStart = trimStart;
+            var spanEnd = trimEnd;
+            origWord = normOrig[spanStart..spanEnd];
+            sugWord = trimmedSug;
+
+            var origLen = spanEnd - spanStart;
+            var sugLen = sugWord.Length;
+
+            // Reject pathological suggestions where large original maps to empty/tiny replacement.
+            // These two guards compensate for a MISALIGNED mapping, which is only possible on a range
+            // produced by splitting: a whole merged range's boundaries never fall inside a diff block,
+            // so OrigToResultPos never interpolates for one and its mapping is exact. That is enforced,
+            // not assumed - see BuildMergedWordRanges' BOUNDARY INVARIANT and the test it names,
+            // SuggestionDiffServiceTests.MergedRangeBoundaries_NeverFallInsideADiffBlock. Applying these
+            // guards to a whole range silently suppressed legitimate large deletions (a removed
+            // duplicated sentence, a stripped editorial note), leaving the user no way to accept the
+            // correction.
+            if (!isWholeRange)
+            {
+                if (origLen > 40 && sugLen <= 8) continue;
+                if (origLen > 25 && sugLen == 0) continue;
+            }
+
+            // Reject suggestions where result mapping is disproportionately large
+            // (typically from diff misalignment caused by AI hallucination / repetition loops)
+            if (sugLen > origLen * 5 + 30) continue;
+
+            suggestions.Add(new AnalysisSuggestion
+            {
+                StartOffset = spanStart,
+                EndOffset = spanEnd,
+                OriginalText = origWord,
+                SuggestedText = sugWord,
+                Reason = "Proofread",
+                ContextBefore = normOrig[Math.Max(0, spanStart - 50)..spanStart],
+                ContextAfter = normOrig[spanEnd..Math.Min(normOrig.Length, spanEnd + 50)]
+            });
+        }
+
+        suggestions = suggestions.Where(IsMeaningfulSuggestion).ToList();
+
+        if (suggestions.Count > MaxSuggestionCountForProofread)
+            return new List<AnalysisSuggestion>();
+
+        return suggestions;
+    }
+
+    /// <summary>
+    /// Steps 1-2 of <see cref="ComputeProofreadSuggestions"/>: expand every diff block's original range
+    /// outward to whole-word boundaries, then sort and merge ranges that overlap or sit within
+    /// <see cref="MergeGapThreshold"/> of each other.
+    ///
+    /// BOUNDARY INVARIANT (the reason a WHOLE merged range needs no mapping verification): no boundary
+    /// of a returned range ever falls STRICTLY inside a diff block's deleted range, so
+    /// <see cref="OrigToResultPos"/> never has to take its interpolation branch for one and the range's
+    /// mapping into the result text is exact. Sketch: expansion only widens, so every block with
+    /// DeleteCountA > 0 contributes a range covering it (a range is dropped only when it stays
+    /// zero-width, which requires DeleteCountA == 0, and an empty deleted range has no interior). A
+    /// boundary strictly inside such a block would therefore overlap that block's own range, putting
+    /// both in one merge group - whose start is the min and end the max of its members, so the boundary
+    /// could not have survived as a group edge. Splitting a merged range is the only thing that can
+    /// place a boundary inside a block, which is exactly what <see cref="SubRangesReproduceResult"/>
+    /// verifies and why the pathological guards stay ON for split ranges.
+    ///
+    /// This is not an argument to be trusted: SuggestionDiffServiceTests
+    /// .MergedRangeBoundaries_NeverFallInsideADiffBlock enforces it over a targeted battery plus a
+    /// randomized sweep, and also checks OrigToResultPos against an independent alignment oracle at
+    /// those boundaries. `internal` exists for that test (InternalsVisibleTo Pagedraft.Api.Tests).
+    /// </summary>
+    internal static List<(int Start, int End)> BuildMergedWordRanges(
+        string normOrig, IList<DiffPlex.Model.DiffBlock> diffBlocks)
+    {
         // Step 1: expand each diff block to word boundaries in the original text.
         var wordRanges = new List<(int Start, int End)>();
-        foreach (var block in diff.DiffBlocks)
+        foreach (var block in diffBlocks)
         {
             if (block.DeleteCountA == 0 && block.InsertCountB == 0)
                 continue;
 
-            var s = block.DeleteStartA;
-            var e = s + block.DeleteCountA;
-
             // NOTE: SnapToWordBoundaries does the same expansion for the consistency near-match path - duplication is intentional; consolidate deliberately when refactoring.
-            // Expand to word boundaries
-            while (s > 0 && IsWordChar(normOrig[s - 1]))
-                s--;
-            while (e < normOrig.Length && IsWordChar(normOrig[e]))
-                e++;
-
-            // For pure insertions (deleteCount == 0) at a word boundary, s == e.
-            // Expand in both directions to capture the enclosing word.
-            if (s == e)
-            {
-                while (s > 0 && IsWordChar(normOrig[s - 1]))
-                    s--;
-                while (e < normOrig.Length && IsWordChar(normOrig[e]))
-                    e++;
-            }
+            var (s, e) = ExpandToAnchorableSpan(normOrig, block.DeleteStartA, block.DeleteStartA + block.DeleteCountA);
 
             if (s < e)
                 wordRanges.Add((s, e));
         }
 
         if (wordRanges.Count == 0)
-            return new List<AnalysisSuggestion>();
+            return new List<(int Start, int End)>();
 
         // Step 2: sort and merge overlapping/adjacent word ranges.
         wordRanges.Sort((a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : a.End.CompareTo(b.End));
@@ -101,58 +220,7 @@ public class SuggestionDiffService
                 merged.Add(current);
         }
 
-        // Step 3: split any oversized merged range back into individual diff-block-aligned sub-ranges.
-        merged = SplitOversizedRanges(merged, diff.DiffBlocks, normOrig);
-
-        // Step 4: build cumulative delta via diff blocks to map original positions to result positions.
-        var blocks = diff.DiffBlocks;
-
-        // Step 5: map each merged original word range to the result and build suggestions.
-        var suggestions = new List<AnalysisSuggestion>();
-        foreach (var (wStart, wEnd) in merged)
-        {
-            var origWord = normOrig[wStart..wEnd];
-
-            var rStart = OrigToResultPos(wStart, blocks);
-            var rEnd = OrigToResultPos(wEnd, blocks);
-
-            rStart = Math.Max(0, Math.Min(rStart, normResult.Length));
-            rEnd = Math.Max(rStart, Math.Min(rEnd, normResult.Length));
-
-            var sugWord = rStart < rEnd ? normResult[rStart..rEnd] : string.Empty;
-
-            if (string.Equals(origWord, sugWord, StringComparison.Ordinal))
-                continue;
-
-            var origLen = wEnd - wStart;
-            var sugLen = rEnd - rStart;
-
-            // Reject pathological suggestions where large original maps to empty/tiny replacement
-            if (origLen > 40 && sugLen <= 8) continue;
-            if (origLen > 25 && sugLen == 0) continue;
-
-            // Reject suggestions where result mapping is disproportionately large
-            // (typically from diff misalignment caused by AI hallucination / repetition loops)
-            if (sugLen > origLen * 5 + 30) continue;
-
-            suggestions.Add(new AnalysisSuggestion
-            {
-                StartOffset = wStart,
-                EndOffset = wEnd,
-                OriginalText = origWord,
-                SuggestedText = sugWord,
-                Reason = "Proofread",
-                ContextBefore = normOrig[Math.Max(0, wStart - 50)..wStart],
-                ContextAfter = normOrig[wEnd..Math.Min(normOrig.Length, wEnd + 50)]
-            });
-        }
-
-        suggestions = suggestions.Where(IsMeaningfulSuggestion).ToList();
-
-        if (suggestions.Count > MaxSuggestionCountForProofread)
-            return new List<AnalysisSuggestion>();
-
-        return suggestions;
+        return merged;
     }
 
     /// <summary>
@@ -160,10 +228,15 @@ public class SuggestionDiffService
     /// in the result text, accounting for all diff blocks whose deleted range ends
     /// before or at the given position.
     ///
-    /// Word-boundary positions should never fall inside a deleted range because we
-    /// expand to word boundaries. The graceful fallback handles it just in case.
+    /// A MERGED range's boundaries never fall strictly inside a deleted range (see
+    /// <see cref="BuildMergedWordRanges"/>), so for those the mapping is exact. The interpolation
+    /// fallback below exists for the SPLIT sub-range boundaries, which can land inside a block -
+    /// those are approximate, which is why <see cref="SubRangesReproduceResult"/> verifies every split.
+    ///
+    /// `internal` for SuggestionDiffServiceTests.MergedRangeBoundaries_NeverFallInsideADiffBlock,
+    /// which pins that exactness against an independent alignment oracle.
     /// </summary>
-    private static int OrigToResultPos(int origPos, IList<DiffPlex.Model.DiffBlock> blocks)
+    internal static int OrigToResultPos(int origPos, IList<DiffPlex.Model.DiffBlock> blocks, bool includeInsertionAtPos = false)
     {
         var delta = 0;
         foreach (var block in blocks)
@@ -173,6 +246,16 @@ public class SuggestionDiffService
             if (deleteEnd < origPos)
             {
                 delta += block.InsertCountB - block.DeleteCountA;
+            }
+            else if (includeInsertionAtPos && block.DeleteCountA == 0 && block.DeleteStartA == origPos)
+            {
+                // A PURE INSERTION sitting exactly on this position. Whether it belongs to the span
+                // ending here or the span starting here is ambiguous by offset alone, so the caller
+                // decides: span ENDS pass true and absorb it, span STARTS pass false and skip it (so
+                // the insertion is never counted twice). Without this, added sentence-final
+                // punctuation was invisible - "ארוך" mapped to "ארוך", compared equal, and the
+                // correction was silently dropped even though resultText contained it.
+                delta += block.InsertCountB;
             }
             else if (block.DeleteStartA < origPos)
             {
@@ -202,18 +285,29 @@ public class SuggestionDiffService
     /// Split any merged range that spans more than <see cref="MaxWordsPerSuggestion"/> words back
     /// into individual diff-block-aligned sub-ranges. This prevents a cluster of nearby
     /// character-level edits from fusing into one giant suggestion.
+    ///
+    /// Splitting is only SAFE when the resulting sub-ranges can still reproduce the corrected text.
+    /// DiffPlex computes a MINIMAL CHARACTER diff, which for a repeated token or a whole-word
+    /// deletion does not align on word boundaries: the edit is spread across two adjacent words, and
+    /// mapping each word independently yields nonsense ("היא היא ידעה" → "היא ידעה" split into
+    /// "היא"→"י" plus "ידעה"→"דעה"). Because the editor applies suggestions INDIVIDUALLY, such a
+    /// split actively corrupts the document. Every candidate split is therefore verified against the
+    /// result text and discarded in favour of the single whole-range suggestion when it fails - a
+    /// correct multi-word suggestion beats a corrupt single-word one (the same trade-off the
+    /// whitespace-join case below already makes).
     /// </summary>
-    private static List<(int Start, int End)> SplitOversizedRanges(
+    private static List<(int Start, int End, bool WholeRange)> SplitOversizedRanges(
         List<(int Start, int End)> merged,
         IList<DiffPlex.Model.DiffBlock> diffBlocks,
-        string normOrig)
+        string normOrig,
+        string normResult)
     {
-        var result = new List<(int Start, int End)>(merged.Count);
+        var result = new List<(int Start, int End, bool WholeRange)>(merged.Count);
         foreach (var (mStart, mEnd) in merged)
         {
             if (CountWords(normOrig, mStart, mEnd) <= MaxWordsPerSuggestion)
             {
-                result.Add((mStart, mEnd));
+                result.Add((mStart, mEnd, true));
                 continue;
             }
 
@@ -225,7 +319,7 @@ public class SuggestionDiffService
             // whole so the join surfaces as one suggestion.
             if (IsWhitespaceOnlyEdit(diffBlocks, normOrig, mStart, mEnd))
             {
-                result.Add((mStart, mEnd));
+                result.Add((mStart, mEnd, true));
                 continue;
             }
 
@@ -235,24 +329,16 @@ public class SuggestionDiffService
             {
                 if (block.DeleteCountA == 0 && block.InsertCountB == 0)
                     continue;
-                var s = block.DeleteStartA;
-                var e = s + block.DeleteCountA;
-                if (e <= mStart || s >= mEnd) continue;
+                if (block.DeleteStartA + block.DeleteCountA <= mStart || block.DeleteStartA >= mEnd) continue;
 
-                while (s > 0 && IsWordChar(normOrig[s - 1])) s--;
-                while (e < normOrig.Length && IsWordChar(normOrig[e])) e++;
-                if (s == e)
-                {
-                    while (s > 0 && IsWordChar(normOrig[s - 1])) s--;
-                    while (e < normOrig.Length && IsWordChar(normOrig[e])) e++;
-                }
+                var (s, e) = ExpandToAnchorableSpan(normOrig, block.DeleteStartA, block.DeleteStartA + block.DeleteCountA);
                 if (s < e)
                     subRanges.Add((s, e));
             }
 
             if (subRanges.Count == 0)
             {
-                result.Add((mStart, mEnd));
+                result.Add((mStart, mEnd, true));
                 continue;
             }
 
@@ -271,19 +357,182 @@ public class SuggestionDiffService
 
             // Finally, enforce MaxWordsPerSuggestion by splitting any remaining
             // multi-word ranges into per-word segments.
+            var candidate = new List<(int Start, int End)>();
             foreach (var (s, e) in subMerged)
             {
                 if (CountWords(normOrig, s, e) <= MaxWordsPerSuggestion)
                 {
-                    result.Add((s, e));
+                    candidate.Add((s, e));
                 }
                 else
                 {
-                    result.AddRange(SplitRangeByWords(normOrig, s, e, MaxWordsPerSuggestion));
+                    candidate.AddRange(SplitRangeByWords(normOrig, s, e, MaxWordsPerSuggestion));
                 }
             }
+
+            // Only accept the split if the per-word sub-ranges still reproduce the corrected text.
+            // Otherwise the character diff did not align to word boundaries here, and splitting
+            // would emit individually-corrupting suggestions - keep the range whole instead.
+            if (candidate.Count > 0 && SubRangesReproduceResult(normOrig, normResult, diffBlocks, mStart, mEnd, candidate))
+                result.AddRange(candidate.Select(r => (r.Start, r.End, WholeRange: false)));
+            else
+                result.Add((mStart, mEnd, true));
         }
         return result;
+    }
+
+    /// <summary>
+    /// Expand a diff block's original range [start, end) outward to whole-word boundaries so the
+    /// suggestion covers readable, anchorable text rather than a bare character slice.
+    ///
+    /// A pure insertion (DeleteCountA == 0) arrives zero-width. Usually it sits against a word and
+    /// the word expansion grows it. When BOTH neighbours are non-word characters it cannot grow -
+    /// e.g. the third dot appended to "בשמונה.." lands between a '.' and a space - and a zero-width
+    /// range is discarded by the caller, so the correction silently never reaches the user even
+    /// though resultText contains it. In that case widen to the surrounding non-whitespace token,
+    /// which yields "בשמונה.." -> "בשמונה..." instead of nothing at all.
+    /// </summary>
+    private static (int Start, int End) ExpandToAnchorableSpan(string normOrig, int start, int end)
+    {
+        var s = start;
+        var e = end;
+
+        // Absorb a partially-covered whitespace RUN first. Collapsing "מן   הים" to "מן הים" deletes
+        // only SOME of the spaces, so the raw block starts mid-run; the resulting span ("  הים" ->
+        // "הים") then looks like a span-boundary artifact and IsMeaningfulSuggestion discards it,
+        // losing the correction. Covering the whole run makes the change unambiguous.
+        while (s > 0 && s < normOrig.Length && char.IsWhiteSpace(normOrig[s]) && char.IsWhiteSpace(normOrig[s - 1]))
+            s--;
+        while (e < normOrig.Length && e > 0 && char.IsWhiteSpace(normOrig[e]) && char.IsWhiteSpace(normOrig[e - 1]))
+            e++;
+
+        while (s > 0 && IsWordChar(normOrig[s - 1]))
+            s--;
+        while (e < normOrig.Length && IsWordChar(normOrig[e]))
+            e++;
+
+        if (s == e)
+        {
+            while (s > 0 && !char.IsWhiteSpace(normOrig[s - 1]))
+                s--;
+            while (e < normOrig.Length && !char.IsWhiteSpace(normOrig[e]))
+                e++;
+        }
+
+        return (s, e);
+    }
+
+    /// <summary>
+    /// Drop the leading and trailing WHOLE WORDS that <paramref name="suggested"/> shares with the
+    /// original span [start, end), returning the tightened span and suggestion.
+    ///
+    /// A cut is only taken where it lands on a word boundary in BOTH strings. That asymmetry matters:
+    /// for "ל הראות" -> "להראות" the shared trailing run "הראות" begins mid-word on the suggested side
+    /// (right after "ל"), so no cut is taken and the join survives as one readable suggestion. For
+    /// "Second sentence should be removed. Third" -> "Third" the shared run "Third" begins after a
+    /// space on the original side and consumes the suggestion entirely, leaving a clean deletion.
+    ///
+    /// NON-DEGENERACY: the trim must never empty the ORIGINAL side. A pure insertion ("abc def" ->
+    /// "abc xyz def") expands to the span "def", whose whole content is also the shared trailing run,
+    /// so the combined cuts would collapse the span to a zero-width [4,4) with OriginalText "". Such a
+    /// suggestion can never be applied - the client anchors by searching for OriginalText, and an
+    /// empty needle is treated as stale (suggestion-anchor.service.ts) so Apply silently does nothing.
+    /// When the cuts would leave start == end we give back the SMALLEST part of the trailing cut that
+    /// leaves an anchoring word on the original side, and only if no trailing cut survives at all do we
+    /// also drop the leading cut. Giving cut back is always safe: prefix/suffix are shared affixes, so
+    /// ANY (prefix, suffix) pair with prefix + suffix &lt;= min(len) describes the same overall
+    /// replacement - a smaller cut just means a wider, still exactly-aligned span. Giving back the least
+    /// possible keeps the emitted span as tight as non-degeneracy allows, which is the whole point of the
+    /// trim. Note the deletion case is unaffected: it is the SUGGESTED side that ends up empty there,
+    /// which is legitimate.
+    /// </summary>
+    private static (int Start, int End, string Suggested) TrimCommonWholeWordAffixes(
+        string normOrig, int start, int end, string suggested)
+    {
+        var orig = normOrig[start..end];
+
+        // Leading common run. Indices coincide on both sides, so one boundary check covers both.
+        var maxPrefix = Math.Min(orig.Length, suggested.Length);
+        var prefix = 0;
+        while (prefix < maxPrefix && orig[prefix] == suggested[prefix])
+            prefix++;
+        while (prefix > 0 && !char.IsWhiteSpace(orig[prefix - 1]))
+            prefix--;
+
+        // Trailing common run, measured from each end independently.
+        var maxSuffix = Math.Min(orig.Length - prefix, suggested.Length - prefix);
+        var suffix = 0;
+        while (suffix < maxSuffix && orig[orig.Length - 1 - suffix] == suggested[suggested.Length - 1 - suffix])
+            suffix++;
+
+        // Walk the trailing cut down to the LARGEST value that is a word start on both sides AND leaves
+        // a non-empty original span (NON-DEGENERACY above). Both conditions in one loop deliberately: a
+        // cut that empties the span is rejected exactly like a mid-word one, so the search lands on the
+        // next legal cut rather than abandoning the trim altogether. For "abc def" -> "abc xyz def" the
+        // whole tail is one word, so this bottoms out at 0 and the span stays "def" -> "xyz def"; where
+        // the shared tail spans several words it gives back only the last of them.
+        while (suffix > 0
+               && (start + prefix >= end - suffix
+                   || !(IsAtWordStart(orig, orig.Length - suffix) && IsAtWordStart(suggested, suggested.Length - suffix))))
+            suffix--;
+
+        // maxSuffix bounds suffix by orig.Length - prefix, so the two cuts can meet but never cross. If
+        // the span is still empty at suffix == 0 the ENTIRE original span is the shared prefix (orig
+        // "def " vs suggested "def xyz"); drop the leading cut too and cover the original span whole.
+        if (start + prefix >= end)
+            prefix = 0;
+
+        return (start + prefix, end - suffix, suggested[prefix..(suggested.Length - suffix)]);
+    }
+
+    /// <summary>
+    /// True when <paramref name="index"/> begins a word in <paramref name="text"/>: either the very
+    /// start of the string, or immediately preceded by whitespace. An out-of-range index (beyond the
+    /// end of the string) is never a word start.
+    /// </summary>
+    private static bool IsAtWordStart(string text, int index) =>
+        index <= 0 || (index <= text.Length && char.IsWhiteSpace(text[index - 1]));
+
+    /// <summary>
+    /// True when replacing each sub-range with its mapped result text - and leaving the gaps between
+    /// them untouched - rebuilds exactly the result slice the whole merged range maps to. This is the
+    /// same operation the editor performs when the user accepts suggestions one at a time, so it is
+    /// the precise safety condition for splitting a merged range into several suggestions.
+    /// </summary>
+    private static bool SubRangesReproduceResult(
+        string normOrig,
+        string normResult,
+        IList<DiffPlex.Model.DiffBlock> diffBlocks,
+        int mStart,
+        int mEnd,
+        List<(int Start, int End)> subRanges)
+    {
+        var expectedStart = OrigToResultPos(mStart, diffBlocks);
+        var expectedEnd = OrigToResultPos(mEnd, diffBlocks, includeInsertionAtPos: true);
+        expectedStart = Math.Max(0, Math.Min(expectedStart, normResult.Length));
+        expectedEnd = Math.Max(expectedStart, Math.Min(expectedEnd, normResult.Length));
+        var expected = normResult[expectedStart..expectedEnd];
+
+        var rebuilt = new System.Text.StringBuilder();
+        var cursor = mStart;
+        foreach (var (s, e) in subRanges.OrderBy(r => r.Start))
+        {
+            if (s < cursor || e > mEnd)
+                return false; // overlapping or out-of-range sub-range - not verifiable, do not split
+
+            rebuilt.Append(normOrig, cursor, s - cursor); // unchanged gap between sub-ranges
+
+            var rStart = OrigToResultPos(s, diffBlocks);
+            var rEnd = OrigToResultPos(e, diffBlocks, includeInsertionAtPos: true);
+            rStart = Math.Max(0, Math.Min(rStart, normResult.Length));
+            rEnd = Math.Max(rStart, Math.Min(rEnd, normResult.Length));
+            rebuilt.Append(normResult, rStart, rEnd - rStart);
+
+            cursor = e;
+        }
+        rebuilt.Append(normOrig, cursor, mEnd - cursor);
+
+        return string.Equals(rebuilt.ToString(), expected, StringComparison.Ordinal);
     }
 
     /// <summary>
