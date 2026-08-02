@@ -839,6 +839,13 @@ public class AiTierNonTriggeringTests
 /// invalidated - turns it RED, which forces the author to notice that <c>ModelName</c> is a per-RUN string
 /// (it is literally the constant <c>"chunked"</c> on both chunked paths, and <c>"stream"</c> on the streaming
 /// one) and is therefore unusable as a cross-model provenance key without first giving Proofread a real one.
+///
+/// TIER-UX-REWORK UPDATE (widened scope): <c>ModelName</c> now has NO reader at all. It used to have exactly
+/// one - a DTO projection in <c>AnalysisController</c> - which put the raw provider:model string on the wire,
+/// where the run tab rendered it beside the result heading as e.g. "ספרותי (Ollama:gemma4:12b)". That
+/// projection is gone: model identity is internal IP and stops at the wire. The column is still WRITTEN, for
+/// diagnostics, so the guard below still has real writers to watch. See
+/// <c>AiTierResultSurfaceDeidentificationTests</c> for the contract test that keeps it off the payload.
 /// </summary>
 public class AiTierProofreadProvenanceTests
 {
@@ -848,11 +855,13 @@ public class AiTierProofreadProvenanceTests
         ["Models/AnalysisResult.cs"] = "the declaration",
         ["Models/AnalysisRunLog.cs"] = "the declaration",
         ["Models/SceneEmbedding.cs"] = "the declaration (no writer service exists)",
-        ["Models/Dtos/AnalysisDto.cs"] = "the DTO member",
+        ["Models/Dtos/AnalysisDto.cs"] = "a doc comment recording the DELIBERATE absence of the member",
         ["Data/AppDbContext.cs"] = "the EF column configuration",
         ["Services/Ai/AiAnalysisService.cs"] = "a writer",
-        ["Services/Analysis/UnifiedAnalysisService.cs"] = "the writers",
-        ["Controllers/AnalysisController.cs"] = "THE single read - a DTO projection"
+        ["Services/Analysis/UnifiedAnalysisService.cs"] = "the writers"
+        // Controllers/AnalysisController.cs is deliberately ABSENT: the DTO projection that used to read
+        // ModelName was removed when the result surface was de-identified. Re-adding the file here means
+        // re-adding a reader, which is exactly the change this list exists to make somebody justify.
     };
 
     /// <summary>Comparison shapes that would turn a display string into a freshness key.</summary>
@@ -902,9 +911,14 @@ public class AiTierProofreadProvenanceTests
 
         Assert.True(offenders.Count == 0, string.Join(Environment.NewLine, offenders));
 
-        // Guard the guard: if the scan found nothing it would pass vacuously.
-        Assert.Contains("Controllers/AnalysisController.cs", seenFiles);
+        // Guard the guard: if the scan found nothing it would pass vacuously. Anchored on the declaration and
+        // on a WRITER - the former single reader (AnalysisController's DTO projection) is gone, so asserting
+        // on it would now be asserting the leak back into existence.
         Assert.Contains("Models/AnalysisResult.cs", seenFiles);
+        Assert.Contains("Services/Ai/AiAnalysisService.cs", seenFiles);
+
+        // The reader really is gone, not merely renamed: no controller may mention ModelName at all.
+        Assert.DoesNotContain(seenFiles, f => f.StartsWith("Controllers/", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

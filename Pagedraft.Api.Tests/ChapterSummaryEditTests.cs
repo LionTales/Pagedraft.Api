@@ -77,8 +77,19 @@ public class ChapterSummaryEditTests
         Assert.True(dto.SummaryUserEdited);
         Assert.Equal(editedAt, dto.SummaryUserEditedAt);
         Assert.Equal(builtAt, dto.StructuredBuiltAt);
-        Assert.Equal(ActiveModel, dto.BuiltWithModel);
         Assert.Equal("he", dto.Language);
+
+        // The DTO used to echo the row's BuiltWithModel. It must not: which model built a brief is internal
+        // IP, and no client surface renders it. The STAMP is still persisted (asserted below) because the
+        // server needs it for staleness; it just stops at the wire.
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            dto, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.DoesNotContain(ActiveModel, json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("builtWithModel", json, StringComparison.OrdinalIgnoreCase);
+
+        var storedRow = await db.ChunkSummaries.AsNoTracking()
+            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId);
+        Assert.Equal(ActiveModel, storedRow.BuiltWithModel);
     }
 
     [Fact]

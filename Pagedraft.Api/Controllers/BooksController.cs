@@ -776,8 +776,7 @@ public class BooksController : ControllerBase
         s.HasReview,
         s.FindingCount,
         s.LastUpdatedAt,
-        s.BuiltWithModel,
-        s.ActiveModel,
+        // BuiltWithModel / ActiveModel stay on the internal status record; only the VERDICT crosses the wire.
         s.BuiltWithDifferentModel,
         s.StaleVsBriefs,
         s.HasBriefs,
@@ -816,7 +815,6 @@ public class BooksController : ControllerBase
             anchors,
             f.SuggestedAction,
             f.Status,
-            f.BuiltWithModel,
             f.CreatedAt,
             f.UpdatedAt);
     }
@@ -1011,7 +1009,6 @@ public class BooksController : ControllerBase
             Rederived: rederived,
             HasStructuredBrief: hasStructured,
             StructuredBuiltAt: after?.StructuredBuiltAt,
-            BuiltWithModel: after?.BuiltWithModel,
             Message: rederived
                 ? "Structured brief re-derived from your edited summary; rebuild the whole-book review to reflect it."
                 : "Could not re-derive the structured brief from your summary right now; your edit was saved."));
@@ -1029,7 +1026,6 @@ public class BooksController : ControllerBase
                 CreatedAt: null,
                 SummaryUserEditedAt: null,
                 StructuredBuiltAt: null,
-                BuiltWithModel: null,
                 StructuredBrief: null);
 
         // READ-only enrichment (wb3-c04 fallback): expose the PARSED structured-brief facts so the FE can
@@ -1048,7 +1044,6 @@ public class BooksController : ControllerBase
             row.CreatedAt,
             row.SummaryUserEditedAt,
             row.StructuredBuiltAt,
-            row.BuiltWithModel,
             StructuredBrief: StructuredChunkSummaryParser.Parse(row.StructuredJson));
     }
 
@@ -1178,8 +1173,7 @@ public class BooksController : ControllerBase
         s.HasBaseline,
         s.IsReady,
         s.LastUpdatedAt,
-        s.BuiltWithModel,
-        s.ActiveModel,
+        // BuiltWithModel / ActiveModel stay on the internal status record; only the VERDICT crosses the wire.
         s.BuiltWithDifferentModel,
         s.ActiveBuildJobId,
         s.ChaptersToBuild,
@@ -1195,8 +1189,7 @@ public class BooksController : ControllerBase
         s.HasSummary,
         s.IsReady,
         s.LastUpdatedAt,
-        s.BuiltWithModel,
-        s.ActiveModel,
+        // BuiltWithModel / ActiveModel stay on the internal status record; only the VERDICT crosses the wire.
         s.BuiltWithDifferentModel,
         s.ActiveBuildJobId,
         s.ChaptersToBuild,
