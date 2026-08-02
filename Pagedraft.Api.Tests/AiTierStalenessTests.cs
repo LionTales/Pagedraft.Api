@@ -545,8 +545,11 @@ public class AiTierStalenessTests
         var db = provider.GetRequiredService<AppDbContext>();
         var (bookId, _) = await AiTierTestHarness.SeedBookAsync(db, "Lookup Book", stored, chapterCount: 0);
 
+        // tier-ux-rework c1: the lookup is per (book, TASK) and the task is required. LinguisticAnalysis is
+        // the task the two freshness consumers ask about, so it is the one whose answer this file is about.
         Assert.Equal(expected, await BookAiTierResolver.ResolveAsync(
-            db, bookId, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, CancellationToken.None));
+            db, bookId, AiTaskType.LinguisticAnalysis,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, CancellationToken.None));
     }
 
     /// <summary>A book id that resolves to nothing must mean LOCAL, never paid cloud.</summary>
@@ -557,9 +560,14 @@ public class AiTierStalenessTests
         var db = provider.GetRequiredService<AppDbContext>();
         var log = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
-        Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, null, log, CancellationToken.None));
-        Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, Guid.Empty, log, CancellationToken.None));
-        Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, Guid.NewGuid(), log, CancellationToken.None));
+        // Asserted for EVERY task, not just LinguisticAnalysis: per-task storage multiplied the number of
+        // ways this lookup can be asked, and the fail-safe direction has to hold on all of them.
+        foreach (var task in Enum.GetValues<AiTaskType>())
+        {
+            Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, null, task, log, CancellationToken.None));
+            Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, Guid.Empty, task, log, CancellationToken.None));
+            Assert.Equal(AiTier.Fast, await BookAiTierResolver.ResolveAsync(db, Guid.NewGuid(), task, log, CancellationToken.None));
+        }
     }
 }
 

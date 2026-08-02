@@ -615,12 +615,18 @@ public class StyleBaselineService
     private string? ResolveLinguisticModelId(AiTier tier) => ResolveLinguisticProviderAndModel(tier).model;
 
     /// <summary>
-    /// This book's model tier, through the shared <see cref="BookAiTierResolver"/> so this service,
-    /// <see cref="AnalysisContextService"/> and <c>UnifiedAnalysisService</c> cannot disagree about which
-    /// tier a book is on. Fail-safe to <see cref="AiTier.Fast"/> on anything unknown.
+    /// This book's model tier FOR LINGUISTICANALYSIS, through the shared <see cref="BookAiTierResolver"/> so
+    /// this service, <see cref="AnalysisContextService"/> and <c>UnifiedAnalysisService</c> cannot disagree
+    /// about which tier a book is on. Fail-safe to <see cref="AiTier.Fast"/> on anything unknown.
+    /// <para>
+    /// tier-ux-rework c1: the task is LinguisticAnalysis and not a parameter, because every use of this value
+    /// in this service resolves the LinguisticAnalysis model - it is what
+    /// <see cref="BookStyleBaseline.BuiltWithModel"/> is stamped with and what the status gate compares a
+    /// stored stamp against. Asking about any other task would gate baselines on a tier that never built them.
+    /// </para>
     /// </summary>
     private Task<AiTier> ResolveBookTierAsync(Guid bookId, CancellationToken ct)
-        => BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+        => BookAiTierResolver.ResolveAsync(_db, bookId, AiTaskType.LinguisticAnalysis, _logger, ct);
 
     // ─── Build estimate helpers (a4) ─────────────────────────────────────────────────────────────
 

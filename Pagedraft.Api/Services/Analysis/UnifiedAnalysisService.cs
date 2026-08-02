@@ -100,9 +100,14 @@ public class UnifiedAnalysisService
     ///
     /// The other entry points - <c>RunWithInputAsync</c> and <c>RunStreamingAsync</c> - each build a single
     /// request and so read once by construction.
+    ///
+    /// tier-ux-rework c1: the lookup is PER TASK, and the task passed here is the same
+    /// <see cref="AiTaskType"/> the request is stamped with (<c>MapToTaskType</c>), never the user-facing
+    /// <c>AnalysisType</c> - so the tier that sized the chunks, the tier stamped on the request, and the tier
+    /// the router keys its <c>{task}_{tier}</c> rung on are one value about one task.
     /// </summary>
-    private Task<AiTier> ResolveBookTierAsync(Guid? bookId, CancellationToken ct)
-        => BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+    private Task<AiTier> ResolveBookTierAsync(Guid? bookId, AiTaskType task, CancellationToken ct)
+        => BookAiTierResolver.ResolveAsync(_db, bookId, task, _logger, ct);
 
     private static (string Outcome, string? Note, double? WordSimilarity) ResolveSingleRunOutcome(
         AnalysisType analysisType,
@@ -350,9 +355,10 @@ public class UnifiedAnalysisService
         var bookId = context.BookId;
         var chapterId = context.ChapterId;
         var sceneId = context.SceneId;
-        // The BOOK's model tier (p3-2), resolved ONCE and used for both the chunk sizing below (the target
-        // depends on the routed provider's window) and the AiRequest stamp further down.
-        var tier = await ResolveBookTierAsync(bookId, ct);
+        // The BOOK's model tier for THIS task (p3-2; per-task since tier-ux-rework c1), resolved ONCE and used
+        // for both the chunk sizing below (the target depends on the routed provider's window) and the
+        // AiRequest stamp further down.
+        var tier = await ResolveBookTierAsync(bookId, MapToTaskType(analysisType), ct);
         if (analysisType == AnalysisType.Proofread)
         {
             var opts = _aiOptions.Value;
@@ -589,7 +595,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = bookId?.ToString() ?? chapterId?.ToString() ?? sceneId?.ToString() ?? "",
-            Tier = await ResolveBookTierAsync(bookId, ct),
+            Tier = await ResolveBookTierAsync(bookId, taskType, ct),
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
@@ -764,7 +770,7 @@ public class UnifiedAnalysisService
             TaskType = taskType,
             Language = language,
             SourceId = targetId.ToString(),
-            Tier = await ResolveBookTierAsync(bookId, ct),
+            Tier = await ResolveBookTierAsync(bookId, taskType, ct),
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
