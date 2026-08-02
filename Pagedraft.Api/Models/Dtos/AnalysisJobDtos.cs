@@ -47,8 +47,8 @@ public record StartStyleBaselineBuildResponse(
 /// <summary>
 /// Response for GET .../style-baseline — coverage + freshness of the cached book style baseline.
 /// JSON casing follows the System.Text.Json default (camelCase) used across the analysis DTOs:
-/// totalChapters, builtChapters, staleCount, hasBaseline, ready, lastUpdatedAt, builtWithModel,
-/// activeModel, builtWithDifferentModel, activeBuildJobId, chaptersToBuild, estimatedSeconds, estimatedUsd.
+/// totalChapters, builtChapters, staleCount, hasBaseline, ready, lastUpdatedAt,
+/// builtWithDifferentModel, activeBuildJobId, chaptersToBuild, estimatedSeconds, estimatedUsd.
 /// </summary>
 public record BookStyleBaselineStatusDto(
     Guid BookId,
@@ -59,12 +59,10 @@ public record BookStyleBaselineStatusDto(
     bool HasBaseline,
     bool Ready,
     DateTimeOffset? LastUpdatedAt,
-    string? BuiltWithModel,
-    // DEF-1: cross-model cache-safety signals for the FE warning.
-    // builtWithModel (above) = the model the cached baseline was built with; activeModel = the model now
-    // configured for LinguisticAnalysis; builtWithDifferentModel = true when a baseline exists and the two
-    // differ (rebuild advisable).
-    string? ActiveModel,
+    // DEF-1: cross-model cache-safety signal for the FE warning. The server compares the model the cached
+    // baseline was built with against the one now configured for LinguisticAnalysis and sends only the
+    // VERDICT: true when a baseline exists and the two differ (rebuild advisable). The two model names
+    // themselves stay server-side - model identity is internal IP, and the FE warning names no model.
     bool BuiltWithDifferentModel,
     // DEF-2: jobId of an in-progress build for (bookId, language), so a reload / second tab can reattach
     // to its progress; null when no build is running.
@@ -95,8 +93,8 @@ public record StartBookSummaryBuildResponse(
 /// Response for GET .../summary — coverage + freshness of the cached L2 book summary (BookBrief) rollup.
 /// JSON casing follows the System.Text.Json default (camelCase), mirroring
 /// <see cref="BookStyleBaselineStatusDto"/>: totalChapters, builtChapters, staleCount, hasSummary, ready,
-/// lastUpdatedAt, builtWithModel, activeModel, builtWithDifferentModel, activeBuildJobId, chaptersToBuild,
-/// estimatedSeconds, estimatedUsd.
+/// lastUpdatedAt, builtWithDifferentModel, activeBuildJobId, chaptersToBuild,
+/// estimatedSeconds, estimatedUsd. Carries no model identity - see <see cref="BookStyleBaselineStatusDto"/>.
 /// </summary>
 public record BookSummaryStatusDto(
     Guid BookId,
@@ -107,8 +105,6 @@ public record BookSummaryStatusDto(
     bool HasSummary,
     bool Ready,
     DateTimeOffset? LastUpdatedAt,
-    string? BuiltWithModel,
-    string? ActiveModel,
     bool BuiltWithDifferentModel,
     Guid? ActiveBuildJobId,
     int ChaptersToBuild,
@@ -143,7 +139,7 @@ public record StartBookReviewBuildResponse(
 /// <summary>
 /// Response for GET .../review/status — coverage + freshness of the cached whole-book review (BookFinding
 /// rows). JSON casing follows the System.Text.Json default (camelCase): bookId, language, hasReview,
-/// findingCount, lastUpdatedAt, builtWithModel, activeModel, builtWithDifferentModel, staleVsBriefs,
+/// findingCount, lastUpdatedAt, builtWithDifferentModel, staleVsBriefs,
 /// hasBriefs, chaptersReviewed, chaptersTotal, windowCount, ranSynthesis, ranContinuityReduce, failedWindows,
 /// activeBuildJobId, ready.
 ///
@@ -162,8 +158,6 @@ public record BookReviewStatusDto(
     bool HasReview,
     int FindingCount,
     DateTimeOffset? LastUpdatedAt,
-    string? BuiltWithModel,
-    string? ActiveModel,
     bool BuiltWithDifferentModel,
     bool StaleVsBriefs,
     bool HasBriefs,
@@ -213,7 +207,6 @@ public record BookFindingDto(
     IReadOnlyList<FindingChapterAnchorDto> ChapterAnchors,
     string? SuggestedAction,
     string Status,
-    string? BuiltWithModel,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
@@ -276,7 +269,6 @@ public record ChapterSummaryViewDto(
     DateTimeOffset? CreatedAt,
     DateTimeOffset? SummaryUserEditedAt,
     DateTimeOffset? StructuredBuiltAt,
-    string? BuiltWithModel,
     StructuredChunkSummaryData? StructuredBrief);
 
 /// <summary>
@@ -289,7 +281,7 @@ public record UpdateChapterSummaryRequest(string? SummaryText, string? Language 
 /// <summary>
 /// Response for POST .../chapters/{chapterId}/summary/rederive — synchronous re-derive of the STRUCTURED
 /// brief seeded with the user's edited flat summary, so the whole-book review reflects the edit. JSON
-/// (camelCase): bookId, chapterId, language, rederived, hasStructuredBrief, structuredBuiltAt, builtWithModel,
+/// (camelCase): bookId, chapterId, language, rederived, hasStructuredBrief, structuredBuiltAt,
 /// message. rederived is true when a fresh structured brief was produced; false (with a message) when the
 /// model could not produce one (graceful — the edit is still saved and clobber-guarded).
 /// </summary>
@@ -300,7 +292,6 @@ public record RederiveChapterSummaryResponse(
     bool Rederived,
     bool HasStructuredBrief,
     DateTimeOffset? StructuredBuiltAt,
-    string? BuiltWithModel,
     string Message);
 
 /// <summary>POST .../chapters/{chapterId}/summary/rederive request body.</summary>

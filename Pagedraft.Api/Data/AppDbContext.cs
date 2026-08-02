@@ -8,6 +8,7 @@ public class AppDbContext : DbContext
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
 
     public DbSet<Book> Books => Set<Book>();
+    public DbSet<BookAiTaskTier> BookAiTaskTiers => Set<BookAiTaskTier>();
     public DbSet<Chapter> Chapters => Set<Chapter>();
     public DbSet<Scene> Scenes => Set<Scene>();
     public DbSet<AnalysisResult> AnalysisResults => Set<AnalysisResult>();
@@ -38,6 +39,21 @@ public class AppDbContext : DbContext
             // so widening the enum later cannot break an existing row.
             e.Property(x => x.AiTier).HasMaxLength(20);
             e.HasMany(x => x.Chapters).WithOne(x => x.Book).HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<BookAiTaskTier>(e =>
+        {
+            // The composite (BookId, TaskKey) IS the identity - there is at most one override per task, and
+            // the resolver's lookup is a PK seek rather than a scan. No surrogate Id, so an upsert cannot
+            // accidentally create a second row for the same task.
+            e.HasKey(x => new { x.BookId, x.TaskKey });
+            e.Property(x => x.TaskKey).HasMaxLength(50);
+            // Same defensive width/nullability as Book.AiTier: the token is parsed, never trusted.
+            e.Property(x => x.Tier).HasMaxLength(20);
+            // Cascade is safe here (unlike the baseline/finding tables) because Book is this table's ONLY
+            // relationship, so there is no second cascade path for SQL Server to object to. BooksController
+            // still removes the rows explicitly, matching how every other book-scoped table is deleted.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Chapter>(e =>
@@ -330,6 +346,13 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) b.CreatedAt = b.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) b.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is BookAiTaskTier bt)
+            {
+                // Stamped here rather than at the write site so every writer (controller today, any future
+                // one) produces a comparable timestamp for "when did this task last depart from the default".
+                if (entry.State is EntityState.Added or EntityState.Modified)
+                    bt.UpdatedAt = DateTimeOffset.UtcNow;
             }
             else if (entry.Entity is Chapter c)
             {

@@ -106,7 +106,6 @@ public class AnalysisController : ControllerBase
             a.JobId,
             a.Type,
             a.ResultText,
-            a.ModelName,
             a.CreatedAt,
             StructuredResult: a.StructuredResult,
             Scope: a.Scope.ToString(),

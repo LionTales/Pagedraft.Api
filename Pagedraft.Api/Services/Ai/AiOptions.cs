@@ -90,6 +90,14 @@ public class AiOptions
     public BookReviewOptions BookReview { get; set; } = new();
 
     /// <summary>
+    /// tier-ux-rework c2 - the nested "Ai:Tier" block. Deployment-shaped policy about the model tier that is
+    /// NOT a routing fact: routing lives in <see cref="FeatureModels"/> and
+    /// <see cref="AiTierPolicy.TieredTasks"/>, while this block holds what the SURFACE must do about the tier
+    /// on this particular deployment. Today that is one flag (<see cref="AiTierOptions.ConsentRequired"/>).
+    /// </summary>
+    public AiTierOptions Tier { get; set; } = new();
+
+    /// <summary>
     /// Max tokens the trimmed BookBrief may occupy when it is repeated at the head of EVERY window of the
     /// windowed whole-book review path (BookContextAssembler.AssembleWindowsAsync, wb4-c01). The BookBrief is
     /// the global anchor placed first in each window and charged to that window's budget; a full BookBrief
@@ -188,6 +196,37 @@ public class AiOptions
         var derived = Math.Min(byFraction, byReserve);
         return Math.Max(256, derived); // never below a floor so the BookBrief can always be attempted
     }
+}
+
+/// <summary>
+/// The "Ai:Tier" block (tier-ux-rework c2): how the model-tier control must BEHAVE on this deployment, as
+/// opposed to how the tier ROUTES (that is <see cref="AiOptions.FeatureModels"/> plus
+/// <see cref="AiTierPolicy.TieredTasks"/>, and nothing here may influence it).
+/// </summary>
+public class AiTierOptions
+{
+    /// <summary>
+    /// WHETHER PICKING "thinking" NEEDS AN EXPLICIT CONSENT STEP IN THE UI. Binds
+    /// <c>Ai:Tier:ConsentRequired</c>.
+    ///
+    /// WHY IT IS CONFIG AND NOT A CONSTANT. The consent step exists to tell an author that an unpublished
+    /// manuscript is about to leave THIS MACHINE, and whether that sentence is true is a property of the
+    /// DEPLOYMENT'S TOPOLOGY, not of the product. In dev the fast tier is local Ollama and the thinking tier
+    /// is a third-party cloud provider, so the step is the whole point (default TRUE, appsettings.json). In a
+    /// hosted production deployment BOTH tiers already run off-machine, so the step would ask the user to
+    /// consent to something that already happened on the fast tier - noise that trains people to click
+    /// through consent dialogs (appsettings.Production.json sets FALSE explicitly; Production REPLACES this
+    /// block rather than merging into it, so the value must be written there, never inherited).
+    ///
+    /// IT IS NOT AN AUTHORIZATION GATE, AND MUST NEVER BECOME ONE. The server's 409 on an unroutable
+    /// "thinking" request is unchanged and unconditional; this flag only decides whether the CLIENT renders a
+    /// confirm step before it sends the PUT. A server that stopped enforcing because a UI step exists would
+    /// have moved a security decision into a rendering flag.
+    ///
+    /// DEFAULTS TRUE for the same reason <c>AiTierPolicy.Parse</c> degrades to Fast: the safe direction for a
+    /// missing/garbled value is MORE disclosure, not less.
+    /// </summary>
+    public bool ConsentRequired { get; set; } = true;
 }
 
 /// <summary>The "Ai:BookReview" block: staged-rollout switches for the whole-book review engine.</summary>

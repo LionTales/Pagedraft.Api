@@ -85,4 +85,90 @@ public static class AiTierPolicy
     /// <summary>The canonical stored form of a tier, for writing <c>Book.AiTier</c>.</summary>
     public static string ToStoredValue(AiTier tier) =>
         tier == AiTier.Thinking ? ThinkingStoredValue : FastStoredValue;
+
+    // ── Per-task tier storage (tier-ux-rework plan, c1) ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Whether a stored token is one <see cref="Parse"/> RECOGNISES, as opposed to one it merely survives.
+    /// <see cref="Parse"/> is deliberately total - it maps "banana" to Fast rather than throwing - which is
+    /// right for routing and useless for observability: a per-task override row holding garbage and a per-task
+    /// override row holding "fast" both run local, but only the first is a bug somebody should see in the log.
+    /// Null/blank counts as UNRECOGNISED here because a row that exists and stores nothing is exactly that
+    /// doubt; the absence of a row is a different (and normal) state the resolver handles separately.
+    /// </summary>
+    public static bool IsRecognisedStoredValue(string? stored)
+    {
+        var token = stored?.Trim();
+        return string.Equals(token, ThinkingStoredValue, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(token, FastStoredValue, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The storage/wire key for a task's tier override. It is the <see cref="AiTaskType"/> name, NOT the
+    /// user-facing <c>AnalysisType</c> name, and the choice is forced by the code rather than stylistic:
+    /// <c>AnalysisTaskMapping</c> is MANY-TO-ONE (LiteraryAnalysis, BookOverview, CharacterAnalysis and
+    /// StoryAnalysis all route to <see cref="AiTaskType.LinguisticAnalysis"/>). Keying storage on
+    /// AnalysisType would therefore let one routing task carry several conflicting tiers, and the two
+    /// freshness consumers - which resolve the ACTIVE LinguisticAnalysis model that
+    /// <c>ChapterStyleProfile.BuiltWithModel</c> and <c>BookStyleBaseline.BuiltWithModel</c> are compared
+    /// against - have no way to pick which one they are gated by. That is precisely the "two consumers
+    /// disagree about a book's tier, every profile reads permanently stale" failure mode
+    /// <c>BookAiTierResolver</c> exists to prevent.
+    /// </summary>
+    public static string TaskKeyFor(AiTaskType task) => task.ToString();
+
+    /// <summary>
+    /// Parses a task token from the wire. Accepts an <see cref="AiTaskType"/> name directly, and ALSO an
+    /// <c>AnalysisType</c> name, which it normalizes through <c>AnalysisTaskMapping</c> - so a client that
+    /// speaks in user-facing edit types ("LiteraryAnalysis") stores under the routing task the tier can
+    /// actually move. Case-insensitive; numeric enum values are rejected so "3" cannot silently mean a task.
+    /// </summary>
+    public static bool TryParseTaskKey(string? token, out AiTaskType task)
+    {
+        task = default;
+        var trimmed = token?.Trim();
+        if (string.IsNullOrEmpty(trimmed) || char.IsDigit(trimmed[0]) || trimmed[0] == '-')
+            return false;
+
+        if (Enum.TryParse(trimmed, ignoreCase: true, out AiTaskType parsed))
+        {
+            task = parsed;
+            return true;
+        }
+
+        if (Enum.TryParse(trimmed, ignoreCase: true, out AnalysisType analysisType))
+        {
+            task = AnalysisTaskMapping.ToAiTaskType(analysisType);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The tasks that get their own tier control on a run surface, ordered so the wire payload is stable.
+    /// DELIBERATELY WIDER THAN <see cref="TieredTasks"/>: the two non-allowlisted entries (LineEdit,
+    /// BookReview) are surfaces a user can launch and therefore reasonably asks about, and answering "this one
+    /// always runs fast, here is why" is the honest answer. It is not an invitation to route them - the
+    /// allowlist above is still the only thing that decides that, and the write path rejects an attempt to put
+    /// one of them on thinking.
+    /// </summary>
+    public static readonly IReadOnlyList<AiTaskType> UserFacingTasks = new[]
+    {
+        AiTaskType.BookReview,
+        AiTaskType.LineEdit,
+        AiTaskType.LinguisticAnalysis,
+        AiTaskType.Proofread
+    };
+
+    // ── Processing location: REMOVED (tier-ux-rework fixes be-c03) ────────────────────────────────────────
+    //
+    // c2 added a "local" | "cloud" token here and a per-task ProcessingLocation field on the tier DTO, on the
+    // stated grounds that the consent copy could not be written without it. No client ever read it: the copy
+    // is a hardcoded constant, and the token could not have grounded it anyway - it described the task's
+    // CURRENT effective tier, which at the moment a consent prompt opens is always FAST, while consent is a
+    // question about the THINKING route the user is about to move to. "Local" also meant local to the API
+    // HOST, not to the author's machine, so in a hosted deployment it did not answer the sentence's question
+    // at all. Do not re-add this shape. A consent prompt that needs a routing fact needs the location of the
+    // TARGET tier's route, relative to the USER - see the be-c03 findings in the tier-ux-rework fixes plan.
 }

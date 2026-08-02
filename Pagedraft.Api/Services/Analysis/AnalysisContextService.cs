@@ -239,7 +239,12 @@ public class AnalysisContextService : IAnalysisContextService
         // which is the freshness gate working - and threading it would mean widening BuildContextAsync, which
         // p3-3 deferred deliberately. What is NOT bounded, and is what this parameter exists for, is the
         // multi-chapter build above.
-        var effectiveTier = tier ?? await BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+        // tier-ux-rework c1: the task asked about is LinguisticAnalysis, because the model this gate compares
+        // BuiltWithModel against is the LinguisticAnalysis one (ActiveLinguisticModelFor, just below). Asking
+        // about any other task would gate these profiles on a tier that never built them - and a per-task flip
+        // on, say, Proofread would then invalidate every chapter profile for nothing.
+        var effectiveTier = tier
+            ?? await BookAiTierResolver.ResolveAsync(_db, bookId, AiTaskType.LinguisticAnalysis, _logger, ct);
 
         // The active LinguisticAnalysis model the deviations would be compared against (config-resolved,
         // same resolution AiRouter uses, at THIS BOOK's tier). A profile built under a DIFFERENT model must
@@ -417,7 +422,10 @@ public class AnalysisContextService : IAnalysisContextService
             // flip drops every row that build just wrote and returns null - no exception, no log, and the
             // caller's baseline is simply never persisted. Only a caller with no tier of its own (the
             // inline Chapter-scope read) falls through to the database read.
-            var effectiveTier = tier ?? await BookAiTierResolver.ResolveAsync(_db, bookId, _logger, ct);
+            // tier-ux-rework c1: LinguisticAnalysis for the same reason as the builder above - this
+            // aggregator's include/exclude test is the LinguisticAnalysis active model.
+            var effectiveTier = tier
+                ?? await BookAiTierResolver.ResolveAsync(_db, bookId, AiTaskType.LinguisticAnalysis, _logger, ct);
             var activeModel = ActiveLinguisticModelFor(effectiveTier);
 
             // 1. Read the persisted profile rows for (bookId, lang) WITH the fields needed to judge
