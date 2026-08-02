@@ -12,6 +12,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Product guides are runtime content, not documentation, placed here ahead of the guides
+         endpoint and chatbot retrieval corpus planned to read them from disk. .md is not a
+         default Web SDK content item, so an explicit Content include is required. -->
+    <Content Include="Content\guides\**\*.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="DiffPlex" Version="1.9.0" />
     <PackageReference Include="DocumentFormat.OpenXml" Version="3.4.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="1.2.9" />
