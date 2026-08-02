@@ -496,7 +496,17 @@ public class AiTierControllerTests
         Assert.Equal("thinking", dto.Tier);
         Assert.Equal("ready", dto.ThinkingReadiness);
         Assert.False(dto.FallbackActive);
-        Assert.All(dto.Routes, r => Assert.True(r.UsesTier));
+        // c2: the moved routes are no longer on the wire, so "the routes moved" is now asserted through the
+        // per-task facts that replaced them - every allowlisted task resolves thinking, is ready, and is not
+        // falling back. (be-c03 dropped the processingLocation token this also checked; effectiveTier is the
+        // fact that says the route moved, and readiness is the fact that says it can.)
+        foreach (var task in AiTierPolicy.TieredTasks)
+        {
+            var reported = dto.Tasks.Single(t => t.Task == task.ToString());
+            Assert.Equal("thinking", reported.EffectiveTier);
+            Assert.False(reported.FallbackActive);
+            Assert.Equal("ready", reported.ThinkingReadiness);
+        }
         Assert.Equal("thinking", (await db.Books.FindAsync(bookId))!.AiTier);
     }
 
@@ -585,8 +595,16 @@ public class AiTierControllerTests
         Assert.Equal("thinking", dto.Tier);
         Assert.Equal("routeNotConfigured", dto.ThinkingReadiness);
         Assert.True(dto.FallbackActive);
-        Assert.All(dto.Routes, r => Assert.False(r.UsesTier));
-        Assert.All(dto.Routes, r => Assert.Equal(Local, r.Provider));
+        // c2: "the routes name the local models" is now the de-identified statement "every allowlisted task
+        // is visibly falling back and none of them is actually running thinking". The model NAMES are
+        // deliberately gone from the payload (AiTierDtoDeidentificationTests pins their absence); what the
+        // user needs - that the stored tier is not what is running - survives.
+        foreach (var task in AiTierPolicy.TieredTasks)
+        {
+            var reported = dto.Tasks.Single(t => t.Task == task.ToString());
+            Assert.True(reported.FallbackActive);
+            Assert.Equal("fast", reported.EffectiveTier);
+        }
     }
 
     /// <summary>A missing book is a 404 on both verbs rather than a default-tier answer.</summary>

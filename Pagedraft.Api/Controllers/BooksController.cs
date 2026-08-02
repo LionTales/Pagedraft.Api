@@ -94,32 +94,46 @@ public class BooksController : ControllerBase
     /// <summary>
     /// GET the book's model tier plus everything needed to describe it honestly (model-tier-fast-thinking
     /// plan, p3-4): the stored tier, whether the thinking tier is usable on this deployment at all, whether
-    /// the book is currently FALLING BACK (stored "thinking" but running local), and the per-task route that
-    /// will actually run.
+    /// the book is currently FALLING BACK (stored "thinking" but running local), and per user-facing task the
+    /// stored/effective tier, where its text is processed, and why "thinking" is unavailable if it is.
     ///
-    /// The routes come from <see cref="Services.Ai.LinguisticModelResolver"/>, the same function
-    /// <see cref="Services.Ai.AiRouter"/> resolves through, so "the model the UI said would run" and "the
-    /// model that ran" are one computation rather than two that agree today.
+    /// The answers still come from <see cref="Services.Ai.LinguisticModelResolver"/>, the same function
+    /// <see cref="Services.Ai.AiRouter"/> resolves through, so "the tier the UI said would run" and "the tier
+    /// that ran" are one computation rather than two that agree today. What CHANGED in tier-ux-rework c2 is
+    /// what survives onto the wire: the resolved (provider, model) is reduced to a local/cloud token inside
+    /// <see cref="Services.Ai.AiTierStatusService"/> and NO field on the response names a provider, a model or
+    /// a version. That is an IP boundary, not a cosmetic one - see <see cref="BookAiTierDto"/>.
     /// </summary>
     [HttpGet("{bookId:guid}/ai-tier")]
     public async Task<ActionResult<BookAiTierDto>> GetAiTier(Guid bookId, CancellationToken ct)
     {
         var book = await _db.Books.AsNoTracking().FirstOrDefaultAsync(b => b.Id == bookId, ct);
         if (book == null) return NotFound();
-        return Ok(BuildAiTierDto(book));
+        return Ok(await BuildAiTierDtoAsync(book, ct));
     }
 
     /// <summary>
-    /// PUT the book's model tier. Opt-in only: choosing "thinking" means this unpublished manuscript's text
-    /// is sent to a third-party provider for the two allowlisted tasks.
+    /// PUT a model tier. Opt-in only: choosing "thinking" means this unpublished manuscript's text is sent to
+    /// a third-party provider for the allowlisted tasks.
     ///
-    /// TWO REJECTIONS, both deliberate:
-    ///   • an unrecognised token is a 400, NOT a defensive parse to "fast". <c>AiTierPolicy.Parse</c> is
+    /// SCOPE (tier-ux-rework c1). With <c>task</c> set, this writes THAT task's override. With <c>task</c>
+    /// absent it writes the BOOK DEFAULT, which is a seed for tasks that have not been decided and therefore
+    /// leaves existing per-task overrides ALONE - clearing them is <see cref="ClearAiTierTask"/>, an explicit
+    /// verb. The alternative (a default write that wipes overrides) makes an unrelated control silently
+    /// discard a choice the user made deliberately, with no undo.
+    ///
+    /// THREE REJECTIONS, all deliberate:
+    ///   • an unrecognised tier token is a 400, NOT a defensive parse to "fast". <c>AiTierPolicy.Parse</c> is
     ///     fail-safe for READS (a legacy row must not throw), but silently storing "fast" because a caller
     ///     typed "thinkng" would make the UI and the database disagree with no signal anywhere.
-    ///   • "thinking" when the tier is not usable on this deployment is a 409 carrying the readiness reason.
-    ///     Accepting it would let a book advertise a tier that provably cannot route, which is the exact
-    ///     silent-lie this todo exists to close. Switching BACK to "fast" is always allowed.
+    ///   • an unrecognised TASK token is a 400 for the same reason: storing it as the book default because
+    ///     the name did not parse would move a setting the caller never asked to move.
+    ///   • "thinking" when the tier is not usable is a 409 carrying the readiness reason, evaluated PER TASK
+    ///     when a task is named and deployment-wide otherwise. Accepting it would let a book advertise a tier
+    ///     that provably cannot route, which is the exact silent-lie this endpoint exists to close - and per
+    ///     task it is also what refuses "thinking" for a non-allowlisted task and for an English book's
+    ///     Proofread (the p2-4 NO-GO, enforced by the language rung outranking the tier rung). Switching BACK
+    ///     to "fast" is always allowed.
     /// </summary>
     [HttpPut("{bookId:guid}/ai-tier")]
     public async Task<ActionResult<BookAiTierDto>> UpdateAiTier(
@@ -137,33 +151,158 @@ public class BooksController : ControllerBase
         else
             return BadRequest(new { error = "unrecognizedTier", allowed = new[] { AiTierPolicy.FastStoredValue, AiTierPolicy.ThinkingStoredValue } });
 
-        if (tier == AiTier.Thinking)
+        AiTaskType? task = null;
+        if (!string.IsNullOrWhiteSpace(req!.Task))
         {
-            var readiness = _aiTierStatus.EvaluateThinkingReadiness(book.Language);
-            if (readiness != AiTierReadiness.Ready)
-                return Conflict(new { error = "thinkingTierUnavailable", reason = ToCamelCase(readiness.ToString()) });
+            if (!AiTierPolicy.TryParseTaskKey(req.Task, out var parsedTask))
+                return BadRequest(new
+                {
+                    error = "unrecognizedTask",
+                    allowed = AiTierPolicy.UserFacingTasks.Select(t => t.ToString()).ToArray()
+                });
+            task = parsedTask;
         }
 
-        book.AiTier = AiTierPolicy.ToStoredValue(tier);
-        book.UpdatedAt = DateTimeOffset.UtcNow;
+        if (tier == AiTier.Thinking)
+        {
+            var readiness = task is null
+                ? _aiTierStatus.EvaluateThinkingReadiness(book.Language)
+                : _aiTierStatus.EvaluateThinkingReadiness(book.Language, task.Value);
+            if (readiness != AiTierReadiness.Ready)
+                return Conflict(new
+                {
+                    error = "thinkingTierUnavailable",
+                    reason = ToCamelCase(readiness.ToString()),
+                    task = task?.ToString()
+                });
+        }
+
+        if (task is null)
+        {
+            book.AiTier = AiTierPolicy.ToStoredValue(tier);
+            book.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        else
+        {
+            var taskKey = AiTierPolicy.TaskKeyFor(task.Value);
+            var existing = await _db.BookAiTaskTiers
+                .FirstOrDefaultAsync(t => t.BookId == bookId && t.TaskKey == taskKey, ct);
+            if (existing == null)
+                _db.BookAiTaskTiers.Add(new BookAiTaskTier
+                {
+                    BookId = bookId,
+                    TaskKey = taskKey,
+                    Tier = AiTierPolicy.ToStoredValue(tier)
+                });
+            else
+                existing.Tier = AiTierPolicy.ToStoredValue(tier);
+        }
+
         await _db.SaveChangesAsync(ct);
 
         _logger.LogInformation(
-            "Book {BookId} model tier set to {Tier}. Thinking means chapter text for the allowlisted tasks leaves this machine.",
-            bookId, book.AiTier);
+            "Book {BookId} model tier for {Task} set to {Tier}. Thinking means chapter text for the allowlisted " +
+            "tasks leaves this machine.",
+            bookId, task?.ToString() ?? "(book default)", AiTierPolicy.ToStoredValue(tier));
 
-        return Ok(BuildAiTierDto(book));
+        return Ok(await BuildAiTierDtoAsync(book, ct));
     }
 
-    private BookAiTierDto BuildAiTierDto(Book book)
+    /// <summary>
+    /// DELETE one task's tier override, so the task INHERITS the book default again (tier-ux-rework c1).
+    ///
+    /// It exists as its own verb because the PUT deliberately does not clear overrides: "set the default" and
+    /// "forget what I chose for this task" are different intents, and collapsing them into one call means the
+    /// user cannot express the first without risking the second. Idempotent - clearing an override that is not
+    /// there is a 200 with the unchanged state, not a 404, because the caller's desired end state holds.
+    /// </summary>
+    [HttpDelete("{bookId:guid}/ai-tier/{task}")]
+    public async Task<ActionResult<BookAiTierDto>> ClearAiTierTask(Guid bookId, string task, CancellationToken ct)
     {
-        var status = _aiTierStatus.Describe(AiTierPolicy.Parse(book.AiTier), book.Language);
+        var book = await _db.Books.FindAsync(new object[] { bookId }, ct);
+        if (book == null) return NotFound();
+
+        if (!AiTierPolicy.TryParseTaskKey(task, out var parsedTask))
+            return BadRequest(new
+            {
+                error = "unrecognizedTask",
+                allowed = AiTierPolicy.UserFacingTasks.Select(t => t.ToString()).ToArray()
+            });
+
+        var taskKey = AiTierPolicy.TaskKeyFor(parsedTask);
+        var existing = await _db.BookAiTaskTiers
+            .FirstOrDefaultAsync(t => t.BookId == bookId && t.TaskKey == taskKey, ct);
+        if (existing != null)
+        {
+            _db.BookAiTaskTiers.Remove(existing);
+            await _db.SaveChangesAsync(ct);
+            _logger.LogInformation(
+                "Book {BookId} model tier override for {Task} cleared; the task follows the book default again.",
+                bookId, taskKey);
+        }
+
+        return Ok(await BuildAiTierDtoAsync(book, ct));
+    }
+
+    /// <summary>
+    /// Builds the tier read model. The per-task tiers come from <see cref="BookAiTierResolver"/> - the SAME
+    /// lookup the analysis run uses - rather than from a second copy of the precedence here, so "the tier the
+    /// UI showed" and "the tier that ran" are one computation. That is the same structural argument as
+    /// <see cref="AiTierStatusService"/> resolving routes through <see cref="LinguisticModelResolver"/>.
+    ///
+    /// WHAT THE RESOLVER ANSWERS IS THE STORAGE QUESTION (be-c01) - the override, else the book default - and
+    /// it knows nothing about task eligibility or the language rung. Turning that into the tier that will
+    /// actually route is <see cref="AiTierStatusService.DescribeTask"/>'s job, which is why every per-task
+    /// value on the wire comes back out of that call rather than out of this dictionary.
+    /// </summary>
+    private async Task<BookAiTierDto> BuildAiTierDtoAsync(Book book, CancellationToken ct)
+    {
+        var resolvedByTask = new Dictionary<AiTaskType, AiTier>();
+        foreach (var task in AiTierPolicy.UserFacingTasks)
+            resolvedByTask[task] = await BookAiTierResolver.ResolveAsync(_db, book.Id, task, _logger, ct);
+
+        var bookDefault = AiTierPolicy.Parse(book.AiTier);
+        var status = _aiTierStatus.Describe(
+            t => resolvedByTask.TryGetValue(t, out var resolved) ? resolved : bookDefault,
+            bookDefault,
+            book.Language);
+
+        var storedByTask = await _db.BookAiTaskTiers
+            .AsNoTracking()
+            .Where(t => t.BookId == book.Id)
+            .ToDictionaryAsync(t => t.TaskKey, t => t.Tier, StringComparer.Ordinal, ct);
+
+        var tasks = AiTierPolicy.UserFacingTasks.Select(task =>
+        {
+            var key = AiTierPolicy.TaskKeyFor(task);
+            // A stored row is reported through the SAME defensive parse as the resolver, so the wire value is
+            // always a clean token and a client never has to own a second copy of that parse. An absent row
+            // stays null, which is the "inherits the default" state and is NOT the same as "fast".
+            AiTier? stored = storedByTask.TryGetValue(key, out var raw) ? AiTierPolicy.Parse(raw) : null;
+            // The per-task read model arrives already DE-IDENTIFIED (tier-ux-rework c2, total since be-c03):
+            // the service resolves the real route and hands back only judgements about it, so this method
+            // never holds a provider, a model or a topology token it could project onto the wire.
+            //
+            // It also arrives CLAMPED (be-c01): what goes in is the resolver's storage answer, what comes back
+            // on EffectiveTier is the tier that will actually route. The stored override goes in beside it
+            // because the service needs it to tell an ignored per-task opt-in apart from a book default that
+            // never applied to this task - see AiTierTaskStatus.FallbackActive.
+            var taskStatus = _aiTierStatus.DescribeTask(task, resolvedByTask[task], stored, book.Language);
+            return new BookAiTierTaskDto(
+                key,
+                stored is { } storedValue ? AiTierPolicy.ToStoredValue(storedValue) : null,
+                AiTierPolicy.ToStoredValue(taskStatus.EffectiveTier),
+                ToCamelCase(taskStatus.ThinkingReadiness.ToString()),
+                taskStatus.FallbackActive);
+        }).ToList();
+
         return new BookAiTierDto(
             book.Id,
             AiTierPolicy.ToStoredValue(status.Tier),
             ToCamelCase(status.ThinkingReadiness.ToString()),
             status.FallbackActive,
-            status.Routes.Select(r => new BookAiTierRouteDto(r.Task, r.Provider, r.Model, r.UsesTier)).ToList());
+            _aiTierStatus.ConsentRequired,
+            tasks);
     }
 
     private static string ToCamelCase(string value) =>
@@ -1103,6 +1242,14 @@ public class BooksController : ControllerBase
     {
         var book = await _db.Books.FindAsync(new object[] { bookId }, ct);
         if (book == null) return NotFound();
+
+        // Per-task tier overrides. The FK is Cascade (Book is this table's only relationship, so there is no
+        // multiple-cascade-paths problem), but removing them explicitly keeps this method the one readable
+        // list of everything a book owns, and keeps the in-memory provider - which only cascades what it has
+        // tracked - behaving like SQL Server in the tests.
+        var taskTiers = await _db.BookAiTaskTiers.Where(t => t.BookId == bookId).ToListAsync(ct);
+        if (taskTiers.Count > 0)
+            _db.BookAiTaskTiers.RemoveRange(taskTiers);
 
         // Explicitly remove dependent ChunkSummaries to satisfy the Restrict FK on BookId.
         var chunkSummaries = await _db.ChunkSummaries.Where(cs => cs.BookId == bookId).ToListAsync(ct);

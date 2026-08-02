@@ -94,6 +94,26 @@ public static class LinguisticModelResolver
     }
 
     /// <summary>
+    /// TRUE when rung 1 (<c>{task}_{lang}</c>) resolves for this request, i.e. the language rung WINS and
+    /// therefore suppresses the tier rung below it (tier-ux-rework c2).
+    ///
+    /// It exists so the surface can tell the two shapes of "thinking will not move this task" apart. Both
+    /// look identical from the outside - the thinking route equals the fast route - but they are different
+    /// sentences to a user and have different fixes:
+    ///   • this predicate TRUE  = "English proofreading always stays fast", a permanent design property
+    ///     (layer E3, the p2-4 <c>Proofread_en</c> NO-GO), nothing to configure;
+    ///   • this predicate FALSE = the <c>{task}_thinking</c> key is absent or half-configured, the documented
+    ///     kill-switch, which an operator CAN change.
+    /// Answering that from the same resolver that owns the precedence is the point: a second copy of "does
+    /// Proofread_en exist" living in the status service would drift the moment a rung moved.
+    /// </summary>
+    public static bool LanguageRungWins(AiOptions opt, AiTaskType task, string? language)
+    {
+        var key = LanguageKeyFor(task, language);
+        return key != null && TryFeature(opt, key, out _);
+    }
+
+    /// <summary>
     /// The language-keyed FeatureModels key for a request, or null when there is no language rung. Mirrors
     /// the condition <see cref="AiRouter.ResolveSelection"/> applied inline before p3-2: trim the tag, match
     /// an <c>en</c> PREFIX case-insensitively (so <c>en-US</c> counts), and only for the two tasks that ship

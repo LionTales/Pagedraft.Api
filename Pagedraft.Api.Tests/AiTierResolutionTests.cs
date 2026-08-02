@@ -669,6 +669,63 @@ public class AiTierConfigParityTests
         // And a brand-new Book entity is on the local tier by construction, not merely by config.
         Assert.Equal(AiTier.Fast, AiTierPolicy.Parse(new Book().AiTier));
     }
+
+    /// <summary>
+    /// THE CONSENT SENTENCE, PINNED BY CONSTRUCTION (be-f06). The client's tier-toggle consent copy
+    /// (<c>pagedraft-client/src/app/shared/tier-toggle/tier-toggle.component.ts</c>, the
+    /// <c>consentBody</c> label) tells the user in as many words that the thinking tier "processes the
+    /// chapter text at a third-party provider ... the text leaves this machine". be-c03 removed the
+    /// <c>processingLocation</c> wire field the client used to read, together with
+    /// <c>AiTierPolicy.ProcessingLocationFor</c> and its <c>LocalProviders</c> set - so nothing left in the
+    /// contract stops a future config edit from routing a <c>{task}_thinking</c> key back to a LOCAL
+    /// provider. Every other check in this class pins the key SHAPES and the task allowlist, never the
+    /// PROVIDER, so <c>"Proofread_thinking": { "Provider": "Ollama", ... }</c> would pass all of them while
+    /// making the consent sentence a lie at the exact moment it asks for informed consent. This test is the
+    /// only thing standing between that edit and a silent, false consent screen.
+    /// </summary>
+    [Fact]
+    public void EveryShippedThinkingTierEntry_RoutesToANonLocalProvider_SoTheConsentCopyStaysTrue()
+    {
+        // The only locally-hosted provider today. Deliberately NOT AiTierPolicy.ProcessingLocationFor / a
+        // resurrected LocalProviders set - be-c03 removed both on purpose. This set exists only to name the
+        // providers the tier-toggle consentBody sentence above is making a factual claim about; it is not a
+        // general-purpose "is this provider local" helper.
+        var localProviders = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Ollama" };
+
+        var features = ShippedFeatureModels();
+
+        // Enumerated from the policy, never hand-written, so a newly tiered task is covered automatically.
+        var thinkingKeys = AiTierPolicy.TieredTasks
+            .Select(task => AiTierPolicy.TierKeyFor(task, AiTier.Thinking))
+            .Where(key => key is not null)
+            .Select(key => key!)
+            .Where(features.ContainsKey)
+            .ToList();
+
+        Assert.True(thinkingKeys.Count > 0,
+            "No configured {task}_thinking key was found by enumerating AiTierPolicy.TieredTasks and " +
+            "AiTierPolicy.TierKeyFor. If this ever came back empty (keys renamed, allowlist emptied, nothing " +
+            "shipped yet) the provider check below would pass VACUOUSLY and stop protecting the consent " +
+            "sentence without anyone noticing - so this must be non-empty before that check means anything.");
+
+        var offenders = thinkingKeys
+            .Select(key => (key, provider: features[key].Provider))
+            // The null/blank guard is not defensive noise: a half-configured key (Model but no Provider) falls
+            // through the shared both-non-empty predicate, so the tier never moves for that task, readiness
+            // reads routeNotConfigured and the consent prompt this test protects is never rendered for it.
+            // Without the guard that config would make this test throw out of HashSet.Contains(null) instead
+            // of reporting either verdict (final-r04).
+            .Where(x => !string.IsNullOrWhiteSpace(x.provider) && localProviders.Contains(x.provider))
+            .ToList();
+
+        Assert.True(offenders.Count == 0,
+            "Ai:FeatureModels carries a thinking-tier entry routed to a LOCALLY-HOSTED provider: [" +
+            string.Join(", ", offenders.Select(o => $"{o.key} -> {o.provider}")) + "]. The client's " +
+            "tier-toggle consent copy (pagedraft-client/src/app/shared/tier-toggle/tier-toggle.component.ts, " +
+            "the consentBody label) tells the user the thinking tier sends chapter text to a third-party " +
+            "provider and that the text leaves this machine. Routing a thinking-tier key to a local provider " +
+            "makes that sentence false at the exact moment it asks for informed consent.");
+    }
 }
 
 /// <summary>
