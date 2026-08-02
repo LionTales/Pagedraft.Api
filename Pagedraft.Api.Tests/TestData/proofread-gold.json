@@ -740,5 +740,546 @@
       }
     ],
     "_note": "Provenance: 2026-07-03 real-chapter proofread overreach (pq-b02). Guards a verb-VOICE flip: 'שהושקעה' is passive (הופעל, agreeing with the singular feminine 'מחשבה' — thought that WAS invested in them) and is grammatically CORRECT in context. The model must NOT flip it to the active 'שהושקיעה' (that SHE invested), which changes the meaning and the subject. The sentence is clean, so shouldHaveNoChanges drives the fp-rate; forbiddenCorrections שהושקעה->שהושקיעה names the exact passive->active rewrite for the overreach column."
+  },
+
+  {
+    "id": "agree-name-01",
+    "input": "סבסטיאן השאיר פתק: ״אני חוזר בשמונה״. נעמי קרא אותו פעמיים ולא הבינה מדוע דווקא בשמונה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "סבסטיאן", "gender": "male" },
+      { "name": "נעמי", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "קרא",
+        "suggested": "קראה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "סבסטיאן השאיר פתק: ״אני חוזר בשמונה״. נעמי קראה אותו פעמיים ולא הבינה מדוע דווקא בשמונה.",
+    "forbiddenCorrections": [
+      {
+        "original": "קרא",
+        "suggested": "קורא",
+        "category": "agreement-near-miss"
+      },
+      {
+        "original": "השאיר",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "THE TRIGGERING LIVE FAILURE (2026-08-01, docs/CHARACTER_CONTEXT_ADHERENCE_GAPS.md), here as one ordinary member of its class. Hebrew is USER-SOURCED verbatim from the live proofread fixture (SuggestionDiffServiceTests.ComputeProofreadSuggestions_LiveHebrewProofreadFixture...), with the straight quotes normalized to Hebrew ״ so the entry does not also invite the norm-3 punctuation correction. AXES: past-tense verb / mid-sentence (second clause) / female subject with a masculine verb / attribute source = name-evident (נעמי reads female to any Hebrew speaker, and the register confirms it). ALSO the two-character single-error case: סבסטיאן's השאיר is CORRECT masculine and must be left alone (forbidden, empty suggested = must not touch), and הבינה later in the same sentence is already correct feminine. The near-miss forbidden קרא->קורא is a present-tense edit at the RIGHT span that leaves the gender error in place: CorrectionsMatch credits any edit at that span as a recall hit, so this makes a right-span/wrong-form 'fix' visible in the overreach column instead of passing silently as recall."
+  },
+  {
+    "id": "agree-name-02",
+    "input": "שירה התחיל להראות סימני לחץ.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "שירה", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "התחיל",
+        "suggested": "התחילה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "שירה התחילה להראות סימני לחץ.",
+    "forbiddenCorrections": [
+      {
+        "original": "התחיל",
+        "suggested": "מתחיל",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / sentence-initial subject / female subject with a masculine verb / name-evident. Base sentence is the attested clean-ms-26 ('שירה התחילה להראות סימני לחץ.') with the verb de-feminized, i.e. the same injection method as the inj-ms-* family. Near-miss forbidden התחיל->מתחיל = present tense, gender still masculine."
+  },
+  {
+    "id": "agree-name-03",
+    "input": "״חיפשתי את המפתחות,״ ענה נעמי.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "נעמי", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "ענה",
+        "suggested": "ענתה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "״חיפשתי את המפתחות,״ ענתה נעמי.",
+    "forbiddenCorrections": [
+      {
+        "original": "ענה",
+        "suggested": "עונה",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / DIALOGUE ATTRIBUTION (verb-subject inversion after the quote) / female subject with a masculine verb / name-evident. The quoted line is user-sourced (live proofread fixture: \"'חיפשתי את המפתחות,' ענתה.\"); the named attribution is the class variation. Hebrew ״ quotes so no punctuation correction is invited. Near-miss forbidden ענה->עונה = present tense, gender still masculine."
+  },
+  {
+    "id": "agree-name-04",
+    "input": "מתן נראה עייפה אחרי האימון.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "מתן", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "עייפה",
+        "suggested": "עייף",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "מתן נראה עייף אחרי האימון.",
+    "forbiddenCorrections": [
+      {
+        "original": "עייפה",
+        "suggested": "מותשת",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: ADJECTIVE agreement / sentence-initial / THE SYMMETRIC ERROR (male subject with a feminine adjective) / name-evident. The verb נראה is already correct masculine, so exactly one span is wrong. Near-miss forbidden עייפה->מותשת = a synonym swap at the right span that stays feminine, i.e. an edit that does not fix the agreement."
+  },
+  {
+    "id": "agree-name-05",
+    "input": "שירה נכנסה לחדר וחייכתי אליו חיוך מעודד.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "שירה", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "אליו",
+        "suggested": "אליה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "שירה נכנסה לחדר וחייכתי אליה חיוך מעודד.",
+    "forbiddenCorrections": [
+      {
+        "original": "אליו",
+        "suggested": "עליו",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: PRONOUN agreement (prepositional pronoun) / mid-sentence, second clause / female referent with a masculine pronoun / name-evident. The tail 'וחייכתי אליה חיוך מעודד' is attested (clean-ms-22); שירה is the only available antecedent, so אליו has no other reading. Near-miss forbidden אליו->עליו = a preposition swap that keeps the masculine suffix."
+  },
+  {
+    "id": "agree-name-06",
+    "input": "נדב חזרה הביתה מאוחר.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "נדב", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "חזרה",
+        "suggested": "חזר",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "נדב חזר הביתה מאוחר.",
+    "forbiddenCorrections": [
+      {
+        "original": "חזרה",
+        "suggested": "חוזרת",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / sentence-initial / THE SYMMETRIC ERROR (male subject with a feminine verb) / name-evident. 'חזרה הביתה' is user-sourced (live fixture: 'בערב חזרה הביתה לבדה.'). Near-miss forbidden חזרה->חוזרת = present tense, gender still feminine."
+  },
+  {
+    "id": "agree-name-07",
+    "input": "שירה נראתה מתוח כל הבוקר.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "שירה", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "מתוח",
+        "suggested": "מתוחה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "שירה נראתה מתוחה כל הבוקר.",
+    "forbiddenCorrections": [
+      {
+        "original": "מתוח",
+        "suggested": "לחוץ",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: ADJECTIVE agreement / sentence-initial / female subject with a masculine adjective / name-evident. Both halves are attested vocabulary (clean-ms-50 'טל נראתה קצת מודאגת.', clean-ms-62 'הוא נראה מתוח.'); the verb נראתה is already correct feminine so exactly one span is wrong. Near-miss forbidden מתוח->לחוץ = a masculine synonym, i.e. an edit at the right span that does not fix the agreement."
+  },
+
+  {
+    "id": "agree-register-01",
+    "input": "התחלתי להבין מדוע ביקש רוני שאביא את נדב.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "female" },
+      { "name": "נדב", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "ביקש",
+        "suggested": "ביקשה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "התחלתי להבין מדוע ביקשה רוני שאביא את נדב.",
+    "forbiddenCorrections": [
+      {
+        "original": "ביקש",
+        "suggested": "מבקש",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / MID-SENTENCE with verb-subject inversion / female subject with a masculine verb / attribute source = REGISTER-ONLY. רוני is a unisex Hebrew name, and nothing else in the sentence marks gender, so the ONLY way to know ביקש is wrong is the [CHARACTER_REGISTER] block. Base sentence is attested verbatim (clean-ms-30) with the verb de-feminized. Near-miss forbidden ביקש->מבקש = present tense, gender still masculine."
+  },
+  {
+    "id": "agree-register-02",
+    "input": "רוני לא הגיב.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "הגיב",
+        "suggested": "הגיבה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "רוני לא הגיבה.",
+    "forbiddenCorrections": [
+      {
+        "original": "הגיב",
+        "suggested": "מגיב",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / sentence-initial / female subject with a masculine verb / REGISTER-ONLY. The minimal form of the register-only probe: the sentence is internally consistent masculine (clean-ms-51 with the verb de-feminized), so without the register there is no error to see at all. Near-miss forbidden הגיב->מגיב = present tense, gender still masculine."
+  },
+  {
+    "id": "agree-register-03",
+    "input": "רוני קם לבדו והתקדם לכיוון היציאה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "קם",
+        "suggested": "קמה",
+        "category": "grammar"
+      },
+      {
+        "original": "לבדו",
+        "suggested": "לבדה",
+        "category": "grammar"
+      },
+      {
+        "original": "התקדם",
+        "suggested": "התקדמה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "רוני קמה לבדה והתקדמה לכיוון היציאה.",
+    "forbiddenCorrections": [
+      {
+        "original": "התקדם",
+        "suggested": "מתקדם",
+        "category": "agreement-near-miss"
+      },
+      {
+        "original": "קם",
+        "suggested": "נעמד",
+        "category": "agreement-near-miss"
+      },
+      {
+        "original": "לבדו",
+        "suggested": "לבדי",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb + pronominal לבדו / sentence-initial / female subject / REGISTER-ONLY, and the STRONGEST form of it: three agreement spans, all internally consistent masculine, so the whole sentence is flawless Hebrew unless the register is read. Base is attested verbatim in the feminine (clean-ms-34) — this is that sentence rendered masculine. The 3 expected corrections make this the heaviest single contributor to the register-only recall denominator; report per-span if the aggregate looks odd. NEAR-MISS GUARD ON ALL THREE SPANS (one per expected fix, as TestData/README.md's near-miss rule requires and AgreementRecallEntries_AreWellFormed_AndCarryARegister now enforces per expected correction): התקדם->מתקדם is the present tense with the gender still masculine; לבדו->לבדי is a WRONG-REFERENT pronominal suffix (first person singular), which edits the span without repairing רוני's agreement; קם->נעמד is a same-gender masculine SYNONYM rather than the present tense, because the present-tense masculine of קם is קם itself, and a forbidden whose suggested equals the original would forbid a no-op and measure nothing (this is the shape agree-name-07 מתוח->לחוץ and agree-register-04 מודאגת->מוטרדת already use). BOTH new word forms are LIFTED from the cleared eval manuscript rather than self-translated (נעמד appears ~47 times, e.g. 'המורה נעמד בין השולחנות שלנו'; לבדי appears in 'החלטתי לנצל את הזמן הפנוי כדי להתאמן לבדי'); their USE as near-miss guards on this sentence is authored and is on the pending native-speaker review list."
+  },
+  {
+    "id": "agree-register-04",
+    "input": "טל נראה קצת מודאגת.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "טל", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "מודאגת",
+        "suggested": "מודאג",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "טל נראה קצת מודאג.",
+    "forbiddenCorrections": [
+      {
+        "original": "מודאגת",
+        "suggested": "מוטרדת",
+        "category": "agreement-near-miss"
+      },
+      {
+        "original": "נראה",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "AXES: ADJECTIVE agreement / sentence-initial / THE SYMMETRIC ERROR (male subject with a feminine adjective) / register-DIRECTED. Note the honest sub-distinction: the mismatch (נראה masc + מודאגת fem) IS visible without the register, but WHICH SIDE to repair is not — a proofreader that guesses may feminize the verb instead, which the empty-suggested forbidden on נראה scores as overreach. טל appears as FEMALE in agree-register-06; that is deliberate, not an inconsistency: a class that is register-driven rather than name-driven must survive the same unisex name carrying either gender. Base is clean-ms-50 ('טל נראתה קצת מודאגת.') re-gendered."
+  },
+  {
+    "id": "agree-register-05",
+    "input": "אור יצאה מהכיתה לפני הצלצול.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "אור", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "יצאה",
+        "suggested": "יצא",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "אור יצא מהכיתה לפני הצלצול.",
+    "forbiddenCorrections": [
+      {
+        "original": "יצאה",
+        "suggested": "יוצאת",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / sentence-initial / THE SYMMETRIC ERROR (male subject with a feminine verb) / REGISTER-ONLY. אור is unisex and the sentence is internally consistent feminine, so only the register makes יצאה wrong. In the source manuscript אור is female (clean-ms-11/49) — declaring him male here is the point: the entry measures whether the register beats the model's name prior, not whether the model remembers the book. Near-miss forbidden יצאה->יוצאת = present tense, gender still feminine."
+  },
+  {
+    "id": "agree-register-06",
+    "input": "״אני כבר בדרך,״ אמר טל.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "טל", "gender": "female" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "אמר",
+        "suggested": "אמרה",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "״אני כבר בדרך,״ אמרה טל.",
+    "forbiddenCorrections": [
+      {
+        "original": "אמר",
+        "suggested": "אומר",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: past-tense verb / DIALOGUE ATTRIBUTION / female subject with a masculine verb / REGISTER-ONLY. Same unisex name as agree-register-04 with the opposite gender, deliberately (see that entry's note). Near-miss forbidden אמר->אומר = present tense, gender still masculine."
+  },
+  {
+    "id": "agree-register-07",
+    "input": "רוני איחר ולכן חיכינו לה בכניסה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "חיכינו לה",
+        "suggested": "חיכינו לו",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "רוני איחר ולכן חיכינו לו בכניסה.",
+    "forbiddenCorrections": [
+      {
+        "original": "חיכינו לה",
+        "suggested": "חיכינו להם",
+        "category": "agreement-near-miss"
+      }
+    ],
+    "_note": "AXES: PRONOUN agreement (dative) / mid-sentence, second clause / THE SYMMETRIC ERROR (male referent with a feminine pronoun) / register-DIRECTED. רוני is the only antecedent. Like agree-register-04 the mismatch is internally visible (איחר masc + לה fem) while the direction of repair is not — a model that trusts the name over the register will feminize the verb instead. The gold spans are deliberately MULTI-WORD ('חיכינו לה'): a bare 'לה' would violate the forbidden-span distinctiveness invariant documented on ForbiddenMatch. Near-miss forbidden = a number error that keeps the feminine/plural mismatch."
+  },
+  {
+    "id": "agree-register-08",
+    "input": "רוני נכנסה למטבח ונדב יצאה אחריה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "female" },
+      { "name": "נדב", "gender": "male" }
+    ],
+    "expectedCorrections": [
+      {
+        "original": "יצאה",
+        "suggested": "יצא",
+        "category": "grammar"
+      }
+    ],
+    "expectedCorrectedText": "רוני נכנסה למטבח ונדב יצא אחריה.",
+    "forbiddenCorrections": [
+      {
+        "original": "יצאה",
+        "suggested": "יוצאת",
+        "category": "agreement-near-miss"
+      },
+      {
+        "original": "נכנסה",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "AXES: past-tense verb / mid-sentence, second clause / THE SYMMETRIC ERROR (male subject with a feminine verb) / TWO CHARACTERS, ONLY ONE REFERENT WRONG / register-dependent LEAVE. רוני's נכנסה is correct feminine and is pinned must-not-touch (empty suggested) — and knowing that requires the register, since רוני is unisex. A model that 'harmonizes' the sentence by masculinizing נכנסה too scores an overreach. Near-miss forbidden יצאה->יוצאת = present tense, gender still feminine."
+  },
+
+  {
+    "id": "agree-preserve-01",
+    "input": "נעמי הסתובבה מהר מדי והפילה את הכוס.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "נעמי", "gender": "female" },
+      { "name": "סבסטיאן", "gender": "male" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "הסתובבה",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION: correct feminine agreement immediately adjacent to a register name. Hebrew is USER-SOURCED verbatim from the live proofread fixture. Any correction is a false positive (shouldHaveNoChanges), and the empty-suggested forbidden on הסתובבה names the specific de-feminization so it also lands in the overreach column. This is the control for the whole agreement class: a class that only rewards fixing agreement would be satisfied by a model that rewrites agreement everywhere."
+  },
+  {
+    "id": "agree-preserve-02",
+    "input": "רוני קמה לבדה והתקדמה לכיוון היציאה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "רוני", "gender": "female" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "קמה",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION: correct feminine agreement on a REGISTER-ONLY (unisex) name — the model must not 'fix' רוני toward its masculine prior. Input is byte-identical to clean-ms-34 ON PURPOSE: the pair is an A/B on the same attested clean sentence, one WITHOUT a register (clean-ms-34, short-prompt surface) and one WITH (this, long+short surface), so a false positive that appears only here is attributable to the register/prompt surface rather than to the sentence. It is also the LEAVE counterpart of agree-register-03, which is this same sentence rendered masculine."
+  },
+  {
+    "id": "agree-preserve-03",
+    "input": "אור נשאר בכיתה עד הצלצול.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "אור", "gender": "male" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "נשאר",
+        "suggested": "נשארה",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, counter-prior: correct MASCULINE agreement on a unisex name the register declares male (and whom the source manuscript treats as female). Any feminization is both a false positive and a named overreach. Together with agree-register-05 this pins both directions on the same name: the register decides, the name prior does not."
+  },
+  {
+    "id": "agree-preserve-04",
+    "input": "חיפשתי את טל בכל הקומה ולבסוף מצאתי אותה ליד המזכירות.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "טל", "gender": "female" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "מצאתי אותה",
+        "suggested": "מצאתיה",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, THE OBSERVED REGISTER-SHIFT OVERREACH (docs/CHARACTER_CONTEXT_ADHERENCE_GAPS.md, Issue 2 sub-issue): the live run produced an analytic object construction rewritten to the synthetic suffixed form. 'מצאתי אותה' is correct, ordinary modern Hebrew; 'מצאתיה' is a literary register shift, which is a LineEdit-scope change and must never come out of Proofread. Generalized to 2-3 verbs across agree-preserve-04/05/06 so the guard is on the CONSTRUCTION, not on one verb."
+  },
+  {
+    "id": "agree-preserve-05",
+    "input": "מתן עבר לידי ושמעתי אותו צוחק בדרך לכיתה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "מתן", "gender": "male" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "ושמעתי אותו",
+        "suggested": "ושמעתיו",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, register-shift overreach, second verb and masculine object: 'ושמעתי אותו' must not become 'ושמעתיו'. Tail is attested (clean-ms-14 'שמעתי את מתן צוחק בדרך לכיתה.') with the named object replaced by the analytic pronoun."
+  },
+  {
+    "id": "agree-preserve-06",
+    "input": "סבסטיאן השאיר פתק קצר ונעמי קראה אותו פעמיים.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "סבסטיאן", "gender": "male" },
+      { "name": "נעמי", "gender": "female" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "קראה אותו",
+        "suggested": "קראתו",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, register-shift overreach, third verb — and the LEAVE counterpart of agree-name-01: this is the triggering sentence already CORRECT, so the model has nothing to fix and two ways to overreach (de-feminize קראה, or contract 'קראה אותו' to the synthetic 'קראתו'). Derived from the user-sourced live fixture."
+  },
+  {
+    "id": "agree-preserve-07",
+    "input": "משהו אמר לי שאני הולך להתחרט על זה.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "שירה", "gender": "female" },
+      { "name": "אור", "gender": "female" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "הולך",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, UNNAMED REFERENT / genuinely ambiguous gender: the first-person narrator is not in the register and nothing in the sentence identifies them, so ANY agreement rewrite (הולך->הולכת) is an over-correction, not a fix. The register deliberately lists only female characters, which is exactly the pressure that makes a register-obedient model over-apply. Input is attested verbatim (clean-ms-42), so the pair clean-ms-42 / this entry also isolates the effect of ADDING a register to an already-clean sentence."
+  },
+  {
+    "id": "agree-preserve-08",
+    "input": "״אני לא בטוח שזה רעיון טוב,״ נשמע קול מאחוריי.",
+    "language": "he-IL",
+    "characterRegister": [
+      { "name": "שירה", "gender": "female" },
+      { "name": "טל", "gender": "female" }
+    ],
+    "shouldHaveNoChanges": true,
+    "forbiddenCorrections": [
+      {
+        "original": "בטוח",
+        "suggested": "",
+        "category": "overreach"
+      }
+    ],
+    "_note": "PRESERVATION, UNNAMED REFERENT in DIALOGUE: the speaker is 'קול מאחוריי' — no name, no gender — so בטוח must stand. Second instance of the ambiguity shape (agree-preserve-07 is the narrator, this one a speaker) because a single instance cannot distinguish 'the model is careful' from 'the model happened not to touch that word'. 'מאחוריי' is attested (clean-ms-43)."
   }
 ]

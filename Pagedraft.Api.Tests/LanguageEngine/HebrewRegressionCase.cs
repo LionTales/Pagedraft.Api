@@ -1,6 +1,11 @@
 namespace Pagedraft.Api.Tests.LanguageEngine;
 
-/// <summary>Single Hebrew regression test case. Matches hebrew-regression.json schema.</summary>
+/// <summary>
+/// Single Hebrew regression test case. Matches hebrew-regression.json schema.
+/// See TestData/README.md for which fields the proofread-gold consumers actually read (several of
+/// these are dead for that consumer), the id-prefix classification convention, and the
+/// "how to add a character-agreement case" guidance.
+/// </summary>
 public class HebrewRegressionCase
 {
     public string Id { get; set; } = "";
@@ -27,6 +32,26 @@ public class HebrewRegressionCase
     /// i.e. "this span must NOT be touched at all".
     /// </summary>
     public ProofreadCorrection[]? ForbiddenCorrections { get; set; }
+
+    /// <summary>
+    /// Optional characters to inject as a <c>[CHARACTER_REGISTER]</c> block ahead of the proofread
+    /// instruction, for cases whose expected fix depends on knowing a character's gender (the
+    /// agreement class, ids <c>agree-*</c>). Reuses the production
+    /// <see cref="Pagedraft.Api.Models.CharacterRegisterEntry"/> shape so the block is rendered by the
+    /// PRODUCTION builder (<c>PromptFactory.BuildProofreadChunkPrompt</c>) rather than a look-alike —
+    /// see <c>ProofreadQualityTests.BuildGoldRequest</c>.
+    ///
+    /// OPT-IN, PER CASE: when this is null/empty the harness leaves <c>AiRequest.Instruction</c> unset,
+    /// which is byte-for-byte the pre-2026-08-02 behavior (short pipeline instruction alone). Every gold
+    /// number measured before the agreement class was added therefore remains comparable. Cases that DO
+    /// carry a register are measured on a DIFFERENT (and more production-like) prompt surface:
+    /// <c>[CHARACTER_REGISTER] + ProofreadHe/En + "\n\n" + short pipeline instruction</c>. Do not add a
+    /// register to a pre-existing case without saying so — it silently moves that case's surface.
+    ///
+    /// <c>gender</c> uses the English literals "male" | "female" | "unknown" even for Hebrew books
+    /// (PromptFactory's character-extraction vocabulary).
+    /// </summary>
+    public Pagedraft.Api.Models.CharacterRegisterEntry[]? CharacterRegister { get; set; }
 }
 
 /// <summary>A single correction entry emitted by the proofread engine.</summary>

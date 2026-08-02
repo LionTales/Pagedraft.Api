@@ -27,18 +27,27 @@ namespace Pagedraft.Api.Tests.LanguageEngine;
 /// Runs the REAL proofread path over each gold case in proofread-gold.json and reports
 /// correction precision, recall, and false-positive rate.
 ///
+/// See TestData/README.md for the id-prefix classification convention (no schema Category field)
+/// and, specifically, "How to add a character-agreement case" before adding a new agree-* entry.
+///
 /// PATH CHOICE — PromptFactory + IAiRouter (NOT UnifiedAnalysisService):
 /// UnifiedAnalysisService.RunAsync cannot be cleanly constructed in a unit test — it requires
 /// an AppDbContext, SfdtConversionService, AnalysisProgressTracker and IAnalysisContextService,
 /// and it resolves its input text from a persisted Book/Chapter/Scene target rather than from a
 /// raw string. So this test drives the same underlying machinery directly:
-///   1. Call IAiRouter.CompleteAsync with an AiRequest { TaskType = AiTaskType.Proofread } and NO caller
-///      Instruction. The router itself resolves the proofread system message + instruction via
-///      PromptFactory.GetPrompt(AiTaskType.Proofread, lang) — the exact prompt UnifiedAnalysisService
-///      sends for non-chunked proofread — using the same router/provider call UnifiedAnalysisService
-///      makes. Leaving the caller Instruction empty makes the router resolve that prompt EXACTLY ONCE
-///      (matching production); for Proofread, passing a PromptFactory-built Instruction would make the
-///      router append the proofread prompt to itself. See AiRouter.CompleteAsync.
+///   1. Call IAiRouter.CompleteAsync with an AiRequest built by BuildGoldRequest — see that method for
+///      the two prompt shapes and why they differ per case.
+///
+///      PROMPT-SURFACE SCOPE LIMIT (verified 2026-08-02, correcting what this comment used to claim):
+///      for a case with NO characterRegister the caller Instruction is left empty, so the router sends
+///      the SHORT legacy pipeline instruction (PromptFactory.GetPrompt(Proofread, lang)) ALONE. That is
+///      NOT what any production call site sends: the non-chunked path sends
+///      GetAnalysisPrompt(AnalysisType.Proofread, ...) and the chunked path sends
+///      BuildProofreadChunkPrompt(...), and in BOTH cases AiRouter then APPENDS the short pipeline
+///      instruction, so production always sees [context preamble] + ProofreadHe/En (long) + short.
+///      Numbers measured on register-less cases are therefore a measurement of the short-prompt surface
+///      in isolation. Cases WITH a characterRegister ride the production long+short shape instead, so
+///      the two subsets are not directly comparable to each other — report them separately.
 ///   3. Extract corrections from the model's corrected text using the PRODUCTION
 ///      SuggestionDiffService.ComputeProofreadSuggestions(input, correctedText) — the same diff
 ///      UnifiedAnalysisService.AttachSuggestions uses to turn proofread output into corrections.
@@ -93,7 +102,7 @@ public class ProofreadQualityTests
     // ─── Cost control (cloud runs cost money — keep them small) ──────────────────────────────────────
     // PROOFREAD_BAKEOFF_CASE_IDS: comma-separated gold ids. When set, the bake-off scores ONLY those
     // cases (file order preserved, unknown ids logged + ignored) so a CLOUD sweep runs a small,
-    // representative subset instead of all 90 cases. PROOFREAD_BAKEOFF_MAX_CASES: an additional numeric
+    // representative subset instead of the whole gold file. PROOFREAD_BAKEOFF_MAX_CASES: an additional numeric
     // cap applied AFTER the id filter (0/unset = unlimited). Both apply to the bake-off ONLY; the
     // single-model local Fact still runs the full gold. Subsetting is always logged (no silent caps).
     private const string BakeoffCaseIdsEnvVar = "PROOFREAD_BAKEOFF_CASE_IDS";
@@ -107,11 +116,13 @@ public class ProofreadQualityTests
     private const string DefaultGoldFile = "proofread-gold.json";
 
     // Default bake-off shortlist: models actually pulled on the RTX 4070 laptop (~8 GB VRAM).
-    // hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest (DictaLM-3.0-12B) is the production default (Ai:FeatureModels:Proofread in appsettings).
-    // DictaLM tag is :latest (the locally pulled tag). 24B models are intentionally EXCLUDED
-    // because they won't fit in 8 GB VRAM.
+    // gemma4:12b (see ProofreadModel above) is the production default. DictaLM-3.0-12B
+    // (hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest) is no longer the Proofread model but
+    // is still the LineEdit model, so it stays in the shortlist as a comparator. DictaLM tag is :latest
+    // (the locally pulled tag). 24B models are intentionally EXCLUDED because they won't fit in 8 GB VRAM.
     private static readonly string[] DefaultBakeoffModels =
     {
+        "gemma4:12b",
         "qwen3.5:9b",
         "qwen3.5:4b",
         "hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest",
@@ -147,23 +158,42 @@ public class ProofreadQualityTests
         var router = CreateRouter(ProofreadModel);
         var diff = new SuggestionDiffService();
 
-        var score = await ScoreModelAsync(router, diff, cases, perCaseOutput: true);
+        var records = await ScoreModelAsync(router, diff, cases, perCaseOutput: true);
 
-        _output.WriteLine("");
-        _output.WriteLine("=== Aggregate ===");
-        _output.WriteLine($"Cases:                 {cases.Length}");
-        _output.WriteLine($"Expected corrections:  {score.TotalExpected}");
-        _output.WriteLine($"Produced corrections:  {score.TotalProduced}");
-        _output.WriteLine($"Matched corrections:   {score.TotalMatched}");
-        _output.WriteLine($"Errored/timed-out:     {score.Errors}");
-        _output.WriteLine($"Precision:             {score.PrecisionDisplay("P1")}");
-        _output.WriteLine($"Recall:                {score.Recall.ToString("P1", CultureInfo.InvariantCulture)}");
-        _output.WriteLine($"No-change cases:       {score.NoChangeCases}");
-        _output.WriteLine($"  with a correction:   {score.NoChangeWithCorrection}");
-        _output.WriteLine($"False-positive rate:   {score.FalsePositiveRate.ToString("P1", CultureInfo.InvariantCulture)}");
-        _output.WriteLine($"Overreach edits:       {score.OverreachEdits} (meaning-changing rewrites the model must NOT make)");
-        _output.WriteLine($"Overreach cases:       {score.OverreachCaseHits} of {score.OverreachCases} cases that declare a forbidden edit");
-        _output.WriteLine($"Overreach rate:        {score.OverreachRate.ToString("P1", CultureInfo.InvariantCulture)}");
+        // ONE model pass, reported per PROMPT SURFACE. The gold file mixes two surfaces whose numbers
+        // are not comparable (see GoldPromptSurface), so a single blended aggregate cannot be read as a
+        // model figure and cannot be reproduced by a later run against a differently-composed file.
+        var split = GoldPromptSurfaces.Split(records);
+
+        if (split.ShortOnlyCases > 0)
+        {
+            WriteAggregateBlock(
+                $"Aggregate: {GoldPromptSurfaces.Describe(GoldPromptSurface.ShortPipelineOnly)}",
+                split.ShortOnlyCases, split.ShortOnly);
+        }
+
+        if (split.ProductionCases > 0)
+        {
+            WriteAggregateBlock(
+                $"Aggregate: {GoldPromptSurfaces.Describe(GoldPromptSurface.ProductionLongPlusShort)}",
+                split.ProductionCases, split.Production);
+        }
+
+        if (split.IsSingleSurface)
+        {
+            // Only one surface is populated, so the mixed block would be a duplicate of the block above
+            // carrying a "mixed" label it does not deserve. Say why it is absent instead of printing it.
+            _output.WriteLine("");
+            _output.WriteLine($"(All {split.AllCases} scored cases ride ONE prompt surface, so there is no " +
+                              "mixed-surface block: the aggregate above IS the whole run.)");
+        }
+        else
+        {
+            WriteAggregateBlock(
+                "Aggregate: ALL cases, MIXED SURFACES - NOT a comparable figure (kept only for continuity " +
+                "with older runs; read the two per-surface blocks above instead)",
+                split.AllCases, split.All);
+        }
 
         // This is a reporting benchmark, not a pass/fail gate on model quality — assert only that
         // the run completed over the gold set so the test surfaces the numbers without failing CI
@@ -238,7 +268,14 @@ public class ProofreadQualityTests
             _output.WriteLine($"Case subset ({BakeoffCaseIdsEnvVar}): {ids}");
         var clean = cases.Count(c => c.ShouldHaveNoChanges == true);
         var overreach = cases.Count(c => (c.ForbiddenCorrections?.Length ?? 0) > 0);
-        _output.WriteLine($"Gold composition: {clean} no-change, {overreach} overreach-guarded, {cases.Length - clean} with expected corrections.");
+        // Prompt-surface composition of the scored set, derived from the same condition BuildGoldRequest
+        // branches on. The table columns aggregate BOTH surfaces (they are the mixed figure), so the
+        // split has to be on the same line an operator reads the composition off.
+        var shortOnlyCases = GoldPromptSurfaces.OnSurface(cases, GoldPromptSurface.ShortPipelineOnly).Length;
+        var productionCases = cases.Length - shortOnlyCases;
+        _output.WriteLine($"Gold composition: {clean} no-change, {overreach} overreach-guarded, {cases.Length - clean} with expected corrections; " +
+                          $"prompt surfaces {shortOnlyCases} short-pipeline-only + {productionCases} production long+short " +
+                          "(NOT comparable to each other - see TestData/README.md, \"The prompt-surface split\").");
         _output.WriteLine("");
 
         const int modelCol = 64;
@@ -253,7 +290,7 @@ public class ProofreadQualityTests
             // Label: "provider:model" for cloud candidates, bare model tag for Ollama.
             var label = CandidateLabel(provider, model);
             string status = "ok";
-            ModelScore? score = null;
+            SurfaceSplitScores? split = null;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -263,7 +300,10 @@ public class ProofreadQualityTests
                 // for a missing one, so a missing model surfaces as an error (recorded NA) instead of
                 // a false success. For cloud providers a missing API key throws and is recorded NA too.
                 var router = CreateRouter(provider, model);
-                score = await ScoreModelAsync(router, diff, cases, perCaseOutput: false);
+                // ONE pass per model; the per-surface aggregates come from partitioning its per-case
+                // records, so ranking on a subset costs nothing extra in GPU time.
+                var records = await ScoreModelAsync(router, diff, cases, perCaseOutput: false);
+                split = GoldPromptSurfaces.Split(records);
             }
             catch (Exception ex)
             {
@@ -272,11 +312,19 @@ public class ProofreadQualityTests
             }
             sw.Stop();
 
-            if (score is { } s)
+            if (split is { } sp)
             {
+                // Table columns keep reporting the WHOLE scored set (the mixed figure, unchanged), while
+                // the row also carries the ranking corpus the Winner hint is computed on: the short-only
+                // subset, the surface every prior model verdict for this file was measured on. When that
+                // subset is empty (an id-subset run, or the English gold) the hint falls back to the whole
+                // set, which is then a single surface anyway.
+                var s = sp.All;
+                var rank = shortOnlyCases > 0 ? sp.ShortOnly : sp.All;
                 var cost = EstimateBakeoffCost(model, s.InputTokens, s.OutputTokens);
                 rows.Add(new BakeoffRow(label, s.Precision, s.Recall, s.FalsePositiveRate,
-                    sw.ElapsedMilliseconds, sw.ElapsedMilliseconds * 1.0 / cases.Length, status, Ok: true));
+                    sw.ElapsedMilliseconds, sw.ElapsedMilliseconds * 1.0 / cases.Length, status, Ok: true,
+                    RankPrecision: rank.Precision, RankRecall: rank.Recall));
                 // A model that completed every gold case but had some cases time out is flagged so
                 // its precision/recall is read with the right caveat. Cloud rows also surface token
                 // totals (Ollama reports none) so the $cost column can be sanity-checked.
@@ -301,34 +349,47 @@ public class ProofreadQualityTests
             else
             {
                 rows.Add(new BakeoffRow(label, 0, 0, 0, sw.ElapsedMilliseconds,
-                    sw.ElapsedMilliseconds * 1.0 / cases.Length, status, Ok: false));
+                    sw.ElapsedMilliseconds * 1.0 / cases.Length, status, Ok: false,
+                    RankPrecision: 0, RankRecall: 0));
                 _output.WriteLine(
                     $"{Truncate(label, modelCol).PadRight(modelCol)} " +
                     $"{"-",7} {"-",7} {"-",8} {"-",10} {"-",7} {"-",7} {sw.ElapsedMilliseconds,10} {"-",9} {"-",9}  {status}");
             }
         }
 
-        // Winner hint (INFORMATIONAL only — not a pass/fail gate): highest recall among models that
+        // Winner hint (INFORMATIONAL only, not a pass/fail gate): highest recall among models that
         // produced any matches; ties broken by higher precision then lower latency.
+        //
+        // RANKED ON ONE SURFACE, NOT ON THE MIXED SET. The table's columns aggregate both prompt
+        // surfaces, but a ranking read off a mixed corpus is not reproducible by a later run against a
+        // differently-composed file, and every historical Proofread verdict for this gold was taken on
+        // the SHORT-only surface. So the hint ranks on the short-only subset whenever it is populated,
+        // and says so. When it is empty (an id-subset run selecting only register-carrying cases, or the
+        // English gold, where no case carries a register) there is only one surface present and the hint
+        // ranks on the whole scored set, again saying so.
+        var rankCorpus = shortOnlyCases > 0
+            ? $"{shortOnlyCases}-case short-pipeline-only subset"
+            : $"{cases.Length}-case {(productionCases > 0 ? "production long+short" : "scored")} set";
         var winner = rows
-            .Where(r => r.Ok && r.Recall > 0)
-            .OrderByDescending(r => r.Recall)
-            .ThenByDescending(r => r.Precision)
+            .Where(r => r.Ok && r.RankRecall > 0)
+            .OrderByDescending(r => r.RankRecall)
+            .ThenByDescending(r => r.RankPrecision)
             .ThenBy(r => r.TotalMs)
             .FirstOrDefault();
 
         _output.WriteLine("");
         if (winner is not null)
         {
-            _output.WriteLine($"[informational] Winner hint (highest recall): {winner.Model} " +
-                              $"— recall {winner.Recall.ToString("P0", CultureInfo.InvariantCulture)}, " +
-                              $"precision {winner.Precision.ToString("P0", CultureInfo.InvariantCulture)}, " +
-                              $"{winner.MsPerCase:F0} ms/case. Verify against the full table; not a gate.");
+            _output.WriteLine($"[informational] Winner hint (highest recall on the {rankCorpus}): {winner.Model} " +
+                              $"- recall {winner.RankRecall.ToString("P0", CultureInfo.InvariantCulture)}, " +
+                              $"precision {winner.RankPrecision.ToString("P0", CultureInfo.InvariantCulture)}, " +
+                              $"{winner.MsPerCase:F0} ms/case. Those two figures are for the ranking corpus; the " +
+                              "table's columns are the MIXED all-cases aggregate. Verify against the full table; not a gate.");
         }
         else
         {
-            _output.WriteLine("[informational] No model produced a non-zero recall (or all models were NA). " +
-                              "No winner hint; inspect the table and ensure the models are pulled.");
+            _output.WriteLine($"[informational] No model produced a non-zero recall on the {rankCorpus} " +
+                              "(or all models were NA). No winner hint; inspect the table and ensure the models are pulled.");
         }
 
         // Reporting benchmark, not a quality gate — assert only that the run iterated the model list.
@@ -336,30 +397,74 @@ public class ProofreadQualityTests
     }
 
     /// <summary>
-    /// Score one model over the gold set: drives the real proofread path (prompt + router + production
-    /// diff) per case and aggregates precision/recall/false-positive. Shared by the single-model scorer
-    /// and the bake-off. When <paramref name="perCaseOutput"/> is true, prints a per-case line.
+    /// Build the <see cref="AiRequest"/> for one gold case. TWO SHAPES, chosen per case by whether the
+    /// case declares a <c>characterRegister</c>:
+    ///
+    /// (1) NO register (every case authored before 2026-08-02, and every case that does not need one):
+    /// <c>Instruction</c> is left NULL, exactly as before. AiRouter.CompleteAsync then resolves the
+    /// legacy pipeline instruction from <c>PromptFactory.GetPrompt(Proofread, lang)</c> and sends it
+    /// ALONE. This is byte-for-byte the historical harness behavior, so every number ever measured on
+    /// those cases stays comparable. It is NOT, however, what production sends (see the class remarks).
+    ///
+    /// (2) WITH a register (the <c>agree-*</c> agreement class): the instruction is built by the
+    /// PRODUCTION builder <c>PromptFactory.BuildProofreadChunkPrompt(language, characters, overlapPrefix:
+    /// null)</c> — the same method <c>UnifiedAnalysisService.RunProofreadChunkedAsync</c> calls — so the
+    /// <c>[CHARACTER_REGISTER]</c> block's byte format cannot drift from production, and the
+    /// <c>ProofreadHe/En</c> body that TELLS the model what that block is for travels with it. Sending a
+    /// register block WITHOUT that body would measure a guaranteed zero for a reason that has nothing to
+    /// do with the model: the short pipeline instruction never mentions <c>[CHARACTER_REGISTER]</c>.
+    /// The router appends the short pipeline instruction after it (Proofread is not in
+    /// <c>ShouldUseUnifiedInstructionVerbatim</c>'s allowlist), which is the same long+short
+    /// concatenation every real production Proofread call produces.
+    ///
+    /// Deterministically pinned (composed prompt string, no model) by ProofreadAgreementGoldTests.
     /// </summary>
-    private async Task<ModelScore> ScoreModelAsync(
+    internal static AiRequest BuildGoldRequest(HebrewRegressionCase c)
+    {
+        string? instruction = null;
+        if (c.CharacterRegister is { Length: > 0 } entries)
+        {
+            instruction = new PromptFactory().BuildProofreadChunkPrompt(
+                c.Language,
+                new CharacterRegister { Characters = entries },
+                overlapPrefix: null);
+        }
+
+        return new AiRequest
+        {
+            InputText = c.Input,
+            Instruction = instruction,
+            TaskType = AiTaskType.Proofread,
+            Language = c.Language,
+            SourceId = c.Id
+        };
+    }
+
+    /// <summary>
+    /// Score one model over the gold set: drives the real proofread path (prompt + router + production
+    /// diff) per case. Shared by the single-model scorer and the bake-off. When
+    /// <paramref name="perCaseOutput"/> is true, prints a per-case line.
+    ///
+    /// RETURNS PER-CASE RECORDS, NOT A SINGLE AGGREGATE. The gold file holds cases on TWO prompt
+    /// surfaces (see <see cref="GoldPromptSurface"/>), whose numbers are not comparable, so callers
+    /// need an aggregate PER SURFACE as well as the mixed total. Emitting one
+    /// <see cref="GoldCaseScore"/> per case and letting <c>GoldPromptSurfaces.Split</c> group them
+    /// gives every subset from ONE model pass; scoring each subset in its own pass would double the
+    /// cost of every GPU sweep for numbers that are already available.
+    /// <c>GoldPromptSurfaces.Aggregate</c> over the full record set reproduces exactly the running
+    /// totals this method used to return.
+    /// </summary>
+    private async Task<List<GoldCaseScore>> ScoreModelAsync(
         IAiRouter router, SuggestionDiffService diff, HebrewRegressionCase[] cases, bool perCaseOutput)
     {
-        var totalExpected = 0;     // sum of expected corrections across all cases that have any
-        var totalProduced = 0;     // sum of produced corrections across all cases
-        var totalMatched = 0;      // produced corrections that matched an expected one
-        var noChangeCases = 0;
-        var noChangeWithCorrection = 0;
-        var errors = 0;            // cases that threw (timeout/OOM/etc.) and were skipped
-        var inputTokens = 0;       // summed across cases (cloud providers report token usage)
-        var outputTokens = 0;
-        // Overreach: a case may declare forbiddenCorrections — meaning-changing rewrites the model must
-        // NOT make. overreachEdits counts every produced correction that hit a forbidden edit;
-        // overreachCases / overreachCaseHits count cases that declared a forbidden edit vs. those that
-        // tripped at least one. This is the precision/false-positive term that captures changing the
-        // RIGHT word to a WRONG (meaning-changing) replacement — which the loose location-only matcher
-        // alone would otherwise credit as a correct fix.
-        var overreachEdits = 0;
-        var overreachCases = 0;
-        var overreachCaseHits = 0;
+        // One record per case. Overreach: a case may declare forbiddenCorrections, meaning-changing
+        // rewrites the model must NOT make. GoldCaseScore.OverreachEdits counts every produced
+        // correction that hit a forbidden edit; DeclaresForbidden / OverreachHit distinguish cases that
+        // declared a forbidden edit from those that tripped at least one. This is the
+        // precision/false-positive term that captures changing the RIGHT word to a WRONG
+        // (meaning-changing) replacement, which the loose location-only matcher alone would otherwise
+        // credit as a correct fix.
+        var records = new List<GoldCaseScore>(cases.Length);
 
         if (perCaseOutput)
         {
@@ -372,35 +477,23 @@ public class ProofreadQualityTests
             var expected = c.ExpectedCorrections ?? Array.Empty<ProofreadCorrection>();
             var forbidden = c.ForbiddenCorrections ?? Array.Empty<ProofreadCorrection>();
             var expectsNoChanges = c.ShouldHaveNoChanges == true;
-            if (forbidden.Length > 0)
-                overreachCases++;
+            var surface = GoldPromptSurfaces.SurfaceOf(c);
 
             int produced;
             int matched;
+            var caseInputTokens = 0;   // counted even on a later failure, as the running totals used to
+            var caseOutputTokens = 0;  // (the call already happened and the provider already billed it)
             var caseOverreach = 0;                    // produced corrections that hit a forbidden edit
             var missedDetail = new List<string>();   // expected corrections with no produced match
             var spuriousDetail = new List<string>();  // produced corrections matching no expected one
             var overreachDetail = new List<string>(); // produced corrections that are forbidden (overreach)
             try
             {
-                // Instruction is intentionally LEFT EMPTY: AiRouter.CompleteAsync resolves the proofread
-                // system message + instruction from PromptFactory.GetPrompt(Proofread, lang) itself. For
-                // AiTaskType.Proofread, ShouldUseUnifiedInstructionVerbatim is false, so passing a
-                // PromptFactory-built Instruction here would make the router APPEND the proofread prompt
-                // to itself (model sees it twice). A clean production proofread call passes no caller
-                // Instruction, so we leave it empty to resolve the prompt EXACTLY ONCE. See AiRouter.cs
-                // CompleteAsync (resolvedInstruction).
-                var request = new AiRequest
-                {
-                    InputText = c.Input,
-                    TaskType = AiTaskType.Proofread,
-                    Language = c.Language,
-                    SourceId = c.Id
-                };
+                var request = BuildGoldRequest(c);
 
                 var response = await router.CompleteAsync(request);
-                inputTokens += response.InputTokens ?? 0;
-                outputTokens += response.OutputTokens ?? 0;
+                caseInputTokens = response.InputTokens ?? 0;
+                caseOutputTokens = response.OutputTokens ?? 0;
                 // Use the PRODUCTION sanitizer so the eval measures the exact corrected text
                 // UnifiedAnalysisService feeds to the diff (UnifiedAnalysisService.RunAsync calls
                 // SanitizeResponse(response.Content ?? "") for the non-chunked Proofread path).
@@ -474,30 +567,40 @@ public class ProofreadQualityTests
                 // zero produced corrections, and CONTINUE so the model still gets a full row. This
                 // is what lets DictaLM-12B / qwen2.5:14b finish their gold-set rows even when a
                 // single CPU-spilled case times out.
-                errors++;
                 if (perCaseOutput)
                     _output.WriteLine($"{c.Id,-12} {expected.Length,8} {"ERR",8} {"-",8}  ERROR: {FirstLine(ex.Message)}");
                 // Expected corrections still count toward recall denominator (a timed-out case is a
-                // miss, not an exclusion), so add them but produce nothing.
-                totalExpected += expected.Length;
-                if (expectsNoChanges)
-                    noChangeCases++; // produced nothing → not a false positive
+                // miss, not an exclusion), so record them but produce nothing. A no-change case that
+                // produced nothing is NOT a false positive.
+                records.Add(new GoldCaseScore(
+                    c.Id, surface,
+                    Expected: expected.Length,
+                    Produced: 0,
+                    Matched: 0,
+                    NoChangeCase: expectsNoChanges,
+                    NoChangeWithCorrection: false,
+                    Errored: true,
+                    InputTokens: caseInputTokens,
+                    OutputTokens: caseOutputTokens,
+                    OverreachEdits: 0,
+                    DeclaresForbidden: forbidden.Length > 0,
+                    OverreachHit: false));
                 continue;
             }
 
-            totalExpected += expected.Length;
-            totalProduced += produced;
-            totalMatched += matched;
-            overreachEdits += caseOverreach;
-            if (caseOverreach > 0)
-                overreachCaseHits++;
-
-            if (expectsNoChanges)
-            {
-                noChangeCases++;
-                if (produced > 0)
-                    noChangeWithCorrection++;
-            }
+            records.Add(new GoldCaseScore(
+                c.Id, surface,
+                Expected: expected.Length,
+                Produced: produced,
+                Matched: matched,
+                NoChangeCase: expectsNoChanges,
+                NoChangeWithCorrection: expectsNoChanges && produced > 0,
+                Errored: false,
+                InputTokens: caseInputTokens,
+                OutputTokens: caseOutputTokens,
+                OverreachEdits: caseOverreach,
+                DeclaresForbidden: forbidden.Length > 0,
+                OverreachHit: caseOverreach > 0));
 
             if (perCaseOutput)
             {
@@ -514,8 +617,31 @@ public class ProofreadQualityTests
             }
         }
 
-        return new ModelScore(totalExpected, totalProduced, totalMatched, noChangeCases, noChangeWithCorrection,
-            errors, inputTokens, outputTokens, overreachEdits, overreachCases, overreachCaseHits);
+        return records;
+    }
+
+    /// <summary>
+    /// Print one aggregate block. Every metric line the single blended block used to carry is printed
+    /// in EACH block, so a per-surface block is a full replacement for the old report rather than a
+    /// summary of it. <paramref name="title"/> states which corpus the numbers came from.
+    /// </summary>
+    private void WriteAggregateBlock(string title, int caseCount, ModelScore score)
+    {
+        _output.WriteLine("");
+        _output.WriteLine($"=== {title} ===");
+        _output.WriteLine($"Cases:                 {caseCount}");
+        _output.WriteLine($"Expected corrections:  {score.TotalExpected}");
+        _output.WriteLine($"Produced corrections:  {score.TotalProduced}");
+        _output.WriteLine($"Matched corrections:   {score.TotalMatched}");
+        _output.WriteLine($"Errored/timed-out:     {score.Errors}");
+        _output.WriteLine($"Precision:             {score.PrecisionDisplay("P1")}");
+        _output.WriteLine($"Recall:                {score.Recall.ToString("P1", CultureInfo.InvariantCulture)}");
+        _output.WriteLine($"No-change cases:       {score.NoChangeCases}");
+        _output.WriteLine($"  with a correction:   {score.NoChangeWithCorrection}");
+        _output.WriteLine($"False-positive rate:   {score.FalsePositiveRate.ToString("P1", CultureInfo.InvariantCulture)}");
+        _output.WriteLine($"Overreach edits:       {score.OverreachEdits} (meaning-changing rewrites the model must NOT make)");
+        _output.WriteLine($"Overreach cases:       {score.OverreachCaseHits} of {score.OverreachCases} cases that declare a forbidden edit");
+        _output.WriteLine($"Overreach rate:        {score.OverreachRate.ToString("P1", CultureInfo.InvariantCulture)}");
     }
 
     /// <summary>Resolve the bake-off model list from the env var (comma-separated) or the default shortlist.</summary>
@@ -612,8 +738,14 @@ public class ProofreadQualityTests
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s[..(max - 1)] + "…";
 
-    /// <summary>Aggregated per-model score; derived rates are computed lazily.</summary>
-    private readonly record struct ModelScore(
+    /// <summary>
+    /// Aggregated per-model score; derived rates are computed lazily. Its semantics are unchanged by
+    /// the prompt-surface split: <c>GoldPromptSurfaces.Aggregate</c> over the FULL per-case record set
+    /// produces exactly what the scorer's running totals used to. It is <c>internal</c> (not private)
+    /// only so the surface aggregation, and its deterministic tests, can build and read one.
+    /// Every derived rate guards its denominator, so an EMPTY subset yields 0.0 / "n/a", never NaN.
+    /// </summary>
+    internal readonly record struct ModelScore(
         int TotalExpected, int TotalProduced, int TotalMatched, int NoChangeCases, int NoChangeWithCorrection,
         int Errors, int InputTokens, int OutputTokens,
         int OverreachEdits, int OverreachCases, int OverreachCaseHits)
@@ -630,9 +762,16 @@ public class ProofreadQualityTests
             TotalProduced > 0 ? Precision.ToString(format, CultureInfo.InvariantCulture) : "n/a";
     }
 
+    /// <summary>
+    /// One printed table row. <c>Precision</c>/<c>Recall</c>/<c>FalsePositiveRate</c> are the MIXED
+    /// all-cases figures the table columns show; <c>RankPrecision</c>/<c>RankRecall</c> are the same
+    /// metrics restricted to the single-surface corpus the Winner hint ranks on (see the hint's
+    /// comment). They are equal whenever the scored set rides one surface.
+    /// </summary>
     private sealed record BakeoffRow(
         string Model, double Precision, double Recall, double FalsePositiveRate,
-        long TotalMs, double MsPerCase, string Status, bool Ok);
+        long TotalMs, double MsPerCase, string Status, bool Ok,
+        double RankPrecision, double RankRecall);
 
     // ─── Cloud-model pricing (USD per 1M tokens, input/output) for the bake-off $cost column ───
     // Ollama (local) and unknown models have no entry -> cost prints blank/0. OpenRouter ids are keyed by
@@ -710,19 +849,51 @@ public class ProofreadQualityTests
     /// SUGGESTED is empty, ANY produced replacement at that span trips it ("must not touch this span").
     /// </summary>
     /// <remarks>
-    /// SPAN DISTINCTIVENESS INVARIANT: this method uses substring-tolerant matching —
-    /// <c>(origF.Contains(origP) || origP.Contains(origF))</c> for the original span, and the same
-    /// containment test for the suggested span. This is correct for today's two tiny single-token
-    /// forbidden cases (overreach-ms-01 <c>רגשית</c>, overreach-ms-02 <c>עתון</c>→<c>עתונות</c>),
-    /// but it is a latent risk: if a future forbidden case uses a short, non-distinctive span, a
-    /// legitimate correction at a DIFFERENT span whose text happens to be a substring of (or contain)
-    /// the forbidden span could be wrongly pulled out as overreach, under-counting recall.
+    /// SPAN DISTINCTIVENESS INVARIANT. Both endpoint tests below are substring-tolerant
+    /// (<c>origF.Contains(origP) || origP.Contains(origF)</c> for the original span, and the same
+    /// containment test for the suggested one), so a forbidden entry can fire on an edit the model made
+    /// SOMEWHERE ELSE in the same input whenever that other span's text happens to be a substring of
+    /// (or to contain) the forbidden span. On a recall case that legitimate correction is then pulled
+    /// out of the pool as overreach BEFORE recall matching runs, silently under-counting recall.
     ///
-    /// Therefore: forbidden-correction spans MUST be distinctive enough that no legitimate correction
-    /// at another span is a substring of (or contains) them. If that invariant is ever broken — i.e.
-    /// you add a forbidden entry whose <c>original</c> is a common Hebrew word that may appear in
-    /// other corrections — tighten the matching to exact / token-boundary comparison instead of the
-    /// current substring containment.
+    /// THE INVARIANT a forbidden entry must satisfy, stated so it can be checked rather than believed:
+    ///  (1) its <c>original</c> occurs in its own case's input at all (an absent span is inert: nothing
+    ///      the model can produce will ever trip it);
+    ///  (2) EVERY occurrence of it is a whole WORD - it must end at a non-letter and start a word,
+    ///      allowing a Hebrew proclitic prefix (ו/ה/ב/כ/ל/מ/ש), which is why the pre-existing
+    ///      <c>עתון</c> inside <c>בעתון</c> is legitimate and an arbitrary infix is not. "Every", not
+    ///      "some": an occurrence sitting inside a longer word IS another word of the input containing
+    ///      the span, and a legitimate correction of that word then aligns the origin test. The
+    ///      proclitic exemption is a DELIBERATE HOLE in exactly that reasoning and not an oversight:
+    ///      <c>בעתון</c> is a longer word containing <c>עתון</c>, so a legitimate correction of
+    ///      <c>בעתון</c> does align the origin test. It is allowed because catching a model that
+    ///      returns the whole clitic-carrying orthographic token is the REASON this matcher is
+    ///      substring-tolerant in the first place; the hole is one clitic wide and is the price of that
+    ///      capability, not a gap the data rule can close; and
+    ///  (3) a forbidden with an EMPTY <c>suggested</c> forbids ANY edit at its span, so it has no second
+    ///      endpoint to lock on and must additionally not CONTAIN a word the input uses elsewhere.
+    ///
+    /// DO NOT MAINTAIN THIS BY HAND AND DO NOT WRITE A POPULATION COUNT HERE - the previous version of
+    /// this block named two forbidden cases when there were four, and was still saying two when there
+    /// were 27. All three clauses are now enforced mechanically over EVERY forbidden entry of EVERY
+    /// proofread gold file by <c>ProofreadAgreementGoldTests.ForbiddenSpans_*</c>, which run in the
+    /// standing deterministic suite; <c>TestData/README.md</c> carries the same rule for the author.
+    ///
+    /// KNOWN RESIDUAL, deliberately not asserted. A MULTI-WORD forbidden span can contain a short word
+    /// that also occurs elsewhere in the input (<c>agree-preserve-04</c>'s <c>מצאתי אותה</c> contains
+    /// <c>את</c>, which that input also uses as a standalone object marker). That is a property of
+    /// Hebrew orthography and cannot be authored away by choosing a different span, so it is bounded by
+    /// the SECOND endpoint instead: the entry's non-empty <c>suggested</c> must also align with the
+    /// produced replacement, and no plausible correction of <c>את</c> yields a string that relates to
+    /// <c>מצאתיה</c>. Clause (3) is exactly the sub-case where that bound does not exist.
+    ///
+    /// WHEN TO CHANGE THE MATCHER INSTEAD. The data-side invariant holds only while produced correction
+    /// spans stay TOKEN-scoped, which is what the measured runs show. A model that emits clause- or
+    /// sentence-level rewrite spans would satisfy <c>origP.Contains(origF)</c> for almost any short
+    /// forbidden span, and no authoring rule could prevent it; that is the trigger for tightening this
+    /// method to token-boundary comparison. Know the cost first: it moves the overreach metric for the
+    /// whole gold file and invalidates every overreach figure ever recorded against it, all of which
+    /// were measured under the substring semantics here.
     /// </remarks>
     internal static bool ForbiddenMatch(string origP, string sugP, string origF, string sugF)
     {
