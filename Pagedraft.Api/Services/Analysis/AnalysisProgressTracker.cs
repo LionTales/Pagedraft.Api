@@ -64,8 +64,14 @@ internal sealed class AnalysisProgressState
 /// <summary>
 /// In-memory progress tracker for long-running analysis jobs (currently chunked Proofread).
 /// Thread-safe and intended for short-lived jobs (entries are pruned after a TTL).
+///
+/// NOT sealed, and <see cref="SetStatus"/> is virtual, purely as an OBSERVATION seam (be-c01): the
+/// persist-then-signal ordering that <c>UnifiedAnalysisService.PersistThenMarkJobSucceededAsync</c>
+/// enforces is only testable if a test can run code at the instant a job is marked Succeeded and check
+/// that the row is already queryable by another DbContext. Production has exactly one implementation
+/// (the DI singleton registered in Program.cs); do not add a second.
 /// </summary>
-public sealed class AnalysisProgressTracker
+public class AnalysisProgressTracker
 {
     private readonly ConcurrentDictionary<Guid, AnalysisProgressState> _jobs = new();
     private readonly TimeSpan _ttl = TimeSpan.FromMinutes(30);
@@ -140,7 +146,11 @@ public sealed class AnalysisProgressTracker
         PruneExpired();
     }
 
-    public void SetStatus(Guid jobId, AnalysisProgressStatus status, string? message = null)
+    /// <summary>
+    /// Move a tracked job to a new status. Virtual only so a test can OBSERVE the transition (see the
+    /// class remarks); the behaviour here is the whole contract.
+    /// </summary>
+    public virtual void SetStatus(Guid jobId, AnalysisProgressStatus status, string? message = null)
     {
         if (!_jobs.TryGetValue(jobId, out var state)) return;
         state.Status = status;

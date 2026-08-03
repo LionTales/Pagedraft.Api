@@ -287,6 +287,32 @@ public class UnifiedAnalysisService
         _db.AnalysisRunLogs.Add(runLog);
     }
 
+    /// <summary>
+    /// PERSIST, THEN SIGNAL — the read-after-write contract for every async-job seam, as ONE call so it
+    /// cannot be split again (be-c01).
+    ///
+    /// The FE polls <c>analysis-progress</c> and, the moment it sees <see cref="AnalysisProgressStatus.Succeeded"/>,
+    /// GETs <c>analysis-jobs/{jobId}</c> — <c>AnalysisController.GetAnalysisByJobId</c>, which queries
+    /// <c>AnalysisResults</c> by (ChapterId, BookId, JobId) on a DIFFERENT DbContext. So the row must be
+    /// COMMITTED before the status flips, or that GET 404s and the run is reported as failed even though it
+    /// succeeded. That is not theoretical: both chunked paths used to signal Succeeded and only then run
+    /// <c>ArchivePreviousActiveAsync</c> + <c>ApplyAnalysisRepairAsync</c> (LLM-backed) before saving, a window
+    /// SECONDS wide, and a user hit the 404 on a 10-chunk Hebrew Proofread.
+    ///
+    /// The previous defence was a comment on the generic path stating the ordering; the two chunked paths
+    /// broke it anyway. Hence a mechanism: call THIS instead of <c>SaveChangesAsync</c> at any seam that
+    /// stamps <see cref="AnalysisResult.JobId"/>. No-op on the signal half when <paramref name="jobId"/> is
+    /// null (the synchronous /analyze path, which returns the row directly and never polls).
+    /// </summary>
+    private async Task PersistThenMarkJobSucceededAsync(
+        Guid? jobId, string succeededMessage, CancellationToken ct)
+    {
+        await _db.SaveChangesAsync(ct);
+
+        if (jobId.HasValue)
+            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded, succeededMessage);
+    }
+
     private void PersistSingleRunLog(
         Guid jobId,
         AnalysisResult result,
@@ -557,15 +583,14 @@ public class UnifiedAnalysisService
                 proofreadWordSimilarity: proofreadWordSimilarity);
         }
 
-        await _db.SaveChangesAsync(ct);
+        // Persist, THEN signal Succeeded — see PersistThenMarkJobSucceededAsync for why the two are one call.
+        await PersistThenMarkJobSucceededAsync(jobId, $"{analysisType} finished", ct);
 
         // be-c03: a persisted CharacterAnalysis is a harvest source for the per-book proper-noun LEAVE set.
+        // Deliberately AFTER the signal: it feeds the repair layer of LATER runs, not this row's readability,
+        // and CharacterAnalysis is not an async-dispatchable type (see AnalysisController's asyncSupported
+        // allowlist), so on any run that signals a job this call is already a no-op.
         InvalidateBookEntitiesIfNameSource(analysisType, bookId);
-
-        // Async-job dispatch: the row is now persisted with JobId set, so the poller's GetAnalysisByJobId
-        // will find it. Mark the job Succeeded to end the FE progress poll. No-op for the sync path.
-        if (jobId.HasValue)
-            _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Succeeded, $"{analysisType} finished");
 
         _logger.LogInformation("Analysis {Id} persisted ({Scope}/{Type})", result.Id, scope, analysisType);
         return result;
@@ -2006,7 +2031,6 @@ public class UnifiedAnalysisService
         var mergedJson = JsonSerializer.Serialize(merged, JsonOpts);
 
         _logger.LogInformation("LineEdit merge complete: {SuggestionCount} suggestions", merged.Suggestions.Count);
-        _progress.SetStatus(jobId, AnalysisProgressStatus.Succeeded, "LineEdit finished");
 
         await ArchivePreviousActiveAsync(bookId, chapterId, sceneId, scope, AnalysisType.LineEdit, ct);
 
@@ -2064,7 +2088,9 @@ public class UnifiedAnalysisService
             durationMs: overallSw.ElapsedMilliseconds,
             noChangesHint: false);
 
-        await _db.SaveChangesAsync(ct);
+        // Persist, THEN signal Succeeded — the FE GETs analysis-jobs/{jobId} the moment it sees Succeeded, so
+        // the row has to be committed first. See PersistThenMarkJobSucceededAsync.
+        await PersistThenMarkJobSucceededAsync(jobId, "LineEdit finished", ct);
 
         _logger.LogInformation("Analysis {Id} persisted (LineEdit chunked, {Scope})", result.Id, scope);
         return result;
@@ -2295,7 +2321,6 @@ public class UnifiedAnalysisService
         var mergedResultText = StripTextToCorrectMarkers(merged.ToString());
 
         _logger.LogInformation("Proofread merge complete: merged length {Len} chars", mergedResultText.Length);
-        _progress.SetStatus(jobId, AnalysisProgressStatus.Succeeded, "Proofread finished");
 
         var noChangesHint = IsProofreadResultNearlyIdentical(inputText, mergedResultText);
         if (noChangesHint)
@@ -2359,7 +2384,9 @@ public class UnifiedAnalysisService
             durationMs: overallSw.ElapsedMilliseconds,
             noChangesHint: result.ProofreadNoChangesHint);
 
-        await _db.SaveChangesAsync(ct);
+        // Persist, THEN signal Succeeded — the FE GETs analysis-jobs/{jobId} the moment it sees Succeeded, so
+        // the row has to be committed first. See PersistThenMarkJobSucceededAsync.
+        await PersistThenMarkJobSucceededAsync(jobId, "Proofread finished", ct);
 
         _logger.LogInformation("Analysis {Id} persisted (Proofread chunked, {Scope})", result.Id, scope);
         return result;
