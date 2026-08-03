@@ -435,7 +435,6 @@ public class StyleBaselineService
         // concurrently; the controller already runs the whole job on a background DI scope.
         var maxParallel = Math.Max(1, _aiOptions.Value.MaxParallelStyleBaselineChapters);
         var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
-        var completed = 0;
         var totalForProgress = Math.Max(chapters.Count, 1);
 
         async Task ProcessChapter(int index)
@@ -477,11 +476,11 @@ public class StyleBaselineService
                         chapterId, bookId);
                 }
 
+                // The tracker owns the completion COUNT now — it increments per call under the entry lock —
+                // so pass this chapter's 1-based INDEX, like every other call site. The local Interlocked
+                // tally this used to keep is gone: two counters for one number is how they drift.
                 if (jobId.HasValue)
-                {
-                    var done = Interlocked.Increment(ref completed);
-                    _progress.ChunkCompleted(jobId.Value, done, totalForProgress);
-                }
+                    _progress.ChunkCompleted(jobId.Value, chapterNumber, totalForProgress);
             }
             finally
             {

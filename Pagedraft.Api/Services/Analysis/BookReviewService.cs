@@ -989,11 +989,14 @@ public class BookReviewService
                 catch (Exception ex)
                 {
                     // Non-fatal: a continuity-pass exception must not sink a build the windows already carried.
-                    // Drain any continuity chunks the throwing pass left unreported by marking the LAST reserved
-                    // continuity chunk complete (ChunkCompleted is monotonic, so this only advances progress) so
-                    // the job still reaches 100% instead of stalling on an orphaned reserved chunk.
+                    // Drain any continuity chunks the throwing pass left unreported so the job still reaches
+                    // 100% instead of stalling on orphaned reserved chunks. This is a DRAIN of a whole tail,
+                    // not one chunk finishing: ChunkCompleted now increments the count by exactly one (it is
+                    // a COUNT, no longer a monotonic max over indices), so expressing it as
+                    // ChunkCompleted(total, total) would advance the readout by a single chunk and leave the
+                    // job stuck. MarkAllChunksCompleted is the method that means "account for all of them".
                     if (jobId.HasValue)
-                        _progress.ChunkCompleted(jobId.Value, totalChunks, totalChunks);
+                        _progress.MarkAllChunksCompleted(jobId.Value, totalChunks);
                     _logger.LogWarning(ex,
                         "Book review (continuity): reduce pass threw; continuing with the window/synthesis findings only.");
                 }
@@ -1382,7 +1385,6 @@ public class BookReviewService
 
         var maxParallel = Math.Max(1, _aiOptions.Value.MaxParallelBookReviewDimensions);
         var semaphore = new SemaphoreSlim(maxParallel, maxParallel);
-        var completed = 0;
         var perDimension = new List<BookFindingItem>?[Dimensions.Length];
 
         async Task ProcessDimension(int index)
@@ -1396,11 +1398,11 @@ public class BookReviewService
                 perDimension[index] = await RunDimensionAsync(
                     Dimensions[index], lang, bookContextSection, ct);
 
+                // The tracker owns the completion COUNT now — it increments per call under the entry lock —
+                // so pass this dimension's 1-based INDEX, matching the ChunkStarted above. The local
+                // Interlocked tally this used to keep is gone: two counters for one number is how they drift.
                 if (jobId.HasValue)
-                {
-                    var done = Interlocked.Increment(ref completed);
-                    _progress.ChunkCompleted(jobId.Value, done, Dimensions.Length);
-                }
+                    _progress.ChunkCompleted(jobId.Value, index + 1, Dimensions.Length);
             }
             finally
             {
