@@ -1,0 +1,343 @@
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Pagedraft.Api.Models;
+using Pagedraft.Api.Services;
+using Pagedraft.Api.Services.Ai;
+using Pagedraft.Api.Services.Ai.Contracts;
+using Pagedraft.Api.Services.Analysis;
+using Xunit;
+
+// Bound through a using ALIAS, not a namespace import: this file must NOT pull
+// Pagedraft.Api.Tests.LanguageEngine into scope, because that is the namespace the standing
+// deterministic filter excludes. Same rule (and same reason) as ProofreadAgreementGoldTests.
+using GoldPromptSurface = Pagedraft.Api.Tests.LanguageEngine.GoldPromptSurface;
+
+namespace Pagedraft.Api.Tests;
+
+// ---------------------------------------------------------------------------------------------
+// c2: WHERE THE HEBREW PUNCTUATION TAX IS PRODUCED. Deterministic, NO MODEL, NO GPU.
+//
+// The baseline measured 40% raw over-correction on the preservation subset, "almost all of it the
+// model rewriting Hebrew gershayim (״ U+05F4) to ASCII quotes and inserting commas". This plan splits
+// that into phenomena that must not share a verdict, and this class holds the evidence for two of
+// them ((C), the whitespace no-ops, is in ChunkedAgreementSanitizerArtifactTests):
+//
+//   (A) THE GERSHAYIM SWAP - a character-set substitution with no linguistic gain. This codebase has
+//       twice diagnosed "proofread overreach" as a PIPELINE defect, so the pipeline is charged first
+//       and must be ACQUITTED with evidence rather than assumed innocent. These tests are that
+//       acquittal: they walk every transform the text passes through, INBOUND (what the model is
+//       actually shown) and OUTBOUND (what is done to its reply before the user sees a correction),
+//       and show each is the identity on U+05F4. The conclusion is deductive and does not need a GPU:
+//       if every stage preserves ״ byte-for-byte, an ASCII quote in a surfaced suggestion can only
+//       have been typed by the model. g1 confirms it directly from a raw response capture.
+//
+//   (B) COMMA INSERTION - a genuine proofreading act. It is not merely "not suppressed" here; it is
+//       EXPLICITLY LICENSED by the shipped prompts, which is pinned below so no later change can
+//       silently withdraw the license and call the resulting recall loss a precision win.
+//
+// WHY THE SAME TESTS ALSO RULE OUT THE DIFF. The known text-axis asymmetry is real - a suggestion's
+// OriginalText comes off the NORMALIZED diff while ResultText is raw - so a difference that is purely
+// normalization can be misreported as a correction. It cannot produce THIS one:
+// NormalizeTextForAnalysis touches only bidi controls and line breaks, which is asserted directly
+// rather than read off its doc comment.
+// ---------------------------------------------------------------------------------------------
+
+/// <summary>
+/// Phenomenon (A) gershayim and phenomenon (B) comma insertion. See the file header.
+/// </summary>
+public class HebrewPunctuationFidelityTests
+{
+    /// <summary>Hebrew gershayim, the character the swap destroys.</summary>
+    private const string Gershayim = "״";
+
+    /// <summary>Hebrew geresh, its single-quote counterpart - same class of substitution.</summary>
+    private const string Geresh = "׳";
+
+    /// <summary>
+    /// A Hebrew dialogue passage in the shape the tax was measured on: gershayim as BOTH the opening
+    /// and closing delimiter, a comma inside the closing delimiter, and a speech-verb attribution.
+    /// Modelled on the gold rows that carry gershayim (agree-name-03, agree-register-06).
+    /// </summary>
+    private const string OpeningDialogue =
+        "״אני כבר בדרך,״ אמר טל. ״חכי לי ליד השער ואל תיכנסי בלעדיי.״";
+
+    private const string ClosingDialogue =
+        "״חיפשתי את המפתחות,״ ענתה נעמי. ״הם היו שם כל הזמן.״";
+
+    /// <summary>
+    /// A chapter long enough that <c>RunAsync</c> routes it to the CHUNKED path, carrying gershayim in
+    /// the first AND last paragraph so the round trip covers the chunk boundary and the merge, not just
+    /// one call. The body is c1's quote-free filler, so nothing but the two dialogue paragraphs can
+    /// contribute a quote character.
+    /// </summary>
+    private static string GershayimChapter =>
+        OpeningDialogue
+        + ChunkedAgreementFixtures.ParagraphSeparator
+        + string.Join(ChunkedAgreementFixtures.ParagraphSeparator, ChunkedAgreementFixtures.Filler)
+        + ChunkedAgreementFixtures.ParagraphSeparator
+        + ClosingDialogue;
+
+    /// <summary>
+    /// The chapter as a harness fixture. The agreement-specific fields are inert here - this fixture
+    /// measures typography, not agreement - and are set to values that cannot accidentally match:
+    /// an empty register (so no <c>[CHARACTER_REGISTER]</c> block is emitted) and an error span that
+    /// does not occur in the text. <c>ExpectedChunkCount</c> is not consumed by the harness; the
+    /// realized count is asserted at run time instead of predicted here.
+    /// </summary>
+    private static ChunkedAgreementFixture Fixture => new(
+        Id: "punct-gershayim-round-trip",
+        Hypothesis: "The pipeline is the identity on U+05F4 from TargetText through to the persisted result.",
+        Language: ChunkedAgreementFixtures.Language,
+        Register: Array.Empty<CharacterRegisterEntry>(),
+        CharacterName: "",
+        ErrorSpan: "\0",
+        ExpectedFix: "\0",
+        NearMissForbidden: "\0",
+        Surface: GoldPromptSurface.ChunkedPerChunk,
+        ExpectedChunkCount: 0,
+        ExpectedErrorChunkIndex: 0,
+        ExpectedNameChunkIndexes: Array.Empty<int>(),
+        NameExpectedInErrorChunkOverlap: false,
+        Text: GershayimChapter,
+        Note: "c2 phenomenon (A). Not part of ChunkedAgreementFixtures.All, which is gated quote-FREE " +
+              "so the two verdicts cannot contaminate each other.");
+
+    private static int Count(string text, string needle) =>
+        text.Split(needle, StringSplitOptions.None).Length - 1;
+
+    // ── (A) the population is real ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// NON-VACUITY FOR EVERY "NOTHING CHANGED IT" CLAIM BELOW. Four times on this corpus a
+    /// preservation assertion has passed because its population was empty, so the passage is proved to
+    /// carry the character under test - and to carry NO ASCII quote - before anything asserts that a
+    /// stage left it alone. Without this, a passage that had lost its gershayim during authoring would
+    /// green every test in this class.
+    /// </summary>
+    [Fact]
+    public void TheTestPassage_ActuallyCarriesGershayim_AndNoAsciiQuote()
+    {
+        Assert.Equal(4, Count(OpeningDialogue, Gershayim));
+        Assert.Equal(4, Count(ClosingDialogue, Gershayim));
+        Assert.Equal(8, Count(GershayimChapter, Gershayim));
+
+        // The swap's DESTINATION must be absent to begin with, or "no ASCII quote was introduced"
+        // would be unprovable.
+        Assert.DoesNotContain("\"", GershayimChapter, StringComparison.Ordinal);
+        Assert.DoesNotContain("“", GershayimChapter, StringComparison.Ordinal);
+        Assert.DoesNotContain("”", GershayimChapter, StringComparison.Ordinal);
+
+        // And a comma really is present inside the dialogue, so (B)'s half of the corpus is non-empty too.
+        Assert.Contains(",״", GershayimChapter, StringComparison.Ordinal);
+    }
+
+    // ── (A) every transform, inbound and outbound ────────────────────────────────────────────────
+
+    /// <summary>
+    /// EVERY SHARED NORMALIZER IS THE IDENTITY ON HEBREW PUNCTUATION - asserted on the functions
+    /// themselves, since this is the layer the plan named as c2's first stop and the layer whose
+    /// CONTENTS the plan footer records as never having been read.
+    ///
+    /// <c>TextNormalization</c> drops bidi controls and maps each line break to a space; it has no
+    /// quote handling at all. <c>StripSyncfusionWatermark</c> normalizes line breaks and horizontal
+    /// whitespace. <c>SanitizeResponse</c> adds think-block, control-character and CJK stripping. None
+    /// of them folds Hebrew punctuation into ASCII, and the one component in the repo that DOES map
+    /// between the two - <c>HebrewNormalizeEngine</c> - maps ASCII to Hebrew (the opposite direction)
+    /// and is not on the analysis path at all.
+    /// </summary>
+    [Fact]
+    public void EveryNormalizationStage_IsTheIdentityOnGershayimAndGeresh()
+    {
+        var line = OpeningDialogue + " " + Geresh + "פ";
+
+        Assert.Equal(line, TextNormalization.NormalizeTextForAnalysis(line));
+        Assert.Equal(line, TextNormalization.NormalizeTextForStorage(line));
+        Assert.Equal(line, SyncfusionWatermarkStripper.StripSyncfusionWatermark(line));
+        Assert.Equal(line, UnifiedAnalysisService.SanitizeResponse(line));
+
+        // Composed the way production composes them: input side (stripper -> normalize) and output
+        // side (sanitize -> normalize). Both preserve the count and introduce no ASCII quote.
+        foreach (var staged in new[]
+                 {
+                     TextNormalization.NormalizeTextForAnalysis(
+                         SyncfusionWatermarkStripper.StripSyncfusionWatermark(GershayimChapter)),
+                     TextNormalization.NormalizeTextForAnalysis(
+                         UnifiedAnalysisService.SanitizeResponse(GershayimChapter))
+                 })
+        {
+            Assert.Equal(8, Count(staged, Gershayim));
+            Assert.DoesNotContain("\"", staged, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// THE INBOUND LEG: what the model is actually shown. If the prompt assembly had folded ״ into an
+    /// ASCII quote, the model would be echoing back what we sent it and "the model rewrites gershayim"
+    /// would be a false charge. Asserted on the REAL composed request captured at the
+    /// <c>IAiRouter</c> seam, not on the fixture text.
+    ///
+    /// NON-VACUITY: the run is proved to have made calls, and to have taken the chunked path, before
+    /// anything is claimed about what those calls carried.
+    /// </summary>
+    [Fact]
+    public async Task TheComposedRequest_CarriesTheGershayimVerbatimToTheModel()
+    {
+        var run = await ChunkedAgreementHarness.RunAsync(Fixture);
+
+        Assert.True(run.RanChunked, "the fixture did not route to the chunked path");
+        Assert.True(run.Calls.Count > 1, "a one-call run does not exercise the per-chunk prompt assembly");
+
+        var carried = run.Calls.Sum(c => Count(c.WrappedInputText, Gershayim));
+        Assert.Equal(8, carried);
+
+        Assert.All(run.Calls, c => Assert.DoesNotContain("\"", c.WrappedInputText, StringComparison.Ordinal));
+
+        // The chunk texts the model sees, unwrapped from the markers, still carry them.
+        Assert.Equal(8, run.Calls.Sum(c => Count(c.ChunkText, Gershayim)));
+    }
+
+    /// <summary>
+    /// THE FULL ROUND TRIP, through the production entry point, with a model that changes NOTHING:
+    /// a gershayim-bearing Hebrew dialogue chapter comes back byte-identical, with no ASCII quote
+    /// anywhere and not a single user-facing correction.
+    ///
+    /// This is the standing regression the todo asks for. It fails if ANY future change - a new
+    /// normalization, a "smart quotes" pass, a repair rule - starts rewriting the author's typography,
+    /// and it fails loudly at the layer that did it rather than as a shifted quality number.
+    ///
+    /// NON-VACUITY: the input's gershayim count is asserted before the output's.
+    /// </summary>
+    [Fact]
+    public async Task AGershayimBearingDialogueChapter_SurvivesTheFullRoundTripUnchanged()
+    {
+        var expected = ChunkedAgreementHarness.ProductionTargetText(Fixture);
+        Assert.Equal(8, Count(expected, Gershayim)); // non-vacuity, on the string production would diff
+
+        var run = await ChunkedAgreementHarness.RunAsync(Fixture);
+
+        Assert.True(run.RanChunked);
+        Assert.Equal(expected, run.Result.ResultText);
+        Assert.Equal(8, Count(run.Result.ResultText, Gershayim));
+        Assert.DoesNotContain("\"", run.Result.ResultText, StringComparison.Ordinal);
+
+        // Nothing reached the user as a correction - neither a quote edit nor a whitespace no-op.
+        Assert.Empty(run.Result.Suggestions);
+    }
+
+    /// <summary>
+    /// THE GOLD ROWS THE 70% PRECISION CEILING WAS MEASURED ON. The passage above is authored, so it
+    /// could in principle be unrepresentative; these are the actual corpus inputs whose over-correction
+    /// produced the number. Every one of them survives the production input-side and output-side
+    /// normalization with its gershayim intact and no ASCII quote introduced, so nothing the harness
+    /// does to a gold case can account for the swap.
+    ///
+    /// NON-VACUITY, TWICE: the gold loader returns an EMPTY array when the fixture file is missing
+    /// (a copy-to-output regression would otherwise green this silently), so the file is proved
+    /// non-empty AND the gershayim-bearing subset is proved non-empty before anything is asserted.
+    /// </summary>
+    [Fact]
+    public void EveryGoldCaseCarryingGershayim_SurvivesTheProductionNormalization()
+    {
+        var gold = LanguageEngine.ProofreadQualityTests.LoadProofreadGold();
+        Assert.NotEmpty(gold);
+
+        var bearing = gold.Where(c => c.Input.Contains(Gershayim, StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(bearing);
+
+        var diff = new SuggestionDiffService();
+        foreach (var c in bearing)
+        {
+            var before = Count(c.Input, Gershayim);
+            Assert.True(before > 0, $"{c.Id}: selected as gershayim-bearing but carries none");
+
+            var inputSide = SyncfusionWatermarkStripper.StripSyncfusionWatermark(c.Input);
+            var outputSide = UnifiedAnalysisService.SanitizeResponse(c.Input);
+
+            Assert.Equal(before, Count(inputSide, Gershayim));
+            Assert.Equal(before, Count(outputSide, Gershayim));
+            Assert.DoesNotContain("\"", outputSide, StringComparison.Ordinal);
+
+            // ...and an echoing model produces no correction on this row at all.
+            Assert.Empty(diff.ComputeProofreadSuggestions(inputSide, outputSide));
+        }
+    }
+
+    // ── (A) the diff is not the culprit either ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// RULES OUT THE THIRD SUSPECT the todo names: the suggestion text axis. A suggestion's
+    /// <c>OriginalText</c> is taken off the NORMALIZED diff while <c>ResultText</c> is raw, so a
+    /// purely-normalizing difference can be misreported as a correction. That asymmetry cannot
+    /// manufacture THIS one, because the normalization is the identity on both the source and the
+    /// destination character of the swap.
+    ///
+    /// The second half is the reason (A) CANNOT be fixed by "suppressing a no-op in the diff": when
+    /// the swap really happens the text really did change, and the diff is right to report it. There
+    /// is no no-op to suppress - which is what makes (A) a prompt candidate for g1 rather than a
+    /// code change here.
+    ///
+    /// NON-VACUITY: the swapped text is proved to differ from the original before its diff is read.
+    /// </summary>
+    [Fact]
+    public void TheSuggestionTextAxis_CannotManufactureAQuoteDifference_AndARealSwapIsNotANoOp()
+    {
+        // The normalization is the identity on BOTH sides of the substitution...
+        Assert.Equal(Gershayim, TextNormalization.NormalizeTextForAnalysis(Gershayim));
+        Assert.Equal("\"", TextNormalization.NormalizeTextForAnalysis("\""));
+        Assert.Equal(Geresh, TextNormalization.NormalizeTextForAnalysis(Geresh));
+        Assert.Equal("'", TextNormalization.NormalizeTextForAnalysis("'"));
+
+        // ...so an unswapped round trip yields nothing at all.
+        var diff = new SuggestionDiffService();
+        Assert.Empty(diff.ComputeProofreadSuggestions(OpeningDialogue, OpeningDialogue));
+
+        // ...and a REAL swap is a real text change the diff correctly surfaces.
+        var swapped = OpeningDialogue.Replace(Gershayim, "\"", StringComparison.Ordinal);
+        Assert.NotEqual(OpeningDialogue, swapped);
+
+        var produced = diff.ComputeProofreadSuggestions(OpeningDialogue, swapped);
+        Assert.NotEmpty(produced);
+        Assert.Contains(produced, s => (s.SuggestedText ?? "").Contains('"'));
+    }
+
+    // ── (B) comma insertion is licensed, not leaked ──────────────────────────────────────────────
+
+    /// <summary>
+    /// PHENOMENON (B) IS THE PRODUCT DOING WHAT IT WAS TOLD. Every Hebrew proofread surface - the
+    /// system message, the short pipeline instruction the router appends, and the long
+    /// <c>ProofreadHe</c> body - names פיסוק (punctuation) as something to correct. An inserted comma
+    /// is therefore a licensed proofreading act whose correctness is a linguistic question, NOT a
+    /// pipeline defect, and blanket-suppressing it would trade the precision tax for a recall loss
+    /// that g1's decision rule explicitly reverts.
+    ///
+    /// The class also pins the (A) PROMPT CANDIDATE, which is the only actionable lever left once the
+    /// pipeline is acquitted: every quotation example inside the Hebrew proofread prompts is written
+    /// with ASCII double quotes, so the instructions the model reads model Hebrew quoting in ASCII
+    /// while asking it to preserve the author's text. g1 measures whether that primes the swap; this
+    /// test just records that the condition holds today, so a prompt edit cannot silently change the
+    /// premise the g1 measurement was designed against.
+    /// </summary>
+    [Fact]
+    public void TheHebrewProofreadPrompts_LicensePunctuationEdits_AndSpellTheirOwnExamplesInAsciiQuotes()
+    {
+        var factory = new PromptFactory();
+
+        var (system, shortInstruction) = factory.GetPrompt(AiTaskType.Proofread, "he-IL");
+        var longBody = factory.GetAnalysisPrompt(AnalysisType.Proofread, "he-IL");
+        var chunkPrompt = factory.BuildProofreadChunkPrompt("he-IL", characters: null, overlapPrefix: null);
+
+        // (B): punctuation is explicitly in scope on every Hebrew proofread surface.
+        Assert.Contains("פיסוק", system, StringComparison.Ordinal);
+        Assert.Contains("פיסוק", shortInstruction, StringComparison.Ordinal);
+        Assert.Contains("פיסוק", longBody, StringComparison.Ordinal);
+        Assert.Contains("פיסוק", chunkPrompt, StringComparison.Ordinal);
+
+        // (A) prompt candidate: the instructions quote Hebrew words using the ASCII delimiter, and
+        // never using gershayim.
+        Assert.Contains("\"", longBody, StringComparison.Ordinal);
+        Assert.Contains("\"", shortInstruction, StringComparison.Ordinal);
+        Assert.DoesNotContain(Gershayim, longBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(Gershayim, shortInstruction, StringComparison.Ordinal);
+    }
+}

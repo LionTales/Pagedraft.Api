@@ -155,7 +155,13 @@ public class ProofreadQualityTests
             return;
         }
 
-        var router = CreateRouter(ProofreadModel);
+        // The provider/model this run ACTUALLY used, resolved through the same parser CreateRouter uses
+        // rather than restated. ReportAndGateTheStandingFloor keys its assert-vs-report decision off
+        // these two locals, so if this Fact ever gains a model override the gate follows it instead of
+        // silently continuing to compare a different model's numbers against g1's bar.
+        var model = ProofreadModel;
+        var (provider, _) = ParseCandidate(model);
+        var router = CreateRouter(model);
         var diff = new SuggestionDiffService();
 
         var records = await ScoreModelAsync(router, diff, cases, perCaseOutput: true);
@@ -179,6 +185,18 @@ public class ProofreadQualityTests
                 split.ProductionCases, split.Production);
         }
 
+        // The THIRD surface (c3). No HebrewRegressionCase can ride it today - GoldPromptSurfaces.SurfaceOf
+        // derives only the two single-shot surfaces from a gold row - so this block is unreachable from
+        // this Fact. It is emitted anyway, unconditionally structured like its siblings, so that "every
+        // aggregate states its surface" is true of the REPORT rather than of today's data: a chunked
+        // record reaching this scorer later prints its own block instead of vanishing into ALL.
+        if (split.ChunkedCases > 0)
+        {
+            WriteAggregateBlock(
+                $"Aggregate: {GoldPromptSurfaces.Describe(GoldPromptSurface.ChunkedPerChunk)}",
+                split.ChunkedCases, split.Chunked);
+        }
+
         if (split.IsSingleSurface)
         {
             // Only one surface is populated, so the mixed block would be a duplicate of the block above
@@ -195,10 +213,262 @@ public class ProofreadQualityTests
                 split.AllCases, split.All);
         }
 
-        // This is a reporting benchmark, not a pass/fail gate on model quality — assert only that
-        // the run completed over the gold set so the test surfaces the numbers without failing CI
-        // for model regressions (which would be noisy and environment-dependent).
+        // THE STANDING FLOOR. Up to here this Fact is a reporting benchmark; from here it is also the
+        // gold-surface half of ProofreadStandingFloor's gate (c3/be-c03). It still cannot fail for a
+        // generic "model regression": it asserts ONLY when the run is on the provider/model the floor
+        // was measured on AND on the gold file the bars were measured over, and reports otherwise.
+        ReportAndGateTheStandingFloor(records, split, provider, model, goldFile);
+
+        // Non-vacuity for everything above: the run scored the gold set at all.
         Assert.True(cases.Length > 0);
+    }
+
+    // ─── the standing floor: the gold-surface bars ───
+
+    /// <summary>
+    /// REPORT-AND-GATE THE GOLD-SURFACE HALF OF <see cref="ProofreadStandingFloor"/> (c3/be-c03).
+    ///
+    /// WHY IT IS HERE. The floor's scalar bars had no measuring consumer at all: <c>Metrics</c> and
+    /// <c>EvaluateMetric</c> were read only by their own deterministic self-tests, while the floor's
+    /// header claimed to be what Wave 2 changes are measured against and the successor plan's decision
+    /// rule cited the <c>agree-preserve</c> bars by name. Every observation below is a plain aggregate
+    /// over the per-case records this Fact ALREADY produced, so nothing extra is measured and no extra
+    /// GPU time is spent - the bars were reachable all along, just unread.
+    ///
+    /// ASSERT-VS-REPORT, AND WHY THE CONDITION IS WHAT IT IS.
+    ///  - MODEL. <c>MeasuredOnModel</c> is a historical literal, and a model swap VOIDS the floor rather
+    ///    than regressing it. So the gate asserts only when the provider/model this run actually used
+    ///    matches it, and reports every verdict otherwise. On today's code both constants are the same
+    ///    value and a deterministic test pins them equal, so this half is currently always true - its
+    ///    entire value is that on a swap the live gate goes quiet while
+    ///    <c>TheFloor_NamesTheShippedProofreadModel_*</c> goes red to demand a re-measurement.
+    ///  - GOLD FILE. This one is genuinely runtime-variable: <c>PROOFREAD_BAKEOFF_GOLD</c> can point
+    ///    this Fact at <c>proofread-gold-en.json</c>, where NO case carries a character register, so
+    ///    every <c>agree-*</c> subset is empty and <c>legacy93</c> is a different corpus entirely.
+    ///  - THE BAKE-OFF IS UNTOUCHED. <c>ProofreadQuality_ModelBakeoff_ReportTable</c> is a separate
+    ///    Fact and the only one that loops candidate models; nothing here can fire during a deliberate
+    ///    cross-model measurement.
+    ///
+    /// AN ERRORED CASE VOIDS ITS SUBSET rather than folding into it - the same rule, and the same
+    /// reason, as the chunked transport tripwire: <c>ScoreModelAsync</c> records a timed-out case as
+    /// zero produced corrections, which is byte-identical to "the model declined to correct", so a
+    /// subset containing one has not measured precision or recall at all.
+    ///
+    /// COMPILE-VERIFIED ONLY. This class is in the filter-EXCLUDED namespace and skips on Ollama
+    /// reachability, so nothing here has been executed. What holds the line in CI is the deterministic
+    /// half in <c>ProofreadStandingFloorTests</c>, including the owner partition that fails if a bar is
+    /// ever added to the floor without a harness claiming it.
+    /// </summary>
+    private void ReportAndGateTheStandingFloor(
+        IReadOnlyList<GoldCaseScore> records, SurfaceSplitScores split,
+        string provider, string model, string goldFile)
+    {
+        const string namePrefix = "agree-name-";
+        const string registerPrefix = "agree-register-";
+        const string preservePrefix = "agree-preserve-";
+
+        var onMeasuredModel =
+            string.Equals(provider, ProofreadStandingFloor.MeasuredOnProvider, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(model, ProofreadStandingFloor.MeasuredOnModel, StringComparison.Ordinal);
+        var onMeasuredGold = string.Equals(goldFile, DefaultGoldFile, StringComparison.OrdinalIgnoreCase);
+        var gating = onMeasuredModel && onMeasuredGold;
+
+        _output.WriteLine("");
+        _output.WriteLine($"=== STANDING FLOOR, gold surfaces (measured {ProofreadStandingFloor.MeasuredOn} on " +
+                          $"{ProofreadStandingFloor.MeasuredOnProvider} / {ProofreadStandingFloor.MeasuredOnModel}) ===");
+        _output.WriteLine($"this run: {provider} / {model} over {goldFile}");
+        if (!gating)
+        {
+            _output.WriteLine(
+                "REPORT ONLY - the floor is not in force for this run" +
+                (onMeasuredModel ? "" : $" (model differs from {ProofreadStandingFloor.MeasuredOnModel}: " +
+                                        "a swap VOIDS the floor, it does not regress it - re-measure)") +
+                (onMeasuredGold ? "" : $" (gold file differs from {DefaultGoldFile}: the bars are shares " +
+                                       "and counts over THAT corpus and mean nothing over another)") +
+                ". Verdicts below are still printed, because a number nobody prints is a number nobody checks.");
+        }
+
+        var failures = new List<string>();
+        var evaluated = 0;
+
+        // ── observations, one per wired bar. Every one is an aggregate over the records above. ──
+        var observations = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        var name = Subset(records, namePrefix);
+        var register = Subset(records, registerPrefix);
+        var preserve = Subset(records, preservePrefix);
+
+        if (Usable(name, namePrefix, failures) is ModelScore nameScore)
+        {
+            observations["agree-name.recall"] = nameScore.Recall;
+            observations["agree-name.precision"] = nameScore.Precision;
+            // SPURIOUS, by the scorer's own construction: it removes forbidden hits from the produced
+            // pool first, then removes the expected matches, and calls whatever is left spurious. So
+            // produced - matched - overreach is that leftover count exactly, not an approximation of it.
+            observations["agree-name.spuriousEdits"] =
+                nameScore.TotalProduced - nameScore.TotalMatched - nameScore.OverreachEdits;
+        }
+
+        if (Usable(register, registerPrefix, failures) is ModelScore registerScore)
+            observations["agree-register.recall"] = registerScore.Recall;
+
+        if (Usable(preserve, preservePrefix, failures) is ModelScore preserveScore)
+        {
+            // THE CASE RATE, not the edit count: the bar is "share of preservation cases producing >= 1
+            // spurious edit". Deliberately NOT ModelScore.FalsePositiveRate, which counts cases that
+            // produced ANY correction - a case whose only correction hit a forbidden span is an
+            // overreach (its own bar, below) and must not also be booked as the punctuation tax.
+            observations["agree-preserve.overCorrectionRate"] =
+                preserve.Count(SpuriousEdits) / (double)preserve.Count;
+            observations["agree-preserve.overreach"] = preserveScore.OverreachCaseHits;
+            _output.WriteLine(
+                $"    agree-preserve: {preserveScore.OverreachCaseHits} overreach case(s) of " +
+                $"{preserveScore.OverreachCases} declaring a forbidden edit, over {preserve.Count} case(s)");
+        }
+
+        // legacy93 is a recall SHARE over a named corpus, so a corpus that changed size voids it even
+        // though the bar's own number is untouched. Report the observation either way; refuse to
+        // EVALUATE it against a bar it no longer describes.
+        if (split.ShortOnlyCases != ProofreadStandingFloor.LegacyShortOnlyGoldCases)
+        {
+            var voided =
+                $"BAR VOID legacy93.recall: measured over {split.ShortOnlyCases} register-less case(s), " +
+                $"but the bar is a recall share over {ProofreadStandingFloor.LegacyShortOnlyGoldCases}. " +
+                $"Observed recall {split.ShortOnly.Recall:P1} is not comparable to the 65.0% floor. " +
+                "Re-measure and re-pin both, or restore the corpus.";
+            _output.WriteLine(voided);
+            if (gating) failures.Add(voided);
+        }
+        else
+        {
+            observations["legacy93.recall"] = split.ShortOnly.Recall;
+        }
+
+        // ── every bar this harness OWNS is reported; a missing observation is itself a finding ──
+        foreach (var id in ProofreadStandingFloor.MetricEvaluators.GoldHarnessEvaluatedMetricIds)
+        {
+            var bar = ProofreadStandingFloor.Metric(id);
+            if (!observations.TryGetValue(id, out var observed))
+            {
+                // Either a subset was unusable (already reported above with its cause) or a future
+                // author added an id to the owner list without wiring an observation for it.
+                _output.WriteLine($"  {id}: NO OBSERVATION this run - not evaluated.");
+                continue;
+            }
+
+            var verdict = ProofreadStandingFloor.EvaluateMetric(bar, observed);
+            evaluated++;
+            var line =
+                $"  {id} [{bar.Surface}] {bar.Subset}: observed {observed:F4} against " +
+                $"{bar.Bound} {bar.Value:F4} {bar.Unit} -> {verdict}. {bar.Meaning}";
+            _output.WriteLine(line);
+
+            if (verdict == MetricVerdict.Regressed && gating) failures.Add("REGRESSED. " + line);
+            if (verdict == MetricVerdict.ImprovedUpdateTheFloor)
+                _output.WriteLine($"    ^ IMPROVED - the floor is now stale on {id}. Re-measure and re-pin " +
+                                  "it, rather than leaving slack a later regression can hide inside.");
+        }
+
+        // ── the bars nothing can observe, named rather than omitted ──
+        foreach (var id in ProofreadStandingFloor.MetricEvaluators.UnevaluatedMetricIds)
+        {
+            var bar = ProofreadStandingFloor.Metric(id);
+            _output.WriteLine(
+                $"  {id} [{bar.Surface}] {bar.Subset}: NOT EVALUATED - recorded figure " +
+                $"({bar.Bound} {bar.Value:F4} {bar.Unit}), no automated evaluator exists. {bar.Meaning}");
+        }
+
+        // ── the punctuation split: subset totals are observable, its per-phenomenon rows are not ──
+        foreach (var subset in new[] { namePrefix, registerPrefix, preservePrefix })
+        {
+            // The subset TOTAL, summed through PhenomenonEditsPerRun over the distinct phenomena the
+            // split names for it. That total IS observable without a classifier (it is just the
+            // subset's spurious-edit count), which is why it is reported while the rows are not.
+            var recorded = ProofreadStandingFloor.PunctuationPhenomena
+                .Where(p => string.Equals(p.Subset, subset, StringComparison.Ordinal))
+                .Select(p => p.Phenomenon)
+                .Distinct(StringComparer.Ordinal)
+                .Sum(phenomenon => ProofreadStandingFloor.PhenomenonEditsPerRun(phenomenon, subset));
+            var rows = Subset(records, subset);
+            if (rows.Count == 0) continue;
+            var observedSpurious = rows.Sum(SpuriousEditCount);
+            var offendersObserved = rows.Where(SpuriousEdits).Select(r => r.Id)
+                .OrderBy(s => s, StringComparer.Ordinal).ToArray();
+            var offendersRecorded = ProofreadStandingFloor.OffendingGoldCaseIds(subset)
+                .OrderBy(s => s, StringComparer.Ordinal).ToArray();
+            _output.WriteLine(
+                $"  punctuation split {subset}: observed {observedSpurious} spurious edit(s) this run " +
+                $"against {recorded} recorded; offending rows observed [{string.Join(", ", offendersObserved)}] " +
+                $"vs recorded [{string.Join(", ", offendersRecorded)}]. CHARACTERIZATION - the " +
+                "per-phenomenon rows (gershayim-swap vs comma-insertion) have no classifier on this " +
+                "surface and are NOT evaluated; see PunctuationPhenomena's remarks.");
+        }
+
+        Assert.True(failures.Count == 0,
+            $"THE STANDING FLOOR DID NOT HOLD on the gold surfaces ({failures.Count} finding(s)). Each one " +
+            "is a bar g1 measured on " + ProofreadStandingFloor.MeasuredOnProvider + " / " +
+            ProofreadStandingFloor.MeasuredOnModel + " that this run no longer meets:\n\n  " +
+            string.Join("\n\n  ", failures));
+
+        // NON-VACUITY, and it is the assertion that matters most here: a gating run that evaluated
+        // nothing must not read as a clean floor. Without this, an empty gold, a renamed id prefix or a
+        // wholly errored pass would all produce "no failures" and look exactly like a green bar.
+        if (gating)
+        {
+            Assert.True(evaluated > 0,
+                "No gold-surface bar was evaluated against the standing floor, so 'no failures' above " +
+                "means nothing. Either every agree-* subset was empty or errored, or the id prefixes the " +
+                "bars name no longer match any gold row.");
+            // The case this catches that `failures` cannot: an id sitting in the owner list with NO
+            // observation wired for it. A void subset already produced a finding above, so reaching
+            // here with failures empty and a short count means the harness CLAIMS a bar it never reads.
+            Assert.True(evaluated == ProofreadStandingFloor.MetricEvaluators.GoldHarnessEvaluatedMetricIds.Count,
+                $"Only {evaluated} of " +
+                $"{ProofreadStandingFloor.MetricEvaluators.GoldHarnessEvaluatedMetricIds.Count} bars this " +
+                "harness OWNS were evaluated, with nothing reported as void. Some bar is listed in " +
+                "GoldHarnessEvaluatedMetricIds without an observation being computed for it above, so " +
+                "the floor claims a consumer it does not have. A partial gate must not report as a whole one.");
+        }
+
+        // ── local helpers ──
+
+        static IReadOnlyList<GoldCaseScore> Subset(IEnumerable<GoldCaseScore> all, string prefix) =>
+            all.Where(r => r.Id.StartsWith(prefix, StringComparison.Ordinal)).ToArray();
+
+        // produced - matched - overreach: see the agree-name.spuriousEdits comment above.
+        static int SpuriousEditCount(GoldCaseScore r) => r.Produced - r.Matched - r.OverreachEdits;
+        static bool SpuriousEdits(GoldCaseScore r) => SpuriousEditCount(r) > 0;
+
+        // A subset is usable only if it is POPULATED and CLEAN. Empty means the bar's id prefix matches
+        // nothing (a renamed corpus, or the English gold); errored means at least one case produced
+        // nothing for transport reasons, which is indistinguishable from the model declining and so
+        // voids precision and recall alike. Both are reported as findings rather than skipped quietly.
+        ModelScore? Usable(IReadOnlyList<GoldCaseScore> subset, string prefix, List<string> into)
+        {
+            if (subset.Count == 0)
+            {
+                var msg = $"BARS VOID for '{prefix}': the gold file being scored ({goldFile}) has no case " +
+                          "with that id prefix, so every bar over that subset is unmeasurable. On the " +
+                          "English gold this is expected and the floor is not in force.";
+                _output.WriteLine(msg);
+                if (gating) into.Add(msg);
+                return null;
+            }
+
+            var score = GoldPromptSurfaces.Aggregate(subset);
+            if (score.Errors > 0)
+            {
+                var msg = $"BARS VOID for '{prefix}': {score.Errors} of {subset.Count} case(s) errored or " +
+                          "timed out. A failed case is scored as zero produced corrections, which is " +
+                          "byte-identical to 'the model declined to correct', so no precision or recall " +
+                          "verdict may be drawn from this subset. Fix the transport and re-measure.";
+                _output.WriteLine(msg);
+                if (gating) into.Add(msg);
+                return null;
+            }
+
+            return score;
+        }
     }
 
     /// <summary>
@@ -934,7 +1204,12 @@ public class ProofreadQualityTests
 
     // ─── Ollama reachability probe (skip-gate) ───
 
-    private static async Task<bool> IsOllamaReachableAsync()
+    /// <summary>
+    /// The reachability skip-gate, shared with the other live harnesses in this namespace (g1's
+    /// <c>ChunkedAgreementLiveTests</c>) so every live test skips on the SAME probe rather than on a
+    /// look-alike that could disagree about whether the server is up.
+    /// </summary>
+    internal static async Task<bool> IsOllamaReachableAsync()
     {
         // Probe both the configured host and the explicit IPv4 loopback: .NET's "localhost"
         // can resolve to ::1 (IPv6) while Ollama binds 127.0.0.1, which would otherwise make a
@@ -1063,7 +1338,14 @@ public class ProofreadQualityTests
         return settings;
     }
 
-    private static IAiRouter CreateRouter(string provider, string model)
+    /// <summary>
+    /// The live router wiring, shared with g1's <c>ChunkedAgreementLiveTests</c>. It is
+    /// <c>internal</c> for the same reason <see cref="BuildHarnessProviderSettings"/> is: a second
+    /// harness that re-wired its own DI would be measuring a DIFFERENT provider tuning than the gold
+    /// numbers it is being compared against, and the divergence would be invisible. One wiring, one
+    /// tuning, both scopes of the g1 session.
+    /// </summary>
+    internal static IAiRouter CreateRouter(string provider, string model)
     {
         // Override Ai:DefaultProvider/DefaultModel AND Ai:FeatureModels:Proofread in the SAME in-memory
         // builder the router resolves through, so the proofread task routes to `provider`/`model`.
