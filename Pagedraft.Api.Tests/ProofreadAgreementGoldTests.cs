@@ -898,7 +898,11 @@ public class ProofreadAgreementGoldTests
         Assert.Equal(116, cases.Length);
         Assert.Equal(93, shortOnly.Length);
         Assert.Equal(23, production.Length);
-        // A partition, not two filters: every case lands on exactly one side.
+        // A partition, not two filters: every case lands on exactly one side. NO gold row rides the
+        // THIRD (chunked) surface and none can - SurfaceOf derives only the two single-shot surfaces
+        // from a HebrewRegressionCase, and a chunked case is a multi-chunk chapter rather than a gold
+        // row. The chunked corpus is ChunkedAgreementFixtures; see ProofreadStandingFloorTests.
+        Assert.Empty(GoldPromptSurfaces.OnSurface(cases, GoldPromptSurface.ChunkedPerChunk));
         Assert.Equal(cases.Length, shortOnly.Length + production.Length);
 
         // The production side is exactly the register-carrying population, which today is the agreement
@@ -993,9 +997,13 @@ public class ProofreadAgreementGoldTests
     };
 
     /// <summary>
-    /// The per-subset aggregation partitions ONE scored pass: each surface sums only its own cases, and
-    /// the mixed ALL block sums everything. This is what makes a second (GPU-costing) scoring pass per
-    /// subset unnecessary.
+    /// The per-subset aggregation partitions ONE scored pass: each of the THREE surfaces sums only its
+    /// own cases, and the mixed ALL block sums everything. This is what makes a second (GPU-costing)
+    /// scoring pass per subset unnecessary.
+    ///
+    /// Widened by c3 from two buckets to three. The third record is what the two-bucket version would
+    /// have dropped: it would have appeared ONLY in <c>All</c>, so the mixed block would have grown
+    /// while neither per-surface block moved.
     /// </summary>
     [Fact]
     public void PerSurfaceAggregation_SumsEachSurfaceSeparately_AndAllIsTheWholeSet()
@@ -1004,27 +1012,176 @@ public class ProofreadAgreementGoldTests
         {
             Record("short-a", GoldPromptSurface.ShortPipelineOnly, expected: 2, produced: 3, matched: 1),
             Record("short-b", GoldPromptSurface.ShortPipelineOnly, expected: 4, produced: 4, matched: 3),
-            Record("prod-a", GoldPromptSurface.ProductionLongPlusShort, expected: 10, produced: 5, matched: 5)
+            Record("prod-a", GoldPromptSurface.ProductionLongPlusShort, expected: 10, produced: 5, matched: 5),
+            Record("chunked-a", GoldPromptSurface.ChunkedPerChunk, expected: 8, produced: 2, matched: 2)
         };
 
         var split = GoldPromptSurfaces.Split(records);
 
         Assert.Equal(2, split.ShortOnlyCases);
         Assert.Equal(1, split.ProductionCases);
-        Assert.Equal(3, split.AllCases);
+        Assert.Equal(1, split.ChunkedCases);
+        Assert.Equal(4, split.AllCases);
+        Assert.Equal(3, split.PopulatedSurfaces);
         Assert.False(split.IsSingleSurface);
+
+        // A PARTITION: the three per-surface case counts sum to the whole, so no record can be counted
+        // twice and none can fall out of every bucket.
+        Assert.Equal(split.AllCases, split.ShortOnlyCases + split.ProductionCases + split.ChunkedCases);
 
         Assert.Equal(6, split.ShortOnly.TotalExpected);
         Assert.Equal(4, split.ShortOnly.TotalMatched);
         Assert.Equal(10, split.Production.TotalExpected);
         Assert.Equal(5, split.Production.TotalMatched);
-        Assert.Equal(16, split.All.TotalExpected);
-        Assert.Equal(9, split.All.TotalMatched);
+        Assert.Equal(8, split.Chunked.TotalExpected);
+        Assert.Equal(2, split.Chunked.TotalMatched);
+        Assert.Equal(24, split.All.TotalExpected);
+        Assert.Equal(11, split.All.TotalMatched);
 
-        // The blended figure really is a blend: neither subset's recall.
+        // The blended figure really is a blend: none of the three subsets' recall.
         Assert.Equal(4.0 / 6, split.ShortOnly.Recall, 6);
         Assert.Equal(0.5, split.Production.Recall, 6);
-        Assert.Equal(9.0 / 16, split.All.Recall, 6);
+        Assert.Equal(0.25, split.Chunked.Recall, 6);
+        Assert.Equal(11.0 / 24, split.All.Recall, 6);
+
+        // ...and the indexed accessor agrees with the named properties, so a report that LOOPS over
+        // GoldPromptSurfaces.AllSurfaces reads the same numbers as one that branches.
+        foreach (var (surface, expectedCases) in new[]
+                 {
+                     (GoldPromptSurface.ShortPipelineOnly, split.ShortOnlyCases),
+                     (GoldPromptSurface.ProductionLongPlusShort, split.ProductionCases),
+                     (GoldPromptSurface.ChunkedPerChunk, split.ChunkedCases)
+                 })
+        {
+            Assert.Equal(expectedCases, split.On(surface).Cases);
+        }
+    }
+
+    /// <summary>
+    /// THE SILENT-MIXING HAZARD, made unreachable rather than merely tested. c1 declined to fold its
+    /// chunked corpus into the then-two-bucket split for exactly this reason: a record whose surface
+    /// matches no bucket is still summed into <c>All</c>, so the mixed block grows while every
+    /// per-surface block stays put - a corpus change wearing the costume of a model change. Since c3
+    /// widened the enum, <c>Split</c> THROWS on such a record instead of dropping it.
+    ///
+    /// Probed with an out-of-range enum value, which is the only way to build one: every declared value
+    /// has a bucket, so this fails the day a fourth surface is added to <c>GoldPromptSurface</c> without
+    /// being added to <c>Split</c>.
+    ///
+    /// TWO distinct scenarios can produce the "no bucket claims this record" throw, and this test
+    /// covers BOTH, because a review of the offender-list derivation (<c>GoldPromptSurfaces.Split</c>)
+    /// found it only correct for one of them:
+    ///   1. An OUT-OF-RANGE cast value (<c>(GoldPromptSurface)999</c>, below) - not a member of the
+    ///      enum's declared values at all. The probe just below this comment covers it.
+    ///   2. A value that IS a declared enum member but has no bucket in <c>Split</c> - the scenario the
+    ///      method's own docstring warns about ("fails the day a fourth surface is added ... without
+    ///      being added to Split"). <c>GoldPromptSurface</c> currently has exactly three members, all
+    ///      three bucketed, so the state cannot be reached by adding a real fourth member without
+    ///      widening every switch that pattern-matches the enum across this corpus (<c>SurfaceOf</c>,
+    ///      <c>On</c>, <c>Describe</c>, the loop at the bottom of this test) - out of scope here.
+    ///      Instead the OFFENDER DERIVATION is exercised directly through
+    ///      <c>GoldPromptSurfaces.OrphanLabels</c>, which takes its bucket set as a parameter: the probe
+    ///      passes a set that deliberately omits <c>ChunkedPerChunk</c>, a REAL declared member, which is
+    ///      precisely "declared but unbucketed". The buggy derivation asks "is this surface in
+    ///      <c>AllSurfaces</c>?" (yes - so the offender is wrongly dropped and the throw reports an empty
+    ///      list); the fixed one asks "is it in the bucket set?" (no - so it keeps naming the offender).
+    ///      An earlier version of this test instead swapped a setter on <c>AllSurfaces</c> and restored it
+    ///      in a <c>finally</c>. That was removed as a RACE, not as a style preference: xUnit runs test
+    ///      classes in parallel and two <c>ProofreadStandingFloorTests</c> cases read <c>AllSurfaces</c>;
+    ///      widening the window made both fail. Scenario 1 and the closing loop still drive the real
+    ///      <c>Split</c>, so the derivation is not tested in isolation from its caller.
+    /// </summary>
+    [Fact]
+    public void ARecordOnNoKnownSurface_ThrowsFromTheSplit_RatherThanLandingOnlyInTheMixedBlock()
+    {
+        var unknown = (GoldPromptSurface)999;
+        Assert.DoesNotContain(unknown, GoldPromptSurfaces.AllSurfaces);
+
+        // Scenario 1: an OUT-OF-RANGE cast value. Both the buggy and the fixed offender derivation
+        // handle this correctly (it is in neither AllSurfaces nor BucketedSurfaces), which is exactly
+        // why this probe alone did not catch the bug - see scenario 2 below for the one that would.
+        var ex = Assert.Throws<InvalidOperationException>(() => GoldPromptSurfaces.Split(new[]
+        {
+            Record("short-a", GoldPromptSurface.ShortPipelineOnly, expected: 1, produced: 1, matched: 1),
+            Record("orphan", unknown, expected: 1, produced: 1, matched: 1)
+        }));
+        Assert.Contains("orphan", ex.Message, StringComparison.Ordinal);
+
+        // The offender list itself must be non-empty and name the record - not just "some throw
+        // happened". This is the shape of assertion that catches an offender-derivation regression;
+        // scenario 2 is what actually exercises it, because scenario 1 passes under both the buggy and
+        // the fixed code (see comment above).
+        var offendersLabel = "Offenders: ";
+        var offendersIndex = ex.Message.IndexOf(offendersLabel, StringComparison.Ordinal);
+        Assert.True(offendersIndex >= 0, "Expected the exception message to contain an 'Offenders: ' section.");
+        var offendersPortion = ex.Message[(offendersIndex + offendersLabel.Length)..];
+        Assert.NotEmpty(offendersPortion);
+        Assert.Contains("orphan", offendersPortion, StringComparison.Ordinal);
+
+        // NON-VACUITY for the throw: the SAME call shape with a known surface does not throw, so what
+        // the assertion above caught is the orphan and not the call itself.
+        var ok = GoldPromptSurfaces.Split(new[]
+        {
+            Record("short-a", GoldPromptSurface.ShortPipelineOnly, expected: 1, produced: 1, matched: 1),
+            Record("chunked-a", GoldPromptSurface.ChunkedPerChunk, expected: 1, produced: 1, matched: 1)
+        });
+        Assert.Equal(2, ok.AllCases);
+
+        // Scenario 2: a surface that IS a declared enum member but has NO bucket. This is the case the
+        // buggy `!AllSurfaces.Contains(r.Surface)` filter got wrong - a declared member passes that
+        // filter, so the offender was dropped from the list even though the record landed in no bucket
+        // and the throw still fired, leaving "Offenders: " empty in exactly the scenario Split's own
+        // docstring names.
+        //
+        // EXERCISED ON THE DERIVATION, NOT BY MUTATING A GLOBAL. The obvious probe - widen
+        // GoldPromptSurfaces.AllSurfaces for the duration of one Split call and restore it in a finally
+        // - is a genuine flake: xUnit runs test CLASSES in parallel, and ProofreadStandingFloorTests and
+        // ChunkedAgreementFixtureTests both READ AllSurfaces. MEASURED: holding the widened window open
+        // made TheStandingCorpus_SpansAllThreeSurfaces_* throw from Describe(999) and
+        // EveryMetricFloor_StatesItsSurfaceAndSubset_* fail on "NO standing metric bar sits on 999". A
+        // finally does not close that window, so AllSurfaces is immutable again and Split's offender
+        // derivation is parameterized by its bucket set instead. That also makes the probe STRONGER: it
+        // uses a REAL declared member rather than a cast sentinel, which is the actual shape of "a
+        // fourth surface was added to the enum but not to Split".
+        var narrowedBuckets = new HashSet<GoldPromptSurface>
+        {
+            GoldPromptSurface.ShortPipelineOnly,
+            GoldPromptSurface.ProductionLongPlusShort
+        };
+        Assert.Contains(GoldPromptSurface.ChunkedPerChunk, GoldPromptSurfaces.AllSurfaces);
+        Assert.DoesNotContain(GoldPromptSurface.ChunkedPerChunk, narrowedBuckets);
+
+        var declaredButUnbucketedRecords = new[]
+        {
+            Record("short-a", GoldPromptSurface.ShortPipelineOnly, expected: 1, produced: 1, matched: 1),
+            Record("orphan-declared", GoldPromptSurface.ChunkedPerChunk, expected: 1, produced: 1, matched: 1)
+        };
+
+        // THE ASSERTION THAT CATCHES THE REGRESSION: under the buggy AllSurfaces-based derivation this
+        // comes back EMPTY, because ChunkedPerChunk IS declared.
+        var declaredOffenders = GoldPromptSurfaces.OrphanLabels(declaredButUnbucketedRecords, narrowedBuckets);
+        Assert.NotEmpty(declaredOffenders);
+        Assert.Contains(declaredOffenders, o => o.StartsWith("orphan-declared", StringComparison.Ordinal));
+        Assert.DoesNotContain(declaredOffenders, o => o.StartsWith("short-a", StringComparison.Ordinal));
+
+        // NON-VACUITY for scenario 2: the SAME records against the FULL bucket set yield no offender at
+        // all, so what was named above is the unbucketed surface and not every record indiscriminately.
+        Assert.Empty(GoldPromptSurfaces.OrphanLabels(
+            declaredButUnbucketedRecords, GoldPromptSurfaces.AllSurfaces.ToHashSet()));
+
+        // Every DECLARED surface really is bucketed by the REAL Split (this is what breaks when a fourth
+        // enum member is added without a bucket, and it is what ties scenario 2's derivation-level probe
+        // back to the method under test).
+        foreach (var surface in GoldPromptSurfaces.AllSurfaces)
+        {
+            var single = GoldPromptSurfaces.Split(new[]
+            {
+                Record("probe", surface, expected: 1, produced: 1, matched: 1)
+            });
+            Assert.Equal(1, single.AllCases);
+            Assert.Equal(1, single.PopulatedSurfaces);
+            Assert.Equal(1, single.On(surface).Cases);
+        }
     }
 
     /// <summary>
@@ -1040,9 +1197,11 @@ public class ProofreadAgreementGoldTests
         Assert.Equal(0, split.AllCases);
         Assert.Equal(0, split.ShortOnlyCases);
         Assert.Equal(0, split.ProductionCases);
+        Assert.Equal(0, split.ChunkedCases);
+        Assert.Equal(0, split.PopulatedSurfaces);
         Assert.True(split.IsSingleSurface);
 
-        foreach (var score in new[] { split.ShortOnly, split.Production, split.All })
+        foreach (var score in new[] { split.ShortOnly, split.Production, split.Chunked, split.All })
         {
             AssertRatesAreFinite(score);
             Assert.Equal(0, score.TotalExpected);
@@ -1072,18 +1231,22 @@ public class ProofreadAgreementGoldTests
 
         var productionSplit = GoldPromptSurfaces.Split(registerOnly);
         Assert.Equal(0, productionSplit.ShortOnlyCases);
+        Assert.Equal(0, productionSplit.ChunkedCases);
         Assert.Equal(registerOnly.Length, productionSplit.ProductionCases);
         Assert.True(productionSplit.IsSingleSurface);
         AssertRatesAreFinite(productionSplit.ShortOnly);
         AssertRatesAreFinite(productionSplit.Production);
+        AssertRatesAreFinite(productionSplit.Chunked);
         AssertRatesAreFinite(productionSplit.All);
 
         var shortSplit = GoldPromptSurfaces.Split(registerLessOnly);
         Assert.Equal(0, shortSplit.ProductionCases);
+        Assert.Equal(0, shortSplit.ChunkedCases);
         Assert.Equal(registerLessOnly.Length, shortSplit.ShortOnlyCases);
         Assert.True(shortSplit.IsSingleSurface);
         AssertRatesAreFinite(shortSplit.ShortOnly);
         AssertRatesAreFinite(shortSplit.Production);
+        AssertRatesAreFinite(shortSplit.Chunked);
         AssertRatesAreFinite(shortSplit.All);
     }
 
@@ -1102,9 +1265,11 @@ public class ProofreadAgreementGoldTests
         var split = GoldPromptSurfaces.Split(english.Select(ScoredRecordFor).ToArray());
         Assert.Equal(english.Length, split.ShortOnlyCases);
         Assert.Equal(0, split.ProductionCases);
+        Assert.Equal(0, split.ChunkedCases);
         Assert.True(split.IsSingleSurface);
         Assert.Equal("n/a", split.Production.PrecisionDisplay("P1"));
-        foreach (var score in new[] { split.ShortOnly, split.Production, split.All })
+        Assert.Equal("n/a", split.Chunked.PrecisionDisplay("P1"));
+        foreach (var score in new[] { split.ShortOnly, split.Production, split.Chunked, split.All })
             AssertRatesAreFinite(score);
     }
 

@@ -179,6 +179,18 @@ public class ProofreadQualityTests
                 split.ProductionCases, split.Production);
         }
 
+        // The THIRD surface (c3). No HebrewRegressionCase can ride it today - GoldPromptSurfaces.SurfaceOf
+        // derives only the two single-shot surfaces from a gold row - so this block is unreachable from
+        // this Fact. It is emitted anyway, unconditionally structured like its siblings, so that "every
+        // aggregate states its surface" is true of the REPORT rather than of today's data: a chunked
+        // record reaching this scorer later prints its own block instead of vanishing into ALL.
+        if (split.ChunkedCases > 0)
+        {
+            WriteAggregateBlock(
+                $"Aggregate: {GoldPromptSurfaces.Describe(GoldPromptSurface.ChunkedPerChunk)}",
+                split.ChunkedCases, split.Chunked);
+        }
+
         if (split.IsSingleSurface)
         {
             // Only one surface is populated, so the mixed block would be a duplicate of the block above
