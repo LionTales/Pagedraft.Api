@@ -1204,7 +1204,12 @@ public class ProofreadQualityTests
 
     // ─── Ollama reachability probe (skip-gate) ───
 
-    private static async Task<bool> IsOllamaReachableAsync()
+    /// <summary>
+    /// The reachability skip-gate, shared with the other live harnesses in this namespace (g1's
+    /// <c>ChunkedAgreementLiveTests</c>) so every live test skips on the SAME probe rather than on a
+    /// look-alike that could disagree about whether the server is up.
+    /// </summary>
+    internal static async Task<bool> IsOllamaReachableAsync()
     {
         // Probe both the configured host and the explicit IPv4 loopback: .NET's "localhost"
         // can resolve to ::1 (IPv6) while Ollama binds 127.0.0.1, which would otherwise make a
@@ -1333,7 +1338,14 @@ public class ProofreadQualityTests
         return settings;
     }
 
-    private static IAiRouter CreateRouter(string provider, string model)
+    /// <summary>
+    /// The live router wiring, shared with g1's <c>ChunkedAgreementLiveTests</c>. It is
+    /// <c>internal</c> for the same reason <see cref="BuildHarnessProviderSettings"/> is: a second
+    /// harness that re-wired its own DI would be measuring a DIFFERENT provider tuning than the gold
+    /// numbers it is being compared against, and the divergence would be invisible. One wiring, one
+    /// tuning, both scopes of the g1 session.
+    /// </summary>
+    internal static IAiRouter CreateRouter(string provider, string model)
     {
         // Override Ai:DefaultProvider/DefaultModel AND Ai:FeatureModels:Proofread in the SAME in-memory
         // builder the router resolves through, so the proofread task routes to `provider`/`model`.
