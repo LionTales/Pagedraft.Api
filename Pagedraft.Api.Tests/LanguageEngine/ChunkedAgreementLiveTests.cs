@@ -81,11 +81,16 @@ public class ChunkedAgreementLiveTests
 
         Assert.True(fixtures.Count > 0, "G1_FIXTURE_IDS selected no fixture; the run would be vacuous.");
 
+        // ONE binding for the provider/model this run actually uses, read by BOTH the router wiring and
+        // the floor gate below. Restating "Ollama" at the gate would let the two drift, which is the
+        // same failure mode the gold harness avoids by resolving its provider through the parser
+        // CreateRouter uses instead of re-declaring it.
+        var provider = "Ollama";
         var model = ProofreadQualityTests.ProofreadModel;
-        var router = ProofreadQualityTests.CreateRouter("Ollama", model);
+        var router = ProofreadQualityTests.CreateRouter(provider, model);
         var diff = new SuggestionDiffService();
 
-        _output.WriteLine($"=== g1 scope (i): chunked agreement, live Ollama/{model} ===");
+        _output.WriteLine($"=== g1 scope (i): chunked agreement, live {provider}/{model} ===");
         _output.WriteLine($"artifacts: {dir}");
         _output.WriteLine($"fixtures : {string.Join(", ", fixtures.Select(f => f.Id))}");
         _output.WriteLine($"reps     : {reps} starting at {repOffset}");
@@ -135,7 +140,7 @@ public class ChunkedAgreementLiveTests
         // Non-vacuity: the run must actually have written its artifact.
         Assert.True(File.Exists(jsonlPath), "no JSONL artifact was written; the run measured nothing");
 
-        ReportAndGateTheStandingFloor(tallies);
+        ReportAndGateTheStandingFloor(tallies, provider, model);
     }
 
     // ── the standing floor gate ──────────────────────────────────────────────────────────────────
@@ -184,12 +189,43 @@ public class ChunkedAgreementLiveTests
     /// (<c>ChunkedHarnessEvaluatedMetricIds</c>), not by a local comparison that restates the floor's
     /// threshold in a second place. The gold-surface bars have their own consumer in
     /// <c>ProofreadQualityTests</c>; this method owns exactly these two.
+    ///
+    /// MODEL-CONDITIONAL, LIKE THE GOLD-SURFACE HALF - AND SPLIT, BECAUSE NOT EVERYTHING HERE IS A
+    /// MODEL CLAIM. The floor's semantics are that a provider/model swap VOIDS it rather than
+    /// regressing it, and this gate used to ignore that: it asserted unconditionally, so the first run
+    /// on a new model would have reported the swap as "THE STANDING FLOOR DID NOT HOLD" - a regression
+    /// verdict on numbers the floor does not claim to describe. That is latent rather than live today,
+    /// because the model is read from <c>ProofreadQualityTests.ProofreadModel</c> and a deterministic
+    /// test pins that equal to <c>MeasuredOnModel</c>; it would have fired on precisely the event the
+    /// model-conditional design exists to handle.
+    ///
+    /// The split matters and a blanket gate would have been wrong. The per-fixture AGREEMENT verdict is
+    /// a claim about how a MODEL behaves, so it is gated. The two INSTRUMENT TRIPWIRES are not - the
+    /// floor's own owner list calls them that. A per-chunk transport failure or a new asymmetric
+    /// normalization means the run MEASURED NOTHING, which is equally true of any model, so they stay
+    /// hard failures on every run. Voiding them along with the verdict would let a swapped-model
+    /// session pass green on a broken instrument, which is the more expensive of the two mistakes.
     /// </summary>
-    private void ReportAndGateTheStandingFloor(IReadOnlyDictionary<string, RunTally> tallies)
+    private void ReportAndGateTheStandingFloor(
+        IReadOnlyDictionary<string, RunTally> tallies, string provider, string model)
     {
+        var onMeasuredModel =
+            string.Equals(provider, ProofreadStandingFloor.MeasuredOnProvider, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(model, ProofreadStandingFloor.MeasuredOnModel, StringComparison.Ordinal);
+
         _output.WriteLine("");
         _output.WriteLine($"=== STANDING FLOOR (measured {ProofreadStandingFloor.MeasuredOn} on " +
                           $"{ProofreadStandingFloor.MeasuredOnProvider} / {ProofreadStandingFloor.MeasuredOnModel}) ===");
+        _output.WriteLine($"this run: {provider} / {model}");
+        if (!onMeasuredModel)
+        {
+            _output.WriteLine(
+                $"REPORT ONLY for the agreement verdicts - this run is on {provider} / {model}, and a " +
+                $"model swap VOIDS the floor rather than regressing it, so the pinned outcomes do not " +
+                $"describe these numbers. Re-measure and re-pin. The two INSTRUMENT tripwires below " +
+                "still fail hard: a transport failure or a whitespace-only suggestion means the run " +
+                "measured nothing, which is true of any model.");
+        }
 
         var failures = new List<string>();
         var evaluated = 0;
@@ -248,7 +284,11 @@ public class ChunkedAgreementLiveTests
             _output.WriteLine(
                 $"    over-corrections: {tally.OverCorrections / (double)tally.Runs:F2}/run " +
                 $"(characterization, floor recorded {entry.OverCorrectionsPerRunMean:F2}/run - NOT gated)");
-            if (ev.IsFailure) failures.Add(ev.Message);
+
+            // The agreement verdict is a claim about a MODEL, so it only FAILS when this run is on the
+            // model the floor was measured on. Off that model it is still printed - a number nobody
+            // prints is a number nobody checks - but it cannot be read as a regression.
+            if (ev.IsFailure && onMeasuredModel) failures.Add(ev.Message);
         }
 
         // failures first: when every fixture voided (fatal or transport-failed), evaluated stays 0 too,
