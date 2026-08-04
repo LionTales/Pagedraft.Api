@@ -150,6 +150,26 @@ internal static class GoldPromptSurfaces
             ? GoldPromptSurface.ProductionLongPlusShort
             : GoldPromptSurface.ShortPipelineOnly;
 
+    /// <summary>
+    /// The prompt surface a CHUNKED-AGREEMENT fixture is sent on, DERIVED from the routing rule rather
+    /// than read off the fixture's own <c>Surface</c> tag.
+    ///
+    /// <c>UnifiedAnalysisService.RunAsync</c> branches on
+    /// <c>WordCount(context.TargetText) &gt; ProofreadChunkTargetWordsFor(opts, language)</c>
+    /// (UnifiedAnalysisService.cs:401): above the language-keyed target the input is chunked and every
+    /// chunk rides <see cref="GoldPromptSurface.ChunkedPerChunk"/>; at or below it the whole input goes
+    /// out in ONE call on <see cref="GoldPromptSurface.ProductionLongPlusShort"/>. Nothing the fixture
+    /// DECLARES enters into it - which is exactly why the declared tag has to be checked against this,
+    /// the same way <c>ProofreadAgreementGoldTests</c> checks the gold partition against the real
+    /// <c>BuildGoldRequest</c>. A fixture that grows or shrinks past the threshold changes surface
+    /// silently otherwise, and its floor stops meaning what it says.
+    /// </summary>
+    internal static GoldPromptSurface DerivedSurfaceOf(ChunkedAgreementFixture fixture) =>
+        ChunkedAgreementHarness.WordCount(ChunkedAgreementHarness.ProductionTargetText(fixture)) >
+        ChunkedAgreementHarness.ChunkTargetWordsFor(fixture)
+            ? GoldPromptSurface.ChunkedPerChunk
+            : GoldPromptSurface.ProductionLongPlusShort;
+
     /// <summary>Gold cases riding <paramref name="surface"/>, file order preserved.</summary>
     internal static HebrewRegressionCase[] OnSurface(
         IEnumerable<HebrewRegressionCase> cases, GoldPromptSurface surface) =>
