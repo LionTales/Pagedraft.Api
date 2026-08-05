@@ -20,6 +20,16 @@ public class AnalysisRunLog
     public int InputCharCount { get; set; }
     public int OutputCharCount { get; set; }
     public int SuggestionCount { get; set; }
+
+    /// <summary>
+    /// Proofread suggestions the orthographic-impossibility safety net WITHHELD on this run
+    /// (<c>HebrewOrthographyShapeGuard</c>; switch <c>Ai:HebrewStyle:DropOrthographicallyImpossibleSuggestions</c>).
+    /// Sits next to <see cref="SuggestionCount"/> deliberately: the pair is what lets an operator tell a
+    /// run that dropped three from a run that dropped none, which a guard that only logged would not.
+    /// 0 on every non-Proofread run, on every English run, and on the overwhelming majority of Hebrew
+    /// ones. Each drop is ALSO logged at Warning with the offending word.
+    /// </summary>
+    public int SuppressedSuggestionCount { get; set; }
     public long TotalDurationMs { get; set; }
     public bool NoChangesHint { get; set; }
     public string? ChunkDetailsJson { get; set; }
