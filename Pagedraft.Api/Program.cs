@@ -105,6 +105,10 @@ builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions
 builder.Services.Configure<Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions>(
     builder.Configuration.GetSection(Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions.SectionName));
 builder.Services.AddSingleton<Pagedraft.Api.Services.Analysis.Hebrew.KtivMaleChecker>();
+// Per-chunk proofread prompt arms. EVERY switch defaults OFF, so an unconfigured deployment composes
+// byte-for-byte the prompt it composed before this section existed; bound from "Ai:ProofreadPrompt".
+builder.Services.Configure<ProofreadPromptOptions>(
+    builder.Configuration.GetSection(ProofreadPromptOptions.SectionName));
 builder.Services.AddSingleton<PromptFactory>();
 builder.Services.AddScoped<IEmbeddingService, StubEmbeddingService>();
 builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
