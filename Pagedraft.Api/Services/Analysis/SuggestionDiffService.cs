@@ -2,11 +2,65 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using DiffPlex;
+using Microsoft.Extensions.Options;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services;
+using Pagedraft.Api.Services.Analysis.Hebrew;
 
 namespace Pagedraft.Api.Services.Analysis;
+
+/// <summary>
+/// One proofread suggestion the orthographic-impossibility safety net withheld, kept so the drop is
+/// OBSERVABLE rather than silent. A fail-safe whose drops are invisible ships failures invisibly.
+/// </summary>
+/// <param name="OriginalText">The manuscript span the withheld suggestion would have replaced.</param>
+/// <param name="SuggestedText">The replacement that was withheld.</param>
+/// <param name="OffendingWord">
+/// The mechanically impossible word the replacement introduced - a Hebrew final form in a non-final
+/// position. This is the whole reason the suggestion was dropped, so it goes in the log line verbatim.
+/// </param>
+public readonly record struct DroppedImpossibleSuggestion(
+    string OriginalText, string SuggestedText, string OffendingWord);
+
+/// <summary>
+/// What <see cref="SuggestionDiffService.ComputeProofreadSuggestions(string, string, out ProofreadShapeGuardOutcome)"/>
+/// withheld on one call. <see cref="Dropped"/> is empty on the overwhelming majority of runs, and an
+/// empty list is the SUCCESS shape, not a missing measurement - <see cref="Ran"/> distinguishes
+/// "the guard ran and found nothing" from "the guard was switched off". THIS DISTINCTION IS IN-PROCESS
+/// ONLY: it is never persisted. The durable surface, <c>AnalysisRunLog.SuppressedSuggestionCount</c>,
+/// records the drop count alone, so a run that ran and dropped nothing and a run on which the guard
+/// was switched off read identically there.
+///
+/// "Withheld" is measured against what the CALLER receives: a call that trips the suggestion cap
+/// returns no suggestions at all, so it reports zero drops even though the guard removed entries from
+/// the list the cap then discarded. Nothing can be withheld from a caller that receives nothing.
+/// </summary>
+/// <param name="Ran">
+/// False when <c>Ai:HebrewStyle:DropOrthographicallyImpossibleSuggestions</c> is off. In-process only -
+/// not written to <c>AnalysisRunLog</c>.
+/// </param>
+/// <param name="DroppedOrNull">
+/// Backing storage for <see cref="Dropped"/>. Null on <c>default(ProofreadShapeGuardOutcome)</c> -
+/// use <see cref="Dropped"/>, never this parameter, to read the withheld suggestions.
+/// </param>
+public readonly record struct ProofreadShapeGuardOutcome(
+    bool Ran, IReadOnlyList<DroppedImpossibleSuggestion>? DroppedOrNull)
+{
+    /// <summary>
+    /// The withheld suggestions, in the order the diff produced them. Never null, even on
+    /// <c>default(ProofreadShapeGuardOutcome)</c>, so callers can foreach it unconditionally.
+    /// </summary>
+    public IReadOnlyList<DroppedImpossibleSuggestion> Dropped =>
+        DroppedOrNull ?? Array.Empty<DroppedImpossibleSuggestion>();
+
+    /// <summary>How many suggestions the guard withheld. Zero when it did not run.</summary>
+    public int DroppedCount => Dropped.Count;
+
+    /// <summary>The outcome of a run on which the guard was switched off.</summary>
+    public static ProofreadShapeGuardOutcome NotRun { get; } =
+        new(false, Array.Empty<DroppedImpossibleSuggestion>());
+}
 
 /// <summary>
 /// Computes proofread and line-edit suggestions on the server.
@@ -36,6 +90,51 @@ namespace Pagedraft.Api.Services.Analysis;
 /// </summary>
 public class SuggestionDiffService
 {
+    /// <summary>
+    /// Whether the orthographic-impossibility safety net runs. Read ONCE per instance from
+    /// <c>Ai:HebrewStyle:DropOrthographicallyImpossibleSuggestions</c> (default true).
+    ///
+    /// It lives HERE rather than at the AttachSuggestions seam on purpose: the gold harness
+    /// (<c>ProofreadQualityTests</c>) and the real-prose harness (<c>RealProsePrecisionLiveTests</c>)
+    /// both call <see cref="ComputeProofreadSuggestions(string, string)"/> directly and never reach
+    /// AttachSuggestions, so a guard placed there would be UNREACHABLE from every surface that measures
+    /// the model - a shipped filter no measurement could either see or opt out of.
+    ///
+    /// Reachable is not the same as enabled, and the two are decided separately. Those harnesses
+    /// deliberately construct this service with the guard OFF, because they measure what the MODEL
+    /// proposed and a layer that deletes model output would subtract from the very counts they publish;
+    /// each states its reason at its own construction site and the postures are pinned by
+    /// <c>MeasurementHarnessGuardPostureTests</c>. Production, and every caller that takes the class
+    /// default, runs with it ON.
+    /// </summary>
+    private readonly bool _dropImpossibleShapes;
+
+    /// <summary>
+    /// Parameterless construction (tests, and any caller with no configuration in scope) takes the
+    /// CLASS defaults of <see cref="HebrewStyleOptions"/>, i.e. the same posture production ships.
+    /// </summary>
+    public SuggestionDiffService() : this(new HebrewStyleOptions())
+    {
+    }
+
+    /// <summary>DI construction. Binds <c>Ai:HebrewStyle</c>.</summary>
+    public SuggestionDiffService(IOptions<HebrewStyleOptions> options)
+        : this(options?.Value ?? new HebrewStyleOptions())
+    {
+    }
+
+    /// <summary>
+    /// Test-friendly construction: pass options directly without IOptions wrapping. Internal, not
+    /// public: a second public one-parameter constructor beside <see cref="SuggestionDiffService(IOptions{HebrewStyleOptions})"/>
+    /// would make container resolution ambiguous the moment <see cref="HebrewStyleOptions"/> is ever
+    /// registered as a bare service, and that failure would surface at startup, not at build.
+    /// </summary>
+    internal SuggestionDiffService(HebrewStyleOptions options)
+    {
+        _dropImpossibleShapes =
+            (options ?? new HebrewStyleOptions()).DropOrthographicallyImpossibleSuggestions;
+    }
+
     private const int MaxSuggestionCountForProofread = 2_000;
     private const int MergeGapThreshold = 1;
     // Target one-word-level proofread suggestions; larger rewrites belong in Line Edit.
@@ -61,9 +160,32 @@ public class SuggestionDiffService
     ///  3. Merge overlapping/adjacent word ranges so multiple blocks within one word become one range.
     ///  4. Map each merged original range to its corresponding result range using cumulative position deltas.
     ///  5. Extract original and suggested text from those ranges → one clean suggestion per word.
+    ///  6. Withhold any suggestion that introduces a mechanically impossible Hebrew word
+    ///     (<see cref="HebrewOrthographyShapeGuard"/>), unless the guard is switched off.
+    ///
+    /// Callers that need to SEE what step 6 withheld use the three-argument overload; this one discards
+    /// the outcome, which is correct only where nothing observes the drop.
     /// </summary>
-    public List<AnalysisSuggestion> ComputeProofreadSuggestions(string originalText, string resultText)
+    public List<AnalysisSuggestion> ComputeProofreadSuggestions(string originalText, string resultText) =>
+        ComputeProofreadSuggestions(originalText, resultText, out _);
+
+    /// <summary>
+    /// <see cref="ComputeProofreadSuggestions(string, string)"/>, additionally reporting what the
+    /// orthographic-impossibility safety net withheld so the drop can be logged and counted rather than
+    /// vanishing. See <see cref="ProofreadShapeGuardOutcome"/>.
+    /// </summary>
+    public List<AnalysisSuggestion> ComputeProofreadSuggestions(
+        string originalText, string resultText, out ProofreadShapeGuardOutcome guardOutcome)
     {
+        // The outcome of a call that withholds nothing: it still reports whether the guard is ENABLED
+        // (a fact about configuration, true on every return path of this method) beside a zero drop
+        // count. Every early return below reports this shape, and so does the suggestion cap.
+        var withheldNothing = _dropImpossibleShapes
+            ? new ProofreadShapeGuardOutcome(true, Array.Empty<DroppedImpossibleSuggestion>())
+            : ProofreadShapeGuardOutcome.NotRun;
+
+        guardOutcome = withheldNothing;
+
         if (string.IsNullOrWhiteSpace(originalText) || string.IsNullOrWhiteSpace(resultText))
             return new List<AnalysisSuggestion>();
 
@@ -159,10 +281,58 @@ public class SuggestionDiffService
 
         suggestions = suggestions.Where(IsMeaningfulSuggestion).ToList();
 
+        // Step 6: the orthographic-impossibility safety net. It runs LAST, over the finished suggestion
+        // list, so it can only ever REMOVE entries - the guarded list is always a subsequence of the
+        // unguarded one, which is the bound that makes it safe to enable by default (pinned by
+        // HebrewOrthographyShapeGuardTests.GuardedOutput_IsAlwaysASubsequenceOfUnguardedOutput).
+        if (_dropImpossibleShapes)
+            suggestions = ApplyShapeGuard(suggestions, out guardOutcome);
+
         if (suggestions.Count > MaxSuggestionCountForProofread)
+        {
+            // DECISION: the cap discards the ENTIRE result, so the guard withheld nothing FROM THE USER
+            // here and the honest report is zero drops - reported as "ran, dropped nothing" rather than
+            // NotRun, because NotRun means the kill switch is off and the switch's state is unchanged.
+            guardOutcome = withheldNothing;
             return new List<AnalysisSuggestion>();
+        }
 
         return suggestions;
+    }
+
+    /// <summary>
+    /// Partition <paramref name="suggestions"/> into the ones that survive the orthographic-impossibility
+    /// safety net and the ones it withholds. Pure: it neither mutates nor reorders the survivors, and it
+    /// never alters a suggestion's text or offsets.
+    ///
+    /// The withheld entries are RETURNED, not swallowed. The caller is expected to log and count them;
+    /// a drop nobody can see is the failure mode this signature exists to prevent.
+    /// </summary>
+    private static List<AnalysisSuggestion> ApplyShapeGuard(
+        List<AnalysisSuggestion> suggestions, out ProofreadShapeGuardOutcome guardOutcome)
+    {
+        List<DroppedImpossibleSuggestion>? dropped = null;
+        var kept = new List<AnalysisSuggestion>(suggestions.Count);
+
+        foreach (var s in suggestions)
+        {
+            if (HebrewOrthographyShapeGuard.WouldDrop(s.OriginalText, s.SuggestedText, out var offender))
+            {
+                dropped ??= new List<DroppedImpossibleSuggestion>();
+                dropped.Add(new DroppedImpossibleSuggestion(
+                    s.OriginalText ?? string.Empty, s.SuggestedText ?? string.Empty, offender));
+                continue;
+            }
+
+            kept.Add(s);
+        }
+
+        guardOutcome = new ProofreadShapeGuardOutcome(
+            true,
+            (IReadOnlyList<DroppedImpossibleSuggestion>?)dropped
+                ?? Array.Empty<DroppedImpossibleSuggestion>());
+
+        return dropped is null ? suggestions : kept;
     }
 
     /// <summary>
