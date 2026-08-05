@@ -186,6 +186,33 @@ public static class RealProseHarness
     /// </summary>
     public static AiOptions HarnessOptions() => new() { MaxParallelProofreadChunks = 1 };
 
+    /// <summary>
+    /// THE SUGGESTION DIFF EVERY MEASUREMENT ON THIS SURFACE READS, and the ONE place its shape-guard
+    /// posture is decided. Deliberately NOT <c>new SuggestionDiffService()</c>: that takes the
+    /// <see cref="HebrewStyleOptions"/> CLASS DEFAULT, which ships
+    /// <c>DropOrthographicallyImpossibleSuggestions = true</c>.
+    ///
+    /// GUARD OFF, ON PURPOSE - this surface measures the MODEL, not the product. Every number this
+    /// harness feeds (<c>RealProseRun.EditCount</c>, <c>EditComposition</c>, and through them
+    /// <see cref="RealProseArmMeasurement"/>'s per-passage precision matrix and semantic families) is a
+    /// count of what the MODEL proposed. A layer that DELETES model output would subtract silently from
+    /// exactly those counts, and it would subtract unequally between arms: the corpus records one
+    /// suggestion the shipped guard reaches (צמצם -> צמץם) and it belongs to ARM A, so a guard-ON
+    /// harness would shrink ARM A's CORRUPTION family and leave the OFF column untouched, i.e. it would
+    /// move an arm COMPARISON by an amount that has nothing to do with the arm.
+    ///
+    /// Contrast the ktiv-male line in <c>RunAsync</c> below, which keeps the PRODUCTION default: that
+    /// layer only ADDS suggestions and the passages are gated ktiv-clean, so it contributes nothing to
+    /// either arm. This one removes them, and nothing gates the corpus against it.
+    ///
+    /// The guard's effect on this corpus is not lost by switching it off here - it is measured
+    /// separately and deterministically by <c>RealProseNonWordResidue.ShapeGuardReaches</c>, which
+    /// computes the reach from the guard itself. Posture pinned by
+    /// <c>MeasurementHarnessGuardPostureTests</c>.
+    /// </summary>
+    public static SuggestionDiffService MeasurementDiffService() =>
+        new(new HebrewStyleOptions { DropOrthographicallyImpossibleSuggestions = false });
+
     /// <summary>The per-chunk word target this harness chunks at (production accessor). 250 for Hebrew.</summary>
     public static int ChunkTargetWords() =>
         UnifiedAnalysisService.ProofreadChunkTargetWordsFor(
@@ -370,7 +397,10 @@ public static class RealProseHarness
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService(),
+            // GUARD OFF, not the production default: this surface measures the MODEL, and a layer that
+            // deletes model output would subtract from the very counts the arm measurement is made of.
+            // Argued in full on MeasurementDiffService.
+            MeasurementDiffService(),
             // PRODUCTION DEFAULT (EnforceKtivMale = true), not a convenience "off": the passages are
             // gated ktiv-clean instead, so this layer contributes nothing to either arm rather than
             // contributing an equal constant nobody remembered to subtract.

@@ -229,6 +229,7 @@ public class UnifiedAnalysisService
             InputCharCount = chunkOutcome.InputCharCount,
             OutputCharCount = chunkOutcome.OutputCharCount,
             SuggestionCount = result.Suggestions.Count,
+            SuppressedSuggestionCount = result.SuppressedImpossibleSuggestionCount,
             TotalDurationMs = durationMs,
             NoChangesHint = analysisType == AnalysisType.Proofread && result.ProofreadNoChangesHint,
             ChunkDetailsJson = JsonSerializer.Serialize(
@@ -278,6 +279,7 @@ public class UnifiedAnalysisService
             InputCharCount = inputText.Length,
             OutputCharCount = outputText.Length,
             SuggestionCount = result.Suggestions.Count,
+            SuppressedSuggestionCount = result.SuppressedImpossibleSuggestionCount,
             TotalDurationMs = durationMs,
             NoChangesHint = noChangesHint,
             ChunkDetailsJson = JsonSerializer.Serialize(outcomesList, JsonOpts),
@@ -3702,7 +3704,28 @@ public class UnifiedAnalysisService
                 }
             }
 
-            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(inputText, result.ResultText);
+            var suggestions = _suggestionDiff.ComputeProofreadSuggestions(
+                inputText, result.ResultText, out var shapeGuard);
+
+            // OBSERVABILITY OF A DROP, and it is not optional. The shape guard REMOVES model output; a
+            // fail-safe whose drops are invisible ships failures invisibly. So every withheld suggestion
+            // is logged at Warning (a level that survives production) with the offending word verbatim,
+            // and the COUNT is carried onto the result so the run-log writers persist it next to
+            // SuggestionCount - a log line alone cannot tell a consumer that THIS run dropped three.
+            result.SuppressedImpossibleSuggestionCount = shapeGuard.DroppedCount;
+            foreach (var drop in shapeGuard.Dropped)
+            {
+                _logger.LogWarning(
+                    "Proofread suggestion WITHHELD by the Hebrew orthographic-impossibility guard: " +
+                    "[{Original}] -> [{Suggested}] introduces [{OffendingWord}], which places a Hebrew " +
+                    "final form in a non-final position. Analysis {Id}, language {Language}. " +
+                    "Kill switch: Ai:HebrewStyle:DropOrthographicallyImpossibleSuggestions=false.",
+                    drop.OriginalText,
+                    drop.SuggestedText,
+                    drop.OffendingWord,
+                    result.Id,
+                    language ?? result.Language ?? string.Empty);
+            }
 
             // Deterministic Hebrew ktiv-male (full-spelling) sub-check. Appends haser→male spelling
             // suggestions for Hebrew text when the house-style toggle is on (Ai:HebrewStyle:EnforceKtivMale,

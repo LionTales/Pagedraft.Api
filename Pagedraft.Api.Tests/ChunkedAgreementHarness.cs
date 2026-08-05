@@ -508,6 +508,25 @@ public static class ChunkedAgreementHarness
     /// </summary>
     public static AiOptions HarnessOptions() => new() { MaxParallelProofreadChunks = 1 };
 
+    /// <summary>
+    /// THE SUGGESTION DIFF EVERY MEASUREMENT ON THIS SURFACE READS, and the ONE place its shape-guard
+    /// posture is decided. Deliberately NOT <c>new SuggestionDiffService()</c>: that takes the
+    /// <see cref="HebrewStyleOptions"/> CLASS DEFAULT, which ships
+    /// <c>DropOrthographicallyImpossibleSuggestions = true</c>.
+    ///
+    /// GUARD OFF, ON PURPOSE - this surface measures the MODEL. g1 scores a chunked run by what the
+    /// model proposed, and its OVER-CORRECTION column is specifically a count of edits the model should
+    /// not have made; a layer that silently deletes the most obviously wrong of those (a mechanically
+    /// impossible Hebrew word) makes the model look better at exactly the metric this harness exists to
+    /// read. Symmetric with <c>RealProseHarness.MeasurementDiffService</c>, which argues it in full.
+    ///
+    /// Contrast the ktiv-male line in <c>RunAsync</c> below, which keeps the PRODUCTION default: that
+    /// layer only ADDS suggestions and the fixtures are gated ktiv-clean, so it contributes nothing.
+    /// This one removes them. Posture pinned by <c>MeasurementHarnessGuardPostureTests</c>.
+    /// </summary>
+    public static SuggestionDiffService MeasurementDiffService() =>
+        new(new HebrewStyleOptions { DropOrthographicallyImpossibleSuggestions = false });
+
     /// <summary>The per-chunk word target THIS harness will chunk a fixture at (production accessor).</summary>
     public static int ChunkTargetWordsFor(ChunkedAgreementFixture fixture) =>
         UnifiedAnalysisService.ProofreadChunkTargetWordsFor(HarnessOptions(), fixture.Language);
@@ -608,7 +627,10 @@ public static class ChunkedAgreementHarness
             NullLogger<UnifiedAnalysisService>.Instance,
             new AnalysisProgressTracker(),
             contextMock.Object,
-            new SuggestionDiffService(),
+            // GUARD OFF, not the production default: this surface measures the MODEL, and a layer that
+            // deletes model output would quietly shrink g1's over-correction column. Argued in full on
+            // MeasurementDiffService.
+            MeasurementDiffService(),
             // PRODUCTION DEFAULT (EnforceKtivMale = true), not a convenience "off". A ktiv-male
             // suggestion the deterministic checker adds would land in g1's over-correction column and
             // be misread as model overreach, so the fixtures are gated ktiv-clean instead

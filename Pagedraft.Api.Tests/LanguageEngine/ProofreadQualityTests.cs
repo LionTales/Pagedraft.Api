@@ -162,7 +162,9 @@ public class ProofreadQualityTests
         var model = ProofreadModel;
         var (provider, _) = ParseCandidate(model);
         var router = CreateRouter(model);
-        var diff = new SuggestionDiffService();
+        // GUARD OFF, not the class default: this Fact measures the MODEL and gates against bars
+        // measured before the shape guard existed. Argued in full on GoldScoringDiffService.
+        var diff = GoldScoringDiffService();
 
         var records = await ScoreModelAsync(router, diff, cases, perCaseOutput: true);
 
@@ -530,7 +532,9 @@ public class ProofreadQualityTests
             return;
         }
 
-        var diff = new SuggestionDiffService();
+        // GUARD OFF, not the class default: a bake-off compares MODELS, so it must see each model's raw
+        // output. Argued in full on GoldScoringDiffService.
+        var diff = GoldScoringDiffService();
 
         _output.WriteLine($"=== Proofread model bake-off ({cases.Length} gold cases, {models.Length} models, default provider={defaultProvider}) ===");
         _output.WriteLine($"Model list source: {(Environment.GetEnvironmentVariable(BakeoffModelsEnvVar) is { Length: > 0 } ? BakeoffModelsEnvVar + " env var" : "built-in default shortlist")}");
@@ -1279,6 +1283,31 @@ public class ProofreadQualityTests
     /// <summary>Human-readable bake-off row label: "provider:model" for cloud, bare model for Ollama.</summary>
     private static string CandidateLabel(string provider, string model)
         => provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? model : $"{provider}:{model}";
+
+    /// <summary>
+    /// THE SUGGESTION DIFF EVERY GOLD SCORE IS EXTRACTED WITH, and the ONE place its shape-guard
+    /// posture is decided. Deliberately NOT <c>new SuggestionDiffService()</c>: that takes the
+    /// <c>HebrewStyleOptions</c> CLASS DEFAULT, which ships
+    /// <c>DropOrthographicallyImpossibleSuggestions = true</c>.
+    ///
+    /// GUARD OFF, ON PURPOSE - this harness measures the MODEL, not the product. Precision, recall,
+    /// fp-rate, overreach and F0.5 are all read off what the model proposed, and a bake-off compares
+    /// those numbers ACROSS models and against bars measured before the guard existed; a layer that
+    /// deletes a model's most obviously wrong output would flatter whichever candidate produces the
+    /// most mechanically impossible Hebrew, and it would do so invisibly.
+    ///
+    /// NOTE WHAT THIS IS NOT: <c>HebrewOrthographyShapeGuardTests.TheGuard_DropsNothingOnEitherGoldCorpusIdealOutput</c>
+    /// and <c>.TheGuard_DropsNoDeclaredGoldCorrection</c> prove the guard is inert on the corpus's own
+    /// inputs and IDEAL outputs, so switching it off here cannot change what the gold DECLARES. They
+    /// say nothing about a live model's actual response, which is exactly the text this diff is run
+    /// against and the only place the guard could fire. Posture pinned by
+    /// <c>MeasurementHarnessGuardPostureTests</c>.
+    /// </summary>
+    internal static SuggestionDiffService GoldScoringDiffService() =>
+        new(new Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions
+        {
+            DropOrthographicallyImpossibleSuggestions = false
+        });
 
     // ─── Router DI (mirrors HebrewRegressionTests.CreateLanguageEngine's Ai wiring) ───
 

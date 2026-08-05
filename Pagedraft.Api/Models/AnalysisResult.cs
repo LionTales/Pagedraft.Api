@@ -48,6 +48,20 @@ public class AnalysisResult
     /// </summary>
     public bool ProofreadResultUnreliable { get; set; }
 
+    /// <summary>
+    /// How many proofread suggestions the orthographic-impossibility safety net withheld on THIS run
+    /// (<c>HebrewOrthographyShapeGuard</c>, gated by
+    /// <c>Ai:HebrewStyle:DropOrthographicallyImpossibleSuggestions</c>). Almost always 0.
+    ///
+    /// TRANSIENT ON PURPOSE, and it is <see cref="NotMappedAttribute"/> rather than a column: it is the
+    /// in-memory carrier from AttachSuggestions to the run-log writers, which is where the count is
+    /// PERSISTED (<see cref="AnalysisRunLog.SuppressedSuggestionCount"/>, written on every Proofread run,
+    /// chunked or not). Reading this off a row loaded from history yields 0 and means nothing; the run
+    /// log is the durable answer to "did this run drop anything".
+    /// </summary>
+    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    public int SuppressedImpossibleSuggestionCount { get; set; }
+
     // ── Navigation ──
     /// <summary>Null for book-scoped results (see <see cref="ChapterId"/>).</summary>
     public Chapter? Chapter { get; set; }

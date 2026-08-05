@@ -88,7 +88,12 @@ public class ChunkedAgreementLiveTests
         var provider = "Ollama";
         var model = ProofreadQualityTests.ProofreadModel;
         var router = ProofreadQualityTests.CreateRouter(provider, model);
-        var diff = new SuggestionDiffService();
+        // THE SAME POSTURE THE HARNESS USES, not a second construction: this diff produces the
+        // per-chunk edit rows while ChunkedAgreementHarness produces the merged-result rows on the SAME
+        // run, so two independently-defaulted services would publish a row whose halves were computed
+        // under different postures. Guard OFF, argued on
+        // ChunkedAgreementHarness.MeasurementDiffService.
+        var diff = ChunkedAgreementHarness.MeasurementDiffService();
 
         _output.WriteLine($"=== g1 scope (i): chunked agreement, live {provider}/{model} ===");
         _output.WriteLine($"artifacts: {dir}");
