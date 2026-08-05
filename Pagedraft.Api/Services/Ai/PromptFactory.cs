@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Extensions.Options;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
 
@@ -7,6 +8,24 @@ namespace Pagedraft.Api.Services.Ai;
 /// <summary>Hebrew-focused, provider-agnostic prompt templates for both the correction pipeline and the unified analysis system.</summary>
 public class PromptFactory
 {
+    private readonly ProofreadPromptOptions _proofreadPrompt;
+
+    /// <summary>
+    /// The UNCONFIGURED factory: every <see cref="ProofreadPromptOptions"/> switch at its default (all
+    /// OFF). This is the legacy shape - what <c>new PromptFactory()</c> composed before the options
+    /// existed - and it is kept as a real constructor rather than deleted because the byte-identity of
+    /// the off path is asserted AGAINST it (a test that compared the options path to itself would pass
+    /// for free).
+    /// </summary>
+    public PromptFactory() : this(null) { }
+
+    /// <param name="proofreadPrompt">
+    /// The bound "Ai:ProofreadPrompt" block. NULL is a supported value and means "the shipped
+    /// defaults", so the DI registration and a bare <c>new PromptFactory()</c> cannot diverge.
+    /// </param>
+    public PromptFactory(IOptions<ProofreadPromptOptions>? proofreadPrompt)
+        => _proofreadPrompt = proofreadPrompt?.Value ?? new ProofreadPromptOptions();
+
     // ─── System messages ────────────────────────────────────────────
 
     private const string HebrewSystemBase =
@@ -179,7 +198,7 @@ public class PromptFactory
     public string BuildProofreadChunkPrompt(string language, CharacterRegister? characters, string? overlapPrefix)
     {
         var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
-        var basePrompt = isHe ? ProofreadHe : ProofreadEn;
+        var basePrompt = ProofreadChunkBody(isHe);
 
         var sb = new StringBuilder();
 
@@ -517,6 +536,69 @@ public class PromptFactory
         Return only the corrected text — no explanations, labels, or preambles like "Corrected text:".
         Do not continue the story or add new content.
         """;
+
+    // ── Per-chunk proofread ARMS (default OFF, see ProofreadPromptOptions) ──────────────────────────
+
+    /// <summary>
+    /// The <c>[CONTEXT_BEFORE]</c> instruction line of <see cref="ProofreadHe"/>, VERBATIM. It is the
+    /// ANCHOR an arm extends, so it is stated once here rather than re-typed at the use site: an anchor
+    /// that silently stopped matching the body would turn an arm into a no-op that still reports as ON.
+    /// <see cref="ProofreadChunkBody"/> throws rather than degrading if it ever stops matching.
+    /// </summary>
+    internal const string ProofreadHeContextBeforeLine =
+        "אם מופיע [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] — זהו הקשר בלבד לצורך המשכיות. אל תתקן אותו ואל תכלול אותו בפלט.";
+
+    /// <summary>The <c>[CONTEXT_BEFORE]</c> instruction line of <see cref="ProofreadEn"/>, VERBATIM.</summary>
+    internal const string ProofreadEnContextBeforeLine =
+        "If [CONTEXT_BEFORE]...[/CONTEXT_BEFORE] is present — it is read-only context for continuity. Do not correct it or include it in your output.";
+
+    /// <summary>
+    /// ARM A (<c>referent-carry-forward.ARM_A.OverlapLicence</c>), Hebrew, VERBATIM as it was measured
+    /// on 2026-08-04 - including the LEADING SPACE, which is what joins it to
+    /// <see cref="ProofreadHeContextBeforeLine"/> rather than starting a new line.
+    ///
+    /// COPIED, NOT RE-AUTHORED. The arm's rendered text is preserved in
+    /// <c>ProofreadStandingFloor.RetiredInterventions</c> and a test asserts THIS constant is contained
+    /// in that record's <c>RenderedChange</c>. A paraphrase would be a different arm, and the 38%
+    /// over-correction cut belongs to this string, not to its meaning.
+    /// </summary>
+    internal const string OverlapReferentLicenceHe =
+        " השתמש בו גם כדי לזהות אל מי מתייחסים כינויי הגוף שבטקסט שיש לתקן, והתאם את מין הפועל, התואר והכינוי אל אותה דמות.";
+
+    /// <summary>ARM A, English, VERBATIM (leading space included). See <see cref="OverlapReferentLicenceHe"/>.</summary>
+    internal const string OverlapReferentLicenceEn =
+        " Also use it to resolve which character the pronouns in the text to correct refer to, and make verb, adjective and pronoun agreement follow that character.";
+
+    /// <summary>
+    /// The proofread body the PER-CHUNK builder uses, with every enabled arm applied. With all arms off
+    /// (the shipped default) this returns <see cref="ProofreadHe"/> / <see cref="ProofreadEn"/>
+    /// UNCHANGED - the reference the off-mode byte-identity test compares against.
+    ///
+    /// THROWS on a missing anchor instead of returning the body unchanged. A silent no-op here is the
+    /// worst available failure: the switch would read as ON, the artifacts would be stamped with the
+    /// arm's name, and the run would measure the OFF prompt under the ON label.
+    /// </summary>
+    private string ProofreadChunkBody(bool isHe)
+    {
+        var body = isHe ? ProofreadHe : ProofreadEn;
+        if (!_proofreadPrompt.OverlapReferentLicence)
+            return body;
+
+        var anchor = isHe ? ProofreadHeContextBeforeLine : ProofreadEnContextBeforeLine;
+        var licence = isHe ? OverlapReferentLicenceHe : OverlapReferentLicenceEn;
+
+        var at = body.IndexOf(anchor, StringComparison.Ordinal);
+        if (at < 0)
+            throw new InvalidOperationException(
+                $"Ai:ProofreadPrompt:{nameof(ProofreadPromptOptions.OverlapReferentLicence)} is ON but the " +
+                "[CONTEXT_BEFORE] anchor line it extends is no longer present in the " +
+                (isHe ? nameof(ProofreadHe) : nameof(ProofreadEn)) +
+                " body. The arm would render nothing while still reporting as enabled, so it fails loudly " +
+                "instead. Update the anchor constant and RE-MEASURE - the recorded numbers belong to the " +
+                "exact composed string, not to the arm's intent.");
+
+        return body.Insert(at + anchor.Length, licence);
+    }
 
     // ── Character Extraction (pre-pass) ────────────────────────────
 

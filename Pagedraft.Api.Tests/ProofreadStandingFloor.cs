@@ -49,6 +49,12 @@ namespace Pagedraft.Api.Tests;
 // is visible, and they are deliberately NOT gated, because they are means with real spread
 // (fixture 03 ranged 2-8) and gating them would buy flake instead of signal.
 //
+// A THIRD CHARACTERIZATION SURFACE lives in the partial half, ProofreadStandingFloor.RetiredInterventions.cs:
+// the interventions already MEASURED against these entries and REJECTED. A KnownDefect entry says a
+// defect exists; that surface says what has been tried against it, with what numbers, so the next plan
+// spends its GPU session on something new. A measured dead end is a deliverable, and it only stays one
+// if it is written down where the bar it failed to move is written down.
+//
 // -- WHY THE EVALUATOR LIVES HERE AND NOT IN THE LIVE TEST -----------------------------------------
 // The live consumers are skip-by-default and sit in the filter-EXCLUDED namespace, so nothing they
 // compute is exercised by a standing gate. The DECISION - "did the floor hold, regress, or move?" -
@@ -304,8 +310,15 @@ public sealed record FloorEvaluation(
 
 /// <summary>
 /// The floor. See the file header for the semantics; every number here is g1's, 2026-08-04.
+///
+/// PARTIAL, and the other half is not an afterthought. <c>ProofreadStandingFloor.RetiredInterventions.cs</c>
+/// carries the floor's THIRD characterization surface: prompt-side interventions that were built,
+/// measured against these very entries, and REJECTED. A pinned <see cref="FloorOutcome.KnownDefect"/>
+/// records that a defect exists; that file records what has already been TRIED against it and did not
+/// move it, which is the half a future planner needs in order not to pay for the same experiment twice.
+/// It is split off for the file-size ceiling only; read the two together.
 /// </summary>
-public static class ProofreadStandingFloor
+public static partial class ProofreadStandingFloor
 {
     /// <summary>Provider the whole floor was measured on.</summary>
     public const string MeasuredOnProvider = "Ollama";
