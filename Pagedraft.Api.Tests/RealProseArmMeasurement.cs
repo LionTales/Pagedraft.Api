@@ -200,7 +200,12 @@ public static class RealProseArmMeasurement
     {
         ("CORRUPTION", 10, 5,
             "The model emits a Hebrew NON-WORD. REPRODUCES at almost exactly c1's synthetic magnitude " +
-            "(-50% vs -49%). ARM A stopped nine of OFF's non-words and manufactured four of its own."),
+            "(-50% vs -49%). ARM A stopped nine of OFF's non-words and manufactured four of its own. " +
+            "GUARD POSTURE (recorded 2026-08-05, not re-measured): one of ARM A's five - צמצם -> צמץם - " +
+            "is the single suggestion the shipped HebrewOrthographyShapeGuard reaches, so a harness " +
+            "running that guard ON would report this column as 4. RealProseHarness therefore " +
+            "constructs its diff with the guard OFF (MeasurementDiffService), which is the posture " +
+            "these numbers were produced under and the one a later re-run has to keep to be comparable."),
         ("REGISTER", 12, 10,
             "Lexical word-for-word swap flattening the author's register. c1's synthetic cut here was " +
             "-58%; on real prose it is -17%. This is the half the named mechanism is ABOUT, and it is " +
@@ -234,19 +239,42 @@ public static class RealProseArmMeasurement
     // ── the residue this measurement surfaced and does not own ───────────────────────────────────
 
     /// <summary>
-    /// AN OPEN LEAD THIS SESSION SURFACED AND DID NOT MEASURE. Deliberately separated from
-    /// <see cref="Verdict"/> so it is findable without being mistaken for one: it is about the MODEL,
-    /// not about the arm, and no decision rule governed it.
+    /// A LEAD THIS SESSION SURFACED AND DID NOT MEASURE, followed up separately on 2026-08-05 and now
+    /// CLOSED. Deliberately kept apart from <see cref="Verdict"/> so it is findable without being
+    /// mistaken for one: it is about the MODEL, not about the arm, and no decision rule of this
+    /// session governed it. The follow-up record lives in
+    /// <c>Pagedraft.Api.Tests.RealProseNonWordResidue</c>; this note points at it rather than
+    /// duplicating it, and carries the two corrections the original note needed.
     /// </summary>
     public const string UnownedResidue =
-        "NOT THIS PLAN'S RESULT AND NOT ACCEPTED. gemma4:12b emits character-level Hebrew NON-WORDS on " +
-        "clean, twice-proofread manuscript prose in BOTH arms - 10 of the OFF arm's 47 edits across " +
-        "twelve short passages, for instance הקטנה -> הקטענה, עכשיו -> עכשור, and צמצם -> צמץם, the " +
-        "last of which places a final tsadi mid-word and is not orthographically legal. That is a " +
-        "larger and separate quality finding than the arm this session was testing, it is the single " +
-        "biggest family in the OFF column after orthographic churn, and it has never had a decision " +
-        "rule, a gold class or an n>=15 measurement of its own. It is recorded as an open lead, not a " +
-        "verdict.";
+        "NOT THIS PLAN'S RESULT AND NOT ACCEPTED as a verdict about the arm, and now CLOSED by a " +
+        "separate follow-up (plan hebrew-non-word-suggestions-2026-08-05). WHAT WAS SEEN: gemma4:12b " +
+        "emits character-level Hebrew NON-WORDS on clean, twice-proofread manuscript prose in BOTH " +
+        "arms - 10 of the 47 edits the OFF arm proposed across twelve short passages, for instance " +
+        "הקטנה -> הקטענה and עכשיו -> עכשור, the single biggest family in the OFF column after " +
+        "orthographic churn, plus five more under ARM A. " +
+        "ARM ATTRIBUTION, CORRECTED: this note used to cite צמצם -> צמץם as one of the OFF arm's ten. " +
+        "It is not an OFF edit. It occurs exactly once in the whole 128-suggestion corpus, under ARM " +
+        "A on real-prose-10-banter-very-high, and it is the corpus's ONLY mechanically illegal " +
+        "suggestion. " +
+        "WHAT THE CLASS HAS NOW, replacing this note's original claim that it had no decision rule, no " +
+        "gold class and no n>=15 measurement: (1) an ORIGIN VERDICT of RAW MODEL, settled " +
+        "deterministically and for free off the already-recorded IAiRouter-seam artifacts, with every " +
+        "post-model pass cleared individually rather than assumed inert - see " +
+        "RealProseNonWordResidue.Origin; (2) a DETERMINISTIC REGRESSION SURFACE, all fifteen instances " +
+        "recorded in RealProseNonWordResidue on the real-prose surface, deliberately not in " +
+        "proofread-gold.json, which structurally cannot reach a per-chunk intervention; (3) a shipped " +
+        "narrow GUARD, HebrewOrthographyShapeGuard behind Ai:HebrewStyle:" +
+        "DropOrthographicallyImpossibleSuggestions (default true), whose measured reach on this corpus " +
+        "is 1 suggestion in 128 and 0 of the ten. " +
+        "WHAT IT STILL DOES NOT HAVE, stated so nobody claims otherwise: NO n>=15 measurement. The GPU " +
+        "todo that would have produced one was CANCELLED with reason, because a guard proved incapable " +
+        "of firing on any of the ten cannot be measured against them. " +
+        "WHY IT IS CLOSED RATHER THAN OPEN: the origin is the model, the pipeline is acquitted by " +
+        "evidence, the guard is a 1-in-128 safety net and not a remedy, and the residue is " +
+        "model-quality character-level corruption on clean prose - two instances of which (הזעת, " +
+        "שהמרור) are legal Hebrew tokens wrong only in context and so are unreachable by any shape or " +
+        "lexicon rule even in principle. Re-opening this needs a NEW lead with its own scope.";
 
     // ── derived readings ─────────────────────────────────────────────────────────────────────────
 
