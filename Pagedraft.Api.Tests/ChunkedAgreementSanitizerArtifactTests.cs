@@ -87,6 +87,16 @@ public class ChunkedAgreementSanitizerArtifactTests
         Assert.Equal(stripped, SyncfusionWatermarkStripper.StripSyncfusionWatermark(stripped));
         Assert.Equal(0, CountBlankLines(stripped));
 
+        // PRODUCTION DEFAULT (the shape guard ON), not the guard-OFF posture the measurement harnesses
+        // take: this test is not a measurement of a model, it is a claim about the shipped normalization
+        // pairing, so the shipped diff is the right one to make it against. The guard is also inert
+        // here by construction - every suggestion this asymmetry produces is whitespace-only (asserted
+        // at the bottom of this test), and a replacement with no Hebrew letter in it cannot carry a
+        // final form in a non-final position.
+        //
+        // SCOPE: this is the posture of THIS diff only. The end-to-end test below drives
+        // ChunkedAgreementHarness.RunAsync and therefore takes that harness's deliberate guard-OFF
+        // posture instead; the guard is equally inert there, because that run's replay echoes its input.
         var diff = new SuggestionDiffService();
 
         // The PRODUCTION pairing: both sides stripped, model echoed => nothing to report.

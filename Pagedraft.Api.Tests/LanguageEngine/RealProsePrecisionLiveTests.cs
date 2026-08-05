@@ -128,7 +128,12 @@ public class RealProsePrecisionLiveTests
         var provider = "Ollama";
         var model = ProofreadQualityTests.ProofreadModel;
         var router = ProofreadQualityTests.CreateRouter(provider, model);
-        var diff = new SuggestionDiffService();
+        // THE SAME INSTANCE THE HARNESS USES, not a second construction: this diff produces the
+        // per-chunk edit rows while RealProseHarness produces the merged-result rows on the SAME run,
+        // so two independently-defaulted services would publish a row whose perChunkEdits and whose
+        // editCount were computed under different postures. Guard OFF, argued on
+        // RealProseHarness.MeasurementDiffService.
+        var diff = RealProseHarness.MeasurementDiffService();
 
         var expectedCallsPerRep = units.Sum(u => u.Passage.ExpectedChunkCount) * Arms.Length;
 
