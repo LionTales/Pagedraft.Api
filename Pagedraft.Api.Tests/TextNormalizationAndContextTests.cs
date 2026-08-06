@@ -202,7 +202,15 @@ public class TextNormalizationAndContextTests
         Assert.Equal(AnalysisType.Proofread, context.AnalysisType);
         Assert.Equal(bookId, context.BookId);
         Assert.Equal(chapterId, context.ChapterId);
-        Assert.Null(context.Characters);
+
+        // COVERAGE (be-c01) changed the SHAPE of this degradation, not its effect. The chapter is now
+        // scanned on its first analysis whatever the register holds, so a BookBible row is created and
+        // this comes back as a real but EMPTY register instead of a null one. Both are identical where
+        // it matters: every [CHARACTER_REGISTER] render site gates on Characters.Count > 0
+        // (PromptFactory :211 and :351), so the model is told about no characters either way - which is
+        // what "gracefully degenerates" means here. Asserting emptiness rather than null keeps that
+        // claim sharp instead of accepting whatever shape happens to arrive.
+        Assert.Empty(context.Characters!.Characters);
     }
 
     [Fact]

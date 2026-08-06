@@ -773,16 +773,19 @@ public class CharacterRegisterProvenanceTests
         });
         await db.SaveChangesAsync();
 
+        // Non-vacuity, read BEFORE the analysis: the seeded column really did hold the malformed shape
+        // this asserts was repaired, so the test cannot pass by the register having been empty or
+        // unreadable all along. It has to be read here rather than after, because the coverage scan
+        // (be-c01) now legitimately REWRITES the column on this chapter's first analysis, persisting
+        // the very repair the assertion below observes.
+        var seeded = await db.BookBibles.AsNoTracking().FirstAsync(b => b.BookId == bookId);
+        Assert.Equal(5, Deserialize(seeded.CharacterRegisterJson!).Characters.Count);
+
         var context = await provider.GetRequiredService<IAnalysisContextService>().BuildContextAsync(
             AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", CancellationToken.None);
 
         var names = context.Characters!.Characters.Select(c => c.Name).ToList();
         Assert.Equal(new[] { "דניאל", "רונית" }, names);
-
-        // Non-vacuity: the seeded column really did hold the malformed shape this asserts was repaired,
-        // so the test cannot pass by the register having been empty or unreadable all along.
-        var bible = await db.BookBibles.AsNoTracking().FirstAsync(b => b.BookId == bookId);
-        Assert.Equal(5, Deserialize(bible.CharacterRegisterJson!).Characters.Count);
     }
 
     [Fact]
@@ -814,19 +817,19 @@ public class CharacterRegisterProvenanceTests
     }
 
     [Fact]
-    public async Task LoadCharacterRegister_AllSuppressedRegister_DoesNotReExtractAtAll()
+    public async Task LoadCharacterRegister_AllSuppressedRegister_IsScannedOnce_AndTheSuppressionSurvivesTheLiveMerge()
     {
-        // REPLACES a test that asserted the opposite and passed VACUOUSLY. It believed an all-suppressed
-        // register falls through to the pre-pass and is rescued by the merge; in fact the gate counts
-        // stored entries whether or not they are suppressed, so the method returns early and NOTHING
-        // runs. Its assertions held only because the seeded row was never rewritten - they would have
-        // held for any implementation, including one that erased the suppression.
+        // HISTORY, because this test has now been wrong twice and the reason matters. Version 1 claimed
+        // an all-suppressed register falls through to the pre-pass and is rescued by the merge, and
+        // passed VACUOUSLY - the old one-shot gate counted stored entries whether suppressed or not, so
+        // the method returned early and nothing ran at all. Version 2 corrected it to assert Times.Never
+        // against that gate. be-c01 REMOVED that gate: a chapter absent from the scan ledger is scanned
+        // whatever the register already holds, so version 1's premise is finally true and version 2's
+        // assertion is finally false. What is pinned here now is the guarantee that actually protects
+        // the author, on the path that actually runs.
         //
-        // The non-vacuity guard here is the router Verify: it fails if the pre-pass ever fires, which is
-        // the only thing that could put the suppression at risk. Asserting on the persisted JSON alone
-        // CANNOT distinguish these cases, because a merge over this register legitimately reproduces
-        // byte-identical output (the suppressed entry wins, and the stamp is preserved when nothing
-        // changed) - that identity is exactly what made the old test vacuous.
+        // The extraction proposes exactly the suppressed name, so the merge is genuinely under test:
+        // resurrect it and the analysis is handed a character the author struck out.
         using var provider = BuildProvider(out var router, extractedCharacterName: "רונית");
         var db = provider.GetRequiredService<AppDbContext>();
         var (bookId, chapterId) = await SeedBookAsync(db);
@@ -841,24 +844,48 @@ public class CharacterRegisterProvenanceTests
         db.BookBibles.Add(new BookBible { BookId = bookId, CharacterRegisterJson = seededJson });
         await db.SaveChangesAsync();
 
-        var context = await provider.GetRequiredService<IAnalysisContextService>().BuildContextAsync(
+        var contextService = provider.GetRequiredService<IAnalysisContextService>();
+        var context = await contextService.BuildContextAsync(
             AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", CancellationToken.None);
 
         var extractionPrompt = provider.GetRequiredService<PromptFactory>().GetCharacterExtractionPrompt("he");
+
+        // NON-VACUITY: the scan really fired, so the merge really ran and really had to refuse the
+        // resurrection. Without this the assertions below would hold for an implementation that simply
+        // never touched the register.
         router.Verify(
             r => r.CompleteAsync(It.Is<AiRequest>(q => q.Instruction == extractionPrompt), It.IsAny<CancellationToken>()),
-            Times.Never);
+            Times.Once);
 
-        // The column was not rewritten, and the suppressed entry is still hidden from the analysis.
-        var bible = await db.BookBibles.AsNoTracking().FirstAsync(b => b.BookId == bookId);
-        Assert.Equal(seededJson, bible.CharacterRegisterJson);
+        // A SUPPRESSED CHARACTER IS NEVER RESURRECTED - now measured against a live merge, not a unit.
         Assert.Empty(context.Characters!.Characters);
+        var persisted = Deserialize(
+            (await db.BookBibles.AsNoTracking().FirstAsync(b => b.BookId == bookId)).CharacterRegisterJson!);
+        var entry = Assert.Single(persisted.Characters);
+        Assert.False(entry.IsCharacter);
+        Assert.True(entry.IsCharacterConfirmed);
+        // The extraction's own fields must not leak in through the back door either.
+        Assert.Null(entry.Gender);
+        Assert.Null(entry.Role);
+
+        // ...and the merge changed nothing, so the stamp stayed null. A bump here would mark every
+        // prior AnalysisResult on the book stale purely because coverage advanced.
+        Assert.Null(persisted.UpdatedAt);
+
+        // The chapter is now IN the ledger, so analysing it again must not spend a second call.
+        await contextService.BuildContextAsync(
+            AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", CancellationToken.None);
+        router.Verify(
+            r => r.CompleteAsync(It.Is<AiRequest>(q => q.Instruction == extractionPrompt), It.IsAny<CancellationToken>()),
+            Times.Once);
     }
 
     [Fact]
     public async Task LoadCharacterRegister_ReExtractionOverAnEmptyRegister_WritesThroughTheMerge()
     {
-        // The one production state that DOES reach the merge: a stored register with zero entries.
+        // The BOOTSTRAP state: a stored register with zero entries. (Before be-c01 it was the ONLY
+        // state that reached the merge at all; a chapter absent from the scan ledger now reaches it
+        // too, whatever the register holds.)
         // Non-vacuity: a plain Serialize(extracted) overwrite would satisfy the character assertion just
         // as well, so the discriminator is the STAMP - only CharacterRegisterMerge sets UpdatedAt, and
         // it sets it only when the entry set actually changed.
@@ -902,9 +929,11 @@ public class CharacterRegisterProvenanceTests
         // the write is guaranteed to land strictly between the pre-call read and the merge. Same
         // side-effecting-fake technique the tracker TOCTOU test used.
         //
-        // SEEDING: an EMPTY (zero-entry) register is the one state that actually reaches the merge -
-        // the gate returns early on any non-empty stored register, so seeding characters here would
-        // have the test pass against the un-fixed code for the wrong reason.
+        // SEEDING: an EMPTY (zero-entry) register. When this was written it was the one state that
+        // reached the merge at all, because the old one-shot gate returned early on any non-empty
+        // stored register, so seeding characters would have had the test pass against the un-fixed
+        // code for the wrong reason. be-c01 removed that gate, but the empty seed stays: it keeps the
+        // race under test independent of the ledger, so a coverage regression cannot green it.
         using var provider = BuildProvider(out var router);
         var db = provider.GetRequiredService<AppDbContext>();
         var (bookId, chapterId) = await SeedBookAsync(db);

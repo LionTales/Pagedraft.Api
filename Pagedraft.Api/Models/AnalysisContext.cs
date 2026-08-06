@@ -81,6 +81,58 @@ public record CharacterRegister
     /// as stale purely because the feature shipped.
     /// </summary>
     public DateTimeOffset? UpdatedAt { get; init; }
+
+    /// <summary>
+    /// THE SCAN LEDGER (automatic-coverage plan, d1 §1): which chapters have already contributed to
+    /// this register, and against which version of their text. It is what replaced the one-shot gate
+    /// that used to freeze the register after a single extraction.
+    ///
+    /// <para>A chapter is COVERED-AND-FRESH iff an entry for it exists here AND its
+    /// <see cref="ScannedChapterEntry.SourceStamp"/> still equals the chapter's current
+    /// <c>Chapter.UpdatedAt</c>. Any other state (no entry, or an older stamp) is a miss and the next
+    /// analysis of that chapter re-contributes it.</para>
+    ///
+    /// <para>It lives INSIDE this record, in the one JSON column, deliberately: the register has one
+    /// storage shape, one serializer and two writers, and a ledger table would be a third writer
+    /// surface for data that is small in every real book (one entry per chapter, never one per scan -
+    /// a re-scan REPLACES its chapter's entry).</para>
+    ///
+    /// <para>It carries NO staleness meaning: grafting an entry on must not move
+    /// <see cref="UpdatedAt"/>, or improving coverage would mark every prior AnalysisResult on the
+    /// book stale without any character FACT having changed. Coverage-freshness and content-freshness
+    /// are two questions on two signals.</para>
+    ///
+    /// <para>NULL-GUARD: same trap as <see cref="Characters"/> - an explicit
+    /// <c>"scannedChapters": null</c> in the persisted JSON overwrites a plain initializer, so the
+    /// init accessor coerces it back to empty.</para>
+    /// </summary>
+    public IReadOnlyList<ScannedChapterEntry> ScannedChapters
+    {
+        get => _scannedChapters;
+        init => _scannedChapters = value ?? Array.Empty<ScannedChapterEntry>();
+    }
+
+    private readonly IReadOnlyList<ScannedChapterEntry> _scannedChapters = Array.Empty<ScannedChapterEntry>();
+}
+
+/// <summary>
+/// One chapter's line in <see cref="CharacterRegister.ScannedChapters"/> (d1 §1).
+///
+/// <para><see cref="SourceStamp"/> is the chapter's <c>Chapter.UpdatedAt</c> AT SCAN TIME and is the
+/// re-scan key: when the author edits the chapter its UpdatedAt moves, the stamps stop matching, and
+/// the chapter re-contributes on its next analysis. <see cref="ScannedAt"/> is the wall clock of the
+/// scan and is reporting only (be-c03) - never compared against anything to decide freshness.</para>
+///
+/// <para>An entry whose <see cref="ChapterId"/> no longer resolves (the chapter was deleted) is
+/// harmless: it names nothing, matches nothing by name, and costs bytes rather than correctness.</para>
+/// </summary>
+public record ScannedChapterEntry
+{
+    public required Guid ChapterId { get; init; }
+    public DateTimeOffset ScannedAt { get; init; }
+
+    /// <summary>The chapter's <c>Chapter.UpdatedAt</c> when it was scanned. The re-scan key.</summary>
+    public DateTimeOffset SourceStamp { get; init; }
 }
 
 /// <summary>

@@ -35,6 +35,15 @@ public class BookContextAssemblerTests
 {
     // A structured L0 brief the assembler's L1 projection reads (camelCase, matches StructuredChunkSummaryData).
     // Each chapter gets a distinct, moderately sized brief so the union is observable and tokens accumulate.
+    //
+    // NORMALIZED TO "\n", and it has to be. A multi-line raw string literal carries the line endings of the
+    // SOURCE FILE, so this fixture is one byte per line longer when the file is checked out CRLF than when it
+    // is checked out LF. Every token count in this class is derived from these bytes, so without this call the
+    // fixture is a different size on a Windows working copy than on the Linux CI runner, and any budget tuned
+    // tightly against it passes on one and fails on the other with nothing in the diff to explain it. That is
+    // not hypothetical: it is exactly how AssembleWindowsAsync_SmallCharacterRegister_LeavesTheWindowPartition-
+    // Unchanged went green locally and red in CI. Pinning the endings here makes the tuned budgets below mean
+    // the same thing everywhere, whatever anyone's core.autocrlf is set to.
     private static string BriefJson(int n) => $$"""
         {
           "plotEvents": ["Chapter {{n}} event alpha that advances the plot", "Chapter {{n}} event beta with consequences"],
@@ -43,7 +52,7 @@ public class BookContextAssemblerTests
           "toneNotes": "tense and foreboding throughout chapter {{n}}",
           "openThreads": ["who sent the letter in chapter {{n}}?"]
         }
-        """;
+        """.ReplaceLineEndings("\n");
 
     // ─── (a) Budget cap respected: assembled context stays within the configured budget ──────────────
 
@@ -976,6 +985,356 @@ public class BookContextAssemblerTests
         Assert.False(windows[0].WindowExceedsBudget);
         Assert.Equal(new[] { 0, 1, 2, 3 }, windows[0].IncludedChapterOrders.OrderBy(o => o).ToArray());
         Assert.True(windows[0].EstimatedTokens <= windows[0].BudgetTokens);
+    }
+
+    // ─── (j) be-c02: the CHARACTER REGISTER block, and the token budget that must charge it ───────────
+    //
+    // THE HAZARD, restated because every assert below exists for it: this assembler caps assembly against a
+    // budget derived from the active model's num_ctx because Ollama SILENTLY TRUNCATES anything past that
+    // window, and a truncated window comes back empty or unparseable. An empty windowed payload is not a
+    // harmless miss here - it has twice been counted as reviewed and fed the coverage set a destructive
+    // delete consumes. So the register block must be CHARGED (making windows narrower), never ADDED ON TOP
+    // (making them overflow). UNDER-counting is the dangerous direction, so it is what these tests catch.
+
+    [Fact]
+    public async Task AssembleWindowsAsync_CharacterRegister_ChargesItsExactBlockSize_AgainstTheWindowBudget()
+    {
+        // A book that fits ONE window, assembled twice: without a register, then with. The difference in the
+        // reported EstimatedTokens must equal the register block's REAL size (block + inter-block separator),
+        // and the emitted Text must grow by exactly the same bytes. That pins the charge to the block rather
+        // than to any independent re-derivation of it.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 100_000,
+            windowBriefMaxTokens: 800, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Register Book", Language = "he" });
+        for (var i = 0; i < 6; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var register = RegisterOf(("דנה", "protagonist", "female"), ("יואב", "antagonist", "male"));
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+
+        var without = await asm.AssembleWindowsAsync(bookId, "he");
+        var with = await asm.AssembleWindowsAsync(bookId, "he", characterRegister: register);
+
+        Assert.Single(without);
+        Assert.Single(with);
+
+        // The block as the assembler renders it, plus the "\n\n" separator that joins it to the next block.
+        var cpt = BookContextAssembler.CharsPerTokenForLanguage("he");
+        var block = BookContextAssembler.FormatCharacterRegisterBlock(register) + "\n\n";
+        var blockTokens = BookContextAssembler.EstimateTokens(block, cpt);
+        Assert.True(blockTokens > 0, "the fixture register must render a non-empty block, or this test is vacuous");
+
+        // (1) The reported estimate moved by the block's REAL size - not by zero (uncharged) and not by some
+        //     other number (charged against a differently-rendered block than the one emitted).
+        Assert.Equal(without[0].EstimatedTokens + blockTokens, with[0].EstimatedTokens);
+
+        // (2) The emitted Text grew by exactly the block's bytes, and the block sits right after the brief.
+        Assert.Equal(without[0].Text.Length + block.Length, with[0].Text.Length);
+        Assert.Contains("[BOOK_CHARACTERS]", with[0].Text);
+        Assert.Contains("- דנה (protagonist) [female]", with[0].Text);
+        Assert.True(
+            with[0].Text.IndexOf("[BOOK_CHARACTERS]", StringComparison.Ordinal)
+                > with[0].Text.IndexOf("[/BOOK_CONTEXT]", StringComparison.Ordinal),
+            "the register block belongs AFTER the BookBrief block, which stays first in every window");
+
+        // (3) THE UPPER-BOUND CONTRACT, which is what an under-count breaks: the reported estimate must still
+        //     bound the real text. Charging zero for an emitted block inverts this.
+        Assert.True(
+            BookContextAssembler.EstimateTokens(with[0].Text, cpt) <= with[0].EstimatedTokens,
+            $"EstimateTokens(Text)={BookContextAssembler.EstimateTokens(with[0].Text, cpt)} must be <= " +
+            $"EstimatedTokens={with[0].EstimatedTokens}: every emitted byte of the register block must be charged.");
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_LargeCharacterRegister_ShrinksWindows_NeverOverflowsTheBudget()
+    {
+        // THE DIRECTION THAT MATTERS. At a tight budget with a LARGE register, the block must eat into the room
+        // available for chapters (more/narrower windows) rather than riding on top of a budget that no longer
+        // describes the emitted text. Every window must still honour the budget against its REAL text.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 900,
+            windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Big Cast Book", Language = "he" });
+        const int chapterCount = 40;
+        for (var i = 0; i < chapterCount; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var register = BigRegister(120); // more than the top-N cap, so the cap is exercised too
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+
+        var without = await asm.AssembleWindowsAsync(bookId, "he");
+        var with = await asm.AssembleWindowsAsync(bookId, "he", characterRegister: register);
+
+        var cpt = BookContextAssembler.CharsPerTokenForLanguage("he");
+
+        // NARROWER, not overflowing: the register costs real tokens at a tight budget, so it can only ever
+        // increase the window count (never decrease it), and it must have cost something here.
+        Assert.True(with.Count >= without.Count,
+            $"register-bearing assembly produced FEWER windows ({with.Count}) than the register-less one " +
+            $"({without.Count}), which means the block was not charged");
+        Assert.True(with.Count > without.Count,
+            $"a {chapterCount}-chapter book at a 900t budget with a large register should need MORE windows " +
+            $"than without it (got {with.Count} vs {without.Count}); if this fixture stops being tight enough " +
+            "the test no longer proves the budget was reduced");
+
+        foreach (var w in with)
+        {
+            Assert.Contains("[BOOK_CHARACTERS]", w.Text);
+            // The reported estimate bounds the real text (the under-count guard) ...
+            Assert.True(
+                BookContextAssembler.EstimateTokens(w.Text, cpt) <= w.EstimatedTokens,
+                $"window {w.WindowIndex}: EstimateTokens(Text)=" +
+                $"{BookContextAssembler.EstimateTokens(w.Text, cpt)} > EstimatedTokens={w.EstimatedTokens}");
+            // ... and the real text stays inside num_ctx's derived budget for every non-pathological window.
+            if (!w.WindowExceedsBudget)
+                Assert.True(
+                    BookContextAssembler.EstimateTokens(w.Text, cpt) <= w.BudgetTokens,
+                    $"window {w.WindowIndex}: real text " +
+                    $"{BookContextAssembler.EstimateTokens(w.Text, cpt)}t exceeds budget {w.BudgetTokens}t");
+        }
+
+        // And nothing was dropped: every chapter is still exactly one window's primary.
+        var primaryOrders = with
+            .SelectMany(w => w.IncludedChapterOrders.Except(w.OverlapChapterOrders))
+            .OrderBy(o => o)
+            .ToList();
+        Assert.Equal(Enumerable.Range(0, chapterCount).ToList(), primaryOrders);
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_SmallCharacterRegister_LeavesTheWindowPartitionUnchanged()
+    {
+        // The complement of the test above: at a budget with headroom, a small register must NOT churn the
+        // partition. Same window count, same chapters per window - it only adds its block. A register that
+        // re-cut a book's windows on every build would invalidate window-indexed provenance for nothing.
+        // Seeded ONCE; every provider below shares this in-memory store by name, so only the budget varies.
+        var dbName = Guid.NewGuid().ToString();
+        var bookId = Guid.NewGuid();
+        using (var seedProvider = BuildProvider(dbName, bookContextTokenBudget: 4000,
+                   windowBriefMaxTokens: 150, windowOverlapChapters: 0))
+        {
+            var seedDb = seedProvider.GetRequiredService<AppDbContext>();
+            seedDb.Books.Add(new Book { Id = bookId, Title = "Stable Window Book", Language = "he" });
+            for (var i = 0; i < 40; i++)
+                SeedChapterWithBrief(seedDb, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+            await seedDb.SaveChangesAsync();
+        }
+
+        var register = RegisterOf(("דנה", "protagonist", "female"), ("יואב", "antagonist", "male"));
+        var cpt = BookContextAssembler.CharsPerTokenForLanguage("he");
+        var blockTokens = BookContextAssembler.EstimateTokens(
+            BookContextAssembler.FormatCharacterRegisterBlock(register) + "\n\n", cpt);
+
+        // THE BUDGET IS DERIVED, NOT HAND-TUNED, and that is the point of the loop below.
+        //
+        // "Unchanged" is only a meaningful claim when the block genuinely fits the slack every window already
+        // had, and slack is the greedy partition's leftover after its last chapter: an essentially arbitrary
+        // value in [0, one chapter's cost) that moves with the fixture's exact BYTE size. Those bytes are NOT
+        // the same on every machine. The assembler builds its blocks with StringBuilder.AppendLine, which
+        // emits Environment.NewLine, so every assembled window is one byte per line larger on a Windows
+        // working copy than on the Linux CI runner. A constant tuned against one of them is green there and
+        // red on the other with nothing in the diff to explain it, which is exactly what a hardcoded 4060 did:
+        // it satisfied this precondition locally and left the tightest CI window 3t of slack against a 47t
+        // block. Searching for the budget removes the platform from the answer.
+        //
+        // The search cannot weaken what is proved. The precondition is the SELECTION criterion rather than a
+        // later assertion, the equality assertions below are untouched, and a range containing no qualifying
+        // budget FAILS loudly instead of quietly settling for a bad one.
+        var chosenBudget = 0;
+        IReadOnlyList<BookContextAssembly>? without = null;
+        var probed = new List<string>();
+
+        for (var budget = 4000; budget <= 4600 && chosenBudget == 0; budget += 5)
+        {
+            using var probeProvider = BuildProvider(dbName, bookContextTokenBudget: budget,
+                windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+            var candidate = await probeProvider.GetRequiredService<BookContextAssembler>()
+                .AssembleWindowsAsync(bookId, "he");
+
+            // Multi-window or it asserts nothing; that is a property of the budget, so it belongs in the
+            // selection rather than in an assertion the search could walk past.
+            if (candidate.Count <= 1) continue;
+
+            var slack = candidate.Min(w => w.BudgetTokens - w.EstimatedTokens);
+            probed.Add($"{budget}->{candidate.Count}w/slack {slack}t");
+            if (slack > blockTokens)
+            {
+                chosenBudget = budget;
+                without = candidate;
+            }
+        }
+
+        Assert.True(chosenBudget > 0,
+            $"no budget in 4000..4600 leaves the tightest window room for this {blockTokens}t register block " +
+            "while still partitioning the fixture into more than one window. Widen the search or shrink the " +
+            $"fixture register; do not relax the assertions below. Probed: {string.Join(", ", probed)}");
+
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: chosenBudget,
+            windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+        var with = await provider.GetRequiredService<BookContextAssembler>()
+            .AssembleWindowsAsync(bookId, "he", characterRegister: register);
+
+        Assert.Equal(without!.Count, with.Count);
+        for (var i = 0; i < without.Count; i++)
+            Assert.Equal(without[i].IncludedChapterOrders, with[i].IncludedChapterOrders);
+
+        // And the block really is present, so "unchanged partition" is not being proved by a register that
+        // silently rendered nothing at all.
+        Assert.All(with, w => Assert.Contains("[BOOK_CHARACTERS]", w.Text));
+    }
+
+    [Fact]
+    public async Task AssembleWindowsAsync_NoCharacterRegister_AssemblesByteIdenticallyToBefore()
+    {
+        // A book with NO register (and one whose register holds no visible characters) must assemble EXACTLY
+        // as it did before this parameter existed: no markers, no bytes, no tokens charged. Otherwise every
+        // register-less book silently pays for an empty section.
+        var dbName = Guid.NewGuid().ToString();
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: 900,
+            windowBriefMaxTokens: 150, windowOverlapChapters: 1);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "No Register Book", Language = "he" });
+        for (var i = 0; i < 20; i++)
+            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+        await db.SaveChangesAsync();
+
+        var asm = provider.GetRequiredService<BookContextAssembler>();
+        var baseline = await asm.AssembleWindowsAsync(bookId, "he");
+        var explicitNull = await asm.AssembleWindowsAsync(bookId, "he", characterRegister: null);
+        var emptyRegister = await asm.AssembleWindowsAsync(
+            bookId, "he", characterRegister: new CharacterRegister { Characters = Array.Empty<CharacterRegisterEntry>() });
+
+        Assert.Equal(baseline.Count, explicitNull.Count);
+        Assert.Equal(baseline.Count, emptyRegister.Count);
+        for (var i = 0; i < baseline.Count; i++)
+        {
+            Assert.Equal(baseline[i].Text, explicitNull[i].Text);
+            Assert.Equal(baseline[i].Text, emptyRegister[i].Text);
+            Assert.Equal(baseline[i].EstimatedTokens, explicitNull[i].EstimatedTokens);
+            Assert.Equal(baseline[i].EstimatedTokens, emptyRegister[i].EstimatedTokens);
+            Assert.DoesNotContain("[BOOK_CHARACTERS]", baseline[i].Text);
+            Assert.DoesNotContain("[BOOK_CHARACTERS]", emptyRegister[i].Text);
+        }
+
+        // An empty register renders NOTHING at all - not bare markers.
+        Assert.Equal(string.Empty, BookContextAssembler.FormatCharacterRegisterBlock(null));
+        Assert.Equal(string.Empty, BookContextAssembler.FormatCharacterRegisterBlock(
+            new CharacterRegister { Characters = Array.Empty<CharacterRegisterEntry>() }));
+    }
+
+    [Fact]
+    public void FormatCharacterRegisterBlock_CapsTheCast_KeepingTheHighestRolesFirst()
+    {
+        // THE BOUND. The block repeats in EVERY window, so an unbounded cast multiplies straight into the
+        // budget. 24 entries is the cap; a larger cast loses its MINOR characters, not an arbitrary tail.
+        var entries = new List<CharacterRegisterEntry>();
+        for (var i = 0; i < 60; i++)
+            entries.Add(new CharacterRegisterEntry { Name = $"מינורי{i}", Role = "minor", Gender = "male" });
+        // The two entries the review most needs are added LAST, i.e. beyond a naive first-N cut.
+        entries.Add(new CharacterRegisterEntry { Name = "דנה", Role = "protagonist", Gender = "female" });
+        entries.Add(new CharacterRegisterEntry { Name = "יואב", Role = "antagonist", Gender = "male" });
+        var register = new CharacterRegister { Characters = entries };
+
+        var block = BookContextAssembler.FormatCharacterRegisterBlock(register);
+        var lines = block.Split('\n').Where(l => l.TrimStart().StartsWith("- ")).ToList();
+
+        Assert.Equal(24, lines.Count);
+        // Role priority put the protagonist and antagonist FIRST despite being last in the register.
+        Assert.StartsWith("- דנה (protagonist) [female]", lines[0].Trim());
+        Assert.StartsWith("- יואב (antagonist) [male]", lines[1].Trim());
+        // And the cut fell on the minor characters, in register order.
+        Assert.Contains("מינורי0", block);
+        Assert.DoesNotContain("מינורי22", block);
+        Assert.DoesNotContain("מינורי59", block);
+    }
+
+    [Fact]
+    public void FormatCharacterRegisterBlock_CapsAliasesPerCharacter()
+    {
+        // The register's OTHER unbounded axis: one entry with thirty surface forms could blow the block up
+        // while the cast size stays well inside the cap.
+        var register = new CharacterRegister
+        {
+            Characters = new[]
+            {
+                new CharacterRegisterEntry
+                {
+                    Name = "דנה",
+                    Role = "protagonist",
+                    Aliases = Enumerable.Range(0, 12).Select(i => $"כינוי{i}").ToArray()
+                }
+            }
+        };
+
+        var block = BookContextAssembler.FormatCharacterRegisterBlock(register);
+
+        Assert.Contains("(aliases: כינוי0, כינוי1, כינוי2)", block);
+        Assert.DoesNotContain("כינוי3", block);
+        Assert.DoesNotContain("כינוי11", block);
+    }
+
+    [Fact]
+    public void FormatCharacterRegisterBlock_AtTheCap_CostsALimitedShareOfTheWindowBudget()
+    {
+        // THE MEASUREMENT behind the cap (d1 §4 shipped 40 as a PROPOSAL and asked be-c02 to verify it; the
+        // measurement moved it to 24 — 40 long Hebrew entries cost 1562t, 19% of every window). A full-cap
+        // register of realistically-long Hebrew entries, charged on the DENSE (2 chars/token) estimate that
+        // Hebrew books use, must stay a small fraction of the per-window budget the SHIPPED Ollama_BookReview
+        // entry derives: NumCtx 16384 - NumPredict 6144 - 1536 prompt reserve - 512 safety margin = 8192t.
+        // If a future widening of the cap or the rendered fields pushes this past the ceiling, this fails and
+        // the trade-off gets made deliberately instead of silently.
+        const int ShippedPerWindowBudget = 8192;
+        var register = BigRegister(120); // 120 in, 24 rendered
+        var block = BookContextAssembler.FormatCharacterRegisterBlock(register) + "\n\n";
+        var tokens = BookContextAssembler.EstimateTokens(
+            block, BookContextAssembler.CharsPerTokenForLanguage("he"));
+
+        Assert.True(tokens <= ShippedPerWindowBudget * 0.13,
+            $"the capped [BOOK_CHARACTERS] block costs {tokens}t on the dense estimate, i.e. " +
+            $"{100.0 * tokens / ShippedPerWindowBudget:F1}% of every {ShippedPerWindowBudget}t window; the cap " +
+            "exists to keep that share small, so re-measure before raising MaxBookReviewCharacters");
+        // Non-vacuity: a cap that rendered nothing (or one entry) would also pass the ceiling above.
+        Assert.True(tokens >= 400,
+            $"the fixture block only costs {tokens}t, which is too small to be exercising the 24-entry cap");
+    }
+
+    /// <summary>A register of (name, role, gender) triples, in the given order.</summary>
+    private static CharacterRegister RegisterOf(params (string Name, string? Role, string? Gender)[] entries) =>
+        new()
+        {
+            Characters = entries
+                .Select(e => new CharacterRegisterEntry { Name = e.Name, Role = e.Role, Gender = e.Gender })
+                .ToList()
+        };
+
+    /// <summary>
+    /// A large ensemble cast with realistically long Hebrew names, roles, genders and aliases - the shape that
+    /// makes the per-window token cost real. Roles cycle so the role-priority ordering has something to sort.
+    /// </summary>
+    private static CharacterRegister BigRegister(int count)
+    {
+        var roles = new[] { "protagonist", "antagonist", "supporting", "minor" };
+        var characters = new List<CharacterRegisterEntry>(count);
+        for (var i = 0; i < count; i++)
+            characters.Add(new CharacterRegisterEntry
+            {
+                Name = $"דמות מרכזית מספר {i}",
+                Role = roles[i % roles.Length],
+                Gender = i % 2 == 0 ? "female" : "male",
+                Aliases = new[] { $"כינוי {i}", $"שם חיבה {i}" }
+            });
+        return new CharacterRegister { Characters = characters };
     }
 
     // ─── (i) Continuity skeleton newline escaping ────────────────────────────────────────────────────

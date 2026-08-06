@@ -486,10 +486,28 @@ public class BookContextAssembler
     /// Returns one <see cref="BookContextAssembly"/> per window carrying the trimmed BookBrief, the included
     /// structured briefs, WindowIndex, IncludedChapterOrders and OverlapChapterOrders for wb4-c02.
     /// </summary>
+    /// <param name="characterRegister">
+    /// The book's CHARACTER REGISTER (automatic-coverage plan, d1 §3), already suppression-filtered by
+    /// <see cref="CharacterRegisterMerge.ForAnalysis"/>. When non-null and non-empty it is rendered once
+    /// (<see cref="FormatCharacterRegisterBlock"/>) and repeated at the head of EVERY window, immediately
+    /// after the trimmed BookBrief, so the whole-book review knows who the book's characters actually are.
+    ///
+    /// IT IS CHARGED, NOT ADDED ON TOP. Its block - header, body and trailing separator, every byte that
+    /// reaches <see cref="BookContextAssembly.Text"/> - is estimated at this assembly's chars-per-token and
+    /// folded into the window's running <c>used</c> total exactly like the brief block, so a large register
+    /// makes windows NARROWER rather than making them OVERFLOW. That direction is the whole point: this
+    /// assembler exists because over-packing a window overflows num_ctx, Ollama silently truncates past it,
+    /// and an empty windowed payload has twice been counted as reviewed and fed a destructive delete. A
+    /// slightly narrower window is a cost; a truncated one is a data-loss bug.
+    ///
+    /// Null (or a register with no visible characters) leaves the assembly BYTE-IDENTICAL to what it was
+    /// before this parameter existed: empty block, zero tokens charged.
+    /// </param>
     public async Task<IReadOnlyList<BookContextAssembly>> AssembleWindowsAsync(
         Guid bookId,
         string language,
         IReadOnlyCollection<AiTaskType>? consumingTasks = null,
+        CharacterRegister? characterRegister = null,
         CancellationToken ct = default)
     {
         var budget = ResolveBudgetTokens(consumingTasks);
@@ -531,6 +549,19 @@ public class BookContextAssembler
                     "BookContextAssembler (windows): BookBrief for book {BookId} trimmed to fit the per-window " +
                     "brief budget ({BriefMaxTokens} tokens) so each window keeps room for chapters.",
                     bookId, briefMaxTokens);
+        }
+
+        // [BOOK_CHARACTERS] block, repeated at the head of every window right after the brief and CHARGED to
+        // every window's budget exactly like it (see the characterRegister param doc). Built ONCE: it is the
+        // same bytes in every window, so estimating it once is both cheaper and the only way the charge can be
+        // guaranteed to equal what is appended.
+        string registerBlock = string.Empty;
+        int registerBlockTokens = 0;
+        var registerText = FormatCharacterRegisterBlock(characterRegister);
+        if (!string.IsNullOrWhiteSpace(registerText))
+        {
+            registerBlock = registerText + BlockSeparator;
+            registerBlockTokens = EstimateTokens(registerBlock, charsPerToken);
         }
 
         // Precompute each chapter's block + cost ONCE (narrative order), skipping genuinely empty chapters.
@@ -577,8 +608,13 @@ public class BookContextAssembler
 
             var sb = new StringBuilder();
             sb.Append(briefBlock);
+            sb.Append(registerBlock);
             foreach (var ob in overlapBlocks) sb.Append(ob);
-            var used = briefBlockTokens + overlapTokens;
+            // The register block is charged with the brief block and the overlap, BEFORE the first chapter is
+            // considered, so every `used + u.Tokens > budget` test below already accounts for it. Appending it
+            // without this term would leave EstimatedTokens understating the emitted Text - the silent-truncation
+            // direction (see the characterRegister param doc).
+            var used = briefBlockTokens + registerBlockTokens + overlapTokens;
 
             var includedBriefs = new List<ChapterBrief>();
             var includedOrders = new List<int>(overlapOrders); // overlap first, then primaries
@@ -607,11 +643,16 @@ public class BookContextAssembler
                 {
                     // Rule c: a single chapter whose block alone exceeds the window budget is its own window.
                     windowExceedsBudget = true;
+                    // Both fixed per-window overheads are named, not just the brief: since be-c02 the
+                    // [BOOK_CHARACTERS] block is charged to every window too, so reporting only the brief
+                    // would understate the room a chapter actually had to fit into and send whoever reads
+                    // this line looking for the missing tokens.
                     _logger.LogWarning(
                         "BookContextAssembler (windows): chapter #{Order} '{Title}' ({Tokens} tokens, plus " +
-                        "brief {BriefTokens}) alone exceeds the window budget ({Budget} tokens) for book " +
-                        "{BookId}; emitting it as its own over-budget window (never dropped).",
-                        u.Order, u.Title, u.Tokens, briefBlockTokens, budget, bookId);
+                        "brief {BriefTokens} and character register {RegisterTokens}) alone exceeds the window " +
+                        "budget ({Budget} tokens) for book {BookId}; emitting it as its own over-budget window " +
+                        "(never dropped).",
+                        u.Order, u.Title, u.Tokens, briefBlockTokens, registerBlockTokens, budget, bookId);
                     break; // an over-budget solo chapter closes the window immediately
                 }
             }
@@ -1025,6 +1066,37 @@ public class BookContextAssembler
         if (b.Synopsis != null) sb.AppendLine($"Synopsis: {b.Synopsis}");
         sb.Append("[/BOOK_CONTEXT]");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Renders the whole-book review's CHARACTER REGISTER block (automatic-coverage plan, d1 §3/§4):
+    /// <c>[BOOK_CHARACTERS]…[/BOOK_CHARACTERS]</c>, no trailing separator - the caller appends
+    /// <c>BlockSeparator</c> and charges the WHOLE thing, exactly as it does with
+    /// <see cref="FormatBookBrief"/>.
+    ///
+    /// <para>Returns the EMPTY STRING for a null register and for one with no visible characters, so a book
+    /// that has no register assembles byte-for-byte as it did before the register reached this path. Callers
+    /// must treat empty as "emit nothing and charge nothing" rather than emitting bare markers, or every such
+    /// book would pay tokens for an empty section that tells the model only that it was told nothing.</para>
+    ///
+    /// <para>THE MARKER IS DELIBERATELY NOT <c>[CHARACTER_REGISTER]</c>. That tag belongs to
+    /// <c>PromptFactory.FormatCharacters</c>, the per-analysis surface that is a standing measurement subject
+    /// and stays byte-identical; a distinct tag means the two can never be confused in a captured prompt or a
+    /// harness that greps for one of them.</para>
+    ///
+    /// <para>Public and static so BOTH consumers - the per-window MAP here and
+    /// <c>BookReviewService.RunSynthesisAsync</c>'s reduce - render the register through ONE formatter. Two
+    /// renderers would drift, and the synthesis pass's own budget derivation subtracts THIS block's cost, so a
+    /// second shape would silently mis-size the digest that shares the window with it.</para>
+    /// </summary>
+    public static string FormatCharacterRegisterBlock(CharacterRegister? register)
+    {
+        if (register is null || register.Characters.Count == 0) return string.Empty;
+
+        var body = PromptFactory.FormatCharactersForBookReview(register);
+        if (string.IsNullOrWhiteSpace(body)) return string.Empty;
+
+        return "[BOOK_CHARACTERS]\n" + body.Trim() + "\n[/BOOK_CHARACTERS]";
     }
 
     /// <summary>

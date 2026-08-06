@@ -6404,6 +6404,248 @@ public class BookReviewServiceTests
         return row.Id;
     }
 
+    // ─── be-c02: the whole-book review RECEIVES the character register ───────────────────────────────
+    //
+    // Before this, GetRelevantFields had no BookReview row (so it fell to ContextField.None),
+    // BookReviewService never called BuildContextAsync, and the one analysis whose stated job is judging
+    // characters was the one analysis with no character data. These pin that it now arrives, on the SHIPPED
+    // path (single-combined windows) as well as the legacy fan-out, and that it arrives for FREE.
+
+    /// <summary>A persisted register: two visible characters and one the author SUPPRESSED.</summary>
+    private const string RegisterJsonWithASuppressedEntry = """
+        {
+          "characters": [
+            { "name": "דנה", "role": "protagonist", "gender": "female", "aliases": ["דנצ'ה"] },
+            { "name": "יואב", "role": "antagonist", "gender": "male" },
+            { "name": "העורב", "role": "minor", "isCharacter": false, "isCharacterConfirmed": true }
+          ]
+        }
+        """;
+
+    private static async Task SeedCharacterRegisterAsync(AppDbContext db, Guid bookId, string? json)
+    {
+        db.BookBibles.Add(new BookBible { BookId = bookId, CharacterRegisterJson = json });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Every Instruction the mock router was handed, in call order.</summary>
+    private static List<string> InstructionsOf(Mock<IAiRouter> routerMock) =>
+        routerMock.Invocations
+            .Where(i => i.Arguments.Count > 0 && i.Arguments[0] is AiRequest)
+            .Select(i => ((AiRequest)i.Arguments[0]).Instruction ?? string.Empty)
+            .ToList();
+
+    [Fact]
+    public async Task BookReview_WindowPrompt_CarriesTheRegister_WithoutSuppressedCharacters()
+    {
+        // THE SHIPPED PATH. BookReviewSingleCombined defaults to TRUE, so the review the user actually gets is
+        // RunBuildAsync -> AssembleWindowsAsync -> RunCombinedCallAsync -> BuildBookReviewWindowPrompt. The
+        // register has to reach THAT prompt; reaching only the legacy per-dimension fan-out would be reaching
+        // a path nobody runs.
+        using var provider = BuildCombinedProvider(out var routerMock, JsonFindings());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+        await SeedCharacterRegisterAsync(db, bookId, RegisterJsonWithASuppressedEntry);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var windowPrompts = InstructionsOf(routerMock)
+            .Where(i => !i.Contains("[WINDOW_FINDINGS]") && !i.Contains("[CONTINUITY_SKELETON]"))
+            .ToList();
+        Assert.NotEmpty(windowPrompts);
+
+        foreach (var prompt in windowPrompts)
+        {
+            Assert.Contains("[BOOK_CHARACTERS]", prompt);
+            Assert.Contains("- דנה (protagonist) [female] (aliases: דנצ'ה)", prompt);
+            Assert.Contains("- יואב (antagonist) [male]", prompt);
+            // The author struck this one out. A suppression that the register API honours but the review's
+            // model never hears about would be inert exactly where it matters most.
+            Assert.DoesNotContain("העורב", prompt);
+            // The review's block is a DIFFERENT surface from the per-analysis one, and must not borrow its tag.
+            Assert.DoesNotContain("[CHARACTER_REGISTER]", prompt);
+        }
+    }
+
+    [Fact]
+    public async Task BookReview_SynthesisPrompt_CarriesTheRegister()
+    {
+        // The synthesis reduce sees NO chapter text at all - its whole view of the book is the BookBrief plus
+        // the findings digest - so without the register it cannot make a holistic character observation about
+        // a cast it was never shown.
+        using var provider = BuildCombinedProvider(out var routerMock, JsonFindings());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+        await SeedCharacterRegisterAsync(db, bookId, RegisterJsonWithASuppressedEntry);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var synthesis = Assert.Single(InstructionsOf(routerMock).Where(i => i.Contains("[WINDOW_FINDINGS]")));
+        Assert.Contains("[BOOK_CHARACTERS]", synthesis);
+        Assert.Contains("- דנה (protagonist) [female]", synthesis);
+        Assert.DoesNotContain("העורב", synthesis);
+        // Placed between the book brief and the digest, so the model reads context then evidence.
+        Assert.True(
+            synthesis.IndexOf("[BOOK_CHARACTERS]", StringComparison.Ordinal)
+                < synthesis.IndexOf("[WINDOW_FINDINGS]", StringComparison.Ordinal),
+            "the register block belongs before the findings digest");
+    }
+
+    [Fact]
+    public async Task BookReview_SynthesisDigestBudget_IsReducedByTheRegisterBlock()
+    {
+        // The synthesis prompt is brief + [BOOK_CHARACTERS] + digest, all in ONE model window. The digest sizes
+        // itself against the resolved budget MINUS the blocks that share that window, so adding the register
+        // must SHRINK the digest - not ride on top of a budget that no longer describes the prompt. Observed
+        // end to end: with a large register in place, the same over-budget digest keeps strictly FEWER lines.
+        var longRationale = new string('ל', 140);
+        var manySpecs = Enumerable.Range(0, 12)
+            .Select(i => new CombinedFindingSpec("plot", "improve", (i % 3) + 1, $"{longRationale} #{i}", i))
+            .ToArray();
+
+        static WindowedResponseHolder NewHolder(CombinedFindingSpec[] specs) => new()
+        {
+            ByWindowIndex = new Dictionary<int, string?> { [1] = JsonCombinedFindings(specs) },
+            SynthesisResponse = JsonCombinedFindings(
+                new CombinedFindingSpec("theme", "improve", 2, "Synthesis note", 0)),
+        };
+
+        // A budget big enough that the digest ALMOST fits: the register's cost is then what decides the cap.
+        const int budget = 1500;
+
+        var bareHolder = NewHolder(manySpecs);
+        using var bare = BuildWindowedProvider(out _, bareHolder, bookContextTokenBudget: budget);
+        var bareDb = bare.GetRequiredService<AppDbContext>();
+        var bareBookId = await SeedReviewableBookAsync(bareDb, chapterCount: 1);
+        await bare.GetRequiredService<BookReviewService>().BuildBookReviewAsync(bareBookId, "he");
+
+        var withHolder = NewHolder(manySpecs);
+        using var with = BuildWindowedProvider(out _, withHolder, bookContextTokenBudget: budget);
+        var withDb = with.GetRequiredService<AppDbContext>();
+        var withBookId = await SeedReviewableBookAsync(withDb, chapterCount: 1);
+        await SeedCharacterRegisterAsync(withDb, withBookId, BigRegisterJson(24));
+        await with.GetRequiredService<BookReviewService>().BuildBookReviewAsync(withBookId, "he");
+
+        static int DigestLines(string? instruction, string marker) => (instruction ?? string.Empty)
+            .Split('\n').Count(l => l.Contains(marker, StringComparison.Ordinal));
+
+        Assert.NotNull(bareHolder.SynthesisInstruction);
+        Assert.NotNull(withHolder.SynthesisInstruction);
+        Assert.Contains("[BOOK_CHARACTERS]", withHolder.SynthesisInstruction!);
+        Assert.DoesNotContain("[BOOK_CHARACTERS]", bareHolder.SynthesisInstruction!);
+
+        var bareLines = DigestLines(bareHolder.SynthesisInstruction, longRationale);
+        var withLines = DigestLines(withHolder.SynthesisInstruction, longRationale);
+
+        // Non-vacuity: the register-less digest must actually be near the cap, or "fewer" proves nothing.
+        Assert.True(bareLines > 0 && bareLines <= 12,
+            $"fixture precondition: the register-less digest kept {bareLines}/12 lines");
+        Assert.True(withLines < bareLines,
+            $"the register block must come OUT of the digest's budget: kept {withLines} lines with it vs " +
+            $"{bareLines} without, so the digest was sized against a window the register was not charged to");
+    }
+
+    /// <summary>A persisted register JSON with <paramref name="count"/> long Hebrew entries (past the render cap).</summary>
+    private static string BigRegisterJson(int count)
+    {
+        var characters = Enumerable.Range(0, count).Select(i => new
+        {
+            name = $"דמות מרכזית מספר {i}",
+            role = "supporting",
+            gender = i % 2 == 0 ? "female" : "male",
+            aliases = new[] { $"כינוי {i}", $"שם חיבה {i}" }
+        });
+        return JsonSerializer.Serialize(new { characters });
+    }
+
+    [Fact]
+    public async Task BookReview_PerDimensionFanOut_CharacterDimensionPrompt_CarriesTheRegister()
+    {
+        // The legacy fan-out (toggle OFF) is where the character-specific lens text actually lives
+        // (BuildBookReviewPrompt's "do characters develop / does one disappear unexplained"). It reaches the
+        // register through the same assembled window text, so the dimension that ASKS about characters is now
+        // also the dimension that is TOLD who they are.
+        using var provider = BuildProvider(out var routerMock, FindingsPerDimension(perDimensionCount: 0));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+        await SeedCharacterRegisterAsync(db, bookId, RegisterJsonWithASuppressedEntry);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        await svc.BuildBookReviewAsync(bookId, "he");
+
+        var characterPrompt = Assert.Single(
+            InstructionsOf(routerMock).Where(i => i.Contains("\"dimension\": \"character\"")));
+        Assert.Contains("[BOOK_CHARACTERS]", characterPrompt);
+        Assert.Contains("- דנה (protagonist) [female]", characterPrompt);
+        Assert.DoesNotContain("העורב", characterPrompt);
+    }
+
+    [Fact]
+    public async Task BookReview_ReadingTheRegister_SpendsNoExtractionCall()
+    {
+        // d1 §2's BOUND: a whole-book review triggers ZERO character-extraction calls. The obvious way to load
+        // a register (AnalysisContextService.LoadCharacterRegisterAsync) can EXTRACT, and a 40-chapter review
+        // deciding to spend model time on an extraction nobody asked for is exactly the GPU cost this machine
+        // cannot absorb. So the review reads the stored row directly - one AsNoTracking query, no model call.
+        using var provider = BuildCombinedProvider(out var withRouter, JsonFindings());
+        var withDb = provider.GetRequiredService<AppDbContext>();
+        var withBookId = await SeedReviewableBookAsync(withDb, chapterCount: 3);
+        await SeedCharacterRegisterAsync(withDb, withBookId, RegisterJsonWithASuppressedEntry);
+        await provider.GetRequiredService<BookReviewService>().BuildBookReviewAsync(withBookId, "he");
+
+        using var bare = BuildCombinedProvider(out var bareRouter, JsonFindings());
+        var bareDb = bare.GetRequiredService<AppDbContext>();
+        var bareBookId = await SeedReviewableBookAsync(bareDb, chapterCount: 3);
+        await bare.GetRequiredService<BookReviewService>().BuildBookReviewAsync(bareBookId, "he");
+
+        // Identical call counts: supplying a register adds no call of any kind.
+        Assert.Equal(InstructionsOf(bareRouter).Count, InstructionsOf(withRouter).Count);
+        // And nothing on the review's path routed the character pre-pass's task.
+        Assert.All(
+            withRouter.Invocations.Select(i => (AiRequest)i.Arguments[0]),
+            req => Assert.Equal(AiTaskType.BookReview, req.TaskType));
+    }
+
+    [Fact]
+    public async Task BookReview_UnreadableCharacterRegister_DegradesToNoCharacterContext()
+    {
+        // FAIL-SAFE, matching every other reader of this column: a corrupt register must not fail the review.
+        // It degrades to "no characters", exactly as a book that has never had one behaves.
+        using var provider = BuildCombinedProvider(out var routerMock, JsonFindings(
+            new FindingSpec("improve", 2, "a finding", 0)));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+        await SeedCharacterRegisterAsync(db, bookId, "{ this is not json ");
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        Assert.All(InstructionsOf(routerMock), i => Assert.DoesNotContain("[BOOK_CHARACTERS]", i));
+    }
+
+    [Fact]
+    public async Task BookReview_BookWithNoRegister_PromptsAreUnchanged()
+    {
+        // The no-register book must be byte-identical to what it was before the register reached this path:
+        // no markers, no bytes. Otherwise every such book pays for an empty section.
+        using var provider = BuildCombinedProvider(out var routerMock, JsonFindings(
+            new FindingSpec("improve", 2, "a finding", 0)));
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 3);
+        // No BookBible row at all - the ordinary state of a book whose register was never built.
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        var result = await svc.BuildBookReviewAsync(bookId, "he");
+
+        Assert.True(result.Ready);
+        var prompts = InstructionsOf(routerMock);
+        Assert.NotEmpty(prompts);
+        Assert.All(prompts, i => Assert.DoesNotContain("[BOOK_CHARACTERS]", i));
+    }
+
     /// <summary>Re-points the shared mutable dimension map the mock router reads, so a second build returns a
     /// different finding set per dimension.</summary>
     private static void SwapDimensionFindings(ServiceProvider provider, Dictionary<string, string> next)
