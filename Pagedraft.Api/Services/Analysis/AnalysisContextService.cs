@@ -98,11 +98,16 @@ public class AnalysisContextService : IAnalysisContextService
                 await ResolveContextEnvelopeAsync(scope, bookId, chapterId, sceneId, ct);
         }
 
+        // The LOAD gate asks PromptFactory the same question the RENDER gate answers, instead of carrying
+        // its own copy of the type list (c04). The field table in PromptFactory.GetRelevantFields is the
+        // single source of truth; this call is the whole binding, so adding ContextField.Characters to a
+        // new row starts loading the register for that type with no edit here.
+        // Not merely a de-duplication: loading is expensive and writing (LoadCharacterRegisterAsync can
+        // fire an LLM extraction pre-pass and persist the merged register), and nothing but prompt
+        // assembly consumes AnalysisContext.Characters, so a type that loads without rendering pays for a
+        // value the model never sees. See the rationale on PromptFactory.RendersCharacterRegister.
         CharacterRegister? characters = null;
-        if (bookId.HasValue && analysisType is AnalysisType.Proofread
-            or AnalysisType.LiteraryAnalysis
-            or AnalysisType.QA
-            or AnalysisType.Synopsis)
+        if (bookId.HasValue && PromptFactory.RendersCharacterRegister(analysisType))
         {
             characters = await LoadCharacterRegisterAsync(bookId.Value, text, ct);
         }
@@ -743,6 +748,20 @@ public class AnalysisContextService : IAnalysisContextService
         return (text, chapter.BookId, chapterId, null);
     }
 
+    /// <summary>
+    /// Resolve the book's character register for analysis context.
+    ///
+    /// <para>FAIL-SAFE CONTRACT (unchanged, and the reason for the shape of this method): any
+    /// non-cancellation failure degrades to a null register so the analysis still runs WITHOUT
+    /// character info, and <see cref="OperationCanceledException"/> still propagates so cooperative
+    /// cancellation works. Nothing added for provenance may turn a register problem into a failed
+    /// analysis.</para>
+    ///
+    /// <para>OBSERVABILITY: that swallowing catch used to be silent, which blinds every outer logger —
+    /// a broken merge or an unreadable register would ship as "this book just has no characters",
+    /// forever. Every degradation path here now logs with the bookId. Register CONTENT is never
+    /// logged: character names are the user's manuscript.</para>
+    /// </summary>
     private async Task<CharacterRegister?> LoadCharacterRegisterAsync(
         Guid bookId,
         string fullText,
@@ -754,13 +773,31 @@ public class AnalysisContextService : IAnalysisContextService
             var bible = await _db.BookBibles
                 .FirstOrDefaultAsync(b => b.BookId == bookId, ct);
 
+            // Captured as a STRING, not as the tracked property, so the re-read comparison below is
+            // against what this request actually saw and cannot be silently updated underneath us.
+            var jsonAtFirstRead = bible?.CharacterRegisterJson;
+
+            CharacterRegister? stored = null;
             if (!string.IsNullOrWhiteSpace(bible?.CharacterRegisterJson))
             {
-                var fromBible = JsonSerializer.Deserialize<CharacterRegister>(
-                    bible.CharacterRegisterJson,
-                    JsonOpts);
-                if (fromBible is { Characters.Count: > 0 })
-                    return fromBible;
+                if (CharacterRegisterService.TryDeserialize(bible.CharacterRegisterJson, out stored, out var parseFault)
+                    && stored is { Characters.Count: > 0 })
+                {
+                    return ForAnalysis(stored);
+                }
+
+                if (parseFault != null)
+                {
+                    // An unreadable register would otherwise fall through to re-extraction and
+                    // OVERWRITE the column - taking any author edits it held with it. Refuse to
+                    // clobber what we could not read, and say why.
+                    _logger.LogError(
+                        parseFault,
+                        "Character register for book {BookId} is unreadable ({JsonLength} chars). Skipping re-extraction so the stored value is not overwritten; this analysis runs without character context.",
+                        bookId,
+                        bible.CharacterRegisterJson.Length);
+                    return null;
+                }
             }
 
             // 2. Fallback: cheap LLM pre-pass on first ~2000 words,
@@ -769,45 +806,182 @@ public class AnalysisContextService : IAnalysisContextService
             var book = await _db.Books
                 .AsNoTracking()
                 .FirstOrDefaultAsync(b => b.Id == bookId, ct);
-            if (book == null) return null;
+            if (book == null)
+            {
+                _logger.LogWarning("Character register skipped: book {BookId} not found.", bookId);
+                return null;
+            }
 
             var language = string.IsNullOrWhiteSpace(book.Language) ? "he" : book.Language;
             var extracted = await ExtractCharacterRegisterAsync(fullText, language, ct);
-            if (extracted is { Characters.Count: > 0 })
+            if (extracted is not { Characters.Count: > 0 })
             {
-                var now = DateTimeOffset.UtcNow;
-                if (bible == null)
-                {
-                    bible = new BookBible
-                    {
-                        BookId = bookId,
-                        CreatedAt = now,
-                        UpdatedAt = now,
-                        CharacterRegisterJson = JsonSerializer.Serialize(extracted, JsonOpts)
-                    };
-                    _db.BookBibles.Add(bible);
-                }
-                else
-                {
-                    bible.CharacterRegisterJson = JsonSerializer.Serialize(extracted, JsonOpts);
-                    bible.UpdatedAt = now;
-                }
-
-                await _db.SaveChangesAsync(ct);
+                _logger.LogInformation(
+                    "Character register pre-pass produced no characters for book {BookId}; analysis runs without character context.",
+                    bookId);
+                // Deliberately returns the PRE-CALL snapshot without re-reading: this branch writes
+                // NOTHING, so a concurrent author edit cannot be lost here. The worst case is that
+                // this one analysis runs against a register a few seconds out of date, which is a
+                // stale read, not data loss. The re-read below guards the branch that WRITES.
+                return ForAnalysis(stored);
             }
 
-            return extracted;
+            // ── RE-READ THE REGISTER BEFORE MERGING (c01) ──────────────────────────────────────
+            // `stored` above was read BEFORE ExtractCharacterRegisterAsync, a multi-second local-model
+            // call. An author PATCH (CharacterRegisterService.ApplyEditsAsync, a different request on
+            // its own scoped DbContext) can land inside that window. Merging the PRE-CALL snapshot and
+            // then writing the whole column back erases that edit with no error and no log line:
+            // BookBible has a unique index on BookId and NO concurrency token / RowVersion, so EF
+            // issues a plain UPDATE and nothing detects the loss. That window is not exotic: the
+            // merge is reached only when the stored register is absent or empty, which is exactly the
+            // state whose client empty-state invites the author to add a character right now.
+            //
+            // ReloadAsync, not a re-query, for the row already tracked: a TRACKING re-query resolves
+            // to the instance already in the change tracker and leaves its stale property values in
+            // place, so it would hand back the very snapshot we are trying to replace; an AsNoTracking
+            // re-query would read current values onto an entity we then could not write through.
+            // Reload refreshes the tracked instance from the store in place, so the merge input and
+            // the write target are the same current row.
+            if (bible != null)
+            {
+                await _db.Entry(bible).ReloadAsync(ct);
+
+                // A concurrent DELETE leaves the entity Detached with no row behind it. Treat that as
+                // "no row" so the create branch below runs instead of writing through a dead entity.
+                if (_db.Entry(bible).State == EntityState.Detached) bible = null;
+            }
+            else
+            {
+                // Nothing was tracked, so there is nothing to reload: query. If a concurrent request
+                // CREATED the row while the pre-pass ran we ADOPT it here, which is also what stops
+                // the create branch below from inserting a SECOND row and turning the unique index on
+                // BookId into an unhandled DbUpdateException (a 500 on the whole analysis).
+                bible = await _db.BookBibles.FirstOrDefaultAsync(b => b.BookId == bookId, ct);
+            }
+
+            var jsonAtReRead = bible?.CharacterRegisterJson;
+            if (!string.Equals(jsonAtReRead, jsonAtFirstRead, StringComparison.Ordinal))
+            {
+                // A clobber that was just prevented. A silently-rescued race nobody can see is the
+                // same blindness one layer up, and this codebase has already paid for that. Book id
+                // and payload LENGTHS only: register content is the user's manuscript and is never
+                // logged.
+                _logger.LogWarning(
+                    "Character register for book {BookId} CHANGED while the extraction pre-pass ran ({BeforeLength} -> {AfterLength} chars). Merging against the CURRENT stored value; the pre-call snapshot would have overwritten a concurrent author edit.",
+                    bookId,
+                    jsonAtFirstRead?.Length ?? 0,
+                    jsonAtReRead?.Length ?? 0);
+            }
+
+            stored = null;
+            if (!string.IsNullOrWhiteSpace(jsonAtReRead)
+                && !CharacterRegisterService.TryDeserialize(jsonAtReRead, out stored, out var reReadFault)
+                && reReadFault != null)
+            {
+                // The same refusal the gate above makes, applied to whichever read found it
+                // unreadable: never overwrite a register we could not read, because whatever author
+                // edits it held would go with it.
+                _logger.LogError(
+                    reReadFault,
+                    "Character register for book {BookId} became unreadable while the extraction pre-pass ran ({JsonLength} chars). Skipping the merge write so the stored value is not overwritten; this analysis runs without character context.",
+                    bookId,
+                    jsonAtReRead.Length);
+                return null;
+            }
+
+            // MERGE, never overwrite (d1 §3). This is the ONLY production re-extraction write, and it
+            // is the reason provenance exists: `stored` may hold author-confirmed genders, hand-added
+            // characters and permanently-suppressed entries, and a straight Serialize(extracted) would
+            // erase all three silently.
+            //
+            // REACHABILITY - measured 2026-08-05, not assumed. This is reached ONLY when the register
+            // read at the TOP of this method was null or held ZERO entries, because the gate above
+            // returns early on any non-empty stored register. An all-suppressed register does NOT
+            // reach here: its entries still count, so it returns at the gate and no re-extraction
+            // fires. An earlier version of this comment claimed the opposite and a test was written to
+            // match the claim; the test passed vacuously because nothing ran at all. The merge is
+            // correct-but-DORMANT in today's code - it is the insurance the first future rebuild path
+            // will need, which was always the point of provenance. Pinned by
+            // CharacterRegisterProvenanceTests; do not restate it as a path that runs today without
+            // re-measuring the gate.
+            //
+            // The gate is on the FIRST read; `stored` here is the RE-READ value (c01), so it can be
+            // non-empty even though the gate let us through: that is precisely the concurrent author
+            // edit this merge now preserves rather than overwrites. The dormancy claim above is about
+            // the GATE and is unchanged by the re-read.
+            var now = DateTimeOffset.UtcNow;
+            var merged = CharacterRegisterMerge.Merge(stored, extracted, now);
+            var json = CharacterRegisterService.Serialize(merged);
+
+            if (bible == null)
+            {
+                bible = new BookBible
+                {
+                    BookId = bookId,
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    CharacterRegisterJson = json
+                };
+                _db.BookBibles.Add(bible);
+            }
+            else
+            {
+                bible.CharacterRegisterJson = json;
+                bible.UpdatedAt = now;
+            }
+
+            await _db.SaveChangesAsync(ct);
+
+            _logger.LogInformation(
+                "Character register re-extracted and merged for book {BookId}: {ExtractedCount} extracted, {LocalCount} already stored, {MergedCount} after merge ({SuppressedCount} suppressed).",
+                bookId,
+                extracted.Characters.Count,
+                stored?.Characters.Count ?? 0,
+                merged.Characters.Count,
+                merged.Characters.Count(CharacterRegisterMerge.IsSuppressed));
+
+            return ForAnalysis(merged);
         }
         catch (OperationCanceledException)
         {
             // Preserve cooperative cancellation so the outer analysis can stop immediately.
             throw;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Any non-cancellation failure should degrade gracefully – proofread still runs without character info.
+            // Any non-cancellation failure should degrade gracefully – proofread still runs without
+            // character info. LOG IT: this catch is the last one on the path, so a fault swallowed
+            // here is invisible to every outer handler.
+            _logger.LogWarning(
+                ex,
+                "Character register could not be loaded for book {BookId}; analysis continues without character context.",
+                bookId);
             return null;
         }
+    }
+
+    /// <summary>
+    /// The register as an ANALYSIS sees it: author-suppressed entries removed.
+    ///
+    /// <para>An entry the author marked "not a character" must not be described to the model as one -
+    /// otherwise the suppression marker is inert for every analysis and only affects future merges.
+    /// This is a no-op for every register persisted before provenance shipped (nothing is suppressed
+    /// there), so it changes nothing about what today's books send to the model.</para>
+    ///
+    /// <para>It is applied HERE and not in <c>PromptFactory.FormatCharacters</c> on purpose: that
+    /// method's output shape is Issue 1's subject and is deliberately untouched by this todo.</para>
+    /// </summary>
+    private static CharacterRegister? ForAnalysis(CharacterRegister? register)
+    {
+        if (register is null) return null;
+
+        var visible = register.Characters
+            .Where(c => c is not null && !CharacterRegisterMerge.IsSuppressed(c))
+            .ToList();
+
+        return visible.Count == register.Characters.Count
+            ? register
+            : register with { Characters = visible };
     }
 
     private async Task<StyleProfileData?> LoadStyleProfileAsync(
