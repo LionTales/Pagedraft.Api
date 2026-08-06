@@ -103,7 +103,17 @@ public class CharacterRegisterService
                     json?.Length ?? 0);
             }
 
-            return new CharacterRegisterDto(bookId, HasRegister: false, UpdatedAt: null, Characters: Array.Empty<CharacterRegisterEntryDto>());
+            // COVERAGE IS REPORTED ON THIS PATH TOO, from a null register: the ledger lives inside the
+            // value that is missing or would not parse, so every chapter reads as outstanding. That is
+            // the honest answer ("nothing is known to have contributed"), it keeps the field non-null on
+            // every response, and it is the empty state's real content - the author is told how much of
+            // the book the register will cover once analyses start, not just that it is empty.
+            return new CharacterRegisterDto(
+                bookId,
+                HasRegister: false,
+                UpdatedAt: null,
+                Characters: Array.Empty<CharacterRegisterEntryDto>(),
+                Coverage: await BuildCoverageAsync(bookId, register: null, ct));
         }
 
         // Normalize COLLAPSES duplicate entries as well as cleaning them (fix-plan c02), so the author
@@ -115,7 +125,74 @@ public class CharacterRegisterService
             bookId,
             HasRegister: true,
             register.UpdatedAt,
-            entries.Select(ToDto).ToList());
+            entries.Select(ToDto).ToList(),
+            // Built from `register` - the value just deserialized out of the column - so the reported
+            // coverage describes the SAME persisted ledger this response's characters came from.
+            await BuildCoverageAsync(bookId, register, ct));
+    }
+
+    /// <summary>
+    /// The coverage summary for a book, computed from the persisted scan ledger carried inside
+    /// <paramref name="register"/> (be-c03).
+    ///
+    /// <para>THE GUARD THIS SHAPE IS: there is no stored coverage count anywhere and no second walk of
+    /// the register. The number the author is shown and the decision the scan path takes about whether
+    /// a chapter still needs scanning are the same predicate over the same list
+    /// (<see cref="CharacterRegisterCoverage.IsCoveredAndFresh"/>), so they cannot drift apart. This
+    /// workspace has shipped a status count and its builder disagreeing more than once.</para>
+    ///
+    /// <para>COST, stated rather than hidden (be-c01). This is TWO reads. The first projects
+    /// <c>{Id, UpdatedAt}</c> for every chapter - two scalar columns, no prose. <c>SummarizeAsync</c>
+    /// then works out which chapters' text the classification can actually consult, which is exactly
+    /// those that are not covered-and-fresh, and only those chapters' <c>ContentText</c> is fetched.
+    /// No reported number moves either way: the answer is identical to loading the whole manuscript,
+    /// because a covered chapter's text is never looked at.</para>
+    ///
+    /// <para>WHAT THAT IS AND IS NOT WORTH, honestly. The second read shrinks with COVERAGE, not with
+    /// book size: a fully covered book reads no chapter text at all, a half-covered one reads half,
+    /// and a book with nothing covered still reads every chapter - now behind one extra round trip
+    /// and an id list. Every register that predates the scan ledger is in exactly that last state, so
+    /// on the day this shipped it saved nothing on any book that existed; it starts paying as chapters
+    /// contribute. Do not restate it as "the card stopped loading the manuscript".</para>
+    ///
+    /// <para>WHY THE TEXT IS STILL READ FOR THE REST rather than replaced with something cheaper:
+    /// "can an analysis read this chapter" is answered by the expression the analysis path itself
+    /// uses (the Syncfusion watermark strip, then a blank test), not by a proxy such as WordCount that
+    /// is maintained by a different writer and could disagree. A mis-answer there is not cosmetic - it
+    /// is what makes 'complete' unreachable on a book with an empty chapter. The exactness is kept;
+    /// only the chapters that cannot change the answer were dropped from the read.</para>
+    /// </summary>
+    private async Task<CharacterRegisterCoverageDto> BuildCoverageAsync(
+        Guid bookId,
+        CharacterRegister? register,
+        CancellationToken ct)
+    {
+        var chapters = await _db.Chapters.AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .Select(c => new CharacterRegisterCoverage.ChapterVersion(c.Id, c.UpdatedAt))
+            .ToListAsync(ct);
+
+        return await CharacterRegisterCoverage.SummarizeAsync(
+            register,
+            chapters,
+            LoadChapterContentTextAsync,
+            ct);
+    }
+
+    /// <summary>
+    /// Phase 2 of the coverage read: the <c>ContentText</c> of the named chapters only, in one round
+    /// trip. Never called with an empty set - <c>SummarizeAsync</c> skips the fetch entirely then.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, string?>> LoadChapterContentTextAsync(
+        IReadOnlyCollection<Guid> chapterIds,
+        CancellationToken ct)
+    {
+        var rows = await _db.Chapters.AsNoTracking()
+            .Where(c => chapterIds.Contains(c.Id))
+            .Select(c => new { c.Id, c.ContentText })
+            .ToListAsync(ct);
+
+        return rows.ToDictionary(r => r.Id, r => (string?)r.ContentText);
     }
 
     /// <summary>
@@ -167,7 +244,18 @@ public class CharacterRegisterService
         // Returns the error string (batch rejected) or null. On rejection NOTHING is written: this
         // runs before any assignment to the tracked entity and before any SaveChangesAsync, which is
         // the all-or-nothing contract the caller relies on.
-        string? TryBuildEntries(string? storedJson, out List<CharacterRegisterEntry> built)
+        // `ledger` is passed straight through UNTOUCHED (automatic-coverage plan, be-c01). It is the
+        // per-chapter scan ledger the OTHER writer of this column
+        // (AnalysisContextService.LoadCharacterRegisterAsync) maintains, and this method has no opinion
+        // about it - but it must carry it across, because this writer replaces the WHOLE column. Losing
+        // it does not corrupt anything visible: it silently marks every chapter unscanned, so the next
+        // analysis of each one pays for a fresh LLM extraction it did not need, forever after any
+        // author edit. It comes out of the same read the entries were built from, so a re-apply against
+        // a re-read value carries THAT value's ledger, not the stale one.
+        string? TryBuildEntries(
+            string? storedJson,
+            out List<CharacterRegisterEntry> built,
+            out IReadOnlyList<ScannedChapterEntry> ledger)
         {
             if (!TryDeserialize(storedJson, out var existing, out var fault) && fault != null)
             {
@@ -187,6 +275,7 @@ public class CharacterRegisterService
             // is one entry to hit, it carries the union of both copies' author state, and serializing
             // the result persists the repair.
             built = CharacterRegisterMerge.Normalize(existing).ToList();
+            ledger = existing?.ScannedChapters ?? Array.Empty<ScannedChapterEntry>();
 
             foreach (var edit in edits)
             {
@@ -205,7 +294,7 @@ public class CharacterRegisterService
         // this request actually applied its batch to and cannot be updated underneath us.
         var jsonAtFirstRead = bible?.CharacterRegisterJson;
 
-        var error = TryBuildEntries(jsonAtFirstRead, out var entries);
+        var error = TryBuildEntries(jsonAtFirstRead, out var entries, out var ledger);
         if (error != null) return (null, error);
 
         // ── RE-READ BEFORE THE WRITE (fix-plan c05) ─────────────────────────────────────────────
@@ -283,11 +372,11 @@ public class CharacterRegisterService
                 jsonAtReRead?.Length ?? 0,
                 edits.Count);
 
-            error = TryBuildEntries(jsonAtReRead, out entries);
+            error = TryBuildEntries(jsonAtReRead, out entries, out ledger);
             if (error != null) return (null, error);
         }
 
-        var updated = new CharacterRegister { Characters = entries, UpdatedAt = now };
+        var updated = new CharacterRegister { Characters = entries, UpdatedAt = now, ScannedChapters = ledger };
 
         if (bible == null)
         {
@@ -320,10 +409,10 @@ public class CharacterRegisterService
                     bookId,
                     edits.Count);
 
-                error = TryBuildEntries(winner.CharacterRegisterJson, out entries);
+                error = TryBuildEntries(winner.CharacterRegisterJson, out entries, out ledger);
                 if (error != null) return (null, error);
 
-                updated = new CharacterRegister { Characters = entries, UpdatedAt = now };
+                updated = new CharacterRegister { Characters = entries, UpdatedAt = now, ScannedChapters = ledger };
                 winner.CharacterRegisterJson = Serialize(updated);
                 winner.UpdatedAt = now;
 
@@ -345,7 +434,17 @@ public class CharacterRegisterService
             entries.Count,
             entries.Count(CharacterRegisterMerge.IsSuppressed));
 
-        return (new CharacterRegisterDto(bookId, HasRegister: true, updated.UpdatedAt, entries.Select(ToDto).ToList()), null);
+        // Coverage comes off `updated` - the record that was just SERIALIZED into the column - so this
+        // response reports the ledger this write actually persisted. Author edits never advance or
+        // retreat coverage (this writer carries the ledger through untouched), but the client replaces
+        // its whole register state from this response, so an omitted or zeroed coverage here would make
+        // the coverage line collapse to "0 of 40" on every save and silently recover on the next GET.
+        return (new CharacterRegisterDto(
+            bookId,
+            HasRegister: true,
+            updated.UpdatedAt,
+            entries.Select(ToDto).ToList(),
+            await BuildCoverageAsync(bookId, updated, ct)), null);
     }
 
     // ── internals ───────────────────────────────────────────────────────────────────────────────

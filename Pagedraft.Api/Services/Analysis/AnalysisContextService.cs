@@ -109,7 +109,10 @@ public class AnalysisContextService : IAnalysisContextService
         CharacterRegister? characters = null;
         if (bookId.HasValue && PromptFactory.RendersCharacterRegister(analysisType))
         {
-            characters = await LoadCharacterRegisterAsync(bookId.Value, text, ct);
+            // `chapterId` is the ledger key (be-c01): it drives WHICH chapter contributes to the
+            // register on this request. It is null only at Book scope, which is deliberately outside
+            // the ledger and keeps the old one-shot bootstrap - see LoadCharacterRegisterAsync.
+            characters = await LoadCharacterRegisterAsync(bookId.Value, text, chapterId, ct);
         }
 
         StyleProfileData? styleProfile = null;
@@ -761,10 +764,37 @@ public class AnalysisContextService : IAnalysisContextService
     /// a broken merge or an unreadable register would ship as "this book just has no characters",
     /// forever. Every degradation path here now logs with the bookId. Register CONTENT is never
     /// logged: character names are the user's manuscript.</para>
+    ///
+    /// <para>COVERAGE (automatic-coverage plan, be-c01 / d1 §2). This method used to return early on
+    /// ANY non-empty stored register, so the extraction pre-pass fired exactly ONCE in a book's life,
+    /// against whichever unit happened to be analysed first — a character introduced in chapter 33
+    /// never entered the register at all, and what the register held depended on which chapter the
+    /// author opened first. That gate is replaced by <see cref="CharacterRegister.ScannedChapters"/>:
+    /// a CHAPTER-scoped (or scene-scoped, which is chapter-keyed) analysis of a chapter that has not
+    /// contributed — or whose <c>Chapter.UpdatedAt</c> has moved since it did — scans THAT chapter and
+    /// merges the result in. BOOK scope (<paramref name="chapterId"/> null) is deliberately outside
+    /// the ledger and keeps the old behaviour exactly.</para>
+    ///
+    /// <para>BOUND: at most ONE extraction call per request, no matter how many chapters are
+    /// unscanned. Coverage grows one chapter at a time, at the pace the author runs analyses
+    /// <c>PromptFactory.RendersCharacterRegister</c> admits (Proofread, LiteraryAnalysis, QA,
+    /// Synopsis) — this method is never reached for any other analysis type; reporting that gap
+    /// honestly is be-c03's job, not this method's.</para>
+    ///
+    /// <para>This is what makes <see cref="CharacterRegisterMerge"/> a LIVE path (it was correct but
+    /// dormant): every guarantee it carries — author-confirmed fields win, suppressed entries are
+    /// never resurrected, unmatched local entries are never deleted, and a no-op merge does not bump
+    /// <see cref="CharacterRegister.UpdatedAt"/> — now has to hold in production.</para>
     /// </summary>
+    /// <param name="chapterId">
+    /// The ledger key. Non-null for Chapter and Scene scope; null at Book scope, where the assembled,
+    /// budget-capped multi-chapter text is not something a per-chapter ledger entry could honestly
+    /// describe as "chapter N scanned".
+    /// </param>
     private async Task<CharacterRegister?> LoadCharacterRegisterAsync(
         Guid bookId,
         string fullText,
+        Guid? chapterId,
         CancellationToken ct)
     {
         try
@@ -780,13 +810,8 @@ public class AnalysisContextService : IAnalysisContextService
             CharacterRegister? stored = null;
             if (!string.IsNullOrWhiteSpace(bible?.CharacterRegisterJson))
             {
-                if (CharacterRegisterService.TryDeserialize(bible.CharacterRegisterJson, out stored, out var parseFault)
-                    && stored is { Characters.Count: > 0 })
-                {
-                    return ForAnalysis(stored);
-                }
-
-                if (parseFault != null)
+                if (!CharacterRegisterService.TryDeserialize(bible.CharacterRegisterJson, out stored, out var parseFault)
+                    && parseFault != null)
                 {
                     // An unreadable register would otherwise fall through to re-extraction and
                     // OVERWRITE the column - taking any author edits it held with it. Refuse to
@@ -800,9 +825,60 @@ public class AnalysisContextService : IAnalysisContextService
                 }
             }
 
-            // 2. Fallback: cheap LLM pre-pass on first ~2000 words,
-            // and persist the extracted register back to BookBible so
-            // subsequent analyses can reuse it without another LLM call.
+            // 2. BOOK SCOPE keeps the ONE-SHOT gate, unchanged (d1 §2). `fullText` here is the
+            // assembled, budget-capped multi-chapter context from BookContextAssembler, not any one
+            // chapter's prose, so no ledger entry could truthfully be written for it. A non-empty
+            // register is served as-is; an empty one still gets today's single bootstrap extraction
+            // below. Book scope therefore neither advances chapter coverage nor regresses it.
+            if (chapterId is null && stored is { Characters.Count: > 0 })
+                return CharacterRegisterMerge.ForAnalysis(stored);
+
+            // 3. CHAPTER/SCENE SCOPE: consult the ledger, and scan the CHAPTER (never the triggering
+            // scene alone — the ledger is keyed by ChapterId, so "scanned" has to mean the chapter's
+            // own content was read, or a five-scene chapter would read as covered after one scene).
+            var extractionSource = fullText;
+            var chapterStamp = default(DateTimeOffset);
+            if (chapterId.HasValue)
+            {
+                var chapter = await _db.Chapters
+                    .AsNoTracking()
+                    .Where(c => c.Id == chapterId.Value)
+                    .Select(c => new { c.ContentText, c.UpdatedAt })
+                    .FirstOrDefaultAsync(ct);
+
+                if (chapter == null)
+                {
+                    // Deleted between target resolution and here. Nothing to scan and nothing the
+                    // ledger could key on, so degrade to whatever is already stored.
+                    _logger.LogWarning(
+                        "Character register coverage skipped: chapter {ChapterId} of book {BookId} no longer exists; serving the stored register.",
+                        chapterId,
+                        bookId);
+                    return CharacterRegisterMerge.ForAnalysis(stored);
+                }
+
+                // COVERED-AND-FRESH is checked regardless of how many characters the register holds.
+                // A chapter that genuinely contains no characters (a foreword, a title page) leaves
+                // the register empty but IS scanned, and must not be re-extracted on every single
+                // analysis for the rest of the book's life.
+                //
+                // THE PREDICATE IS SHARED, NOT RESTATED (be-c03). The author-facing coverage report
+                // (CharacterRegisterService.GetAsync) counts a chapter as covered by calling exactly
+                // this method over exactly this list. Inlining `entry.SourceStamp == chapter.UpdatedAt`
+                // here would leave two definitions of "already scanned" free to drift, and the visible
+                // symptom of drift is the worst possible one: a book reported complete that the scan
+                // path keeps re-scanning, or reported incomplete while nothing will ever scan again.
+                var ledgerEntry = CharacterRegisterCoverage.FindEntry(stored, chapterId.Value);
+                if (CharacterRegisterCoverage.IsCoveredAndFresh(ledgerEntry, chapter.UpdatedAt))
+                    return CharacterRegisterMerge.ForAnalysis(stored);
+
+                chapterStamp = chapter.UpdatedAt;
+                extractionSource = SyncfusionWatermarkStripper.StripSyncfusionWatermark(chapter.ContentText ?? "");
+            }
+
+            // 4. Cheap LLM pre-pass over the unit being scanned (still capped at
+            // CharacterPrepassMaxWords), merged and persisted back to BookBible so this chapter does
+            // not pay for the call again until it is edited.
             var book = await _db.Books
                 .AsNoTracking()
                 .FirstOrDefaultAsync(b => b.Id == bookId, ct);
@@ -813,17 +889,64 @@ public class AnalysisContextService : IAnalysisContextService
             }
 
             var language = string.IsNullOrWhiteSpace(book.Language) ? "he" : book.Language;
-            var extracted = await ExtractCharacterRegisterAsync(fullText, language, ct);
-            if (extracted is not { Characters.Count: > 0 })
+            var extracted = await ExtractCharacterRegisterAsync(extractionSource, language, ct);
+
+            // TWO DIFFERENT EXITS THAT LOOK LIKE ONE (final-r01). `extracted` is NULL only when there
+            // was no answer to read (the router threw, the response was blank or carried no parsable
+            // JSON); it is an EMPTY register when the model answered and named nobody.
+            //
+            //  - NULL, at ANY scope: write NOTHING. A chapter-keyed scan must NOT record a ledger entry
+            //    for a call that failed, or one wedged Ollama run marks every chapter analysed during
+            //    the outage permanently covered while having read none of them - and neither the
+            //    register (it looks like a chapter with no characters) nor the coverage report (it says
+            //    covered) can tell anyone. Nothing re-scans it until the author edits that chapter.
+            //  - EMPTY at BOOK scope: today's bootstrap behaviour, unchanged - no ledger exists to
+            //    write and there is nothing to merge.
+            //  - EMPTY at CHAPTER scope: fall through and record the ledger entry, so a chapter that
+            //    genuinely has no characters in it (a foreword, a title page) does not burn one LLM
+            //    call every time it is analysed, forever.
+            if (extracted is null || (chapterId is null && extracted.Characters.Count == 0))
             {
-                _logger.LogInformation(
-                    "Character register pre-pass produced no characters for book {BookId}; analysis runs without character context.",
-                    bookId);
+                if (extracted is null)
+                {
+                    // TWO DIFFERENT REASONS `extracted` CAN BE NULL, and only one of them is transient
+                    // (P3-7). `ExtractCharacterRegisterAsync` returns null with NO model call when its
+                    // truncated input is blank (`extractionSource` was already empty/whitespace here -
+                    // an empty or watermark-only chapter). That is exactly `IsScannable` returning false,
+                    // the same UNSCANNABLE state the coverage report already classifies correctly, and it
+                    // can never be resolved by retrying: every future scene analysis of this chapter hits
+                    // the same empty source and logs the same thing again. The genuine transient case -
+                    // the model was asked and gave no parsable answer - has a non-empty extractionSource
+                    // and stays a WARNING, because THAT retry can succeed once the model behaves.
+                    //
+                    // final-r01: the blank-source branch is NOT chapter-only. At BOOK scope
+                    // `extractionSource` is the assembled multi-chapter text, which is blank when the
+                    // whole book has nothing readable in it. The level and the "permanent, no model was
+                    // called" claim are right there too, but there is no chapter and the coverage report
+                    // made no classification about one, so the message names the SOURCE rather than
+                    // asserting a per-chapter verdict, and the UNSCANNABLE cross-reference is scoped to
+                    // the chapter case where it is actually true. `{ChapterId}` is null at book scope.
+                    if (string.IsNullOrWhiteSpace(extractionSource))
+                        _logger.LogInformation(
+                            "Character register pre-pass skipped for book {BookId} (chapter {ChapterId}, null at book scope): the text handed to the pre-pass has no scannable content (empty or watermark-only), so no model call was made. This is a permanent state, not a transient failure - nothing is recorded as scanned and retrying will not resolve it. At chapter scope this is exactly the UNSCANNABLE bucket the coverage report already reports.",
+                            bookId,
+                            chapterId);
+                    else
+                        _logger.LogWarning(
+                            "Character register pre-pass returned NO USABLE ANSWER for book {BookId} (chapter {ChapterId}); the analysis runs without character context and the chapter is deliberately NOT recorded as scanned, so it is retried on its next analysis.",
+                            bookId,
+                            chapterId);
+                }
+                else
+                    _logger.LogInformation(
+                        "Character register pre-pass produced no characters for book {BookId}; analysis runs without character context.",
+                        bookId);
+
                 // Deliberately returns the PRE-CALL snapshot without re-reading: this branch writes
                 // NOTHING, so a concurrent author edit cannot be lost here. The worst case is that
                 // this one analysis runs against a register a few seconds out of date, which is a
                 // stale read, not data loss. The re-read below guards the branch that WRITES.
-                return ForAnalysis(stored);
+                return CharacterRegisterMerge.ForAnalysis(stored);
             }
 
             // ── RE-READ THE REGISTER BEFORE MERGING (c01) ──────────────────────────────────────
@@ -832,9 +955,15 @@ public class AnalysisContextService : IAnalysisContextService
             // its own scoped DbContext) can land inside that window. Merging the PRE-CALL snapshot and
             // then writing the whole column back erases that edit with no error and no log line:
             // BookBible has a unique index on BookId and NO concurrency token / RowVersion, so EF
-            // issues a plain UPDATE and nothing detects the loss. That window is not exotic: the
-            // merge is reached only when the stored register is absent or empty, which is exactly the
-            // state whose client empty-state invites the author to add a character right now.
+            // issues a plain UPDATE and nothing detects the loss. That window is not exotic, and it
+            // stopped being merely defensive when coverage shipped (be-c01): the register used to be
+            // written about ONCE PER BOOK and is now written once per chapter scanned, so this
+            // re-read is on the hot path rather than the edge of one. Do not weaken it.
+            //
+            // It is ALSO what makes two DIFFERENT chapters scanning concurrently safe for free:
+            // whichever request writes second re-reads immediately before merging, so it sees the
+            // first one's characters AND its ledger entry and merges on top of them instead of
+            // overwriting the column with its own pre-call snapshot.
             //
             // ReloadAsync, not a re-query, for the row already tracked: a TRACKING re-query resolves
             // to the instance already in the change tracker and leaves its stale property values in
@@ -894,24 +1023,49 @@ public class AnalysisContextService : IAnalysisContextService
             // characters and permanently-suppressed entries, and a straight Serialize(extracted) would
             // erase all three silently.
             //
-            // REACHABILITY - measured 2026-08-05, not assumed. This is reached ONLY when the register
-            // read at the TOP of this method was null or held ZERO entries, because the gate above
-            // returns early on any non-empty stored register. An all-suppressed register does NOT
-            // reach here: its entries still count, so it returns at the gate and no re-extraction
-            // fires. An earlier version of this comment claimed the opposite and a test was written to
-            // match the claim; the test passed vacuously because nothing ran at all. The merge is
-            // correct-but-DORMANT in today's code - it is the insurance the first future rebuild path
-            // will need, which was always the point of provenance. Pinned by
-            // CharacterRegisterProvenanceTests; do not restate it as a path that runs today without
-            // re-measuring the gate.
+            // REACHABILITY - re-measured 2026-08-06 for be-c01, and it CHANGED. This merge used to be
+            // correct-but-DORMANT: the old one-shot gate returned early on any non-empty stored
+            // register, so the only way here was a register that was absent or held zero entries. It
+            // is now the ordinary path. Every Chapter- or Scene-scoped analysis of a chapter that has
+            // not contributed to the ledger (or whose text has changed since it did) arrives here
+            // with a fully populated `stored`, which is exactly the input the merge was written for
+            // and had never actually been given in production. Its guarantees - confirmed fields win,
+            // suppressed entries are never resurrected, unmatched locals are never deleted, a no-op
+            // does not bump the stamp - are load-bearing from here on, not insurance.
             //
-            // The gate is on the FIRST read; `stored` here is the RE-READ value (c01), so it can be
-            // non-empty even though the gate let us through: that is precisely the concurrent author
-            // edit this merge now preserves rather than overwrites. The dormancy claim above is about
-            // the GATE and is unchanged by the re-read.
+            // `stored` is the RE-READ value (c01), never the pre-call snapshot, so a concurrent
+            // author edit (or a sibling chapter's scan) is merged over rather than overwritten.
             var now = DateTimeOffset.UtcNow;
             var merged = CharacterRegisterMerge.Merge(stored, extracted, now);
-            var json = CharacterRegisterService.Serialize(merged);
+
+            // THE LEDGER IS GRAFTED ON AFTER THE MERGE, and this order is not incidental.
+            // CharacterRegisterMerge decides `changed`/UpdatedAt from Characters ONLY; it does not
+            // know ScannedChapters exists and must not be taught to. A `with` expression cannot move
+            // UpdatedAt, so a chapter joining the ledger while contributing no new or changed
+            // character leaves the stamp alone - which is required, or improving coverage would mark
+            // every prior AnalysisResult on the book stale without one character fact having changed.
+            //
+            // Merge builds a FRESH record, so the existing ledger has to be carried across
+            // explicitly on BOTH branches; letting the book-scope bootstrap fall through with the
+            // merge's own empty list would silently erase coverage a chapter scan had already earned.
+            var ledger = stored?.ScannedChapters ?? Array.Empty<ScannedChapterEntry>();
+            if (chapterId.HasValue)
+            {
+                // REPLACE this chapter's entry rather than append, so the ledger stays one line per
+                // chapter however many times the chapter is re-scanned.
+                ledger = ledger
+                    .Where(e => e.ChapterId != chapterId.Value)
+                    .Append(new ScannedChapterEntry
+                    {
+                        ChapterId = chapterId.Value,
+                        ScannedAt = now,
+                        SourceStamp = chapterStamp
+                    })
+                    .ToList();
+            }
+
+            var final = merged with { ScannedChapters = ledger };
+            var json = CharacterRegisterService.Serialize(final);
 
             if (bible == null)
             {
@@ -932,15 +1086,20 @@ public class AnalysisContextService : IAnalysisContextService
 
             await _db.SaveChangesAsync(ct);
 
+            // `extracted` is non-null by the guard above, but MAY hold zero characters: a chapter-keyed
+            // scan reaches this line on an empty answer too, because the ledger entry still has to be
+            // recorded. `{ExtractedCount} = 0` here is that case, and it is not a failure.
             _logger.LogInformation(
-                "Character register re-extracted and merged for book {BookId}: {ExtractedCount} extracted, {LocalCount} already stored, {MergedCount} after merge ({SuppressedCount} suppressed).",
+                "Character register scanned chapter {ChapterId} of book {BookId}: {ExtractedCount} extracted, {LocalCount} already stored, {MergedCount} after merge ({SuppressedCount} suppressed), {ScannedChapterCount} chapters in the ledger.",
+                chapterId,
                 bookId,
-                extracted.Characters.Count,
+                extracted?.Characters.Count ?? 0,
                 stored?.Characters.Count ?? 0,
                 merged.Characters.Count,
-                merged.Characters.Count(CharacterRegisterMerge.IsSuppressed));
+                merged.Characters.Count(CharacterRegisterMerge.IsSuppressed),
+                final.ScannedChapters.Count);
 
-            return ForAnalysis(merged);
+            return CharacterRegisterMerge.ForAnalysis(final);
         }
         catch (OperationCanceledException)
         {
@@ -960,44 +1119,11 @@ public class AnalysisContextService : IAnalysisContextService
         }
     }
 
-    /// <summary>
-    /// The register as an ANALYSIS sees it: NORMALIZED, then author-suppressed entries removed.
-    ///
-    /// <para>An entry the author marked "not a character" must not be described to the model as one -
-    /// otherwise the suppression marker is inert for every analysis and only affects future merges.</para>
-    ///
-    /// <para>NORMALIZE FIRST, and not only for tidiness. Every other reader of a stored register runs
-    /// <c>CharacterRegisterMerge.Normalize</c> before showing it: <c>CharacterRegisterService.GetAsync</c>
-    /// and the author PATCH both do, and the re-extraction path gets it from <c>Merge</c>, which
-    /// normalizes both sides. This path used to be the one reader that did not, so a legacy register
-    /// holding a duplicate pair, a blank name or an untrimmed one described that character to the model
-    /// twice while the register API showed a single collapsed row - two answers to "who is in this book"
-    /// from one column, with the repair only persisted once something happened to write.</para>
-    ///
-    /// <para>ORDER MATTERS, so this is one funnel rather than two hand-copied steps: collapsing a
-    /// duplicate lets SUPPRESSION WIN onto the survivor (see
-    /// <c>CharacterRegisterMerge.CollapseDuplicate</c>). Filtering first would keep the unsuppressed
-    /// copy of a half-suppressed pair and hand the model a character the author had struck out, which is
-    /// the opposite of what the API reports. Normalize is idempotent, so the already-normalized merge
-    /// result passing through here collapses nothing further.</para>
-    ///
-    /// <para>This does NOT write anything and does NOT touch <see cref="CharacterRegister.UpdatedAt"/>:
-    /// it is an in-memory projection for one analysis. Persisting the repair stays the writers' job, on
-    /// purpose, so reading a book for analysis never marks its earlier results stale.</para>
-    ///
-    /// <para>It is applied HERE and not in <c>PromptFactory.FormatCharacters</c> on purpose: that
-    /// method's output shape is Issue 1's subject and is deliberately untouched by this todo.</para>
-    /// </summary>
-    private static CharacterRegister? ForAnalysis(CharacterRegister? register)
-    {
-        if (register is null) return null;
-
-        var visible = CharacterRegisterMerge.Normalize(register)
-            .Where(c => !CharacterRegisterMerge.IsSuppressed(c))
-            .ToList();
-
-        return register with { Characters = visible };
-    }
+    // The register-as-an-analysis-sees-it projection (NORMALIZE, then drop author-suppressed entries) now
+    // lives on CharacterRegisterMerge.ForAnalysis. It was PROMOTED there by the automatic-coverage plan's
+    // d1 §3 so BookReviewService can share ONE projection instead of re-deriving the suppression rule for
+    // the whole-book review. See that method for the full argument: why it normalizes first, why it writes
+    // nothing and never moves UpdatedAt, and why it is not applied inside PromptFactory.FormatCharacters.
 
     private async Task<StyleProfileData?> LoadStyleProfileAsync(
         Guid bookId,
@@ -1026,6 +1152,21 @@ public class AnalysisContextService : IAnalysisContextService
         }
     }
 
+    /// <summary>
+    /// The character pre-pass over one unit's text.
+    ///
+    /// <para>NULL MEANS FAILED, NOT "FOUND NOTHING", and the distinction is load-bearing since be-c01
+    /// (final-r01). A chapter-keyed scan records a ledger entry on ANY answer it gets, so that a chapter
+    /// which genuinely has no characters in it (a foreword, a title page) is not re-extracted on every
+    /// analysis for the rest of the book's life. If a FAILED call were indistinguishable from that, one
+    /// wedged Ollama run would mark every chapter analysed during the outage permanently covered, having
+    /// read none of them - invisible in the register (it looks like a chapter with no characters) and
+    /// invisible in the coverage report (it says covered), with no way back short of an author edit.</para>
+    ///
+    /// <para>So: an EMPTY register is returned when the model answered and named nobody; NULL is returned
+    /// only when there was no answer to read - no text to send, the router threw, the response was blank,
+    /// or it carried no parsable JSON array.</para>
+    /// </summary>
     private async Task<CharacterRegister?> ExtractCharacterRegisterAsync(
         string fullText,
         string language,
@@ -1054,32 +1195,49 @@ public class AnalysisContextService : IAnalysisContextService
             // Let cancellation propagate to the caller.
             throw;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            // LOG IT. This catch is the reason `null` exists, and since be-c01 `null` is what stops a
+            // chapter being recorded as scanned - so a fault swallowed silently here is a coverage
+            // decision nobody can see the cause of. The caller logs that the scan was skipped; this is
+            // the only place that knows WHY. No prose is logged, only the exception.
+            _logger.LogWarning(ex, "Character extraction pre-pass call failed; no register was extracted.");
             return null;
         }
 
         var raw = response.Content;
         if (string.IsNullOrWhiteSpace(raw))
+        {
+            _logger.LogWarning("Character extraction pre-pass returned an EMPTY response; no register was extracted.");
             return null;
+        }
 
         var json = ExtractJsonArray(raw);
         if (string.IsNullOrWhiteSpace(json))
+        {
+            _logger.LogWarning(
+                "Character extraction pre-pass response carried no JSON array ({Length} chars); no register was extracted.",
+                raw.Length);
             return null;
+        }
 
         try
         {
             var entries = JsonSerializer.Deserialize<List<CharacterRegisterEntry>>(json, JsonOpts);
-            if (entries is not { Count: > 0 })
+            if (entries is null)
                 return null;
 
+            // An EMPTY list is an ANSWER ("nobody appears in this unit"), not a failure - see the null
+            // contract on this method. Collapsing it to null here is what would let a wedged model be
+            // recorded as a clean scan.
             return new CharacterRegister
             {
                 Characters = entries
             };
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
+            _logger.LogWarning(ex, "Character extraction pre-pass returned unparsable JSON; no register was extracted.");
             return null;
         }
     }

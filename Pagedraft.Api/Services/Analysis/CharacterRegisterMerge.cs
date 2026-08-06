@@ -229,6 +229,55 @@ public static class CharacterRegisterMerge
     }
 
     /// <summary>
+    /// The register as an ANALYSIS sees it: NORMALIZED, then author-suppressed entries removed.
+    ///
+    /// <para>An entry the author marked "not a character" must not be described to the model as one -
+    /// otherwise the suppression marker is inert for every analysis and only affects future merges.</para>
+    ///
+    /// <para>NORMALIZE FIRST, and not only for tidiness. Every other reader of a stored register runs
+    /// <see cref="Normalize"/> before showing it: <c>CharacterRegisterService.GetAsync</c> and the author
+    /// PATCH both do, and the re-extraction path gets it from <see cref="Merge"/>, which normalizes both
+    /// sides. The analysis path used to be the one reader that did not, so a legacy register holding a
+    /// duplicate pair, a blank name or an untrimmed one described that character to the model twice while
+    /// the register API showed a single collapsed row - two answers to "who is in this book" from one
+    /// column, with the repair only persisted once something happened to write.</para>
+    ///
+    /// <para>ORDER MATTERS, so this is one funnel rather than two hand-copied steps: collapsing a
+    /// duplicate lets SUPPRESSION WIN onto the survivor (see <c>CollapseDuplicate</c>). Filtering first
+    /// would keep the unsuppressed copy of a half-suppressed pair and hand the model a character the
+    /// author had struck out, which is the opposite of what the API reports. <see cref="Normalize"/> is
+    /// idempotent, so the already-normalized merge result passing through here collapses nothing
+    /// further.</para>
+    ///
+    /// <para>This does NOT write anything and does NOT touch <see cref="CharacterRegister.UpdatedAt"/>:
+    /// it is an in-memory projection for one analysis. Persisting the repair stays the writers' job, on
+    /// purpose, so reading a book for analysis never marks its earlier results stale. It also does NOT
+    /// touch <see cref="CharacterRegister.ScannedChapters"/> - the ledger travels with the projection
+    /// untouched, so a reader that wants coverage still sees it.</para>
+    ///
+    /// <para>It lives HERE and not in <c>PromptFactory.FormatCharacters</c> on purpose: that method's
+    /// output shape is a measurement subject and is deliberately untouched.</para>
+    ///
+    /// <para><b>WHY IT IS ON THIS CLASS</b> (automatic-coverage plan, d1 §3): it started as a private
+    /// helper on <c>AnalysisContextService</c>, but <see cref="BookReviewService"/> needs the SAME
+    /// projection and must not call <c>LoadCharacterRegisterAsync</c> (that method can spend an LLM
+    /// extraction call, and the whole-book review is bound to zero of them). Normalization plus the
+    /// suppression rule is already this file's concern, so a second caller shares one projection here
+    /// rather than re-deriving "which entries may the model see", which is exactly the kind of divergent
+    /// second rule this file's header forbids.</para>
+    /// </summary>
+    public static CharacterRegister? ForAnalysis(CharacterRegister? register)
+    {
+        if (register is null) return null;
+
+        var visible = Normalize(register)
+            .Where(c => !IsSuppressed(c))
+            .ToList();
+
+        return register with { Characters = visible };
+    }
+
+    /// <summary>
     /// Trim, drop blanks, drop an alias identical to the entry's own name, and de-duplicate
     /// case-insensitively while preserving first-seen order.
     /// </summary>
