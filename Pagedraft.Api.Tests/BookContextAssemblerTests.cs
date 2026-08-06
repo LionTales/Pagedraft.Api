@@ -35,6 +35,15 @@ public class BookContextAssemblerTests
 {
     // A structured L0 brief the assembler's L1 projection reads (camelCase, matches StructuredChunkSummaryData).
     // Each chapter gets a distinct, moderately sized brief so the union is observable and tokens accumulate.
+    //
+    // NORMALIZED TO "\n", and it has to be. A multi-line raw string literal carries the line endings of the
+    // SOURCE FILE, so this fixture is one byte per line longer when the file is checked out CRLF than when it
+    // is checked out LF. Every token count in this class is derived from these bytes, so without this call the
+    // fixture is a different size on a Windows working copy than on the Linux CI runner, and any budget tuned
+    // tightly against it passes on one and fails on the other with nothing in the diff to explain it. That is
+    // not hypothetical: it is exactly how AssembleWindowsAsync_SmallCharacterRegister_LeavesTheWindowPartition-
+    // Unchanged went green locally and red in CI. Pinning the endings here makes the tuned budgets below mean
+    // the same thing everywhere, whatever anyone's core.autocrlf is set to.
     private static string BriefJson(int n) => $$"""
         {
           "plotEvents": ["Chapter {{n}} event alpha that advances the plot", "Chapter {{n}} event beta with consequences"],
@@ -43,7 +52,7 @@ public class BookContextAssemblerTests
           "toneNotes": "tense and foreboding throughout chapter {{n}}",
           "openThreads": ["who sent the letter in chapter {{n}}?"]
         }
-        """;
+        """.ReplaceLineEndings("\n");
 
     // ─── (a) Budget cap respected: assembled context stays within the configured budget ──────────────
 
@@ -1107,45 +1116,80 @@ public class BookContextAssemblerTests
         // The complement of the test above: at a budget with headroom, a small register must NOT churn the
         // partition. Same window count, same chapters per window - it only adds its block. A register that
         // re-cut a book's windows on every build would invalidate window-indexed provenance for nothing.
+        // Seeded ONCE; every provider below shares this in-memory store by name, so only the budget varies.
         var dbName = Guid.NewGuid().ToString();
-        // 4060, not a round 4000: the greedy partition leaves each window whatever is left over after its last
-        // chapter, and at 4000 that remainder (19t) is SMALLER than the register block, so the block genuinely
-        // does move a boundary. The precondition below states this rather than leaving the number a mystery.
-        using var provider = BuildProvider(dbName, bookContextTokenBudget: 4060,
-            windowBriefMaxTokens: 150, windowOverlapChapters: 0);
-        var db = provider.GetRequiredService<AppDbContext>();
-
         var bookId = Guid.NewGuid();
-        db.Books.Add(new Book { Id = bookId, Title = "Stable Window Book", Language = "he" });
-        const int chapterCount = 40;
-        for (var i = 0; i < chapterCount; i++)
-            SeedChapterWithBrief(db, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
-        await db.SaveChangesAsync();
+        using (var seedProvider = BuildProvider(dbName, bookContextTokenBudget: 4000,
+                   windowBriefMaxTokens: 150, windowOverlapChapters: 0))
+        {
+            var seedDb = seedProvider.GetRequiredService<AppDbContext>();
+            seedDb.Books.Add(new Book { Id = bookId, Title = "Stable Window Book", Language = "he" });
+            for (var i = 0; i < 40; i++)
+                SeedChapterWithBrief(seedDb, bookId, order: i, title: $"Ch{i}", briefJson: BriefJson(i));
+            await seedDb.SaveChangesAsync();
+        }
 
         var register = RegisterOf(("דנה", "protagonist", "female"), ("יואב", "antagonist", "male"));
-        var asm = provider.GetRequiredService<BookContextAssembler>();
-
-        var without = await asm.AssembleWindowsAsync(bookId, "he");
-        var with = await asm.AssembleWindowsAsync(bookId, "he", characterRegister: register);
-
-        Assert.True(without.Count > 1, "the fixture must be multi-window or this asserts nothing");
-
-        // PRECONDITION, asserted rather than assumed: "unchanged" is only a meaningful claim when the block
-        // genuinely fits the slack every window already had. Stated here so a future fixture drift fails as
-        // "this fixture no longer has headroom" instead of silently becoming a test of nothing (or a false
-        // alarm about the charging logic, which the other tests own).
         var cpt = BookContextAssembler.CharsPerTokenForLanguage("he");
         var blockTokens = BookContextAssembler.EstimateTokens(
             BookContextAssembler.FormatCharacterRegisterBlock(register) + "\n\n", cpt);
-        var minSlack = without.Min(w => w.BudgetTokens - w.EstimatedTokens);
-        Assert.True(minSlack > blockTokens,
-            $"fixture precondition broken: the tightest register-less window has {minSlack}t of slack but the " +
-            $"register block costs {blockTokens}t, so the partition SHOULD move. Widen the budget or shrink " +
-            "the fixture register; do not relax the assertions below.");
 
-        Assert.Equal(without.Count, with.Count);
+        // THE BUDGET IS DERIVED, NOT HAND-TUNED, and that is the point of the loop below.
+        //
+        // "Unchanged" is only a meaningful claim when the block genuinely fits the slack every window already
+        // had, and slack is the greedy partition's leftover after its last chapter: an essentially arbitrary
+        // value in [0, one chapter's cost) that moves with the fixture's exact BYTE size. Those bytes are NOT
+        // the same on every machine. The assembler builds its blocks with StringBuilder.AppendLine, which
+        // emits Environment.NewLine, so every assembled window is one byte per line larger on a Windows
+        // working copy than on the Linux CI runner. A constant tuned against one of them is green there and
+        // red on the other with nothing in the diff to explain it, which is exactly what a hardcoded 4060 did:
+        // it satisfied this precondition locally and left the tightest CI window 3t of slack against a 47t
+        // block. Searching for the budget removes the platform from the answer.
+        //
+        // The search cannot weaken what is proved. The precondition is the SELECTION criterion rather than a
+        // later assertion, the equality assertions below are untouched, and a range containing no qualifying
+        // budget FAILS loudly instead of quietly settling for a bad one.
+        var chosenBudget = 0;
+        IReadOnlyList<BookContextAssembly>? without = null;
+        var probed = new List<string>();
+
+        for (var budget = 4000; budget <= 4600 && chosenBudget == 0; budget += 5)
+        {
+            using var probeProvider = BuildProvider(dbName, bookContextTokenBudget: budget,
+                windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+            var candidate = await probeProvider.GetRequiredService<BookContextAssembler>()
+                .AssembleWindowsAsync(bookId, "he");
+
+            // Multi-window or it asserts nothing; that is a property of the budget, so it belongs in the
+            // selection rather than in an assertion the search could walk past.
+            if (candidate.Count <= 1) continue;
+
+            var slack = candidate.Min(w => w.BudgetTokens - w.EstimatedTokens);
+            probed.Add($"{budget}->{candidate.Count}w/slack {slack}t");
+            if (slack > blockTokens)
+            {
+                chosenBudget = budget;
+                without = candidate;
+            }
+        }
+
+        Assert.True(chosenBudget > 0,
+            $"no budget in 4000..4600 leaves the tightest window room for this {blockTokens}t register block " +
+            "while still partitioning the fixture into more than one window. Widen the search or shrink the " +
+            $"fixture register; do not relax the assertions below. Probed: {string.Join(", ", probed)}");
+
+        using var provider = BuildProvider(dbName, bookContextTokenBudget: chosenBudget,
+            windowBriefMaxTokens: 150, windowOverlapChapters: 0);
+        var with = await provider.GetRequiredService<BookContextAssembler>()
+            .AssembleWindowsAsync(bookId, "he", characterRegister: register);
+
+        Assert.Equal(without!.Count, with.Count);
         for (var i = 0; i < without.Count; i++)
             Assert.Equal(without[i].IncludedChapterOrders, with[i].IncludedChapterOrders);
+
+        // And the block really is present, so "unchanged partition" is not being proved by a register that
+        // silently rendered nothing at all.
+        Assert.All(with, w => Assert.Contains("[BOOK_CHARACTERS]", w.Text));
     }
 
     [Fact]
