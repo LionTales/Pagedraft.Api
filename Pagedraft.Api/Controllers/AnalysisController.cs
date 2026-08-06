@@ -80,7 +80,51 @@ public class AnalysisController : ControllerBase
         }
     }
 
-    internal static AnalysisResultDto ToDto(AnalysisResult a)
+    /// <summary>
+    /// AnalysisTypes that actually pull the character register into their context. ONLY these may be
+    /// flagged stale against the register stamp; for any other type the register never reached the model,
+    /// so the flag would be a false signal.
+    /// <para>
+    /// c04: this used to be a hand-maintained THIRD copy of the type set, kept in step with
+    /// <c>AnalysisContextService</c>'s load gate and <c>PromptFactory.GetRelevantFields</c> by a comment
+    /// and nothing else. It now DELEGATES to the one predicate derived from the field table, so the three
+    /// cannot diverge: there is no list here to fall out of date. The delegation is also the honest
+    /// definition of the flag's meaning: "the model saw the register the author has since changed" is
+    /// true exactly when the section was RENDERED into the prompt.
+    /// </para>
+    /// </summary>
+    internal static bool ReadsCharacterRegister(AnalysisType type)
+        => PromptFactory.RendersCharacterRegister(type);
+
+    /// <summary>
+    /// The book's character-register invalidation stamp (d1 §4), or null when the book has no
+    /// register / no stamp. Read once per request and passed to <see cref="ToDto"/>.
+    /// Deliberately reads only the JSON column's UpdatedAt: <c>BookBible.UpdatedAt</c> is shared by
+    /// every sibling blob on the bible and would false-positive on an unrelated write.
+    /// </summary>
+    private async Task<DateTimeOffset?> GetCharacterRegisterStampAsync(Guid bookId, CancellationToken ct)
+    {
+        var json = await _db.BookBibles.AsNoTracking()
+            .Where(b => b.BookId == bookId)
+            .Select(b => b.CharacterRegisterJson)
+            .FirstOrDefaultAsync(ct);
+
+        // Non-throwing by contract: an unreadable register yields no stamp (never stale) rather than
+        // failing a history read. This request never calls CharacterRegisterService.GetAsync or
+        // AnalysisContextService.LoadCharacterRegisterAsync, so no logger fires for that fault here -
+        // deliberately: a history list is a high-frequency read path, and the register's own surfaces
+        // (opening it, or loading it for an analysis) already log the fault where it matters.
+        return CharacterRegisterService.TryDeserialize(json, out var register, out _)
+            ? register?.UpdatedAt
+            : null;
+    }
+
+    /// <param name="characterRegisterUpdatedAt">
+    /// The book's character-register stamp, when the caller has it. Null (the default) means "no
+    /// staleness signal" and yields <c>CharacterRegisterStale = false</c> — which is also the correct
+    /// answer for a result that was just produced.
+    /// </param>
+    internal static AnalysisResultDto ToDto(AnalysisResult a, DateTimeOffset? characterRegisterUpdatedAt = null)
     {
         var suggestions = a.Suggestions
             .OrderBy(s => s.OrderIndex)
@@ -116,7 +160,10 @@ public class AnalysisController : ControllerBase
             Status: a.Status.ToString(),
             ProofreadNoChangesHint: a.ProofreadNoChangesHint,
             Suggestions: suggestions,
-            ProofreadResultUnreliable: a.ProofreadResultUnreliable);
+            ProofreadResultUnreliable: a.ProofreadResultUnreliable,
+            CharacterRegisterStale: characterRegisterUpdatedAt is { } stamp
+                && ReadsCharacterRegister(a.AnalysisType)
+                && a.CreatedAt < stamp);
     }
 
     private async Task<(AnalysisType analysisType, string? customPrompt, string language)> ResolveAnalysisParamsAsync(Guid chapterId, RunAnalysisRequest req, Chapter? chapter, CancellationToken ct)
@@ -191,7 +238,8 @@ public class AnalysisController : ControllerBase
             query = query.Where(a => a.AnalysisType == type);
 
         var items = (await query.ToListAsync(ct)).OrderByDescending(a => a.CreatedAt).ToList();
-        var dtos = items.Select(a => ToDto(a)).ToList();
+        var registerStamp = await GetCharacterRegisterStampAsync(bookId, ct);
+        var dtos = items.Select(a => ToDto(a, registerStamp)).ToList();
 
         return Ok(dtos);
     }
@@ -204,7 +252,7 @@ public class AnalysisController : ControllerBase
             .FirstOrDefaultAsync(x => x.ChapterId == chapterId && x.Id == id, ct);
         if (a == null) return NotFound();
 
-        return Ok(ToDto(a));
+        return Ok(ToDto(a, await GetCharacterRegisterStampAsync(bookId, ct)));
     }
 
 
@@ -365,7 +413,7 @@ public class AnalysisController : ControllerBase
         if (analysis == null)
             return NotFound();
 
-        return Ok(ToDto(analysis));
+        return Ok(ToDto(analysis, await GetCharacterRegisterStampAsync(bookId, ct)));
     }
 
     /// <summary>Get all persisted suggestions for a given analysis result.</summary>

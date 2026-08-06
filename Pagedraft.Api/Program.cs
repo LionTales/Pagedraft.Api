@@ -72,6 +72,11 @@ builder.Services.AddSingleton<SuggestionDiffService>();
 builder.Services.AddScoped<BookIntelligenceService>();
 builder.Services.AddSingleton<AnalysisProgressTracker>();
 builder.Services.AddScoped<IAnalysisContextService, AnalysisContextService>();
+// Author-editable character register (character-register-editing c1). Scoped: it reads/writes the
+// scoped DbContext. Owns the AUTHOR's writes to BookBible.CharacterRegisterJson; the re-extraction
+// write stays in AnalysisContextService and goes through CharacterRegisterMerge, so the two writers
+// share one merge rule and one serializer configuration.
+builder.Services.AddScoped<CharacterRegisterService>();
 builder.Services.AddScoped<StyleBaselineService>();
 // Structured per-chapter brief builder (wb1-c01). Scoped like StyleBaselineService; the book-wide build
 // resolves a fresh instance per chapter from the scope factory so concurrent builds never share a

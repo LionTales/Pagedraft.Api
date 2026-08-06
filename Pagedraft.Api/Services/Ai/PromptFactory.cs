@@ -202,6 +202,12 @@ public class PromptFactory
 
         var sb = new StringBuilder();
 
+        // NOT a second copy of the register-reading type set: this method has no type switch, because it
+        // is Proofread-by-construction (its only callers are inside RunProofreadChunkedAsync). What binds
+        // it to <see cref="RendersCharacterRegister"/> is the ARGUMENT: every caller passes
+        // AnalysisContext.Characters, which AnalysisContextService populates only when that predicate says
+        // Proofread reads the register. Drop ContextField.Characters from the Proofread row and this
+        // section stops rendering here too, with no edit to this file.
         if (characters is { Characters.Count: > 0 })
             AppendSection(sb, "CHARACTER_REGISTER", FormatCharacters(characters));
 
@@ -286,6 +292,40 @@ public class PromptFactory
         // BookOverview, CharacterAnalysis, Custom — no extra context needed
         _ => ContextField.None,
     };
+
+    /// <summary>
+    /// THE single source of truth for "does this analysis type use the character register", DERIVED from
+    /// the table above rather than restating it. Every gate on that question resolves to the SAME TABLE
+    /// ROW, so adding <see cref="ContextField.Characters"/> to a row above moves all three at once and
+    /// there is no list to keep in lockstep any more:
+    /// <list type="bullet">
+    /// <item>the RENDER gate, <see cref="BuildContextPreamble"/>, reads
+    /// <c>GetRelevantFields(type).HasFlag(ContextField.Characters)</c> INLINE alongside every other
+    /// field it renders, rather than calling this method - it is one flag test in a run of them, and
+    /// singling this one out would read as though it were a different question. It is the same
+    /// expression this method is defined as;</item>
+    /// <item>the LOAD gate in <c>AnalysisContextService.BuildContextAsync</c> calls this method;</item>
+    /// <item><c>AnalysisController.ReadsCharacterRegister</c> (which decides whether a result may be
+    /// flagged stale against the register stamp) delegates to this method.</item>
+    /// </list>
+    /// The oracle in <c>CharacterRegisterReadingTypeSetTests</c> checks the three OBSERVABLES, not the
+    /// predicate, so the render gate's inline form is pinned to the other two by behaviour.
+    /// <para>
+    /// WHY THE RENDER GATE IS THE AUTHORITY, and why the load gate has no freedom to differ (c04, argued
+    /// from the call graph as it is TODAY, not from taste): <c>AnalysisContext.Characters</c> has exactly
+    /// two consumers, <see cref="BuildContextPreamble"/> and
+    /// <see cref="BuildProofreadChunkPrompt"/> via <c>UnifiedAnalysisService.RunProofreadChunkedAsync</c>,
+    /// both prompt assembly. Nothing loads the register for any other purpose. Rendering without loading is
+    /// silently inert (the section condition also requires a non-empty register, so the declaration is
+    /// simply dead); loading without rendering costs an LLM extraction pre-pass AND a BookBible write per
+    /// analysis for a value the model never sees, and makes the staleness flag a false signal. If a future
+    /// consumer genuinely needs the register loaded WITHOUT rendering it, it must state its own need
+    /// explicitly rather than widen this predicate; the mechanical oracle in
+    /// <c>CharacterRegisterReadingTypeSetTests</c> will make that divergence visible.
+    /// </para>
+    /// </summary>
+    internal static bool RendersCharacterRegister(AnalysisType type) =>
+        GetRelevantFields(type).HasFlag(ContextField.Characters);
 
     private static string BuildContextPreamble(AnalysisContext ctx, AnalysisType type)
     {

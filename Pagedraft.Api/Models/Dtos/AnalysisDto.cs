@@ -29,7 +29,22 @@ public record AnalysisResultDto(
     /// <summary>Server-side suggestions for this analysis run (Proofread and Line Edit).</summary>
     List<AnalysisSuggestionDto>? Suggestions = null,
     /// <summary>True when a Proofread result is untrustworthy: the model returned empty/blank output, content unrelated to the input, or dropped a span of the input (producing a flood of bogus deletions). Distinct from ProofreadNoChangesHint, which is also true for genuinely-clean text. Persisted, so History reflects it.</summary>
-    bool ProofreadResultUnreliable = false);
+    bool ProofreadResultUnreliable = false,
+    /// <summary>
+    /// INFORMATIONAL staleness signal (character-register-editing d1 §4): this result was produced
+    /// BEFORE the book's character register was last changed, so the character facts it was given may
+    /// since have been corrected. Computed at read time as
+    /// <c>register.UpdatedAt is { } stamp &amp;&amp; result.CreatedAt &lt; stamp</c> — a stamp comparison,
+    /// never an eager delete/recompute pass. Nothing on the server re-runs or archives anything
+    /// because of it.
+    ///
+    /// Gated to the AnalysisTypes that ever actually pull the register into context (Proofread,
+    /// LiteraryAnalysis, QA, Synopsis); any other type never read it, so flagging it would be a false
+    /// signal rather than a true one. Always false when the register has no stamp — a null
+    /// <c>UpdatedAt</c> (every register persisted before provenance shipped) means "no staleness
+    /// signal", never "everything is stale".
+    /// </summary>
+    bool CharacterRegisterStale = false);
 
 /// <summary>Request body for POST .../analyze. Send AnalysisType for type picker; TemplateId for legacy.</summary>
 public record RunAnalysisRequest(

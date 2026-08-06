@@ -42,21 +42,112 @@ public record AnalysisContext
 
 // ─── Character Register ─────────────────────────────────────────────
 
-/// <summary>Known characters in the book, assembled from BookBible.CharacterRegisterJson.</summary>
+/// <summary>
+/// Known characters in the book, assembled from BookBible.CharacterRegisterJson.
+///
+/// PROVENANCE (character-register-editing plan, d1): the entries carry per-field
+/// author-confirmation flags so a re-extraction can preserve what a human blessed. See
+/// <see cref="CharacterRegisterEntry"/> and <c>CharacterRegisterMerge</c> (the single place the
+/// merge rule lives).
+/// </summary>
 public record CharacterRegister
 {
-    public IReadOnlyList<CharacterRegisterEntry> Characters { get; init; } = Array.Empty<CharacterRegisterEntry>();
+    private readonly IReadOnlyList<CharacterRegisterEntry> _characters = Array.Empty<CharacterRegisterEntry>();
+
+    /// <summary>
+    /// NULL-GUARD (see Services/Analysis/RepairableFields.cs for the canonical statement of this
+    /// trap): a plain <c>= Array.Empty&lt;...&gt;()</c> initializer does NOT survive an EXPLICIT
+    /// <c>"characters": null</c> in the persisted JSON — System.Text.Json writes the null straight
+    /// through and the collection becomes null despite the initializer. The init accessor coerces it
+    /// back, so no consumer (PromptFactory.FormatCharacters, the merge, the endpoints) can ever see
+    /// a null here.
+    /// </summary>
+    public IReadOnlyList<CharacterRegisterEntry> Characters
+    {
+        get => _characters;
+        init => _characters = value ?? Array.Empty<CharacterRegisterEntry>();
+    }
+
+    /// <summary>
+    /// Last time this register's content changed, by EITHER a re-extraction or an author edit
+    /// (d1 §4 invalidation stamp). Deliberately NOT <c>BookBible.UpdatedAt</c>, which is one column
+    /// shared by every sibling JSON blob on the bible — a write to StyleProfileJson would bump it
+    /// and falsely read as "the register changed" (the dual-surface trap already paid for once on
+    /// ChunkSummary).
+    ///
+    /// Null on every register persisted before provenance shipped, and on a register nothing has
+    /// touched since. A null MUST be read as "no staleness signal", never as "everything referencing
+    /// this register is stale" — otherwise every pre-existing AnalysisResult on every book lights up
+    /// as stale purely because the feature shipped.
+    /// </summary>
+    public DateTimeOffset? UpdatedAt { get; init; }
 }
 
+/// <summary>
+/// One character. Provenance is PER-FIELD and scoped to exactly the three fields an author can
+/// edit (d1 §1): Gender, Aliases, IsCharacter. Role/Description carry no flag — they are
+/// always-extracted, always-replaceable, because no UI exposes an edit path for them.
+///
+/// BACKWARD COMPATIBILITY INVARIANT: every provenance field defaults so that a register persisted
+/// BEFORE this shipped (none of these properties present in its JSON) deserializes as
+/// EXTRACTED-and-a-character — never as author-confirmed. Defaulting the other way would freeze
+/// every currently-guessed gender as if a human had blessed it. Pinned by
+/// <c>CharacterRegisterProvenanceTests</c> from a literal pre-change JSON string.
+/// </summary>
 public record CharacterRegisterEntry
 {
+    private readonly IReadOnlyList<string> _aliases = Array.Empty<string>();
+
     public required string Name { get; init; }
     public string? Gender { get; init; }
 
-    /// <summary>"protagonist", "antagonist", "supporting", "minor"</summary>
+    /// <summary>"protagonist", "antagonist", "supporting", "minor" — extracted-only, no provenance flag.</summary>
     public string? Role { get; init; }
+
+    /// <summary>Extracted-only, no provenance flag: same reason as <see cref="Role"/>.</summary>
     public string? Description { get; init; }
-    public IReadOnlyList<string> Aliases { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// NULL-GUARD, same trap as <see cref="CharacterRegister.Characters"/>: an explicit
+    /// <c>"aliases": null</c> overwrites the initializer with null, and
+    /// <c>PromptFactory.FormatCharacters</c> reads <c>c.Aliases.Count</c> unguarded. The init
+    /// accessor coerces null back to empty so that read can never NRE.
+    /// </summary>
+    public IReadOnlyList<string> Aliases
+    {
+        get => _aliases;
+        init => _aliases = value ?? Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// False once the author marks this entry as not-a-character (suppressed). Default TRUE so a
+    /// legacy row with this field absent means "yes, a character" — matching what the extractor
+    /// already implied simply by including the entry.
+    /// </summary>
+    public bool IsCharacter { get; init; } = true;
+
+    /// <summary>
+    /// True when the WHOLE entry was hand-added by the author rather than produced by extraction.
+    /// An author-added entry is exempt from the extracted-only replace step on EVERY field, not just
+    /// the three provenance-flagged ones (d1 §3, row 3).
+    /// </summary>
+    public bool IsAuthorAdded { get; init; }
+
+    // ── Per-field provenance (d1 §1). Each MUST default to false so a legacy row with the field
+    // absent deserializes as EXTRACTED, never as author-confirmed. ──────────────────────────────
+
+    /// <summary>The author explicitly set <see cref="Gender"/>; a re-extraction must not overwrite it.</summary>
+    public bool GenderConfirmed { get; init; }
+
+    /// <summary>The author explicitly set <see cref="Aliases"/>; a re-extraction must not overwrite them.</summary>
+    public bool AliasesConfirmed { get; init; }
+
+    /// <summary>
+    /// The author explicitly decided <see cref="IsCharacter"/>. Combined with
+    /// <c>IsCharacter == false</c> this is the PERMANENT SUPPRESSION marker: a re-extraction that
+    /// proposes a matching entry must drop it rather than resurrect the character.
+    /// </summary>
+    public bool IsCharacterConfirmed { get; init; }
 }
 
 // ─── Style Profile ──────────────────────────────────────────────────
