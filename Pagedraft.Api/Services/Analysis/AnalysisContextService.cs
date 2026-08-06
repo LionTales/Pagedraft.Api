@@ -961,12 +961,29 @@ public class AnalysisContextService : IAnalysisContextService
     }
 
     /// <summary>
-    /// The register as an ANALYSIS sees it: author-suppressed entries removed.
+    /// The register as an ANALYSIS sees it: NORMALIZED, then author-suppressed entries removed.
     ///
     /// <para>An entry the author marked "not a character" must not be described to the model as one -
-    /// otherwise the suppression marker is inert for every analysis and only affects future merges.
-    /// This is a no-op for every register persisted before provenance shipped (nothing is suppressed
-    /// there), so it changes nothing about what today's books send to the model.</para>
+    /// otherwise the suppression marker is inert for every analysis and only affects future merges.</para>
+    ///
+    /// <para>NORMALIZE FIRST, and not only for tidiness. Every other reader of a stored register runs
+    /// <c>CharacterRegisterMerge.Normalize</c> before showing it: <c>CharacterRegisterService.GetAsync</c>
+    /// and the author PATCH both do, and the re-extraction path gets it from <c>Merge</c>, which
+    /// normalizes both sides. This path used to be the one reader that did not, so a legacy register
+    /// holding a duplicate pair, a blank name or an untrimmed one described that character to the model
+    /// twice while the register API showed a single collapsed row - two answers to "who is in this book"
+    /// from one column, with the repair only persisted once something happened to write.</para>
+    ///
+    /// <para>ORDER MATTERS, so this is one funnel rather than two hand-copied steps: collapsing a
+    /// duplicate lets SUPPRESSION WIN onto the survivor (see
+    /// <c>CharacterRegisterMerge.CollapseDuplicate</c>). Filtering first would keep the unsuppressed
+    /// copy of a half-suppressed pair and hand the model a character the author had struck out, which is
+    /// the opposite of what the API reports. Normalize is idempotent, so the already-normalized merge
+    /// result passing through here collapses nothing further.</para>
+    ///
+    /// <para>This does NOT write anything and does NOT touch <see cref="CharacterRegister.UpdatedAt"/>:
+    /// it is an in-memory projection for one analysis. Persisting the repair stays the writers' job, on
+    /// purpose, so reading a book for analysis never marks its earlier results stale.</para>
     ///
     /// <para>It is applied HERE and not in <c>PromptFactory.FormatCharacters</c> on purpose: that
     /// method's output shape is Issue 1's subject and is deliberately untouched by this todo.</para>
@@ -975,13 +992,11 @@ public class AnalysisContextService : IAnalysisContextService
     {
         if (register is null) return null;
 
-        var visible = register.Characters
-            .Where(c => c is not null && !CharacterRegisterMerge.IsSuppressed(c))
+        var visible = CharacterRegisterMerge.Normalize(register)
+            .Where(c => !CharacterRegisterMerge.IsSuppressed(c))
             .ToList();
 
-        return visible.Count == register.Characters.Count
-            ? register
-            : register with { Characters = visible };
+        return register with { Characters = visible };
     }
 
     private async Task<StyleProfileData?> LoadStyleProfileAsync(

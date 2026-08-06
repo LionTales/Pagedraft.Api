@@ -751,6 +751,69 @@ public class CharacterRegisterProvenanceTests
     }
 
     [Fact]
+    public async Task LoadCharacterRegister_LegacyMalformedRegister_ReachesTheAnalysisNormalized()
+    {
+        // The analysis read used to be the ONE reader of a stored register that skipped Normalize, so a
+        // legacy register described the same character to the model twice while GET showed one collapsed
+        // row. Every seeded defect here is one Normalize repairs: a duplicate pair, a name matched only
+        // through the other side's aliases, an untrimmed name, and a blank-named entry.
+        using var provider = BuildProvider();
+        var db = provider.GetRequiredService<AppDbContext>();
+        var (bookId, chapterId) = await SeedBookAsync(db);
+
+        db.BookBibles.Add(new BookBible
+        {
+            BookId = bookId,
+            CharacterRegisterJson = CharacterRegisterService.Serialize(Reg(
+                new CharacterRegisterEntry { Name = "דניאל", Gender = "male" },
+                new CharacterRegisterEntry { Name = "  דניאל  " },
+                new CharacterRegisterEntry { Name = "דני", Aliases = new[] { "דניאל" } },
+                new CharacterRegisterEntry { Name = "   " },
+                new CharacterRegisterEntry { Name = "רונית" }))
+        });
+        await db.SaveChangesAsync();
+
+        var context = await provider.GetRequiredService<IAnalysisContextService>().BuildContextAsync(
+            AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", CancellationToken.None);
+
+        var names = context.Characters!.Characters.Select(c => c.Name).ToList();
+        Assert.Equal(new[] { "דניאל", "רונית" }, names);
+
+        // Non-vacuity: the seeded column really did hold the malformed shape this asserts was repaired,
+        // so the test cannot pass by the register having been empty or unreadable all along.
+        var bible = await db.BookBibles.AsNoTracking().FirstAsync(b => b.BookId == bookId);
+        Assert.Equal(5, Deserialize(bible.CharacterRegisterJson!).Characters.Count);
+    }
+
+    [Fact]
+    public async Task LoadCharacterRegister_DuplicateWhereOneCopyIsSuppressed_ReachesTheAnalysisNotAtAll()
+    {
+        // The reason normalization and suppression-filtering are ONE funnel in a fixed ORDER rather than
+        // two steps: collapsing the duplicate lets suppression win onto the survivor. Filter first and the
+        // unsuppressed copy survives, handing the model a character the author struck out - the opposite
+        // of what the register API reports for the same column.
+        using var provider = BuildProvider();
+        var db = provider.GetRequiredService<AppDbContext>();
+        var (bookId, chapterId) = await SeedBookAsync(db);
+
+        db.BookBibles.Add(new BookBible
+        {
+            BookId = bookId,
+            CharacterRegisterJson = CharacterRegisterService.Serialize(Reg(
+                new CharacterRegisterEntry { Name = "הרוח" },
+                new CharacterRegisterEntry { Name = "הרוח", IsCharacter = false, IsCharacterConfirmed = true },
+                new CharacterRegisterEntry { Name = "רונית" }))
+        });
+        await db.SaveChangesAsync();
+
+        var context = await provider.GetRequiredService<IAnalysisContextService>().BuildContextAsync(
+            AnalysisScope.Chapter, chapterId, AnalysisType.Proofread, "he", CancellationToken.None);
+
+        var visible = Assert.Single(context.Characters!.Characters);
+        Assert.Equal("רונית", visible.Name);
+    }
+
+    [Fact]
     public async Task LoadCharacterRegister_AllSuppressedRegister_DoesNotReExtractAtAll()
     {
         // REPLACES a test that asserted the opposite and passed VACUOUSLY. It believed an all-suppressed
