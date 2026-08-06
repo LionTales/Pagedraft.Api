@@ -98,11 +98,21 @@ internal static class BookReviewDigests
     /// is — an id the model was never given must not resolve — and the ids number the ACCUMULATION positions, so a
     /// capped-away line simply leaves a gap in the sequence rather than renumbering the ones that survived it.
     /// </summary>
+    /// <param name="registerBlock">
+    /// be-c02: the rendered <c>[BOOK_CHARACTERS]</c> block the synthesis prompt places between the brief and
+    /// this digest (empty when the book has no register). It is RESERVED here alongside the brief block, for
+    /// exactly the same reason the brief block is: all three share ONE model window, so a digest sized against
+    /// only the brief would grow into the room the register now occupies and push the whole prompt past
+    /// num_ctx - where Ollama truncates it silently and the synthesis comes back unparseable. The caller passes
+    /// the block it will actually emit rather than re-rendering it here, so what is charged is provably what is
+    /// sent.
+    /// </param>
     internal static (string Digest, IReadOnlyCollection<int> ShownOrders, IReadOnlyDictionary<string, BookFindingItem> IdMap)
         BuildSynthesisDigest(
             IReadOnlyList<BookFindingItem> accumulatedFindings,
             string lang,
             string briefBlock,
+            string registerBlock,
             DigestAnchorGate anchorGate,
             BookContextAssembler contextAssembler,
             ILogger logger)
@@ -110,10 +120,22 @@ internal static class BookReviewDigests
         var charsPerToken = BookContextAssembler.CharsPerTokenForLanguage(lang);
         var budget = contextAssembler.ResolveBudgetTokens(new[] { AiTaskType.BookReview });
 
-        // Reserve the room the FULL brief block already occupies in [BOOK_CONTEXT]; the digest must fit in what
-        // remains. Guard a pathological non-positive remainder to a small floor so at least a few lines survive.
+        // Reserve the room the FULL brief block and the [BOOK_CHARACTERS] block already occupy in the prompt;
+        // the digest must fit in what remains. Estimated SEPARATELY and summed, which rounds UP per block - the
+        // conservative direction, since under-counting is what silently truncates.
+        // Guard a pathological non-positive remainder to a small floor so at least a few lines survive.
+        //
+        // P3-10: `registerTokens` charges `registerBlock` alone, while the caller (RunSynthesisAsync) actually
+        // EMITS `registerBlock + "\n\n"` when the block is non-empty - two characters this line does not charge
+        // for. Left unequal deliberately rather than reshaped to match byte-for-byte: at the densest supported
+        // script (CharsPerTokenDense = 2.0 chars/token) two uncharged characters can undercount by AT MOST one
+        // whole token, against a `digestBudget` denominated in the thousands and already floored at 256 above -
+        // not "absorbed to zero" by Math.Ceiling, but small enough that a one-token miss cannot push the digest
+        // past num_ctx. (`briefBlock` has the identical two-character gap against its own "\n\n" separator and
+        // is pre-existing, out of this fix's scope.)
         var briefTokens = BookContextAssembler.EstimateTokens(briefBlock, charsPerToken);
-        var digestBudget = Math.Max(256, budget - briefTokens);
+        var registerTokens = BookContextAssembler.EstimateTokens(registerBlock, charsPerToken);
+        var digestBudget = Math.Max(256, budget - briefTokens - registerTokens);
 
         const string openMarker = "[WINDOW_FINDINGS]";
         const string closeMarker = "[/WINDOW_FINDINGS]";

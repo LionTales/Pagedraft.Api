@@ -566,8 +566,14 @@ public class BookReviewService
         //    that window's chapters as READY-to-feed Text, plus its metadata (WindowIndex, IncludedChapterOrders,
         //    OverlapChapterOrders). We MAP each window through the combined review call, ACCUMULATE every
         //    window's findings in memory, then (after the wb4-c04/c05 reduce passes) union/dedup + persist ONCE.
+        //    be-c02: the CHARACTER REGISTER is read FIRST (one AsNoTracking row, zero LLM calls) and handed to
+        //    the assembler, which charges its block against every window's budget. This is the one analysis
+        //    whose stated job is judging characters and it used to be the one analysis with no character data.
+        var characterRegister = await LoadCharacterRegisterForReviewAsync(bookId, ct);
+
         var windows = await _contextAssembler.AssembleWindowsAsync(
-            bookId, lang, consumingTasks: new[] { AiTaskType.BookReview }, ct);
+            bookId, lang, consumingTasks: new[] { AiTaskType.BookReview },
+            characterRegister: characterRegister, ct: ct);
 
         // 2. BRIEFS-ABSENT GUARD (before spending any model calls). The review reads the dense structured
         //    briefs; producing findings from the degraded flat-text fallback would be unanchored noise. We
@@ -908,7 +914,7 @@ public class BookReviewService
                 try
                 {
                     var synthesis = await RunSynthesisAsync(
-                        fullBookBrief, accumulated, lang, jobId, digestAnchorGate, ct);
+                        fullBookBrief, accumulated, lang, jobId, digestAnchorGate, characterRegister, ct);
                     if (synthesis != null)
                     {
                         // b8 THE MERGE MAP — the reduce's DELETE channel. Captured here and applied as PASS 0 of
@@ -1621,20 +1627,33 @@ public class BookReviewService
     /// prompt (id column, 260-char cap, "express a merge ONLY through `merges`") in both. See
     /// <see cref="SynthesisMergeMap"/>, KILL-SWITCH.
     /// </summary>
+    /// <param name="characterRegister">
+    /// be-c02: the same suppression-filtered register the windows carry, rendered ONCE here (this pass runs
+    /// once, so there is no per-window multiplier) into the same <c>[BOOK_CHARACTERS]</c> block. The synthesis
+    /// pass sees NO chapter text at all - its whole view of the book is the BookBrief plus the digest - so a
+    /// holistic character observation ("this character is named in nine chapters and never resolved") has no
+    /// other way to know who the cast is. Its cost is subtracted from the DIGEST's budget below, not added on
+    /// top of it.
+    /// </param>
     private async Task<SynthesisOutcome?> RunSynthesisAsync(
         BookBrief bookBrief,
         IReadOnlyList<BookFindingItem> accumulatedFindings,
         string lang,
         Guid? jobId,
         DigestAnchorGate anchorGate,
+        CharacterRegister? characterRegister,
         CancellationToken ct)
     {
         try
         {
             var briefBlock = BookContextAssembler.FormatBookBrief(bookBrief);
+            // be-c02. The register block occupies the SAME window as the digest, so the digest's budget must be
+            // reduced by it exactly as it already is by the brief block. Passed in rather than re-rendered
+            // inside the digest builder so the block that is CHARGED is provably the block that is EMITTED.
+            var registerBlock = BookContextAssembler.FormatCharacterRegisterBlock(characterRegister);
             var (digestBlock, shownOrders, idMap) =
                 BookReviewDigests.BuildSynthesisDigest(
-                    accumulatedFindings, lang, briefBlock, anchorGate, _contextAssembler, _logger);
+                    accumulatedFindings, lang, briefBlock, registerBlock, anchorGate, _contextAssembler, _logger);
 
             // Input mirrors the combined call: whole-book context in the instruction's [BOOK_CONTEXT], then the
             // compact [WINDOW_FINDINGS] digest, then the synthesis prompt body. InputText stays empty.
@@ -1651,7 +1670,9 @@ public class BookReviewService
             // put that chapter into the SYNTHESIS allowlist — and the resolver then accepted the synthesis's copy of
             // it, because by then the order was both real and "shown". The gate (DigestAnchorGate) closes that loop:
             // an order reaches this digest only if the finding that carries it will KEEP it through resolution.
-            var bookContextSection = briefBlock + "\n\n" + digestBlock + "\n\n";
+            var bookContextSection = briefBlock + "\n\n"
+                + (registerBlock.Length > 0 ? registerBlock + "\n\n" : string.Empty)
+                + digestBlock + "\n\n";
             var instruction = bookContextSection + _promptFactory.BuildBookReviewSynthesisPrompt(lang)
                 + AllowlistSuffix(lang, shownOrders);
 
@@ -2900,6 +2921,48 @@ public class BookReviewService
     // ─── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Reads the book's persisted CHARACTER REGISTER for the review (automatic-coverage plan, d1 §3). ONE
+    /// <c>AsNoTracking</c> row, and ZERO model calls.
+    ///
+    /// <para><b>WHY NOT <c>AnalysisContextService.LoadCharacterRegisterAsync</c></b>, which is the method that
+    /// obviously loads a register: because that method can EXTRACT. It runs the character pre-pass when a
+    /// chapter has not contributed yet, and d1 §2 bounds the whole feature at one extraction call per analysis
+    /// request with a whole-book review triggering ZERO. Calling it here would let a review of a 40-chapter
+    /// book decide to spend model time on an extraction nobody asked for, on a machine where the review is
+    /// already the longest job there is. The review wants the register IF ONE EXISTS and nothing otherwise.</para>
+    ///
+    /// <para>The suppression + normalization projection is
+    /// <see cref="CharacterRegisterMerge.ForAnalysis"/> - the SAME one the per-analysis path applies - so an
+    /// entry the author struck out is not described to the review's model either. Re-deriving that rule here
+    /// is exactly the divergent second implementation the merge file's header forbids.</para>
+    ///
+    /// <para>FAIL-SAFE, matching every other reader of this column: a missing bible, a blank column or
+    /// unparseable JSON degrades to NULL and the review proceeds exactly as it did before the register reached
+    /// it. The fault is LOGGED rather than swallowed (a fail-safe that swallows blinds its caller's logger),
+    /// and no register CONTENT is logged - character names are the author's manuscript.</para>
+    /// </summary>
+    private async Task<CharacterRegister?> LoadCharacterRegisterForReviewAsync(Guid bookId, CancellationToken ct)
+    {
+        var json = await _db.BookBibles.AsNoTracking()
+            .Where(b => b.BookId == bookId)
+            .Select(b => b.CharacterRegisterJson)
+            .FirstOrDefaultAsync(ct);
+
+        if (!CharacterRegisterService.TryDeserialize(json, out var stored, out var fault) || stored is null)
+        {
+            if (fault != null)
+                _logger.LogError(
+                    fault,
+                    "Book review: the character register for book {BookId} could not be parsed; the review runs " +
+                    "without character context (it is not failed for this).",
+                    bookId);
+            return null;
+        }
+
+        return CharacterRegisterMerge.ForAnalysis(stored);
+    }
+
+    /// <summary>
     /// Returns the assembled book context as the prompt-prefix section, EXACTLY as <see cref="BookContextAssembler"/>
     /// produced it. The assembler already wraps the BookBrief in a [BOOK_CONTEXT]…[/BOOK_CONTEXT] block (its own
     /// FormatBookBrief emits the markers) and appends the chapter briefs after it, so this MUST NOT add a SECOND
@@ -2908,6 +2971,8 @@ public class BookReviewService
     /// every other assembly.Text consumer read it raw — with a malformed, double-wrapped context. Passing
     /// assembly.Text through verbatim gives the review the SAME context shape every other consumer of the
     /// assembler sends; the caller appends the dimension/combined instruction after the trailing blank line.
+    /// <para>The <c>[BOOK_CHARACTERS]</c> block (be-c02) is already inside <c>assembledText</c> too, placed and
+    /// charged by the assembler; nothing is added here.</para>
     /// </summary>
     private static string BuildBookContextSection(string assembledText)
     {

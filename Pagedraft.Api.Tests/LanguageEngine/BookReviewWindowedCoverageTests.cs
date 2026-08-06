@@ -47,7 +47,11 @@ namespace Pagedraft.Api.Tests.LanguageEngine;
 /// the large gold fixture so the summed briefs exceed the ~8192-token production budget SEVERAL times over and
 /// the REAL <see cref="BookContextAssembler.AssembleWindowsAsync"/> genuinely partitions the book into
 /// MULTIPLE windows. The briefs are stamped with the resolved Summarization model so they read FRESH with NO
-/// summarization LLM call — the only live model calls are the review's window + reduce calls.
+/// summarization LLM call — the only live model calls are the review's window + reduce calls. NO
+/// <c>BookBibles</c> row is seeded for this book, so <c>BookReviewService.LoadCharacterRegisterForReviewAsync</c>
+/// resolves a null character register for this run too, same as the model-free window-partition guard below —
+/// the production-faithful budget claim on that guard's <c>AssembleWindowsAsync</c> call holds here as well, by
+/// the same accident of an unregistered fixture rather than by construction.
 ///
 /// HOW IT IS WIRED — the REAL Ollama-backed <see cref="IAiRouter"/> (the SAME DI shape
 /// <see cref="BookReviewQualityTests.CreateRouter"/> uses to reach the model), plus the production BookReview
@@ -245,8 +249,19 @@ public class BookReviewWindowedCoverageTests
 
         // Production-faithful budget: the SAME consuming task the production build passes so ResolveBudgetTokens
         // derives the SAME ~8192-token window budget (Ollama_BookReview NumCtx=16384 in BuildProvider).
+        //
+        // characterRegister IS EXPLICIT, not merely absent: production also charges a [BOOK_CHARACTERS] block
+        // into this SAME per-window budget when a register exists (BookContextAssembler.AssembleWindowsAsync's
+        // characterRegister param doc; the registerBlock/registerBlockTokens pair and the
+        // `used = briefBlockTokens + registerBlockTokens + overlapTokens` line), which would make every window
+        // NARROWER and could change the window count this test asserts. This fixture's SeedLargeBookAsync never
+        // writes a db.BookBibles row for the seeded book, so LoadCharacterRegisterForReviewAsync (the production
+        // caller) would resolve null here too - the SAME null this test passes. So this call's fidelity to
+        // production holds ONLY for a book with no character register, which is what this fixture is; passing
+        // `characterRegister: null` by name makes that a deliberate, visible choice instead of a default a
+        // future signature change could move silently.
         var windows = await assembler.AssembleWindowsAsync(
-            bookId, largeBook.Language, consumingTasks: new[] { AiTaskType.BookReview });
+            bookId, largeBook.Language, consumingTasks: new[] { AiTaskType.BookReview }, characterRegister: null);
 
         _output.WriteLine($"AssembleWindowsAsync partitioned the {largeBook.Chapters.Count}-chapter large gold " +
                           $"book into {windows.Count} window(s) at the production BookReview budget " +

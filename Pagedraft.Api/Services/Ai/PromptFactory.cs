@@ -289,7 +289,15 @@ public class PromptFactory
         AnalysisType.QA                 => ContextField.BookBrief | ContextField.Characters,
         AnalysisType.StoryAnalysis      => ContextField.BookBrief,
         AnalysisType.Synopsis           => ContextField.Characters,
-        // BookOverview, CharacterAnalysis, Custom — no extra context needed
+        // BookOverview, CharacterAnalysis, Custom — no extra context needed.
+        //
+        // BookReview is here too, and its absence is NOT the statement it used to be: since be-c02 the
+        // whole-book review DOES receive the character register, just not through this table. It never
+        // builds an AnalysisContext at all - BookReviewService reads the register column itself and
+        // BookContextAssembler renders it as a [BOOK_CHARACTERS] block into every window and the
+        // synthesis. Adding ContextField.Characters here would load and possibly EXTRACT a register the
+        // review path never reads, which is exactly the "loading without rendering" cost the doc on
+        // RendersCharacterRegister argues against. Do not add a row for it.
         _ => ContextField.None,
     };
 
@@ -505,6 +513,99 @@ public class PromptFactory
         }
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The maximum number of characters the WHOLE-BOOK REVIEW block renders (automatic-coverage plan, d1 §4).
+    ///
+    /// <para>It exists because the block is repeated in EVERY window and charged to every window's token
+    /// budget, so an unbounded ensemble cast would shrink every window until the review's real payload (the
+    /// chapters) stopped fitting. The budget is the hazard: over-packing a window overflows num_ctx, Ollama
+    /// silently truncates past it, and the resulting empty window has twice been counted as reviewed in this
+    /// subsystem.</para>
+    ///
+    /// <para>MEASURED, AND THE MEASUREMENT MOVED IT (be-c02). The plan proposed 40 as a starting bound and
+    /// asked for it to be verified on a large-cast fixture. It was: the SHIPPED per-window budget is 8192
+    /// tokens (Ollama_BookReview NumCtx 16384, minus NumPredict 6144, the 1536-token prompt reserve and the
+    /// 512-token safety margin), and 40 long Hebrew entries with aliases render at <b>1562 tokens on the dense
+    /// 2-chars-per-token estimate Hebrew books use - 19% of EVERY window</b>. Nineteen percent of every window
+    /// spent on the cast, repeated across every window of the book, buys minor characters at the price of the
+    /// chapters the review is actually reading. At <b>24</b> the same worst-case fixture costs about 940 tokens
+    /// (~11%), and a typical register (shorter names, one alias) about 550 (~7%). 24 comfortably covers any
+    /// book's principal cast, and <see cref="RolePriority"/> means what a larger cast loses is its MINOR
+    /// characters, not an arbitrary tail. Pinned by a test so a future widening is a deliberate act with a
+    /// visible cost.</para>
+    /// </summary>
+    private const int MaxBookReviewCharacters = 24;
+
+    /// <summary>
+    /// Aliases rendered per character in the whole-book review block. The entry COUNT is not the only unbounded
+    /// axis: <see cref="CharacterRegisterEntry.Aliases"/> is a list an extraction (or an author) can grow
+    /// without limit, so a cast well inside <see cref="MaxBookReviewCharacters"/> could still blow the block up
+    /// through one entry with thirty surface forms. Three is enough for the block's actual job - letting the
+    /// model recognise that a name it meets in the text is a character it already knows.
+    /// </summary>
+    private const int MaxBookReviewAliasesPerCharacter = 3;
+
+    /// <summary>
+    /// Renders the character register for the WHOLE-BOOK REVIEW (automatic-coverage plan, d1 §3/§4). This is a
+    /// SEPARATE surface from <see cref="FormatCharacters"/> and must stay separate: that method's output is a
+    /// standing measurement subject for the chunked-agreement work, so it is byte-identical by construction
+    /// here - the review never calls it, and this method has no caller on the analysis-context path.
+    ///
+    /// <para>Differences from <see cref="FormatCharacters"/>, each deliberate:</para>
+    /// <list type="bullet">
+    /// <item>DROPS <c>Description</c>. The review needs IDENTITY (who exists, what to call them, how to
+    /// recognise an alias), not the biographical blurb, and Description is typically the longest field - so
+    /// dropping it is the cheapest lever against the per-window token cost before resorting to dropping
+    /// characters outright.</item>
+    /// <item>CAPS at <see cref="MaxBookReviewCharacters"/>, ordered by <see cref="RolePriority"/>
+    /// (protagonist, antagonist, supporting, then minor/unlabelled), ties broken by the register's existing
+    /// order because <c>OrderBy</c> is a stable sort. A book whose roles are all null or non-English renders
+    /// in register order, which is what it did before any ordering existed.</item>
+    /// <item>CAPS the per-entry alias list at <see cref="MaxBookReviewAliasesPerCharacter"/>, the register's
+    /// OTHER unbounded axis.</item>
+    /// <item>Renders no provenance flags - same as <see cref="FormatCharacters"/>, which has never rendered
+    /// them either. Provenance decides what the register HOLDS, not what a model is told.</item>
+    /// </list>
+    ///
+    /// <para>The caller passes a register that is ALREADY suppression-filtered
+    /// (<c>CharacterRegisterMerge.ForAnalysis</c>), so this does not re-check <c>IsCharacter</c>. It is wrapped
+    /// in the distinct <c>[BOOK_CHARACTERS]</c> marker (not <c>[CHARACTER_REGISTER]</c>) by
+    /// <c>BookContextAssembler.FormatCharacterRegisterBlock</c>, so the two surfaces can never be confused by
+    /// tag alone in a captured prompt.</para>
+    /// </summary>
+    internal static string FormatCharactersForBookReview(CharacterRegister reg)
+    {
+        var sb = new StringBuilder();
+        var ordered = reg.Characters
+            .OrderBy(RolePriority)
+            .Take(MaxBookReviewCharacters);
+        foreach (var c in ordered)
+        {
+            sb.Append($"- {c.Name}");
+            if (c.Role != null) sb.Append($" ({c.Role})");
+            if (c.Gender != null) sb.Append($" [{c.Gender}]");
+            if (c.Aliases.Count > 0)
+                sb.Append($" (aliases: {string.Join(", ", c.Aliases.Take(MaxBookReviewAliasesPerCharacter))})");
+            sb.AppendLine();
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Sort key for <see cref="FormatCharactersForBookReview"/>'s top-N cut: the roles a whole-book review
+    /// most needs named come first, so a cast larger than the cap loses its MINOR characters rather than an
+    /// arbitrary tail. <c>Role</c> is an extracted-only free-text field, so anything unrecognised (a Hebrew
+    /// role string, a null) shares the last rung with "minor" and keeps its register order.
+    /// </summary>
+    private static int RolePriority(CharacterRegisterEntry c) =>
+        (c.Role ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "protagonist" => 0,
+            "antagonist" => 1,
+            "supporting" => 2,
+            _ => 3,
+        };
 
     private static string FormatBookBrief(BookBrief b)
     {

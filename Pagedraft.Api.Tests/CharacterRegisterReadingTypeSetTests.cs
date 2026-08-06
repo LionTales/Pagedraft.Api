@@ -18,7 +18,15 @@ using Xunit;
 namespace Pagedraft.Api.Tests;
 
 /// <summary>
-/// THE COMPLETENESS ORACLE for "which AnalysisTypes use the character register" (c04).
+/// THE COMPLETENESS ORACLE for "which AnalysisTypes read the register THROUGH
+/// <c>AnalysisContext</c>" (c04).
+///
+/// <para>SCOPE, narrowed deliberately since be-c02 so the title stops overclaiming: the whole-book
+/// review DOES use the register, and this oracle correctly answers "false" for
+/// <c>AnalysisType.BookReview</c>, because the review never builds an <c>AnalysisContext</c> at all -
+/// <c>BookReviewService</c> reads the column itself and <c>BookContextAssembler</c> renders it as a
+/// <c>[BOOK_CHARACTERS]</c> block. That path is pinned by <c>BookReviewServiceTests</c>, not here.
+/// What this class owns is that the three <c>AnalysisContext</c> gates agree with each other.</para>
 ///
 /// <para>What it replaces: three hand-maintained copies of that type set (the LOAD gate in
 /// <c>AnalysisContextService.BuildContextAsync</c>, the <c>ContextField.Characters</c> rows of
@@ -88,8 +96,11 @@ public class CharacterRegisterReadingTypeSetTests
             var rendered = prompt.Contains("[/CHARACTER_REGISTER]", StringComparison.Ordinal);
 
             // OBSERVABLE 2 - LOAD: does the real context build hand this type a register? The book is
-            // seeded with a NON-EMPTY register, so the load gate returns it at the top of
-            // LoadCharacterRegisterAsync and no extraction pre-pass or write is involved.
+            // seeded with a NON-EMPTY register, so what comes back is the seeded character either way.
+            // (Since be-c01 the FIRST register-reading type in this loop also scans the chapter into
+            // the coverage ledger; the router below answers an empty extraction, so the merge is a
+            // no-op and every later iteration reads the same register back off the ledger. This probe
+            // is about which types LOAD, not about how many scans happen.)
             var built = await contextService.BuildContextAsync(
                 AnalysisScope.Chapter, chapterId, type, "he", CancellationToken.None);
             var loaded = built.Characters is { Characters.Count: > 0 };
