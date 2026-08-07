@@ -2,15 +2,15 @@
 id: whole-book-review
 stage: whole-book-review
 audience: author
-updated: 2026-08-02
+updated: 2026-08-06
 lang: en
 ---
 
-# The whole-book review
+# The developmental review
 
-The whole-book review is the developmental pass: it looks at the book as a book, not at the
-sentences. It produces findings across six dimensions: plot, character, pacing, tone, theme and
-continuity.
+The developmental review, sometimes called the whole-book review, is the pass that looks at the book
+as a book rather than at the sentences. It produces findings across six dimensions: plot, character,
+pacing, tone, theme and continuity.
 
 This is the only pass that reads the whole book in order to find problems that live between
 chapters, such as a thread introduced early and never resolved, or a detail that contradicts an
@@ -18,14 +18,14 @@ earlier one. The chapter passes work on one chapter or scene at a time. Some of 
 little beyond it, such as a book-level brief or the edge of the neighbouring chapter, but none of
 them reads the book, so none of them can find this class of problem.
 
-## It needs the book summary first
+## It needs the book briefs first
 
 The review is built from the chapter briefs. If no usable briefs exist, it stops immediately, tells
-you to build the book summary first, and does no work at all. This is a real requirement rather than
+you to build the book briefs first, and does no work at all. This is a real requirement rather than
 advice: there is nothing for the review to read without it.
 
-If you have not built the book summary yet, build it and then run the review. If you built it a
-while ago and have edited chapters since, rebuild it first so the review is looking at the current
+If you have not built the book briefs yet, build them and then run the review. If you built them a
+while ago and have edited chapters since, rebuild them first so the review is looking at the current
 book.
 
 ## How it handles a long book
@@ -47,22 +47,22 @@ own findings without leaving it.
 
 A review counts as ready only when all of these hold:
 
-- the book summary exists,
+- the book briefs exist,
 - the review exists,
 - it was built under the model that is active now,
-- it is not older than the book summary.
+- it is not older than the book briefs.
 
-The last one catches people out. Rebuilding the book summary after running a review marks that
-review as out of date, because the review was built from the briefs as they were before. If you are
-going to rebuild the summary, expect to rebuild the review after it.
+The last one catches people out. Rebuilding the book briefs after running a review marks that review
+as out of date, because the review was built from the briefs as they were before. If you are going
+to rebuild the briefs, expect to rebuild the review after them.
 
 The third one matters too: changing a tier changes which model is active, and a review built under a
 different model is flagged rather than silently accepted.
 
 ## Tier
 
-The whole-book review always runs on the fast tier. The tier control is still shown for it so that
-you get a stated reason rather than a control that silently does nothing.
+The developmental review always runs on the fast tier. The tier control is still shown for it so
+that you get a stated reason rather than a control that silently does nothing.
 
 ## If the review comes back thin or fails
 
