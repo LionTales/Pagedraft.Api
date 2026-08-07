@@ -2,7 +2,7 @@
 id: book-setup-and-intelligence
 stage: book-intelligence
 audience: author
-updated: 2026-08-02
+updated: 2026-08-06
 lang: en
 ---
 
@@ -12,30 +12,30 @@ Some of what PageDraft produces belongs to a single chapter, and some of it belo
 book. This guide covers the book-level material: what it is, what it needs, and what makes it go out
 of date.
 
-## The book summary
+## The book briefs
 
-The book summary is built in layers. For every chapter, PageDraft derives a short structured brief.
+The book briefs are built in layers. For every chapter, PageDraft derives a short structured brief.
 Those per-chapter briefs are then composed into one brief for the whole book.
 
-It needs chapters with saved text, and nothing more. It does not need any editing pass to have run
-first, and it does not need the Story Bible. You can build it immediately after import.
+They need chapters with saved text, and nothing more. They do not need any editing pass to have run
+first, and they do not need the Story Bible. You can build them immediately after import.
 
 The build is incremental. A chapter whose brief is already current is skipped, so a rebuild after
 editing two chapters re-derives those two and leaves the rest alone.
 
-Two things make the book summary worth building early:
+Two things make the book briefs worth building early:
 
-- The whole-book review reads the chapter briefs and will not run without them.
+- The developmental review reads the chapter briefs and will not run without them.
 - The Literary pass on a chapter reads the whole-book brief when it exists, so it has more to work
-  with once the summary is built.
+  with once the briefs are built.
 
-## When the book summary counts as ready
+## When the book briefs count as ready
 
 Ready means all three of these at once:
 
 - every chapter's brief is current,
 - every chapter is covered,
-- the summary was built under the model that is active now.
+- they were built under the model that is active now.
 
 If any of the three is false, the dashboard shows it as behind rather than missing, and it reports
 how many chapters have changed, which is how much a rebuild would re-derive.
@@ -50,13 +50,13 @@ wording is what the new version starts from.
 
 ## The book profile
 
-Separately from the summary, PageDraft keeps a profile of the book as a whole: its genre and
+Separately from the briefs, PageDraft keeps a profile of the book as a whole: its genre and
 sub-genre, its intended audience, a synopsis, the characters it found, and the shape of the plot.
 
 It is built from your chapter summaries, so those need to exist first. Refreshing it summarizes any
 chapter whose summary is out of date and then rebuilds the profile from those summaries.
 
-It is not a prerequisite for the book summary or for the whole-book review. Both of those run
+It is not a prerequisite for the book briefs or for the developmental review. Both of those run
 whether or not the profile has ever been built, and simply use its details when they are there.
 
 One practical difference from the rest of the product: the profile itself has no freshness check.
@@ -66,7 +66,7 @@ something.
 
 ## What the Story Bible is
 
-The view named Story Bible is not the profile above. It is a second way of reading the whole-book
+The view named Story Bible is not the profile above. It is a second way of reading the developmental
 review: the same findings arranged as characters, story threads and a timeline instead of as a flat
 list. It sits beside the findings and appears only once a review has been built.
 
@@ -84,13 +84,13 @@ summaries first.
 Some per-chapter passes read book-level material when it is present, and run without it when it is
 not. Nothing is blocked by its absence; the passes just have less context. This is why the same
 pass, run on the same chapter, can produce a different result before and after you build the book
-summary.
+briefs.
 
 ## What makes book-level work go out of date
 
-- **Editing a chapter** makes that chapter's brief out of date. The next summary build re-derives
+- **Editing a chapter** makes that chapter's brief out of date. The next briefs build re-derives
   just that chapter.
-- **Rebuilding the book summary after a whole-book review** makes that review out of date, because
+- **Rebuilding the book briefs after a developmental review** makes that review out of date, because
   the review was built from the older briefs.
 - **Changing a tier** changes which model is active. Book-level material records which model built
   it, so a tier change is treated the same way as a content change and asks to be rebuilt.

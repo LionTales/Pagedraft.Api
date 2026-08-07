@@ -121,6 +121,18 @@ public class PromptFactory
             return (system, instruction);
         }
 
+        if (taskType == AiTaskType.ProductChat)
+        {
+            // Grounded product Q&A over the shipped guides (chatbot phase A, c1). The system message is
+            // OWNED by ProductChatPrompt so the grounding wording has exactly one home; this arm exists
+            // so the router resolves it rather than falling through to the Hebrew proofreader default at
+            // the bottom of this method, which would sabotage the answer the way HebrewSystemBase
+            // sabotages any free-form question. The instruction is supplied whole by ProductChatService
+            // (grounding rule + selected guides + capped history) and the router sends it verbatim, so
+            // there is no pipeline instruction to append here.
+            return (Services.Chat.ProductChatPrompt.SystemMessage(isHebrew ? "he" : "en"), "");
+        }
+
         if (taskType == AiTaskType.BookReview)
         {
             // Whole-book developmental review. The complete, structured-JSON instruction is supplied

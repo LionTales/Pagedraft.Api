@@ -192,6 +192,11 @@ public class CloudTuningCoverageConfigParityTests
         ["OpenRouter_AnalysisRepair"] = (16384, 2048),
         ["OpenRouter_TermRepair"] = (16384, 256),
         ["OpenRouter_GenericChat"] = (16384, 2048),
+        // Chatbot phase A (c1). MaxTokens 2048 = the measured output size of a chat answer, deliberately
+        // below the flat entry's 5120 because on a paid provider an oversized cap is cost exposure;
+        // NumCtx 16384 mirrors Ollama_ProductChat because d1's whole-file retrieval math is against that
+        // window and a tier switch must change the MODEL, not the input budget.
+        ["OpenRouter_ProductChat"] = (16384, 2048),
         ["OpenAI_BookReview"] = (16384, 6144),
         ["Azure_BookReview"] = (16384, 6144),
         ["Anthropic_BookReview"] = (16384, 6144)

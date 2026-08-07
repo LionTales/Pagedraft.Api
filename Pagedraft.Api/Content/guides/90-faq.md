@@ -2,11 +2,19 @@
 id: faq
 stage: faq
 audience: author
-updated: 2026-08-02
+updated: 2026-08-06
 lang: en
 ---
 
 # Questions the work raises
+
+## How do I run a pass on a chapter?
+
+With the chapter open in the editor, use the Assistant panel: stay on Edit help, choose the Analysis
+view, pick the pass you want from the row of six, and press Run analysis. The pass runs on the scene
+you have selected, or on the whole chapter when none is selected, so there is no separate scope
+control to set. The chapter editing passes guide has the full sequence, including the confirmation
+you get when a previous run left pending suggestions, and why a run cannot be canceled once started.
 
 ## What do "fast" and "thinking" mean?
 
@@ -21,8 +29,8 @@ extra to confirm and the switch commits directly.
 
 ## Which passes can actually use the thinking tier?
 
-Proofread and Linguistic can. Line Edit and the whole-book review show the control but always run on
-the fast tier, and they say so instead of leaving you guessing. Summarize and Custom have no tier
+Proofread and Linguistic can. Line Edit and the developmental review show the control but always run
+on the fast tier, and they say so instead of leaving you guessing. Summarize and Custom have no tier
 control at all.
 
 There is also a language rule that outranks your choice: for an English book, proofreading always
@@ -41,15 +49,15 @@ Because the server would refuse the change, and offering the option would be an 
 refusal. The reason is stated on the control itself: the pass is not eligible, the book language
 forces fast, the route is not enabled here, or there is no access configured for it.
 
-## Why is my summary or review marked out of date?
+## Why are my briefs or review marked out of date?
 
-Something it was built from moved. Specifically:
+Something they were built from moved. Specifically:
 
 - A chapter brief is out of date once you edit that chapter.
-- The book summary is ready only when every chapter's brief is current, every chapter is covered,
-  and it was built under the model that is active now.
-- The whole-book review is ready only when the summary exists, the review exists, it was built under
-  the currently active model, and it is not older than the summary.
+- The book briefs are ready only when every chapter's brief is current, every chapter is covered,
+  and they were built under the model that is active now.
+- The developmental review is ready only when the briefs exist, the review exists, it was built
+  under the currently active model, and it is not older than the briefs.
 
 Nothing is rebuilt for you in the background. PageDraft marks the state and waits, and "not built"
 and "out of date" are shown as different states so you can tell which one you have.
@@ -72,7 +80,7 @@ The visible reasons are worth checking first, because they are usually the real 
   different report.
 - **The available context changed.** Several passes read book-level material when it exists and run
   without it when it does not. The same pass on the same chapter has more to work with after the
-  book summary is built than before.
+  book briefs are built than before.
 - **The scope changed.** Linguistic compares a scene against the rest of its chapter, and a chapter
   against the average of the book's other chapters, so a scene run and a chapter run are answering
   different questions about the same words.
@@ -89,7 +97,7 @@ Edit, where you see every proposed change individually and nothing is applied wi
 
 **Report only, with nothing to accept:** Linguistic (measurements and flags that navigate you to the
 passage), Literary (a critique of the prose), Summarize (a summary of the chapter), and the
-whole-book review (findings with a status you set).
+developmental review (findings with a status you set).
 
 **Custom** runs your own instruction against the text, so what comes back depends on what you asked
 for.
@@ -97,21 +105,21 @@ for.
 In no case is your manuscript rewritten without you. Even the passes that produce edits produce them
 as proposals.
 
-## What is the difference between running Summarize on a chapter and building the book summary?
+## What is the difference between running Summarize on a chapter and building the book briefs?
 
 Summarize produces a summary of that one chapter that you read like any other result. The book
-summary is a separate build that derives a structured brief for every chapter and composes them into
-one brief for the whole book, and that structure is what the whole-book review reads.
+briefs are a separate build that derives a structured brief for every chapter and composes them into
+one brief for the whole book, and that structure is what the developmental review reads.
 
-Running Summarize on every chapter in turn does not add up to a book summary.
+Running Summarize on every chapter in turn does not add up to the book briefs.
 
-## The whole-book review would not run
+## The developmental review would not run
 
 It needs the chapter briefs, so if no usable briefs exist it stops before doing any work and tells
-you to build the book summary first. Build the summary, then run the review.
+you to build the book briefs first. Build the briefs, then run the review.
 
-If you have edited chapters since the summary was built, rebuild the summary first, otherwise the
-review will be reading the book as it used to be.
+If you have edited chapters since the briefs were built, rebuild them first, otherwise the review
+will be reading the book as it used to be.
 
 ## Why does a long Hebrew chapter take longer, or get split into more pieces?
 
