@@ -5,6 +5,7 @@ using Pagedraft.Api.Hubs;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Analysis;
+using Pagedraft.Api.Services.Chat;
 using Pagedraft.Api.Services.LanguageEngine;
 using Pagedraft.Api.Services.LanguageEngine.Contracts;
 using Pagedraft.Api.Services.LanguageEngine.Detect;
@@ -104,6 +105,19 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 // In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
 // registry so a running summary build never blocks a review build (and vice versa) for the same book.
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
+
+// ─── Grounded product chat over the shipped guides (chatbot phase A, c1) ──────────────────────────
+// The corpus reader is SINGLETON and caches a successful load: Content/guides ships with the app and
+// cannot change while the process runs, so re-reading 15 files per request would be pure waste. It
+// resolves the directory from IHostEnvironment.ContentRootPath, i.e. the same on-disk location the
+// csproj Content include copies to both the build output and a `dotnet publish` output. A FAULTED
+// load is deliberately not cached, so a deployment missing its Content folder recovers the moment it
+// is fixed rather than staying broken until a restart.
+builder.Services.AddSingleton<GuidesCorpusReader>();
+// The chat service itself is stateless (no DbContext, no conversation state - phase A keeps none) so
+// it could be a singleton, but it is Scoped to match every other service here and to keep the door
+// open for phase B's book-aware context, which will need the scoped DbContext.
+builder.Services.AddScoped<ProductChatService>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
