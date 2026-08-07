@@ -122,7 +122,9 @@ public class AiRouter : IAiRouter
         => ResolveSelection(request, opt);
 
     /// <summary>
-    /// For unified analysis flows (LineEdit, LinguisticAnalysis, BookReview, AnalysisRepair, TermRepair), avoid
+    /// For unified analysis flows (LineEdit, LinguisticAnalysis, BookReview, AnalysisRepair, TermRepair) and for
+    /// grounded product chat (ProductChat, whose caller composes the whole grounding + guides + history block and
+    /// whose contract the legacy heading/numbered-list instruction would directly contradict), avoid
     /// appending the legacy pipeline instruction when the caller already provided a complete,
     /// task-specific instruction (for AnalysisRepair, the value-only Hebrew cleanup prompt; for TermRepair,
     /// the marked-span replace-one-word prompt). These
@@ -136,7 +138,7 @@ public class AiRouter : IAiRouter
         if (request == null || string.IsNullOrWhiteSpace(request.Instruction))
             return false;
 
-        if (request.TaskType is AiTaskType.LineEdit or AiTaskType.LinguisticAnalysis or AiTaskType.BookReview or AiTaskType.AnalysisRepair or AiTaskType.TermRepair)
+        if (request.TaskType is AiTaskType.LineEdit or AiTaskType.LinguisticAnalysis or AiTaskType.BookReview or AiTaskType.AnalysisRepair or AiTaskType.TermRepair or AiTaskType.ProductChat)
             return true;
 
         var instruction = request.Instruction;

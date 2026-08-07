@@ -217,6 +217,7 @@ public class ProviderTuningConfigParityTests
     ///   Ollama_AnalysisRepair      = { NumPredict 2048, NumCtx 16384 }
     ///   Ollama_TermRepair          = { NumPredict  256, NumCtx 16384 }
     ///   Ollama_GenericChat         = { NumPredict 2048, NumCtx 16384 }
+    ///   Ollama_ProductChat         = { NumPredict 2048, NumCtx 16384, Temperature 0.1 }
     /// Translation has NO per-task entry and no FeatureModels key, so it falls to the flat Ollama entry.
     ///
     /// READ THE PROOFREAD/LINEEDIT ROWS: their entries omit NumCtx, so BOTH surfaces resolve the 4096 class
@@ -235,7 +236,12 @@ public class ProviderTuningConfigParityTests
         [AiTaskType.GenericChat] = new Expected(16384, 2048, 1.1, 16384, 2048),
         [AiTaskType.BookReview] = new Expected(16384, 6144, 1.1, 16384, 6144),
         [AiTaskType.AnalysisRepair] = new Expected(16384, 2048, 1.1, 16384, 2048),
-        [AiTaskType.TermRepair] = new Expected(16384, 256, 1.1, 16384, 256)
+        [AiTaskType.TermRepair] = new Expected(16384, 256, 1.1, 16384, 256),
+        // Chatbot phase A (c1). The 16384 window is load-bearing rather than decorative: d1's whole-file
+        // retrieval math (top N=4 guides, Hebrew worst case ~8,700 tokens) is computed against exactly
+        // this number, and Ollama truncates an over-long prompt from the START, which is where the guides
+        // sit. Lowering it would silently produce an UNGROUNDED answer that still carries citations.
+        [AiTaskType.ProductChat] = new Expected(16384, 2048, 1.1, 16384, 2048)
     };
 
     [Fact]
