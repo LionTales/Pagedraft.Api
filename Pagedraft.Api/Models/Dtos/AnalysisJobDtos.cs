@@ -94,8 +94,25 @@ public record StartBookSummaryBuildResponse(
 /// JSON casing follows the System.Text.Json default (camelCase), mirroring
 /// <see cref="BookStyleBaselineStatusDto"/>: totalChapters, builtChapters, staleCount, hasSummary, ready,
 /// lastUpdatedAt, builtWithDifferentModel, activeBuildJobId, chaptersToBuild,
-/// estimatedSeconds, estimatedUsd. Carries no model identity - see <see cref="BookStyleBaselineStatusDto"/>.
+/// estimatedSeconds, estimatedUsd, summaryCoversBuiltChapters. Carries no model identity - see
+/// <see cref="BookStyleBaselineStatusDto"/>.
+///
+/// THIS IS THE STAGE-2 SIGNAL for the Wave 3 stage spine ("Book briefs"), and it is complete: not-started =
+/// <c>!hasSummary</c>; running = <c>activeBuildJobId != null</c>; ready = <c>ready</c>; behind =
+/// <c>hasSummary &amp;&amp; !ready</c>, whose MAGNITUDE is <c>staleCount</c> and whose REASON is whichever of
+/// the three not-ready inputs is set (<c>staleCount &gt; 0</c>, <c>builtWithDifferentModel</c>,
+/// <c>!summaryCoversBuiltChapters</c>).
 /// </summary>
+/// <param name="SummaryCoversBuiltChapters">
+/// Wave 3 / w1. The THIRD reason a built summary is not ready, and until now the only one the client could
+/// not see: the cached rollup was composed over FEWER chapters than are individually fresh now (a chapter
+/// gained a brief after the last full build). It was already computed server-side and already part of
+/// <c>ready</c>, so a client rendering `behind` on <c>hasSummary &amp;&amp; !ready</c> could land in the state
+/// "out of date, 0 chapters moved, same model" and have nothing true to say about why. False when no summary
+/// exists (see <see cref="Pagedraft.Api.Services.Analysis.BookSummaryStatus.SummaryCoversBuiltChapters"/>),
+/// so it must only be read as a REASON alongside <c>hasSummary</c> - on a book with no summary at all the
+/// state is not-started, not behind.
+/// </param>
 public record BookSummaryStatusDto(
     Guid BookId,
     string Language,
@@ -109,7 +126,8 @@ public record BookSummaryStatusDto(
     Guid? ActiveBuildJobId,
     int ChaptersToBuild,
     int EstimatedSeconds,
-    decimal? EstimatedUsd);
+    decimal? EstimatedUsd,
+    bool SummaryCoversBuiltChapters);
 
 /// <summary>POST .../summary/build request body.</summary>
 public record BuildBookSummaryRequest(string? Language = "he");
@@ -151,7 +169,29 @@ public record StartBookReviewBuildResponse(
 /// (0, book chapter count). The build-time-only shape (windowCount / ranSynthesis / ranContinuityReduce /
 /// failedWindows) is not persisted, so it reports 0/false here — the precise per-build counts live on
 /// BookReviewBuildResult (the POST /review build response path). wb4-f01 mirrors these EXACT camelCase names.
+///
+/// THIS IS THE STAGE-3 SIGNAL for the Wave 3 stage spine ("Developmental review"), and it is complete:
+/// blocked = <c>!hasBriefs</c> (the product's one hard prerequisite, and the prerequisite a blocked stage
+/// must name inline is the book briefs); running = <c>activeBuildJobId != null</c>; not-started =
+/// <c>!hasReview</c>; behind = <c>hasReview &amp;&amp; (staleVsBriefs || builtWithDifferentModel)</c>;
+/// ready = <c>ready</c>. Working-THROUGH progress is <c>resolvedFindingCount</c> over <c>findingCount</c>.
 /// </summary>
+/// <param name="OpenFindingCount">
+/// Wave 3 / M3. Findings still at status <c>open</c> - never touched by the author. Strictly narrower than
+/// "not resolved": an <c>acknowledged</c> finding is neither open nor resolved, so this cannot be derived
+/// from the other two counts and is carried explicitly.
+/// </param>
+/// <param name="ResolvedFindingCount">
+/// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> - the SAME partition the shipped findings
+/// ledger renders (its active group is open + acknowledged, its resolved group is dismissed + done), so the
+/// spine and the ledger can never disagree about how far through the review the author is.
+///
+/// Why it is on the STATUS payload at all: per-finding status already ships on
+/// <see cref="BookFindingDto"/>, but the only way to turn it into a number was
+/// <c>GET review/findings</c>, i.e. downloading every finding with its evidence and anchors to render
+/// "7 of 23". The spine renders that number on surfaces that never load the ledger. Two integers on a status
+/// probe the client already polls; computed in the same query that already reads the findings rows.
+/// </param>
 public record BookReviewStatusDto(
     Guid BookId,
     string Language,
@@ -168,7 +208,9 @@ public record BookReviewStatusDto(
     bool RanContinuityReduce,
     int FailedWindows,
     Guid? ActiveBuildJobId,
-    bool Ready);
+    bool Ready,
+    int OpenFindingCount,
+    int ResolvedFindingCount);
 
 /// <summary>
 /// One chapter anchor a finding touches (DTO mirror of <see cref="Pagedraft.Api.Models.FindingChapterAnchor"/>).

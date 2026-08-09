@@ -25,6 +25,22 @@ public sealed class BookReviewStatus
     /// <summary>Total persisted findings for (BookId, Language).</summary>
     public int FindingCount { get; init; }
 
+    /// <summary>
+    /// Wave 3 / M3. Findings still at status <c>open</c> — never touched by the author. NOT derivable from
+    /// <see cref="FindingCount"/> minus <see cref="ResolvedFindingCount"/>, because <c>acknowledged</c> is a
+    /// third bucket that is neither.
+    /// </summary>
+    public int OpenFindingCount { get; init; }
+
+    /// <summary>
+    /// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> — the same partition the shipped
+    /// findings ledger calls "resolved" (its active group is open + acknowledged). Working-through progress is
+    /// this over <see cref="FindingCount"/>, so the stage spine can render it WITHOUT downloading the whole
+    /// findings list. Read the split from <see cref="FindingStatusPartition"/>; do not re-spell the status
+    /// strings at a second call site.
+    /// </summary>
+    public int ResolvedFindingCount { get; init; }
+
     /// <summary>When the review was last (re)built (max UpdatedAt over the findings); null when none.</summary>
     public DateTimeOffset? LastUpdatedAt { get; init; }
 
@@ -97,6 +113,30 @@ public sealed class BookReviewStatus
     /// <see cref="HasBriefs"/> is false.
     /// </summary>
     public bool IsReady => HasBriefs && HasReview && !BuiltWithDifferentModel && !StaleVsBriefs;
+}
+
+/// <summary>
+/// The ONE place the persisted <c>BookFinding.Status</c> vocabulary (open | acknowledged | dismissed | done)
+/// is partitioned into "still to work through" and "resolved". Extracted for Wave 3 / M3 so the count on the
+/// status payload and the ledger's own grouping can never drift apart: the client's findings ledger renders
+/// open + acknowledged as its ACTIVE group and dismissed + done as its RESOLVED group, and a spine that
+/// counted differently would report progress the ledger contradicts on the next screen.
+/// </summary>
+public static class FindingStatusPartition
+{
+    public const string Open = "open";
+    public const string Acknowledged = "acknowledged";
+    public const string Dismissed = "dismissed";
+    public const string Done = "done";
+
+    /// <summary>Strictly <c>open</c>: never looked at. An acknowledged finding is NOT open.</summary>
+    public static bool IsOpen(string? status) =>
+        string.Equals(status, Open, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary><c>dismissed</c> or <c>done</c>: the author is finished with it, either way.</summary>
+    public static bool IsResolved(string? status) =>
+        string.Equals(status, Dismissed, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(status, Done, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>Result of a whole-book review build job.</summary>
@@ -310,10 +350,12 @@ public class BookReviewService
     {
         var lang = BaselineLanguageResolver.Normalize(language);
 
+        // Status rides along on the SAME projection (Wave 3 / M3): the working-through counts cost one more
+        // column on a query that already runs, not a second request and not the full findings payload.
         var findings = await _db.BookFindings
             .AsNoTracking()
             .Where(f => f.BookId == bookId && f.Language == lang)
-            .Select(f => new { f.UpdatedAt, f.BuiltWithModel })
+            .Select(f => new { f.UpdatedAt, f.BuiltWithModel, f.Status })
             .ToListAsync(ct);
 
         var hasReview = findings.Count > 0;
@@ -381,6 +423,8 @@ public class BookReviewService
             Language = lang,
             HasReview = hasReview,
             FindingCount = findings.Count,
+            OpenFindingCount = findings.Count(f => FindingStatusPartition.IsOpen(f.Status)),
+            ResolvedFindingCount = findings.Count(f => FindingStatusPartition.IsResolved(f.Status)),
             LastUpdatedAt = lastUpdatedAt,
             BuiltWithModel = builtWithModel,
             ActiveModel = activeModel,

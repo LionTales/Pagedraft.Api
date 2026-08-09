@@ -65,18 +65,33 @@ public class BooksController : ControllerBase
         };
         _db.Books.Add(book);
         await _db.SaveChangesAsync(ct);
-        return CreatedAtAction(nameof(GetById), new { bookId = book.Id }, ToDto(book));
+        // A book is created empty, so the M1 counts are 0/0 by construction - stated rather than re-queried.
+        return CreatedAtAction(nameof(GetById), new { bookId = book.Id }, ToDto(book, chapterCount: 0, chaptersWithTextCount: 0));
     }
 
+    /// <summary>
+    /// The books list. Since Wave 3 / M1 each row carries <c>chapterCount</c> and
+    /// <c>chaptersWithTextCount</c> so the stage spine can compute the Import stage HERE, on the one surface
+    /// where importing is the next action. Both are projected inside this single query (a correlated count per
+    /// row, not a request per book) - the cost of the list does not scale with the size of the manuscripts.
+    /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<BookDto>>> GetAll(CancellationToken ct)
     {
         var orderedBooks = await _db.Books
             .AsNoTracking()
             .OrderBy(b => b.UpdatedAt)
+            .Select(b => new
+            {
+                Book = b,
+                ChapterCount = b.Chapters.Count(),
+                ChaptersWithTextCount = b.Chapters.Count(c => c.WordCount > 0)
+            })
             .ToListAsync(ct);
 
-        return Ok(orderedBooks.Select(ToDto).ToList());
+        return Ok(orderedBooks
+            .Select(row => ToDto(row.Book, row.ChapterCount, row.ChaptersWithTextCount))
+            .ToList());
     }
 
     [HttpGet("{bookId:guid}")]
@@ -926,7 +941,10 @@ public class BooksController : ControllerBase
         s.RanContinuityReduce,
         s.FailedWindows,
         s.ActiveBuildJobId,
-        s.IsReady);
+        s.IsReady,
+        // Wave 3 / M3: working-through progress without downloading the ledger.
+        s.OpenFindingCount,
+        s.ResolvedFindingCount);
 
     private static BookReviewFindingsDto ToReviewFindingsDto(BookReviewFindings f) => new(
         f.BookId,
@@ -1234,7 +1252,17 @@ public class BooksController : ControllerBase
         book.Author = req.Author;
         book.Language = req.Language ?? book.Language;
         await _db.SaveChangesAsync(ct);
-        return Ok(ToDto(book));
+
+        // The M1 counts are part of the BookDto contract, so the update response has to carry the REAL ones -
+        // a renamed book that came back reporting 0 chapters would tell the books list the book had been
+        // un-imported. One scalar query, not the chapter rows.
+        var wordCounts = await _db.Chapters
+            .AsNoTracking()
+            .Where(c => c.BookId == bookId)
+            .Select(c => c.WordCount)
+            .ToListAsync(ct);
+
+        return Ok(ToDto(book, wordCounts.Count, wordCounts.Count(w => w > 0)));
     }
 
     [HttpDelete("{bookId:guid}")]
@@ -1341,14 +1369,18 @@ public class BooksController : ControllerBase
         s.ActiveBuildJobId,
         s.ChaptersToBuild,
         s.EstimatedSeconds,
-        s.EstimatedUsd);
+        s.EstimatedUsd,
+        // Wave 3 / w1: the third not-ready reason, computed all along and previously dropped on the floor.
+        s.SummaryCoversBuiltChapters);
 
     // Normalized on the way out (p3-4): the stored column is a nullable free string so a legacy or
     // hand-edited row degrades to the local tier instead of throwing, but the wire value is always exactly
     // "fast" or "thinking". Doing the defensive parse HERE means no client has to own a second copy of it.
-    private static BookDto ToDto(Book b) => new(
+    private static BookDto ToDto(Book b, int chapterCount, int chaptersWithTextCount) => new(
         b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt,
-        AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(b.AiTier)));
+        AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(b.AiTier)),
+        chapterCount,
+        chaptersWithTextCount);
 
     private static BookProfileDto ToProfileDto(BookProfile p) => new(
         p.Id,
