@@ -2,7 +2,7 @@
 id: export
 stage: export
 audience: author
-updated: 2026-08-02
+updated: 2026-08-09
 lang: en
 ---
 
@@ -11,10 +11,21 @@ lang: en
 Export produces a DOCX file from what is saved in your chapters. Two forms exist: the whole book,
 and a single chapter on its own.
 
-## Availability
+## Where to find it
 
-Export is not yet wired to a control in the editing interface. Everything below describes what the
-export does when you reach it; if you are looking for an export button today, you will not find one.
+Export has its own screen, at `/books/<your book>/export`. Two ways lead there:
+
+- the Export stage on the workflow spine, from its "Go to export" action;
+- the Export button in the book dashboard header.
+
+The screen lists what it can produce. Today that is the whole book and a single chapter, both as
+Word files; pick one, press Download, and the file arrives under the name PageDraft chose for it.
+There are no formatting options, on purpose: the export gives you your text back, and the shaping of
+it belongs in your word processor.
+
+A book with no chapters yet has nothing to put in a file, and the screen says so instead of handing
+you an empty document. The workflow spine says the same thing one step earlier: its Export stage
+reads as blocked until something has been imported.
 
 ## What it contains
 
