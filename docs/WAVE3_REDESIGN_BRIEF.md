@@ -2,6 +2,28 @@
 
 Prepared 2026-08-02 for the design session. Audience: a designer who will not open the codebase.
 
+> ## Decisions taken - owner session, 2026-08-09
+>
+> All thirteen questions in section 8 are DECIDED. Section 8 remains below as the options record;
+> this block is the authoritative answer sheet, and the implementation plan
+> (`src/.cursor/plans/_todo/wave3-implementation-2026-08-09.plan.md`) is written from it.
+>
+> | Q | Decision |
+> |---|---|
+> | Q1 | **D - route-adaptive spine**: compact in app chrome, full on book surfaces |
+> | Q2 | **A - stage 4 renders per-chapter**, no book-level state; never a hardcoded done |
+> | Q3 | **B - build a minimal export surface** this wave; stage 5 becomes real |
+> | Q4 | **A - fold the bare-arrow build into the formal build row**; one build, one ceremony |
+> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces |
+> | Q6 | **A - style baseline moves to the book dashboard** beside the other builds, WITH a new global directive: **dashboard elements become collapsible** - the big parts and the parts inside them, where it makes sense and does not complicate |
+> | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) |
+> | Q8 | **C - reframe the chapter-brief editing card as "the inputs to this build"**, visibly part of stage 2 |
+> | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed |
+> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them |
+> | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence |
+> | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine |
+> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency |
+
 Everything below is written in product terms. Where a claim rests on code, the code lives in
 Appendix B and in the phase 0 plan referenced there. You do not need either to do the work.
 
