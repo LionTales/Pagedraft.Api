@@ -46,7 +46,11 @@ public class DocumentControllerTests
         var chapterService = new FakeChapterService();
         var bookAssembly = new FakeBookAssemblyService();
 
-        return new DocumentController(parser, sfdt, chapterService, bookAssembly);
+        // The export paths are covered by BookExportServiceTests, which wires a real DB; this fixture only
+        // drives Import, so the export service is constructed over the same fakes and never called.
+        var bookExport = new BookExportService(null!, chapterService, sfdt, bookAssembly);
+
+        return new DocumentController(parser, sfdt, chapterService, bookAssembly, bookExport);
     }
 
     private static IFormFile CreateFormFile(string fileName)

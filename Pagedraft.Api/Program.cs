@@ -42,6 +42,7 @@ builder.Services.AddScoped<SfdtConversionService>();
 builder.Services.AddScoped<ChapterService>();
 builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
+builder.Services.AddScoped<BookExportService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
 // Value-scoped, fail-safe analysis-output repair (analysis-output-repair plan, p3). Scoped to match its

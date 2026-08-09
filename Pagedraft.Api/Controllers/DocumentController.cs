@@ -12,13 +12,20 @@ public class DocumentController : ControllerBase
     private readonly SfdtConversionService _sfdtConversion;
     private readonly ChapterService _chapterService;
     private readonly BookAssemblyService _bookAssembly;
+    private readonly BookExportService _bookExport;
 
-    public DocumentController(DocxParserService docxParser, SfdtConversionService sfdtConversion, ChapterService chapterService, BookAssemblyService bookAssembly)
+    public DocumentController(
+        DocxParserService docxParser,
+        SfdtConversionService sfdtConversion,
+        ChapterService chapterService,
+        BookAssemblyService bookAssembly,
+        BookExportService bookExport)
     {
         _docxParser = docxParser;
         _sfdtConversion = sfdtConversion;
         _chapterService = chapterService;
         _bookAssembly = bookAssembly;
+        _bookExport = bookExport;
     }
 
     /// <summary>
@@ -139,23 +146,41 @@ public class DocumentController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// Downloads the whole book as one DOCX, chapters in order, named after the book.
+    ///
+    /// <c>404</c> when the book does not exist and <c>409</c> <see cref="ExportUnavailableDto"/> when it has
+    /// no chapters yet. Before Wave 3 / w1 both reached the assembler's empty-document path and answered
+    /// <c>500</c>, indistinguishable from each other and from a real fault.
+    /// </summary>
     [HttpGet("export/book/{bookId:guid}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ExportUnavailableDto), StatusCodes.Status409Conflict)]
     public async Task<IActionResult> ExportBook(Guid bookId, CancellationToken ct)
-    {
-        var chapters = await _chapterService.GetAllByBookAsync(bookId, ct);
-        var buffers = new List<byte[]>();
-        foreach (var ch in chapters)
-            buffers.Add(_sfdtConversion.ConvertSfdtToDocx(ch.ContentSfdt));
-        var docx = _bookAssembly.AssembleDocx(buffers);
-        return File(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "book.docx");
-    }
+        => ToFileResult(await _bookExport.ExportBookAsync(bookId, ct));
 
+    /// <summary>
+    /// Downloads one chapter as a DOCX, named after the chapter. <c>404</c> when the book or the chapter does
+    /// not exist.
+    /// </summary>
     [HttpGet("export/chapter/{bookId:guid}/{chapterId:guid}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> ExportChapter(Guid bookId, Guid chapterId, CancellationToken ct)
+        => ToFileResult(await _bookExport.ExportChapterAsync(bookId, chapterId, ct));
+
+    /// <summary>
+    /// The one place an export outcome becomes an HTTP answer, so the book path and the chapter path cannot
+    /// disagree about what "there is nothing to download" looks like on the wire.
+    ///
+    /// The 409 body carries a REASON TOKEN, not a sentence: the client is he/en bilingual and owns the copy,
+    /// exactly as the tier and readiness payloads do it.
+    /// </summary>
+    private IActionResult ToFileResult(BookExportResult result) => result.Outcome switch
     {
-        var ch = await _chapterService.GetByIdAsync(bookId, chapterId, ct);
-        if (ch == null) return NotFound();
-        var docx = _sfdtConversion.ConvertSfdtToDocx(ch.ContentSfdt);
-        return File(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", $"{ch.Title}.docx");
-    }
+        BookExportOutcome.Ok => File(result.Content!, BookExportService.DocxContentType, result.FileName!),
+        BookExportOutcome.NothingToExport => Conflict(new ExportUnavailableDto(ExportUnavailableDto.NoChapters)),
+        _ => NotFound()
+    };
 }
