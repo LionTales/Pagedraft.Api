@@ -106,6 +106,12 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 // In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
 // registry so a running summary build never blocks a review build (and vice versa) for the same book.
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
+// Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
+// reason as the three registries above (one shared map across request scopes), and the runner is stateless.
+// Unlike them this one keys by BookId ALONE — BookProfile is one row per BOOK, so two languages contend for
+// the same row; see BookProfileBuildCoordinator for the full rationale.
+builder.Services.AddSingleton<IBookProfileBuilder, ScopedBookProfileBuilder>();
+builder.Services.AddSingleton<BookProfileBuildCoordinator>();
 
 // ─── Grounded product chat over the shipped guides (chatbot phase A, c1) ──────────────────────────
 // The corpus reader is SINGLETON and caches a successful load: Content/guides ships with the app and

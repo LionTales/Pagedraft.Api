@@ -378,6 +378,7 @@ public class BooksReviewControllerTests
         chapterBrief: null!,
         progress: provider.GetRequiredService<AnalysisProgressTracker>(),
         aiTierStatus: null!,
+        profileBuilds: null!,
         scopeFactory: provider.GetRequiredService<IServiceScopeFactory>(),
         appLifetime: new TestApplicationLifetime(),
         logger: NullLogger<BooksController>.Instance);

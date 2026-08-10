@@ -24,6 +24,7 @@ public class BooksController : ControllerBase
     private readonly ChapterBriefService _chapterBrief;
     private readonly AnalysisProgressTracker _progress;
     private readonly AiTierStatusService _aiTierStatus;
+    private readonly BookProfileBuildCoordinator _profileBuilds;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly ILogger<BooksController> _logger;
@@ -37,11 +38,13 @@ public class BooksController : ControllerBase
         ChapterBriefService chapterBrief,
         AnalysisProgressTracker progress,
         AiTierStatusService aiTierStatus,
+        BookProfileBuildCoordinator profileBuilds,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
         ILogger<BooksController> logger)
     {
         _aiTierStatus = aiTierStatus;
+        _profileBuilds = profileBuilds;
         _db = db;
         _bookIntelligence = bookIntelligence;
         _styleBaseline = styleBaseline;
@@ -341,12 +344,58 @@ public class BooksController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Rebuild the book profile: re-summarize stale chapters, then rebuild the profile from them.
+    ///
+    /// THE REQUEST TOKEN GOVERNS THE WAIT, NEVER THE WORK (be-c03, review finding 6). This endpoint used
+    /// to await <see cref="BookIntelligenceService.RefreshProfileAsync"/> inline with <paramref name="ct"/>,
+    /// so an ordinary client teardown - closing the dashboard panel, entering focus mode, switching the
+    /// assistant to Edit help, reloading mid-build - did not merely stop OBSERVING a whole-book build that
+    /// costs minutes, it CANCELED it, and the book profile was silently never built while the row read
+    /// ready. The build now runs on its own DI scope under the SERVER's lifetime token, and
+    /// <c>WaitAsync(ct)</c> bounds only how long this request waits for it: an abandoned request returns,
+    /// the build commits.
+    ///
+    /// CONCURRENT CALLERS ARE DEDUPLICATED SERVER-SIDE (review finding 24). Two reattached tabs, or the
+    /// import-handoff card racing the dashboard's status row, join ONE build - see
+    /// <see cref="BookProfileBuildCoordinator"/> for why running it twice is not merely wasteful.
+    ///
+    /// NOT A TRACKED JOB. Unlike the briefs / review / style-baseline builds this returns no jobId and has
+    /// no progress route, so the response shape is unchanged (<see cref="BookProfileDto"/>) and the client
+    /// has nothing to reattach to. That was a costed decision, recorded in the be-c03 investigation
+    /// findings; do not read the absence as an oversight.
+    /// </summary>
     [HttpPost("{bookId:guid}/profile/refresh")]
     public async Task<ActionResult<BookProfileDto>> RefreshProfile(Guid bookId, [FromBody] RefreshProfileRequest req, CancellationToken ct)
     {
         if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+        // The RAW request value is what reaches the build, unchanged: the persistence layer normalizes for
+        // itself (SummarizeChaptersCoreAsync) and the prompts see the caller's value. Normalizing here
+        // would quietly change what the model is asked for, which be-c03 is not allowed to do.
         var language = req.Language ?? "he";
-        var profile = await _bookIntelligence.RefreshProfileAsync(bookId, language, ct);
+
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new build." });
+
+        var build = _profileBuilds.StartOrJoin(bookId, language, shutdownToken);
+        if (build.Joined)
+        {
+            _logger.LogInformation(
+                "Book profile refresh for {BookId} joined the build already in flight (requested {RequestedLanguage}, building {BuildLanguage}).",
+                bookId, language, build.BuildLanguage);
+        }
+
+        // ct is the WAIT bound only. If it fires, this throws and the response is abandoned - which is
+        // correct, because the only thing that cancels it is the caller going away - while the build keeps
+        // running on its own scope and commits.
+        await build.Completion.WaitAsync(ct);
+
+        // Re-read from THIS request's DbContext rather than returning the entity the build produced: the
+        // build ran in another scope, and a joining caller never had one at all. Both callers therefore
+        // return committed state, read the same way.
+        var profile = await _db.Set<BookProfile>().AsNoTracking().FirstOrDefaultAsync(p => p.BookId == bookId, ct);
+        if (profile == null) return NotFound();
         return Ok(ToProfileDto(profile));
     }
 

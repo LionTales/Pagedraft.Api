@@ -435,6 +435,7 @@ public class AiTierControllerTests
             chapterBrief: null!,
             progress: null!,
             aiTierStatus: tierStatus,
+            profileBuilds: null!,
             scopeFactory: scopeFactory.Object,
             appLifetime: lifetime.Object,
             logger: NullLogger<BooksController>.Instance);

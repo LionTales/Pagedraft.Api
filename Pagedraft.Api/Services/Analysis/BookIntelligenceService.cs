@@ -204,7 +204,12 @@ public class BookIntelligenceService
     /// boundary was priced as "acceptable because the freshness guard makes a re-run idempotent, so it is
     /// never a correctness loss, only repeated work". That is true of CORRECTNESS and false of PROGRESS:
     /// repeated work that is aborted at the SAME POINT every time never converges. This method is awaited
-    /// INLINE on the request thread with the REQUEST token (BooksController.Summarize / RefreshProfile), the
+    /// INLINE on whatever thread its caller supplies, with THAT CALLER'S token - and the two callers no
+    /// longer supply the same kind of token (be-c03). BooksController.RefreshProfile now runs it on a
+    /// background DI scope under IHostApplicationLifetime.ApplicationStopping, so a client teardown cannot
+    /// abort it; BooksController.Summarize STILL awaits it on the request thread with the REQUEST token, so
+    /// for that one caller everything below is live (it has no client caller today - see the be-c03
+    /// investigation findings). The
     /// measured cost is ~18-27 s per chapter (section 19), and this project's own corpus contains an
     /// 80-chapter book - so a first pass over it is a 24-37 minute single request. Under one commit, a client
     /// reload, a gateway idle ceiling, or the OOM-wedged Ollama runner this host has actually produced
@@ -620,6 +625,17 @@ public class BookIntelligenceService
 
     /// <summary>
     /// Refresh: re-summarize stale chapters, then rebuild the profile.
+    ///
+    /// PARTIALLY idempotent, and the asymmetry matters to callers (be-c03): phase 1 skips every chapter
+    /// whose summary is already fresh, but phase 2 (<see cref="BuildBookProfileAsync"/>) has NO freshness
+    /// gate and re-issues its four whole-book model calls on every invocation. So this is safe to call
+    /// twice, never free to call twice.
+    ///
+    /// NOT SAFE TO RUN CONCURRENTLY WITH ITSELF for the same book: both rows it writes are unique-indexed
+    /// and written read-then-add with no transaction (ChunkSummary on (BookId, ChapterId), BookProfile on
+    /// BookId), so two overlapping passes collide on the index and one loses a whole checkpoint window of
+    /// paid work. Callers must serialize - the HTTP path does so through
+    /// <see cref="BookProfileBuildCoordinator"/>.
     /// </summary>
     public async Task<BookProfile> RefreshProfileAsync(Guid bookId, string language, CancellationToken ct = default)
     {
