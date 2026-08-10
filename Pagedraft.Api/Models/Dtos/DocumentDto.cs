@@ -44,11 +44,22 @@ public record ImportConfirmationResultDto(
 /// <param name="Reason">
 /// A TOKEN, never a sentence. The client renders the Hebrew and English copy for it; a server-side message
 /// would ship one language into a bilingual product and would be the wrong place to change the wording.
-/// Currently the only value is <see cref="NoChapters"/>; new reasons are added as new tokens rather than by
-/// reusing this one with different prose.
+/// The values are <see cref="NoChapters"/> and <see cref="NothingWritten"/>; new reasons are added as new
+/// tokens rather than by reusing an existing one with different prose. A client that meets a token it does
+/// not know must say something truthful about not knowing, never guess at one it does.
 /// </param>
 public record ExportUnavailableDto(string Reason)
 {
     /// <summary>The book has no chapters yet, so stage 1 has not happened and stage 5 cannot.</summary>
     public const string NoChapters = "noChapters";
+
+    /// <summary>
+    /// There is something to export in principle - the book has chapters, or the requested chapter exists -
+    /// but nothing in it has been written yet, so the assembled document would be blank. Distinct from
+    /// <see cref="NoChapters"/> because the author's next action is different: write, not import.
+    ///
+    /// Answered by BOTH export paths: the whole book when every one of its chapters is unwritten, and a single
+    /// chapter when that chapter is. It replaces a 200 carrying a valid, correctly-named, empty .docx.
+    /// </summary>
+    public const string NothingWritten = "nothingWritten";
 }

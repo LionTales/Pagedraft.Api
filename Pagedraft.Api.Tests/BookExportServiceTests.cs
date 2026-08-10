@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
@@ -31,6 +34,14 @@ namespace Pagedraft.Api.Tests;
 ///   • ONE chapter created but never written to (ContentSfdt is the entity default "{}") made the WHOLE
 ///     book's export throw the same way;
 ///   • every book on the installation downloaded as the literal filename "book.docx".
+///
+/// What the wave-3 fix pass then changed, and why an EXPORT is where honesty is cheapest to lose: a chapter
+/// with nothing renderable in it is left out of the assembled document, and w1 left that out SILENTLY. So a
+/// 10-chapter book with 3 unwritten chapters downloaded as a plausible manuscript with 3 chapters missing,
+/// and an all-unwritten book downloaded as a valid, correctly-named, EMPTY file with HTTP 200 - the exact
+/// thing BookExportOutcome.NothingToExport's own doc comment forbids, pinned as desired by a test in this
+/// class. Both are now answered: the skipped chapters are named on the response, and a document that would
+/// contain nothing is a 409 instead. Both export paths, one rule.
 ///
 /// The happy-path tests run the REAL Syncfusion SFDT -> DOCX conversion, because that is the thing the user
 /// receives; asserting a byte count off a fake would prove nothing about the artifact.
@@ -102,14 +113,75 @@ public class BookExportServiceTests
         var file = Assert.IsType<FileContentResult>(result);
         Assert.True(file.FileContents.Length > 0);
         Assert.True(IsZipArchive(file.FileContents));
+        // Exporting is not the same as exporting everything: the blank chapter is left out, and said so.
+        Assert.Equal("1", SkippedCount(controller));
+        Assert.Equal(new[] { "Blank" }, SkippedTitles(controller));
     }
 
     [Fact]
-    public async Task ExportBook_EveryChapterUntouched_StillProducesAValidDocument()
+    public async Task ExportBook_ManySkippedChapters_KeepsTheHeaderBoundedAndTheCountTruthful()
     {
-        // The book HAS chapters, so this is not "nothing to export"; it is a manuscript with nothing written
-        // in it yet. The assembler's zero-buffer fallback has to produce a real DOCX for that, which it did
-        // not before w1 - it threw, so this was another 500.
+        // The header shares a few kilobytes of response-header budget with Content-Disposition and the rest,
+        // and a Hebrew title costs about six characters per letter once percent-encoded. So the LIST is
+        // bounded and the COUNT is not: a client that renders the count is always right, and one that renders
+        // the names knows it may be seeing fewer of them.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "ארוך", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, order: 0, title: "כתוב", text: "הגיבור יוצא מביתו בשקט."));
+        for (var i = 1; i <= 60; i++)
+        {
+            db.Chapters.Add(new Chapter { BookId = book.Id, Order = i, Title = new string('פ', 60), ContentSfdt = "{}" });
+        }
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.IsType<FileContentResult>(result);
+        Assert.Equal("60", SkippedCount(controller));
+
+        var raw = controller.Response.Headers[BookExportService.SkippedChaptersHeader].ToString();
+        Assert.True(raw.Length <= 3000, $"The skipped-chapters header must stay inside its budget, got {raw.Length}.");
+        var named = SkippedChapters(controller);
+        Assert.NotEmpty(named);
+        Assert.True(named.Count < 60, "This case is only meaningful if the list was actually bounded below the count.");
+    }
+
+    [Theory]
+    // The neighbours of the "{}" entity default. The SceneService writes the second of these as its own empty
+    // document, so it is not a hypothetical shape - it is one this product's own code produces.
+    [InlineData("{\"sections\":[]}")]
+    [InlineData("{\"sections\":[{\"blocks\":[]}]}")]
+    public async Task ExportBook_ChapterCarryingAnEmptyDocumentShape_DoesNotFailTheWholeBook(string emptyShape)
+    {
+        // These reach Syncfusion and throw KeyNotFoundException("sfdt"), i.e. the WHOLE book's export answers
+        // 500 because of one chapter nobody has written in - the identical failure the "{}" guard was written
+        // to close, one shape over. Verified against the un-patched guard: both cases threw here.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Mixed", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, order: 0, title: "Written", text: "This chapter has real text in it."));
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "Blank", ContentSfdt = emptyShape });
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        var file = Assert.IsType<FileContentResult>(result);
+        Assert.True(IsZipArchive(file.FileContents));
+        // And it is reported, not silently dropped.
+        Assert.Equal("1", SkippedCount(controller));
+        Assert.Equal(new[] { "Blank" }, SkippedTitles(controller));
+    }
+
+    [Fact]
+    public async Task ExportBook_EveryChapterUntouched_IsAConflict_NotAnEmptyDocument()
+    {
+        // REWRITTEN. This used to assert the empty document as desired behaviour, under the name
+        // ExportBook_EveryChapterUntouched_StillProducesAValidDocument. The book HAS chapters, so the reason
+        // is not "noChapters" - it is that nothing in it has been written yet - but handing the author a
+        // valid, correctly-named .docx with nothing in it in answer to "export my book" is exactly what
+        // BookExportOutcome.NothingToExport's own doc comment forbids, and it is worse than the 500 that
+        // preceded it: a 500 is visible, a plausible empty file is not.
         var (controller, db) = await BuildAsync();
         var book = new Book { Id = Guid.NewGuid(), Title = "Outline only", Language = "he" };
         db.Books.Add(book);
@@ -119,14 +191,66 @@ public class BookExportServiceTests
 
         var result = await controller.ExportBook(book.Id, CancellationToken.None);
 
-        var file = Assert.IsType<FileContentResult>(result);
-        Assert.Equal("Outline only.docx", file.FileDownloadName);
-        Assert.True(IsZipArchive(file.FileContents));
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        var body = Assert.IsType<ExportUnavailableDto>(conflict.Value);
+        // A DIFFERENT token from the no-chapters case: the author's next action is "write", not "import".
+        Assert.Equal("nothingWritten", body.Reason);
+        Assert.NotEqual(ExportUnavailableDto.NoChapters, body.Reason);
     }
 
     [Fact]
-    public async Task ExportChapter_NeverWrittenTo_ExportsAnEmptyDocument()
+    public async Task ExportBook_SomeChaptersUnwritten_NamesThemOnTheSuccessfulResponse()
     {
+        // The partial case, which is the worse one: the file DOES arrive, it looks like the manuscript, and
+        // two chapters are missing from it. Before this, nothing on any surface said so.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "חלקי", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, order: 0, title: "פרק א", text: "הגיבור יוצא מביתו בשקט."));
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "פרק ב", ContentSfdt = "{}" });
+        db.Chapters.Add(NewChapter(book.Id, order: 2, title: "פרק ג", text: "הסופה מגיעה אל החוף."));
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 3, Title = "פרק ד", ContentSfdt = "   " });
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        var file = Assert.IsType<FileContentResult>(result);
+        Assert.True(IsZipArchive(file.FileContents));
+        Assert.Equal("2", SkippedCount(controller));
+
+        var skipped = SkippedChapters(controller);
+        Assert.Equal(2, skipped.Count);
+        // Order and title, in Order, so the client can render a sentence naming chapters the author knows.
+        Assert.Equal(1, skipped[0].Order);
+        Assert.Equal("פרק ב", skipped[0].Title);
+        Assert.Equal(3, skipped[1].Order);
+        Assert.Equal("פרק ד", skipped[1].Title);
+    }
+
+    [Fact]
+    public async Task ExportBook_NothingSkipped_StillSaysSoRatherThanSayingNothing()
+    {
+        // The zero is written deliberately. If the header were emitted only when something was skipped, a
+        // client could not tell "nothing was skipped" from "this server, or a proxy, did not tell me".
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Complete", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, order: 0, title: "One", text: "This chapter has real text in it."));
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.IsType<FileContentResult>(result);
+        Assert.Equal("0", SkippedCount(controller));
+        Assert.False(controller.Response.Headers.ContainsKey(BookExportService.SkippedChaptersHeader));
+    }
+
+    [Fact]
+    public async Task ExportChapter_NeverWrittenTo_IsAConflict_NotAnEmptyDocument()
+    {
+        // REWRITTEN, and it is the BOOK path's all-unwritten case seen through a one-chapter window - the two
+        // document paths are the standing drift trap in this codebase, so they answer with the same token.
+        // This used to be ExportChapter_NeverWrittenTo_ExportsAnEmptyDocument and asserted "Blank.docx".
         var (controller, db) = await BuildAsync();
         var book = new Book { Id = Guid.NewGuid(), Title = "Mixed", Language = "he" };
         db.Books.Add(book);
@@ -136,9 +260,52 @@ public class BookExportServiceTests
 
         var result = await controller.ExportChapter(book.Id, chapter.Id, CancellationToken.None);
 
-        var file = Assert.IsType<FileContentResult>(result);
-        Assert.Equal("Blank.docx", file.FileDownloadName);
-        Assert.True(IsZipArchive(file.FileContents));
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        var body = Assert.IsType<ExportUnavailableDto>(conflict.Value);
+        Assert.Equal("nothingWritten", body.Reason);
+    }
+
+    [Fact]
+    public async Task ExportChapter_CarryingAnEmptyDocumentShape_IsTheSameConflict()
+    {
+        // The other half of the drift check: the empty-document family is recognized on BOTH paths, and on
+        // this one it is a 409 rather than a skip, because the unit the caller asked for is the empty one.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Mixed", Language = "he" };
+        db.Books.Add(book);
+        var chapter = new Chapter
+        {
+            Id = Guid.NewGuid(),
+            BookId = book.Id,
+            Order = 0,
+            Title = "Blank",
+            ContentSfdt = "{\"sections\":[{\"blocks\":[]}]}"
+        };
+        db.Chapters.Add(chapter);
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportChapter(book.Id, chapter.Id, CancellationToken.None);
+
+        var conflict = Assert.IsType<ConflictObjectResult>(result);
+        Assert.Equal("nothingWritten", Assert.IsType<ExportUnavailableDto>(conflict.Value).Reason);
+    }
+
+    [Fact]
+    public async Task ExportChapter_SuccessfulExport_ReportsNothingSkipped()
+    {
+        // Nothing can be "skipped" on the chapter path by construction - the unit either exports or it does
+        // not - but the header is written anyway, so a client reads ONE contract on both paths.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "A book", Language = "he" };
+        db.Books.Add(book);
+        var chapter = NewChapter(book.Id, order: 0, title: "One", text: "This chapter has real text in it.");
+        db.Chapters.Add(chapter);
+        await db.SaveChangesAsync();
+
+        var result = await controller.ExportChapter(book.Id, chapter.Id, CancellationToken.None);
+
+        Assert.IsType<FileContentResult>(result);
+        Assert.Equal("0", SkippedCount(controller));
     }
 
     [Theory]
@@ -152,13 +319,41 @@ public class BookExportServiceTests
         Assert.False(BookExportService.HasRenderableContent(stored));
     }
 
-    [Fact]
-    public void HasRenderableContent_AcceptsAnythingElse()
+    [Theory]
+    [InlineData("{\"sections\":[]}")]                                      // no sections at all
+    [InlineData("  {\"sections\":[]}\n")]                                  // and it survives surrounding whitespace
+    [InlineData("{\"sections\":[{\"blocks\":[]}]}")]                       // SceneService's own empty default
+    [InlineData("{\"sections\":[{}]}")]                                    // a section with no blocks key
+    [InlineData("{\"sections\":[{\"blocks\":[]},{\"blocks\":[]}]}")]       // several, all blockless
+    public void HasRenderableContent_RejectsTheWholeEmptyDocumentFamily_NotJustTheOneLiteral(string stored)
     {
-        // The guard must not become a general "if anything looks odd, skip the chapter" rule: a corrupt
-        // chapter is a fault to surface, not one to quietly drop from the author's exported manuscript.
+        // Matching only "{}" closed one member of a family and left its neighbours open, and the neighbours
+        // are not hypothetical: SceneService writes {"sections":[{"blocks":[]}]} as its empty document. Each
+        // of these reaches Syncfusion and throws, taking the whole book's export down with it.
+        Assert.False(BookExportService.HasRenderableContent(stored));
+    }
+
+    [Theory]
+    [InlineData("{\"unexpected\":1}")]                                     // a JSON object that is not an SFDT document
+    [InlineData("not json at all")]
+    [InlineData("[]")]                                                     // valid JSON, wrong root kind
+    [InlineData("\"sections\"")]
+    [InlineData("{\"sections\":\"nope\"}")]                                // sections present but not an array
+    [InlineData("{\"sections\":[{\"blocks\":\"nope\"}]}")]                 // blocks present but not an array
+    [InlineData("{\"sections\":[42]}")]                                    // a section that is not an object
+    public void HasRenderableContent_KeepsCorruptSfdtLoud_RatherThanDroppingTheChapter(string stored)
+    {
+        // The failure modes are NOT symmetrical. Widening the guard until it swallows anything odd would make
+        // a corrupt chapter disappear from the author's exported manuscript with no error anywhere - which is
+        // the very defect this todo exists to remove, arriving from the opposite direction. Anything that is
+        // not RECOGNIZABLY an empty document goes to the converter and is allowed to throw.
+        Assert.True(BookExportService.HasRenderableContent(stored));
+    }
+
+    [Fact]
+    public void HasRenderableContent_AcceptsARealChapter()
+    {
         Assert.True(BookExportService.HasRenderableContent(SfdtConversionService.CreateMinimalSfdtFromText("Some real chapter text.")));
-        Assert.True(BookExportService.HasRenderableContent("{\"unexpected\":1}"));
     }
 
     // ─── Chapter-level export: the same rules, the other path ─────────────────────────────────────
@@ -346,6 +541,29 @@ public class BookExportServiceTests
 
     // ─── helpers ──────────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>The raw skipped-count header, as a client would read it - no default, no coercion.</summary>
+    private static string? SkippedCount(DocumentController controller) =>
+        controller.Response.Headers[BookExportService.SkippedCountHeader].ToString() is { Length: > 0 } v ? v : null;
+
+    /// <summary>
+    /// Decodes the skipped-chapters header EXACTLY the way the client is told to:
+    /// <c>JSON.parse(decodeURIComponent(value))</c>. If this helper and the client's read ever disagree, the
+    /// contract stated in <c>BookExportService.SkippedChaptersHeader</c> is what both are wrong about.
+    /// </summary>
+    private static IReadOnlyList<SkippedChapterOnTheWire> SkippedChapters(DocumentController controller)
+    {
+        var raw = controller.Response.Headers[BookExportService.SkippedChaptersHeader].ToString();
+        Assert.False(string.IsNullOrEmpty(raw), "The skipped-chapters header is missing.");
+        var json = Uri.UnescapeDataString(raw);
+        return JsonSerializer.Deserialize<List<SkippedChapterOnTheWire>>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+    }
+
+    private static IReadOnlyList<string> SkippedTitles(DocumentController controller) =>
+        SkippedChapters(controller).Select(c => c.Title).ToList();
+
+    /// <summary>Declared here rather than reused from the API so the wire shape is asserted, not assumed.</summary>
+    private sealed record SkippedChapterOnTheWire(int Order, string Title);
+
     /// <summary>DOCX is an OOXML package, i.e. a ZIP: "PK\x03\x04".</summary>
     private static bool IsZipArchive(byte[] bytes) =>
         bytes.Length > 4 && bytes[0] == 0x50 && bytes[1] == 0x4B && bytes[2] == 0x03 && bytes[3] == 0x04;
@@ -373,7 +591,12 @@ public class BookExportServiceTests
         var assembly = new BookAssemblyService();
         var export = new BookExportService(db, chapters, sfdt, assembly);
 
-        var controller = new DocumentController(new DocxParserService(), sfdt, chapters, assembly, export);
+        var controller = new DocumentController(new DocxParserService(), sfdt, chapters, assembly, export)
+        {
+            // A real HttpContext, because the export answer is not only a body: the skipped-chapter signal
+            // rides on RESPONSE HEADERS, and a controller with no context cannot write one.
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
         return Task.FromResult((controller, db));
     }
 }

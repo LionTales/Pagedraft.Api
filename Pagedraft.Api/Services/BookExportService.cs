@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Pagedraft.Api.Data;
 
@@ -20,16 +21,53 @@ public enum BookExportOutcome
     /// DOCX: handing the author a valid, empty, correctly-named file in answer to "export my book" is the
     /// same class of dishonesty as a stage that reports done without computing anything.
     /// </summary>
-    NothingToExport
+    NothingToExport,
+
+    /// <summary>
+    /// There ARE chapters, but not one of them has anything renderable in it, so the assembled document would
+    /// be blank. The SAME invariant as <see cref="NothingToExport"/>, one situation over, and it is a separate
+    /// member because the two need different copy and lead to different next actions: "import a manuscript"
+    /// versus "write something first". The caller turns both into a 409 with its own reason token.
+    ///
+    /// Until w1+w4 this case produced a valid, correctly-named, EMPTY .docx with HTTP 200, and a test pinned
+    /// that as desired behaviour. In a book-editing product a chapter missing from an exported manuscript is
+    /// indistinguishable from data loss, so an export that would contain nothing must say so instead.
+    /// </summary>
+    NothingWritten
 }
 
+/// <summary>
+/// A chapter that was left OUT of an assembled export because it has nothing renderable in it.
+///
+/// This travels to the client on a SUCCESSFUL export (see <see cref="BookExportService.SkippedChaptersHeader"/>)
+/// so the author is told which chapters are not in the file they just downloaded. Silence here is the defect:
+/// a 10-chapter book with 3 unwritten chapters used to export 7 with no count, no header and nothing on any
+/// surface saying so.
+/// </summary>
+/// <param name="Order">The chapter's zero-based <c>Order</c>, exactly as stored - the client owns display numbering.</param>
+/// <param name="Title">The chapter title as stored, so the sentence the client renders names chapters the author recognizes.</param>
+public sealed record ExportSkippedChapter(int Order, string Title);
+
 /// <summary>The assembled document, or the reason there isn't one.</summary>
-public sealed record BookExportResult(BookExportOutcome Outcome, byte[]? Content, string? FileName)
+/// <param name="SkippedChapters">
+/// Never null. Empty on every outcome except <see cref="BookExportOutcome.Ok"/>, where it names the chapters
+/// the assembled document does NOT contain, in <c>Order</c>. Empty on the chapter path by construction: a
+/// single unrenderable chapter is <see cref="BookExportOutcome.NothingWritten"/>, not a skip.
+/// </param>
+public sealed record BookExportResult(
+    BookExportOutcome Outcome,
+    byte[]? Content,
+    string? FileName,
+    IReadOnlyList<ExportSkippedChapter> SkippedChapters)
 {
-    public static BookExportResult Ok(byte[] content, string fileName) => new(BookExportOutcome.Ok, content, fileName);
-    public static BookExportResult BookNotFound() => new(BookExportOutcome.BookNotFound, null, null);
-    public static BookExportResult ChapterNotFound() => new(BookExportOutcome.ChapterNotFound, null, null);
-    public static BookExportResult NothingToExport() => new(BookExportOutcome.NothingToExport, null, null);
+    private static readonly IReadOnlyList<ExportSkippedChapter> NoneSkipped = Array.Empty<ExportSkippedChapter>();
+
+    public static BookExportResult Ok(byte[] content, string fileName, IReadOnlyList<ExportSkippedChapter>? skipped = null)
+        => new(BookExportOutcome.Ok, content, fileName, skipped ?? NoneSkipped);
+    public static BookExportResult BookNotFound() => new(BookExportOutcome.BookNotFound, null, null, NoneSkipped);
+    public static BookExportResult ChapterNotFound() => new(BookExportOutcome.ChapterNotFound, null, null, NoneSkipped);
+    public static BookExportResult NothingToExport() => new(BookExportOutcome.NothingToExport, null, null, NoneSkipped);
+    public static BookExportResult NothingWritten() => new(BookExportOutcome.NothingWritten, null, null, NoneSkipped);
 }
 
 /// <summary>
@@ -48,8 +86,41 @@ public sealed record BookExportResult(BookExportOutcome Outcome, byte[]? Content
 /// </summary>
 public class BookExportService
 {
-    /// <summary>The DOCX media type, spelled once. Both endpoints and their tests read it from here.</summary>
+    /// <summary>
+    /// The DOCX media type, spelled once. Both endpoints and their tests read it from here.
+    ///
+    /// MIRRORED IN THE CLIENT as <c>DOCX_CONTENT_TYPE</c> (pagedraft-client
+    /// <c>src/app/core/models/export.ts</c>); the two must stay byte-identical.
+    /// </summary>
     public const string DocxContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    /// <summary>
+    /// How many chapters the downloaded document does NOT contain, as a decimal integer. Present on EVERY
+    /// successful export from EITHER path, <c>"0"</c> included - so a client that reads no header at all knows
+    /// it is looking at an old server or a proxy that stripped it, rather than concluding "nothing was
+    /// skipped" from an absence.
+    ///
+    /// READ BY THE CLIENT in <c>src/app/core/services/export.service.ts</c>, which is also the only other
+    /// response-header read in the product. Like <c>Content-Disposition</c>, this header is NOT
+    /// CORS-safelisted, so it is listed in the CORS policy's <c>WithExposedHeaders</c> in <c>Program.cs</c>;
+    /// without that entry the read returns null cross-origin and the author is silently never told.
+    /// </summary>
+    public const string SkippedCountHeader = "X-Export-Skipped-Count";
+
+    /// <summary>
+    /// WHICH chapters the downloaded document does not contain, so the client can name them rather than
+    /// render a bare number.
+    ///
+    /// Wire format: <c>Uri.EscapeDataString</c> of a UTF-8 JSON array of
+    /// <c>{ "order": &lt;int&gt;, "title": &lt;string&gt; }</c>, in <c>Order</c>. Percent-encoded because a
+    /// header value is bytes and every chapter title in this product may be Hebrew; the client reads it as
+    /// <c>JSON.parse(decodeURIComponent(value))</c>.
+    ///
+    /// Absent when nothing was skipped. It may name FEWER chapters than
+    /// <see cref="SkippedCountHeader"/> reports, because the header is bounded so a long book cannot blow a
+    /// proxy's response-header limit: THE COUNT IS AUTHORITATIVE, the list is a courtesy.
+    /// </summary>
+    public const string SkippedChaptersHeader = "X-Export-Skipped-Chapters";
 
     /// <summary>
     /// Cap on the title-derived part of a download filename. Long enough for any real book or chapter title,
@@ -122,6 +193,12 @@ public class BookExportService
     ///
     /// The filename was also a single hard-coded constant, so every book on the installation downloaded as
     /// "book.docx" and exporting three of them left the author with three identical names in one folder.
+    ///
+    /// AN EXPORT NEVER LIES ABOUT WHAT IS IN IT. A chapter with nothing renderable in it cannot be assembled
+    /// and is left out, but it is never left out SILENTLY: every skipped chapter is named on the result, and
+    /// if that leaves nothing at all the answer is <see cref="BookExportOutcome.NothingWritten"/> rather than
+    /// a valid, correctly-named, empty .docx. Both halves matter, because the partial case is the worse one -
+    /// a file that looks like the author's manuscript with three chapters quietly missing from it.
     /// </summary>
     public async Task<BookExportResult> ExportBookAsync(Guid bookId, CancellationToken ct = default)
     {
@@ -137,31 +214,42 @@ public class BookExportService
         if (chapters.Count == 0) return BookExportResult.NothingToExport();
 
         var buffers = new List<byte[]>(chapters.Count);
+        var skipped = new List<ExportSkippedChapter>();
         foreach (var chapter in chapters)
         {
-            if (!HasRenderableContent(chapter.ContentSfdt)) continue;
+            if (!HasRenderableContent(chapter.ContentSfdt))
+            {
+                skipped.Add(new ExportSkippedChapter(chapter.Order, chapter.Title));
+                continue;
+            }
             buffers.Add(_sfdtConversion.ConvertSfdtToDocx(chapter.ContentSfdt));
         }
 
+        // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
+        // the answer this must not give. NothingToExport's own doc comment states the invariant.
+        if (buffers.Count == 0) return BookExportResult.NothingWritten();
+
         var docx = _bookAssembly.AssembleDocx(buffers);
-        return BookExportResult.Ok(docx, BuildFileName(title, fallbackStem: "book"));
+        return BookExportResult.Ok(docx, BuildFileName(title, fallbackStem: "book"), skipped);
     }
 
     /// <summary>
     /// One chapter as a DOCX, named after the chapter. The chapter lookup is already book-scoped, so an
     /// unknown book and an unknown chapter both land on <see cref="BookExportOutcome.ChapterNotFound"/>.
+    ///
+    /// THE SAME HONESTY RULE AS THE BOOK PATH, which is the whole reason these two live in one service: a
+    /// chapter with nothing renderable in it used to download as a valid, correctly-named, EMPTY .docx, which
+    /// is the book path's all-unwritten case seen through a one-chapter window. It answers
+    /// <see cref="BookExportOutcome.NothingWritten"/> instead. Nothing can be "skipped" on this path - the
+    /// unit asked for either exports or it does not - so the result's skipped list is always empty here.
     /// </summary>
     public async Task<BookExportResult> ExportChapterAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
     {
         var chapter = await _chapters.GetByIdAsync(bookId, chapterId, ct);
         if (chapter == null) return BookExportResult.ChapterNotFound();
+        if (!HasRenderableContent(chapter.ContentSfdt)) return BookExportResult.NothingWritten();
 
-        var docx = HasRenderableContent(chapter.ContentSfdt)
-            ? _sfdtConversion.ConvertSfdtToDocx(chapter.ContentSfdt)
-            // An untouched chapter has nothing to convert; the assembler's zero-buffer path is the one
-            // existing producer of a valid empty DOCX, so it is reused rather than hand-rolling a second.
-            : _bookAssembly.AssembleDocx(Array.Empty<byte[]>());
-
+        var docx = _sfdtConversion.ConvertSfdtToDocx(chapter.ContentSfdt);
         return BookExportResult.Ok(docx, BuildFileName(chapter.Title, fallbackStem: "chapter"));
     }
 
@@ -169,20 +257,61 @@ public class BookExportService
     /// Whether a chapter's stored SFDT is something the converter can turn into a document at all.
     ///
     /// <c>Chapter.ContentSfdt</c> DEFAULTS to the literal <c>"{}"</c> - what a chapter created through
-    /// <c>POST /chapters</c> carries until the editor first saves it. Syncfusion cannot load that (it throws
-    /// "There are no sections present in the document"), so before this guard ONE untouched chapter turned
-    /// the whole book's export into a 500: a book-level failure caused by a chapter the author had not
-    /// started writing. On the book path such a chapter is simply skipped, which is also what it contributes
-    /// to the manuscript: nothing.
+    /// <c>POST /chapters</c> carries until the editor first saves it. Syncfusion cannot load that, so before
+    /// this guard ONE untouched chapter turned the whole book's export into a 500: a book-level failure
+    /// caused by a chapter the author had not started writing.
     ///
-    /// Deliberately NARROW - blank and the empty-object default only. Any other stored value is passed to the
-    /// converter and allowed to throw, because a genuinely corrupt chapter is a fault worth surfacing, not
-    /// one worth silently dropping from the author's exported book.
+    /// THE EMPTY-DOCUMENT FAMILY, NOT ONE LITERAL. Matching only <c>"{}"</c> closed one member of a family
+    /// and left its neighbours open: <c>{"sections":[]}</c> and <c>{"sections":[{"blocks":[]}]}</c> - the
+    /// latter being the shape <see cref="SceneService"/> writes as its own empty default - both reach
+    /// Syncfusion and throw <c>KeyNotFoundException("sfdt")</c>, which is the identical whole-book 500 the
+    /// guard was written to close, one shape over. So the question asked here is structural: does this
+    /// document contain a single block anywhere?
+    ///
+    /// STILL DELIBERATELY NARROW, because the failure modes are not symmetrical. Dropping a chapter that DOES
+    /// have content is data loss in the author's manuscript; throwing on a corrupt one is a fault they need to
+    /// hear about. So anything that is not recognizably an empty SFDT document is reported as renderable and
+    /// allowed to throw: a value that is not JSON, a JSON root that is not an object, a document with no
+    /// <c>sections</c> property at all, or a <c>sections</c>/<c>blocks</c> that is not an array. Only a
+    /// well-formed document whose every section is blockless is treated as empty.
     /// </summary>
     internal static bool HasRenderableContent(string? contentSfdt)
     {
         if (string.IsNullOrWhiteSpace(contentSfdt)) return false;
-        return contentSfdt.Trim() != "{}";
+
+        var trimmed = contentSfdt.Trim();
+        // The entity default, kept as its own case: it is a JSON object with no "sections" property, which the
+        // structural walk below deliberately treats as unrecognized-and-therefore-loud.
+        if (trimmed == "{}") return false;
+
+        JsonDocument parsed;
+        try
+        {
+            parsed = JsonDocument.Parse(trimmed);
+        }
+        catch (JsonException)
+        {
+            return true; // Not JSON at all: a fault to surface, not a chapter to drop.
+        }
+
+        using (parsed)
+        {
+            var root = parsed.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return true;
+            if (!root.TryGetProperty("sections", out var sections)) return true;
+            if (sections.ValueKind != JsonValueKind.Array) return true;
+
+            foreach (var section in sections.EnumerateArray())
+            {
+                if (section.ValueKind != JsonValueKind.Object) return true;
+                // A section with no "blocks" at all is the same empty shape one level down, not a fault.
+                if (!section.TryGetProperty("blocks", out var blocks)) continue;
+                if (blocks.ValueKind != JsonValueKind.Array) return true;
+                if (blocks.GetArrayLength() > 0) return true;
+            }
+
+            return false;
+        }
     }
 
     /// <summary>

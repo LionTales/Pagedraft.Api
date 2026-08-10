@@ -27,11 +27,18 @@ A book with no chapters yet has nothing to put in a file, and the screen says so
 you an empty document. The workflow spine says the same thing one step earlier: its Export stage
 reads as blocked until something has been imported.
 
+The same holds for a book whose chapters are all still empty, and for a single chapter you have not
+written in yet. There is nothing to put in the file, so you are told that rather than handed one.
+
 ## What it contains
 
 Exactly what is saved in your chapters, converted back to a Word document. The whole-book export
 puts the chapters together in order into one file. The single-chapter export gives you that one
 chapter, in a file named after the chapter.
+
+Chapters you have not written in yet are not in the file, because there is nothing in them to put
+there. When that happens the screen tells you how many were left out and names them, so a chapter is
+never quietly missing from a manuscript you exported.
 
 ## What it depends on
 
