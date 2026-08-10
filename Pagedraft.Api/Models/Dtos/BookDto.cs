@@ -18,12 +18,13 @@ namespace Pagedraft.Api.Models.Dtos;
 /// computes it inside its single books query.
 /// </param>
 /// <param name="ChaptersWithTextCount">
-/// Wave 3 / M1. Chapters with <c>WordCount &gt; 0</c>. Present because "has chapter rows" and "has a
-/// manuscript" are DIFFERENT states and the spine has to tell them apart: a book whose chapters were created
-/// empty (hand-added, or an import that produced titles and no bodies) is not imported in any sense a user
-/// would recognise. The stage-1 derivation the audit fixed on is:
-/// <c>ChapterCount == 0</c> → not-started; <c>ChaptersWithTextCount &gt; 0</c> → ready; in between → the
-/// honest partial state (chapters exist but carry no text).
+/// Wave 3 / M1. Chapters that satisfy <see cref="Pagedraft.Api.Models.ChapterTextPredicate.HasText"/> - the
+/// ONE definition of "has text", shared by every site that needs it so the definition cannot drift between
+/// them. Present because "has chapter rows" and "has a manuscript" are DIFFERENT states and the spine has to
+/// tell them apart: a book whose chapters were created empty (hand-added, or an import that produced titles
+/// and no bodies) is not imported in any sense a user would recognise. The stage-1 derivation the audit
+/// fixed on is: <c>ChapterCount == 0</c> → not-started; <c>ChaptersWithTextCount &gt; 0</c> → ready; in
+/// between → the honest partial state (chapters exist but carry no text).
 ///
 /// Deliberately NOT a "did the user check the split" flag - that signal was ruled out (M5) because the
 /// product cannot verify it, and a checkbox the product cannot verify is the same class of lie as the

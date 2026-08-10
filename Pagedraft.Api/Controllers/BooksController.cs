@@ -77,25 +77,33 @@ public class BooksController : ControllerBase
     /// <c>chaptersWithTextCount</c> so the stage spine can compute the Import stage HERE, on the one surface
     /// where importing is the next action. Both are projected inside this single query (a correlated count per
     /// row, not a request per book) - the cost of the list does not scale with the size of the manuscripts.
+    /// Uses the same <see cref="WithCounts"/> projection as <see cref="Update"/>, so the two are symmetric:
+    /// both compute both counts as SQL aggregates, never a re-query of the chapter rows.
     /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<BookDto>>> GetAll(CancellationToken ct)
     {
-        var orderedBooks = await _db.Books
-            .AsNoTracking()
-            .OrderBy(b => b.UpdatedAt)
-            .Select(b => new
-            {
-                Book = b,
-                ChapterCount = b.Chapters.Count(),
-                ChaptersWithTextCount = b.Chapters.Count(c => c.WordCount > 0)
-            })
-            .ToListAsync(ct);
+        var orderedBooks = await WithCounts(_db.Books.AsNoTracking().OrderBy(b => b.UpdatedAt)).ToListAsync(ct);
 
         return Ok(orderedBooks
             .Select(row => ToDto(row.Book, row.ChapterCount, row.ChaptersWithTextCount))
             .ToList());
     }
+
+    /// <summary>
+    /// Projects a books query into (book, chapterCount, chaptersWithTextCount) using ONE SQL query per
+    /// caller: <c>ChapterCount</c> and <c>ChaptersWithTextCount</c> (<see cref="ChapterTextPredicate.HasText"/>)
+    /// are both correlated COUNT subqueries, not a materialization of the chapter rows. The shared shape is
+    /// what keeps <see cref="GetAll"/> and <see cref="Update"/> symmetric - see <see cref="BooksControllerQueryShapeTests"/>
+    /// for the assertion that this stays translated to SQL rather than silently regressing to a per-row fetch.
+    /// </summary>
+    internal static IQueryable<BookWithCountsRow> WithCounts(IQueryable<Book> books) =>
+        books.Select(b => new BookWithCountsRow(
+            b,
+            b.Chapters.Count(),
+            b.Chapters.AsQueryable().Count(ChapterTextPredicate.HasText)));
+
+    internal sealed record BookWithCountsRow(Book Book, int ChapterCount, int ChaptersWithTextCount);
 
     [HttpGet("{bookId:guid}")]
     public async Task<ActionResult<BookDetailDto>> GetById(Guid bookId, CancellationToken ct)
@@ -1276,14 +1284,12 @@ public class BooksController : ControllerBase
 
         // The M1 counts are part of the BookDto contract, so the update response has to carry the REAL ones -
         // a renamed book that came back reporting 0 chapters would tell the books list the book had been
-        // un-imported. One scalar query, not the chapter rows.
-        var wordCounts = await _db.Chapters
-            .AsNoTracking()
-            .Where(c => c.BookId == bookId)
-            .Select(c => c.WordCount)
-            .ToListAsync(ct);
+        // un-imported. Symmetric with GetAll: one SQL query aggregating both counts server-side via the same
+        // WithCounts projection (ChapterCount and ChaptersWithTextCount are both correlated COUNT subqueries),
+        // not a fetch of the chapter rows into memory to count them here.
+        var counts = await WithCounts(_db.Books.AsNoTracking().Where(b => b.Id == bookId)).FirstAsync(ct);
 
-        return Ok(ToDto(book, wordCounts.Count, wordCounts.Count(w => w > 0)));
+        return Ok(ToDto(book, counts.ChapterCount, counts.ChaptersWithTextCount));
     }
 
     [HttpDelete("{bookId:guid}")]
