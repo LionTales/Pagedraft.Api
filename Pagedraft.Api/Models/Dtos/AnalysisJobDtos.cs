@@ -183,8 +183,15 @@ public record StartBookReviewBuildResponse(
 /// </param>
 /// <param name="ResolvedFindingCount">
 /// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> - the SAME partition the shipped findings
-/// ledger renders (its active group is open + acknowledged, its resolved group is dismissed + done), so the
-/// spine and the ledger can never disagree about how far through the review the author is.
+/// ledger renders (its active group is open + acknowledged, its resolved group is dismissed + done). The
+/// FIELDS themselves can never disagree with the ledger: both read <see cref="FindingStatusPartition"/>,
+/// the one place the vocabulary is spelled (be-c05). That does NOT mean a caller can render just these two
+/// counts as "N resolved, K open" and have the sentence add up to the total - <c>acknowledged</c> is a
+/// third bucket counted by neither field, so <c>FindingCount - ResolvedFindingCount - OpenFindingCount</c>
+/// is that bucket's size, not zero. A caller that renders a progress SENTENCE must account for all three
+/// buckets (or state only one of them) to avoid visibly failing to reconcile beside a ledger that shows a
+/// third group; the wave 3 stage spine does this (see c07-spine-contract-drift, `findingsProgress` in the
+/// client's `stage-spine.copy.ts`).
 ///
 /// Why it is on the STATUS payload at all: per-finding status already ships on
 /// <see cref="BookFindingDto"/>, but the only way to turn it into a number was
