@@ -58,6 +58,42 @@ public class BookExportService
     /// </summary>
     private const int MaxFileNameStemLength = 80;
 
+    /// <summary>
+    /// The characters a download filename may not carry, spelled out EXPLICITLY rather than read from
+    /// <see cref="Path.GetInvalidFileNameChars"/>.
+    ///
+    /// The contract is "a name the CLIENT can write to disk", not "a name this host can". The name travels in
+    /// a Content-Disposition header to a browser that saves it on the reader's machine, and that machine has
+    /// nothing to do with the machine that produced it. <c>Path.GetInvalidFileNameChars()</c> answers the
+    /// other question: it returns 40+ characters on Windows and only <c>{'\0', '/'}</c> on Unix, so a
+    /// Linux-hosted API would pass <c>\ : * ? " &lt; &gt; |</c> straight through to a Windows reader, and the
+    /// same book title would download under two different names depending on which host happened to answer.
+    /// The w1 test for this asserted the Windows result and went red on the Linux CI runner - the same defect
+    /// seen from the other side.
+    ///
+    /// The set is the UNION of what Windows forbids (these nine) and what Unix and macOS forbid (<c>/</c> and
+    /// NUL, both already covered). NUL and the other control characters are rejected separately by
+    /// <see cref="char.IsControl(char)"/>, which is wider than any platform's list. The double quote earns its
+    /// place twice: it also terminates the <c>filename</c> parameter of the header that carries it.
+    /// </summary>
+    private const string InvalidFileNameChars = "<>:\"/\\|?*";
+
+    /// <summary>
+    /// Names Windows reserves for devices. <c>NUL.docx</c> is not a file on Windows, it is the null device, so
+    /// a chapter titled "Nul" would produce a download that silently goes nowhere. The extension does not
+    /// exempt it - the reservation applies to the stem before the FIRST dot - and the match is
+    /// case-insensitive, so a title of "con", "Con" or "CON.v2" is the same reserved name.
+    ///
+    /// Listed explicitly for the same reason as <see cref="InvalidFileNameChars"/>: this is a property of the
+    /// reader's machine, and nothing on a Linux host would tell us about it.
+    /// </summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+
     private readonly AppDbContext _db;
     private readonly ChapterService _chapters;
     private readonly SfdtConversionService _sfdtConversion;
@@ -151,8 +187,8 @@ public class BookExportService
 
     /// <summary>
     /// A download filename from an author-supplied title: <c>{sanitized title}.docx</c>, falling back to
-    /// <paramref name="fallbackStem"/> when the title is blank or consists entirely of characters a filename
-    /// cannot carry.
+    /// <paramref name="fallbackStem"/> when the title is blank, consists entirely of characters a filename
+    /// cannot carry, or would land on a Windows device name.
     ///
     /// Hebrew is preserved, which is the point - the primary language is Hebrew and stripping to ASCII would
     /// hand every Hebrew-titled book the fallback name. ASP.NET Core's <c>File(..., fileName)</c> emits both a
@@ -167,29 +203,46 @@ public class BookExportService
     }
 
     /// <summary>
-    /// Strips what a filename may not carry - the platform's invalid characters plus control characters -
+    /// Strips what a filename may not carry - <see cref="InvalidFileNameChars"/> plus control characters -
     /// collapses runs of whitespace, trims, and caps the length. Returns an empty string when nothing usable
     /// survives, which is the caller's cue to use its fallback.
     ///
+    /// The result is IDENTICAL on every host, by construction: nothing here asks the operating system what it
+    /// thinks a filename is. The question being answered is what the reader's browser can save, and the API
+    /// host is not the reader's machine (see <see cref="InvalidFileNameChars"/>).
+    ///
     /// Trailing dots and spaces are trimmed too: Windows silently drops them, so "Chapter 1." would be saved
-    /// as a different name than the one the header claimed.
+    /// as a different name than the one the header claimed. A name that would land on a Windows device
+    /// (<see cref="ReservedDeviceNames"/>) is refused outright rather than mangled, because the fallback name
+    /// is honest while "NUL_.docx" would be a name the author never chose.
     /// </summary>
     internal static string SanitizeFileNameStem(string? title)
     {
         if (string.IsNullOrWhiteSpace(title)) return string.Empty;
 
-        var invalid = Path.GetInvalidFileNameChars();
         var builder = new System.Text.StringBuilder(title.Length);
         var pendingSpace = false;
 
-        foreach (var ch in title)
+        for (var i = 0; i < title.Length; i++)
         {
+            var ch = title[i];
             if (char.IsWhiteSpace(ch))
             {
                 pendingSpace = builder.Length > 0;
                 continue;
             }
-            if (char.IsControl(ch) || Array.IndexOf(invalid, ch) >= 0) continue;
+            if (char.IsControl(ch) || InvalidFileNameChars.IndexOf(ch) >= 0) continue;
+
+            // An emoji or a rare CJK glyph is ONE character to the author and TWO UTF-16 code units here. The
+            // pair is appended and counted as a unit so the cap can never cut between its halves - a lone
+            // surrogate is not text, and encoding one into the header's filename* parameter yields a
+            // replacement character in the name the reader sees. A surrogate with no partner is dropped for
+            // the same reason.
+            var isPair = char.IsHighSurrogate(ch) && i + 1 < title.Length && char.IsLowSurrogate(title[i + 1]);
+            if (char.IsSurrogate(ch) && !isPair) continue;
+
+            var separator = pendingSpace ? 1 : 0;
+            if (builder.Length + separator + (isPair ? 2 : 1) > MaxFileNameStemLength) break;
 
             if (pendingSpace)
             {
@@ -197,9 +250,23 @@ public class BookExportService
                 pendingSpace = false;
             }
             builder.Append(ch);
-            if (builder.Length >= MaxFileNameStemLength) break;
+            if (isPair) builder.Append(title[++i]);
         }
 
-        return builder.ToString().TrimEnd(' ', '.');
+        var stem = builder.ToString().TrimEnd(' ', '.');
+        return IsReservedDeviceName(stem) ? string.Empty : stem;
+    }
+
+    /// <summary>
+    /// Whether a sanitized stem would resolve to a Windows device. The reservation is on the segment before
+    /// the first dot, so "CON", "con.docx" and "Com1.v2" are all the same reserved name.
+    /// </summary>
+    private static bool IsReservedDeviceName(string stem)
+    {
+        if (stem.Length == 0) return false;
+
+        var dot = stem.IndexOf('.');
+        var baseName = (dot < 0 ? stem : stem[..dot]).TrimEnd(' ');
+        return ReservedDeviceNames.Contains(baseName);
     }
 }

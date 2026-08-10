@@ -215,7 +215,11 @@ public class BookExportServiceTests
     public async Task ExportChapter_TitleWithPathCharacters_ProducesAUsableFileName()
     {
         // Chapter titles come from the manuscript and from the author, so they carry anything: a slash, a
-        // colon, a quote. An unsanitized name breaks the download on Windows.
+        // colon, a quote. An unsanitized name breaks the download on Windows. This assertion is host-
+        // independent only because the sanitizer no longer asks the host what a filename is - see
+        // BuildFileName_StripsEveryCharacterTheREADERSPlatformForbids_NotJustThisHosts, which is the
+        // character-by-character oracle for that; when this ran off Path.GetInvalidFileNameChars() it passed
+        // here and failed on the Linux CI runner.
         var (controller, db) = await BuildAsync();
         var book = new Book { Id = Guid.NewGuid(), Title = "A book", Language = "he" };
         db.Books.Add(book);
@@ -244,6 +248,61 @@ public class BookExportServiceTests
         Assert.Equal(expected, BookExportService.BuildFileName(title, fallbackStem: "book"));
     }
 
+    [Theory]
+    [InlineData('<')]
+    [InlineData('>')]
+    [InlineData(':')]
+    [InlineData('"')]
+    [InlineData('/')]
+    [InlineData('\\')]
+    [InlineData('|')]
+    [InlineData('?')]
+    [InlineData('*')]
+    [InlineData('\0')]
+    public void BuildFileName_StripsEveryCharacterTheREADERSPlatformForbids_NotJustThisHosts(char forbidden)
+    {
+        // THE POINT OF THIS TEST: the filename is written to disk by the reader's BROWSER, not by the API
+        // host, so the rule cannot be Path.GetInvalidFileNameChars() - that answers "what can THIS machine
+        // save", and it returns 40+ characters on Windows and only {'\0','/'} on Unix. Under that call this
+        // theory passes on a developer's Windows box and fails on the ubuntu-latest CI runner for the eight
+        // characters Unix omits, and, worse than red CI, a Linux-hosted API hands a Windows reader a name
+        // their machine cannot save. Every case below must hold on EVERY host.
+        var name = BookExportService.BuildFileName($"Act 1{forbidden}2 Departure", fallbackStem: "book");
+
+        Assert.Equal("Act 12 Departure.docx", name);
+        Assert.DoesNotContain(forbidden, name);
+    }
+
+    [Theory]
+    [InlineData("CON")]         // the classic devices, all four
+    [InlineData("PRN")]
+    [InlineData("AUX")]
+    [InlineData("NUL")]
+    [InlineData("nul")]         // case does not exempt it
+    [InlineData("Com1")]
+    [InlineData("COM9")]
+    [InlineData("LPT1")]
+    [InlineData("lpt9")]
+    [InlineData("NUL.v2")]      // nor does an extension: the reservation is on the segment before the dot
+    [InlineData("con.txt")]
+    [InlineData("  CON  ")]     // nor trailing space, which Windows drops
+    public void BuildFileName_RefusesAWindowsDeviceName(string title)
+    {
+        // "NUL.docx" is not a file on Windows, it is the null device: the download would silently go nowhere.
+        Assert.Equal("book.docx", BookExportService.BuildFileName(title, fallbackStem: "book"));
+    }
+
+    [Theory]
+    [InlineData("COM0")]        // COM0/LPT0 are not reserved
+    [InlineData("LPT0")]
+    [InlineData("CONSOLE")]     // a longer word that merely starts with one
+    [InlineData("NULL")]
+    [InlineData("My CON game")] // and one that merely contains one
+    public void BuildFileName_KeepsATitleThatOnlyLooksLikeADeviceName(string title)
+    {
+        Assert.Equal(title + ".docx", BookExportService.BuildFileName(title, fallbackStem: "book"));
+    }
+
     [Fact]
     public void BuildFileName_CapsAVeryLongTitle()
     {
@@ -251,6 +310,38 @@ public class BookExportServiceTests
 
         Assert.EndsWith(".docx", name);
         Assert.True(name.Length <= 90, $"Filename should stay short enough for a Content-Disposition header, got {name.Length}.");
+    }
+
+    [Fact]
+    public void BuildFileName_CapsALongTitleWithoutSplittingASurrogatePair()
+    {
+        // An emoji is one character to the author and two UTF-16 code units to the cap. Cutting between them
+        // leaves an unpaired surrogate, which is not text: encoded into the header's filename* parameter it
+        // reaches the reader as a replacement character in the middle of their filename.
+        //
+        // The 79 ASCII characters are load-bearing: they put the FIRST emoji's two code units astride the
+        // 80-unit boundary. A title of nothing but emoji would land the cap on an even offset and pass under
+        // the broken code too, which is the shape of a test that cannot fail.
+        var name = BookExportService.BuildFileName(new string('a', 79) + string.Concat(Enumerable.Repeat("😀", 10)), fallbackStem: "book");
+
+        var stem = name[..^".docx".Length];
+        Assert.Equal(new string('a', 79), stem);
+        Assert.True(stem.Length > 0, "The cap should keep a usable stem, not empty it.");
+        Assert.All(
+            Enumerable.Range(0, stem.Length),
+            i => Assert.True(
+                !char.IsSurrogate(stem[i]) ||
+                (char.IsHighSurrogate(stem[i]) && i + 1 < stem.Length && char.IsLowSurrogate(stem[i + 1])) ||
+                (char.IsLowSurrogate(stem[i]) && i > 0 && char.IsHighSurrogate(stem[i - 1])),
+                $"Unpaired surrogate at index {i} of the filename stem."));
+    }
+
+    [Fact]
+    public void BuildFileName_DropsAnUnpairedSurrogateRatherThanEmittingOne()
+    {
+        var name = BookExportService.BuildFileName("Act \ud83d 1", fallbackStem: "book");
+
+        Assert.Equal("Act 1.docx", name);
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────────────────────────────
