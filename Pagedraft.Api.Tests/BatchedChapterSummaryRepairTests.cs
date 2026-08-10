@@ -95,12 +95,28 @@ public class BatchedChapterSummaryRepairTests
         IReadOnlyDictionary<string, string> replacementByLatinName,
         List<string> callLog,
         Func<AiRequest, bool>? throwOnTermRepair = null,
-        Action<AiRequest>? onSummarize = null)
+        Action<AiRequest>? onSummarize = null,
+        string? structuredBriefJson = null)
     {
         var mock = new Mock<IAiRouter>();
         mock.Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((AiRequest req, CancellationToken _) =>
             {
+                // be-c04: the STRUCTURED chapter-brief request (ChapterBriefService) is also a Summarization
+                // task; JsonMode is the discriminator - UnifiedAnalysisService never sets it for
+                // AnalysisType.Summarization (only LineEdit / LinguisticAnalysis), and the brief request
+                // always sets it.
+                if (structuredBriefJson is not null && req.JsonMode)
+                {
+                    callLog.Add("brief");
+                    return new AiResponse
+                    {
+                        Content = structuredBriefJson,
+                        Provider = "test",
+                        Model = "qwen3.5:9b"
+                    };
+                }
+
                 if (req.TaskType == AiTaskType.TermRepair)
                 {
                     callLog.Add("repair");
@@ -136,7 +152,13 @@ public class BatchedChapterSummaryRepairTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
-        services.AddDbContext<AppDbContext>(opt => opt.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        // A FIXED database name (evaluated ONCE here, not per DbContext) so a child DI scope - which
+        // ChapterBriefService.BuildBookChapterBriefsAsync creates per chapter - shares the SAME in-memory
+        // store, mirroring SQL Server where every scope points at one physical database. Leaving
+        // Guid.NewGuid() inside the options lambda gives each scope its OWN empty database, which is not a
+        // shape any deployment has.
+        var dbName = Guid.NewGuid().ToString();
+        services.AddDbContext<AppDbContext>(opt => opt.UseInMemoryDatabase(dbName));
 
         services.AddSingleton(router.Object);
         if (aiOptionsOverride is not null)
@@ -837,6 +859,177 @@ public class BatchedChapterSummaryRepairTests
         Assert.DoesNotContain("save", callLog);
         Assert.DoesNotContain("summarize", callLog);
         Assert.DoesNotContain("repair", callLog);
+    }
+
+    // ── (5d) THE FIRST BUILD: A ROW CREATED BY THE STRUCTURED WRITER IS NOT A WRITTEN FLAT SUMMARY ───────
+
+    /// <summary>A complete, non-degenerate structured brief the mocked router returns for the STRUCTURED
+    /// (JsonMode) request, so ChapterBriefService actually persists a row instead of degrading to null.</summary>
+    private const string ValidStructuredBriefJson = """
+        {
+          "plotEvents": ["הגיבור יוצא מהבית"],
+          "characterStates": [{ "name": "דנה", "state": "בורחת מהעיר", "emotionalArc": "פחד שהופך להחלטה" }],
+          "thematicMarkers": ["בדידות"],
+          "toneNotes": "מתוח ומאיים",
+          "openThreads": ["מי שלח את המכתב?"]
+        }
+        """;
+
+    /// <summary>
+    /// be-c04 (P1 finding 8). The Q4-A fold runs phase 1 (ChapterBriefService - the STRUCTURED brief) before
+    /// phase 2 (this flat path). Phase 1 INSERTS the shared <see cref="ChunkSummary"/> row with an empty flat
+    /// SummaryText, and AppDbContext's SaveChanges override stamps <c>CreatedAt = UtcNow</c> on the Add - so
+    /// the row is born with a NOW stamp on the FLAT surface's freshness column while the flat surface itself
+    /// is empty. Under a stamp-only guard EVERY chapter of a first build was then skipped as
+    /// <see cref="BookIntelligenceService.ChapterSkipReason.Fresh"/> and the flat summary was never written
+    /// for the whole book - the work the retired circular-arrow button used to do, and what makes the
+    /// inputs-to-this-build card fall back to the read-only structured digest for every chapter.
+    ///
+    /// The two writers are REAL here (no seeded row, no hand-stamped CreatedAt): phase 1 is
+    /// <see cref="ChapterBriefService.BuildBookChapterBriefsAsync"/> and phase 2 is the method under test, so
+    /// the row and its stamp are produced by the shipped code path, not by the fixture.
+    ///
+    /// REVERT-VERIFY: drop the <c>!string.IsNullOrWhiteSpace(existing.SummaryText)</c> conjunct from the
+    /// phase-1 freshness guard and this goes RED on the flat-summary assertion (both chapters come back as
+    /// Fresh skips with an empty SummaryText and zero summarize calls).
+    /// </summary>
+    [Fact]
+    public async Task SummarizeChapters_RowCreatedByTheStructuredBriefWriter_StillWritesTheFlatSummary()
+    {
+        var callLog = new List<string>();
+        var router = BuildRouter(
+            summaryByChapterText: new Dictionary<string, string>
+            {
+                [ChapterText(0)] = CleanSummary(Marker(0)),
+                [ChapterText(1)] = CleanSummary(Marker(1))
+            },
+            replacementByLatinName: new Dictionary<string, string>(),
+            callLog,
+            structuredBriefJson: ValidStructuredBriefJson);
+
+        using var provider = BuildProvider(router, ShippedRepairOptions());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var (bookId, chapters) = await SeedBookAsync(db, 2);
+
+        // ── Phase 1: the STRUCTURED brief build creates the rows (flat surface left empty by design) ──
+        var briefResult = await provider.GetRequiredService<ChapterBriefService>()
+            .BuildBookChapterBriefsAsync(bookId, "he", CancellationToken.None);
+        Assert.Equal(2, briefResult.BuiltChapters);
+
+        // The precondition this regression is about: a row exists, its CreatedAt is at/after the chapter's
+        // last edit, and the flat summary is EMPTY.
+        var afterPhase1 = await db.ChunkSummaries.AsNoTracking()
+            .Where(cs => cs.BookId == bookId).ToDictionaryAsync(cs => cs.ChapterId);
+        Assert.Equal(2, afterPhase1.Count);
+        foreach (var chapter in chapters)
+        {
+            Assert.True(string.IsNullOrWhiteSpace(afterPhase1[chapter.Id].SummaryText));
+            Assert.True(afterPhase1[chapter.Id].CreatedAt >= chapter.UpdatedAt);
+            Assert.False(string.IsNullOrWhiteSpace(afterPhase1[chapter.Id].StructuredJson));
+        }
+
+        callLog.Clear();
+
+        // ── Phase 2: the flat path must NOT read those rows as fresh ──
+        var outcome = await provider.GetRequiredService<BookIntelligenceService>()
+            .SummarizeChaptersCoreAsync(bookId, "he", CancellationToken.None);
+
+        Assert.Empty(outcome.Skipped);
+        Assert.Equal(
+            chapters.Select(c => c.Id).OrderBy(id => id),
+            outcome.Summarized.Select(o => o.ChapterId).OrderBy(id => id));
+        Assert.Equal(new[] { "summarize", "summarize" }, callLog);
+
+        var rows = await db.ChunkSummaries.AsNoTracking()
+            .Where(cs => cs.BookId == bookId).ToDictionaryAsync(cs => cs.ChapterId);
+
+        // THE ASSERTION THAT NAMES THE DEFECT: every chapter of a first-ever build ends with flat prose.
+        Assert.Equal(CleanSummary(Marker(0)), rows[chapters[0].Id].SummaryText);
+        Assert.Equal(CleanSummary(Marker(1)), rows[chapters[1].Id].SummaryText);
+
+        // DUAL SURFACE: the structured surface this same row carries is untouched by the flat write - same
+        // JSON, same structured build stamp, same model - and the user-edit surface is still clean.
+        foreach (var chapter in chapters)
+        {
+            Assert.Equal(afterPhase1[chapter.Id].StructuredJson, rows[chapter.Id].StructuredJson);
+            Assert.Equal(afterPhase1[chapter.Id].StructuredBuiltAt, rows[chapter.Id].StructuredBuiltAt);
+            Assert.Equal(afterPhase1[chapter.Id].BuiltWithModel, rows[chapter.Id].BuiltWithModel);
+            Assert.Equal("he", rows[chapter.Id].Language);
+            Assert.False(rows[chapter.Id].SummaryUserEdited);
+            Assert.Null(rows[chapter.Id].SummaryUserEditedAt);
+        }
+
+        // And it stays paid-once: with the flat text now written, a second pass is a pure Fresh skip.
+        callLog.Clear();
+        var second = await provider.GetRequiredService<BookIntelligenceService>()
+            .SummarizeChaptersCoreAsync(bookId, "he", CancellationToken.None);
+        Assert.Empty(second.Summarized);
+        Assert.All(second.Skipped,
+            s => Assert.Equal(BookIntelligenceService.ChapterSkipReason.Fresh, s.Reason));
+        Assert.Empty(callLog);
+    }
+
+    // ── (5e) THE SECOND INSTANCE: A FLAT SUMMARY BLANKED BY THE LANGUAGE FLIP MUST REBUILD ───────────────
+
+    /// <summary>
+    /// be-c04, the pre-Q4-A instance of the same defect. ChapterBriefService's language-flip guard BLANKS a
+    /// stale-locale <c>SummaryText</c> and its own comment promises "the flat path (SummarizeChaptersAsync)
+    /// rebuilds it for the new locale when needed". It does not own <c>CreatedAt</c> and does not touch it, so
+    /// under a stamp-only guard the blanked row read as Fresh forever and the new-locale prose was never
+    /// rebuilt - the promise was false. This pins it true.
+    ///
+    /// REVERT-VERIFY: drop the same conjunct and the row keeps the empty SummaryText the flip left behind.
+    /// </summary>
+    [Fact]
+    public async Task SummarizeChapters_FlatSummaryBlankedByTheLanguageFlip_IsRebuiltForTheNewLocale()
+    {
+        var callLog = new List<string>();
+        var router = BuildRouter(
+            summaryByChapterText: new Dictionary<string, string> { [ChapterText(0)] = CleanSummary(Marker(0)) },
+            replacementByLatinName: new Dictionary<string, string>(),
+            callLog,
+            structuredBriefJson: ValidStructuredBriefJson);
+
+        using var provider = BuildProvider(router, ShippedRepairOptions());
+        var db = provider.GetRequiredService<AppDbContext>();
+        var (bookId, chapters) = await SeedBookAsync(db, 1);
+
+        // An ENGLISH row carrying both surfaces, with the flat stamp fresher than the chapter's last edit.
+        db.ChunkSummaries.Add(new ChunkSummary
+        {
+            BookId = bookId, ChapterId = chapters[0].Id, Language = "en",
+            SummaryText = "An old English summary.",
+            StructuredJson = "{\"plotEvents\":[\"old\"]}",
+            StructuredBuiltAt = DateTimeOffset.UtcNow.AddDays(-1),
+            BuiltWithModel = "qwen3.5:9b"
+        });
+        await db.SaveChangesAsync();
+
+        // The flip: a Hebrew structured (re)build clears the now-stale English flat prose (and its user-edit
+        // guard) while leaving CreatedAt - the FLAT surface's stamp, which it does not own - alone.
+        await provider.GetRequiredService<ChapterBriefService>()
+            .LoadOrBuildChapterBriefAsync(bookId, chapters[0].Id, "he", CancellationToken.None);
+
+        var flipped = await db.ChunkSummaries.AsNoTracking().SingleAsync(cs => cs.ChapterId == chapters[0].Id);
+        Assert.True(string.IsNullOrWhiteSpace(flipped.SummaryText));
+        Assert.True(flipped.CreatedAt >= chapters[0].UpdatedAt);
+        Assert.False(flipped.SummaryUserEdited);
+
+        callLog.Clear();
+
+        await provider.GetRequiredService<BookIntelligenceService>()
+            .SummarizeChaptersAsync(bookId, "he", CancellationToken.None);
+
+        var row = await db.ChunkSummaries.AsNoTracking().SingleAsync(cs => cs.ChapterId == chapters[0].Id);
+        Assert.Equal(CleanSummary(Marker(0)), row.SummaryText);
+        Assert.Equal("he", row.Language);
+        Assert.Equal(new[] { "summarize" }, callLog);
+
+        // The structured surface the flip just rebuilt is not disturbed by the flat rebuild.
+        Assert.Equal(flipped.StructuredJson, row.StructuredJson);
+        Assert.Equal(flipped.StructuredBuiltAt, row.StructuredBuiltAt);
+        Assert.False(row.SummaryUserEdited);
+        Assert.Null(row.SummaryUserEditedAt);
     }
 
     // ── (6) THE ChunkSummary DUAL-SURFACE CONTRACT ───────────────────────────────────────────────────────

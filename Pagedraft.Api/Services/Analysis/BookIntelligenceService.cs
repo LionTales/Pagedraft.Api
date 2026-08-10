@@ -14,9 +14,12 @@ namespace Pagedraft.Api.Services.Analysis;
 /// (genre, synopsis, characters, story structure), and answer Q&A.
 ///
 /// Invalidation strategy:
-///   - Each ChunkSummary records CreatedAt.
+///   - Each ChunkSummary records CreatedAt (the FLAT surface's freshness stamp; the structured surface has
+///     its own, StructuredBuiltAt).
 ///   - On RefreshProfileAsync, compare Chapter.UpdatedAt vs ChunkSummary.CreatedAt.
-///   - Only re-summarize chapters where UpdatedAt > ChunkSummary.CreatedAt (stale).
+///   - Re-summarize a chapter whose row is stale (UpdatedAt > CreatedAt) OR whose flat SummaryText is still
+///     empty (be-c04: the row is shared with the structured writer, which creates it with a NOW stamp and an
+///     empty flat surface, so the stamp alone never proves the flat summary exists).
 ///   - After re-summarizing stale chapters, rebuild the full BookProfile.
 ///
 /// FILE-SIZE WAIVER (CLAUDE.md's ~700-line soft ceiling) - recorded by f2 (2026-07-28), with the numbers
@@ -136,7 +139,9 @@ public class BookIntelligenceService
         /// <summary>The chapter's ContentText is empty or whitespace-only.</summary>
         NoContent,
 
-        /// <summary>The existing summary row is fresh: CreatedAt >= Chapter.UpdatedAt.</summary>
+        /// <summary>The existing summary row is fresh: it ALREADY CARRIES a flat SummaryText and its
+        /// CreatedAt is at/after Chapter.UpdatedAt (be-c04 - both halves, because the row is shared with the
+        /// structured writer, which creates it with a NOW stamp and an empty flat surface).</summary>
         Fresh,
 
         /// <summary>wb3-c04 clobber guard: the existing row's SummaryUserEdited is set.</summary>
@@ -314,8 +319,26 @@ public class BookIntelligenceService
                 continue;
             }
 
+            // be-c04: the stamp is only evidence about a surface that HAS content. CreatedAt is a ROW-level
+            // column and this row has two writers, so a NOW stamp on it does not mean the FLAT surface was
+            // ever written. Two shipped writers create/leave a row whose CreatedAt is at/after the chapter's
+            // last edit while SummaryText is empty:
+            //   - the Q4-A fold's phase 1 (ChapterBriefService inserts the row for the STRUCTURED brief and
+            //     leaves SummaryText empty by design; the SaveChanges override then stamps CreatedAt = now),
+            //     so on a first build EVERY chapter read as Fresh here and the flat summary was never written
+            //     for the whole book;
+            //   - the language-flip guard in ChapterBriefService, which BLANKS a stale-locale SummaryText and
+            //     relies on this path to rebuild it.
+            // So the gate asks about the flat surface itself, exactly as the structured gate already does
+            // (ChapterBriefService.IsFresh opens with IsUsable(StructuredJson) for the mirror-image reason),
+            // and as BookContextAssembler already does when it filters blank flat summaries out of the
+            // assembly. A blank SummaryText is not a summary anywhere else in the system; it must not count
+            // as one here either. The user-edit clobber guard below is unaffected: a row that falls through
+            // this guard reaches it next, and a user-edited row can never be blank (UpdateChapterSummary
+            // rejects blank text, and the flip that blanks the text resets the flag with it).
             if (existingSummaries.TryGetValue(chapter.Id, out var existing) &&
-                existing.CreatedAt >= chapter.UpdatedAt)
+                existing.CreatedAt >= chapter.UpdatedAt &&
+                !string.IsNullOrWhiteSpace(existing.SummaryText))
             {
                 _logger.LogDebug("Chapter {ChapterId} summary is fresh, skipping", chapter.Id);
                 skipped.Add(new SkippedChapter(chapter.Id, ChapterSkipReason.Fresh));
