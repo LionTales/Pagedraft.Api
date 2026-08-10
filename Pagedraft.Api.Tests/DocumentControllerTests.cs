@@ -4,8 +4,10 @@ using System.Linq;
 using System.Threading;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Moq;
 using Pagedraft.Api.Controllers;
+using Pagedraft.Api.Data;
 using Pagedraft.Api.Models.Dtos;
 using Pagedraft.Api.Services;
 using Xunit;
@@ -47,8 +49,13 @@ public class DocumentControllerTests
         var bookAssembly = new FakeBookAssemblyService();
 
         // The export paths are covered by BookExportServiceTests, which wires a real DB; this fixture only
-        // drives Import, so the export service is constructed over the same fakes and never called.
-        var bookExport = new BookExportService(null!, chapterService, sfdt, bookAssembly);
+        // drives Import, so the export service is constructed over the same fakes and never called. The DB is
+        // still a real in-memory context (not null!) so a future constructor-time DB touch fails loudly here
+        // instead of NRE-ing the whole class.
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+        var bookExport = new BookExportService(new AppDbContext(options), chapterService, sfdt, bookAssembly);
 
         return new DocumentController(parser, sfdt, chapterService, bookAssembly, bookExport);
     }

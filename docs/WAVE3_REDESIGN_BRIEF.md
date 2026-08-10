@@ -5,8 +5,12 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > ## Decisions taken - owner session, 2026-08-09
 >
 > All thirteen questions in section 8 are DECIDED. Section 8 remains below as the options record;
-> this block is the authoritative answer sheet, and the implementation plan
-> (`src/.cursor/plans/_todo/wave3-implementation-2026-08-09.plan.md`) is written from it.
+> this block is the authoritative answer sheet, and the implementation plan is written from it. That
+> plan is not part of this repo - it lives in the PageDraft workspace's plan tree, which is not a git
+> repo itself, at `src/.cursor/plans/_todo/wave3-implementation-2026-08-09.plan.md` relative to the
+> workspace root that also holds this repo's checkout (`src/Pagedraft.Api-repo`) and the client's
+> (`src/pagedraft-client`) as siblings. A reader of only this repo will not have that path on disk;
+> ask the owner for the plan file directly.
 >
 > | Q | Decision |
 > |---|---|

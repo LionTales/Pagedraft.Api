@@ -92,7 +92,10 @@ public class BookExportService
     /// The DOCX media type, spelled once. Both endpoints and their tests read it from here.
     ///
     /// MIRRORED IN THE CLIENT as <c>DOCX_CONTENT_TYPE</c> (pagedraft-client
-    /// <c>src/app/core/models/export.ts</c>); the two must stay byte-identical.
+    /// <c>src/app/core/models/export.ts</c>); the two must stay byte-identical. This is not a decorative
+    /// duplicate: the client compares an incoming response's Content-Type against its copy of this value
+    /// (<c>export.service.ts</c>) and refuses the download when they disagree, so a drift here breaks every
+    /// export in that client build, not just the label on it.
     /// </summary>
     public const string DocxContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
@@ -295,9 +298,9 @@ public class BookExportService
     /// The scenes of the given chapters, keyed by chapter, in the order they would be read.
     ///
     /// One query per export, and it returns NO ROWS for a book nobody has split - which is nearly every book,
-    /// so the common path costs a round trip and nothing else. Untracked because this is a read: the chapters
-    /// are already in the change tracker (see the note on <see cref="ChapterService.GetAllByBookAsync"/>) and
-    /// nothing here mutates a scene.
+    /// so the common path costs a round trip and nothing else. Untracked because this is a read, the same
+    /// reasoning as the chapters this export also loads (see the note on
+    /// <see cref="ChapterService.GetAllByBookAsync"/>): nothing here mutates a scene either.
     /// </summary>
     private async Task<Dictionary<Guid, List<Scene>>> LoadScenesAsync(IReadOnlyCollection<Guid> chapterIds, CancellationToken ct)
     {

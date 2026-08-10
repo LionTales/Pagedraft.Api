@@ -26,14 +26,14 @@ public sealed class BookReviewStatus
     public int FindingCount { get; init; }
 
     /// <summary>
-    /// Wave 3 / M3. Findings still at status <c>open</c> — never touched by the author. NOT derivable from
+    /// Wave 3 / M3. Findings still at status <c>open</c> - never touched by the author. NOT derivable from
     /// <see cref="FindingCount"/> minus <see cref="ResolvedFindingCount"/>, because <c>acknowledged</c> is a
     /// third bucket that is neither.
     /// </summary>
     public int OpenFindingCount { get; init; }
 
     /// <summary>
-    /// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> — the same partition the shipped
+    /// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> - the same partition the shipped
     /// findings ledger calls "resolved" (its active group is open + acknowledged). Working-through progress is
     /// this over <see cref="FindingCount"/>, so the stage spine can render it WITHOUT downloading the whole
     /// findings list. Read the split from <see cref="FindingStatusPartition"/>; do not re-spell the status

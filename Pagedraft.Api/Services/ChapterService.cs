@@ -37,9 +37,16 @@ public class ChapterService
         _bookEntities = bookEntities;
     }
 
+    /// <summary>
+    /// All of a book's chapters, in <c>Order</c>. Untracked: every caller - the chapter list and reorder
+    /// responses in <see cref="Controllers.ChaptersController"/>, and the export read in
+    /// <see cref="BookExportService"/> - only reads or projects these rows and never mutates the returned
+    /// instances, so nothing needs them tracked. If a future caller needs to mutate a chapter fetched this
+    /// way, load it through a tracked query instead of removing this for everyone.
+    /// </summary>
     public async Task<List<Chapter>> GetAllByBookAsync(Guid bookId, CancellationToken ct = default)
     {
-        return await _db.Chapters.Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync(ct);
+        return await _db.Chapters.AsNoTracking().Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync(ct);
     }
 
     public async Task<Chapter?> GetByIdAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)

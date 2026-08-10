@@ -108,7 +108,7 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
 // Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
 // reason as the three registries above (one shared map across request scopes), and the runner is stateless.
-// Unlike them this one keys by BookId ALONE — BookProfile is one row per BOOK, so two languages contend for
+// Unlike them this one keys by BookId ALONE - BookProfile is one row per BOOK, so two languages contend for
 // the same row; see BookProfileBuildCoordinator for the full rationale.
 builder.Services.AddSingleton<IBookProfileBuilder, ScopedBookProfileBuilder>();
 builder.Services.AddSingleton<BookProfileBuildCoordinator>();

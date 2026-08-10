@@ -110,7 +110,13 @@ public class Wave3StageSignalContractTests
     [Fact]
     public async Task Create_ReportsAnEmptyBook_NotAnUnknownOne()
     {
+        // BooksController.Create states chapterCount/chaptersWithTextCount as the literal 0/0 rather than
+        // re-querying (a brand-new book cannot have chapters yet, so a query would be pure overhead). That
+        // hardcode is only legitimate as long as the premise holds - Create never seeds a chapter. Assert the
+        // PREMISE against the real DB, not just the DTO the same hardcode produced; if a future change ever
+        // seeds a default chapter on create, the DTO would still say 0/0 while this DB check goes red.
         using var provider = BuildProvider();
+        var db = provider.GetRequiredService<AppDbContext>();
         var controller = BuildController(provider);
 
         var created = Assert.IsType<CreatedAtActionResult>(
@@ -119,6 +125,9 @@ public class Wave3StageSignalContractTests
 
         Assert.Equal(0, dto.ChapterCount);
         Assert.Equal(0, dto.ChaptersWithTextCount);
+
+        var actualChapterCount = await db.Chapters.CountAsync(c => c.BookId == dto.Id, CancellationToken.None);
+        Assert.Equal(0, actualChapterCount); // proves the hardcode, does not just restate it
     }
 
     [Fact]
