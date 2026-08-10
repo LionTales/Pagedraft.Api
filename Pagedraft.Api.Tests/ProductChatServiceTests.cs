@@ -167,7 +167,11 @@ public class ProductChatServiceTests
         // (4) The selected guide's real text, and its citable id.
         Assert.Contains("=== GUIDE id=export lang=en ===", instruction, StringComparison.Ordinal);
         Assert.Contains("Export produces a DOCX file", instruction, StringComparison.Ordinal);
-        Assert.Contains("Save before you export", instruction, StringComparison.Ordinal);
+        // A section heading from deep inside the guide, so this asserts the WHOLE file travels rather
+        // than only its opening. be-c06 renamed it (from "Save before you export", which blamed the
+        // author for the scene-split staleness defect) and kept the token "export" in it deliberately:
+        // GuideSelector scores headings only, and this is the one heading that carries that token.
+        Assert.Contains("Which version of your text the export writes", instruction, StringComparison.Ordinal);
     }
 
     /// <summary>

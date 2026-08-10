@@ -1,6 +1,8 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Pagedraft.Api.Data;
+using Pagedraft.Api.Models;
 
 namespace Pagedraft.Api.Services;
 
@@ -170,16 +172,27 @@ public class BookExportService
     private readonly SfdtConversionService _sfdtConversion;
     private readonly BookAssemblyService _bookAssembly;
 
+    /// <summary>
+    /// Optional so the direct-construction tests keep compiling; DI always supplies the real logger. Its one
+    /// job is <see cref="WarnIfBothCopiesLookWritten"/>: a chapter and its scenes are two independently
+    /// writable stores for one chapter's prose (see <see cref="RenderableUnitsOf"/>), and when both have been
+    /// written the export has to pick one. Picking one silently is the class of dishonesty this whole wave is
+    /// about, and there is no channel to tell the author on a DOCX download, so at minimum the server says so.
+    /// </summary>
+    private readonly ILogger<BookExportService>? _logger;
+
     public BookExportService(
         AppDbContext db,
         ChapterService chapters,
         SfdtConversionService sfdtConversion,
-        BookAssemblyService bookAssembly)
+        BookAssemblyService bookAssembly,
+        ILogger<BookExportService>? logger = null)
     {
         _db = db;
         _chapters = chapters;
         _sfdtConversion = sfdtConversion;
         _bookAssembly = bookAssembly;
+        _logger = logger;
     }
 
     /// <summary>
@@ -199,6 +212,10 @@ public class BookExportService
     /// if that leaves nothing at all the answer is <see cref="BookExportOutcome.NothingWritten"/> rather than
     /// a valid, correctly-named, empty .docx. Both halves matter, because the partial case is the worse one -
     /// a file that looks like the author's manuscript with three chapters quietly missing from it.
+    ///
+    /// AND IT NEVER SHIPS A DRAFT THE AUTHOR HAS ALREADY REPLACED: a chapter the author has split into scenes
+    /// is assembled from those scenes when they hold the writing, because <c>chapter.ContentSfdt</c> is then a
+    /// frozen pre-split copy. See <see cref="RenderableUnitsOf"/> for the rule and why it is conditional.
     /// </summary>
     public async Task<BookExportResult> ExportBookAsync(Guid bookId, CancellationToken ct = default)
     {
@@ -213,16 +230,24 @@ public class BookExportService
         var chapters = await _chapters.GetAllByBookAsync(bookId, ct);
         if (chapters.Count == 0) return BookExportResult.NothingToExport();
 
+        var scenesByChapter = await LoadScenesAsync(chapters.Select(c => c.Id).ToList(), ct);
+
         var buffers = new List<byte[]>(chapters.Count);
         var skipped = new List<ExportSkippedChapter>();
         foreach (var chapter in chapters)
         {
-            if (!HasRenderableContent(chapter.ContentSfdt))
+            scenesByChapter.TryGetValue(chapter.Id, out var scenes);
+            var units = ResolveUnitsFor(chapter, scenes);
+            if (units.Count == 0)
             {
                 skipped.Add(new ExportSkippedChapter(chapter.Order, chapter.Title));
                 continue;
             }
-            buffers.Add(_sfdtConversion.ConvertSfdtToDocx(chapter.ContentSfdt));
+            // A scene-composed chapter contributes SEVERAL buffers to the same list, in scene order, with
+            // nothing inserted between them: scenes are contiguous prose inside one chapter, and the split
+            // deleted whatever break marker the author had written, so inventing one would be writing into
+            // their manuscript.
+            foreach (var unit in units) buffers.Add(_sfdtConversion.ConvertSfdtToDocx(unit));
         }
 
         // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
@@ -242,15 +267,153 @@ public class BookExportService
     /// is the book path's all-unwritten case seen through a one-chapter window. It answers
     /// <see cref="BookExportOutcome.NothingWritten"/> instead. Nothing can be "skipped" on this path - the
     /// unit asked for either exports or it does not - so the result's skipped list is always empty here.
+    ///
+    /// THE SCENE RULE IS ALSO SHARED, and it had drifted here in the other direction: this path read
+    /// <c>chapter.ContentSfdt</c> and never looked at the chapter's scenes, so "export this chapter" on a
+    /// scene-split chapter handed back the pre-split draft under the chapter's own name. Both paths now route
+    /// the decision through the one <see cref="RenderableUnitsOf"/>, so they cannot answer differently about
+    /// the same chapter.
     /// </summary>
     public async Task<BookExportResult> ExportChapterAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
     {
         var chapter = await _chapters.GetByIdAsync(bookId, chapterId, ct);
         if (chapter == null) return BookExportResult.ChapterNotFound();
-        if (!HasRenderableContent(chapter.ContentSfdt)) return BookExportResult.NothingWritten();
 
-        var docx = _sfdtConversion.ConvertSfdtToDocx(chapter.ContentSfdt);
+        var scenesByChapter = await LoadScenesAsync(new[] { chapter.Id }, ct);
+        scenesByChapter.TryGetValue(chapter.Id, out var scenes);
+
+        var units = ResolveUnitsFor(chapter, scenes);
+        if (units.Count == 0) return BookExportResult.NothingWritten();
+
+        // AssembleDocx returns a single buffer untouched, so an unsplit chapter produces byte-for-byte what
+        // it always did and only a scene-composed one goes through the assembler.
+        var docx = _bookAssembly.AssembleDocx(units.Select(_sfdtConversion.ConvertSfdtToDocx).ToList());
         return BookExportResult.Ok(docx, BuildFileName(chapter.Title, fallbackStem: "chapter"));
+    }
+
+    /// <summary>
+    /// The scenes of the given chapters, keyed by chapter, in the order they would be read.
+    ///
+    /// One query per export, and it returns NO ROWS for a book nobody has split - which is nearly every book,
+    /// so the common path costs a round trip and nothing else. Untracked because this is a read: the chapters
+    /// are already in the change tracker (see the note on <see cref="ChapterService.GetAllByBookAsync"/>) and
+    /// nothing here mutates a scene.
+    /// </summary>
+    private async Task<Dictionary<Guid, List<Scene>>> LoadScenesAsync(IReadOnlyCollection<Guid> chapterIds, CancellationToken ct)
+    {
+        var scenes = await _db.Scenes
+            .AsNoTracking()
+            .Where(s => chapterIds.Contains(s.ChapterId))
+            .ToListAsync(ct);
+
+        return scenes
+            .GroupBy(s => s.ChapterId)
+            // Order, then CreatedAt as a deterministic tiebreak: Order is what the split assigns, what the
+            // editor's chapter tree renders, and what SceneService.GetAllByChapterAsync already sorts by.
+            .ToDictionary(g => g.Key, g => g.OrderBy(s => s.Order).ThenBy(s => s.CreatedAt).ToList());
+    }
+
+    /// <summary>
+    /// Whether a chapter's SCENES hold its current text, rather than the chapter row.
+    ///
+    /// A chapter and its scenes are two independently writable stores for one chapter's prose, and NOTHING in
+    /// this product copies between them in either direction: <c>SplitScenesFromChapterAsync</c> reads
+    /// <c>Chapter.ContentText</c> and writes scenes, and from that moment the chapter row is a frozen pre-split
+    /// copy while the editor happily saves into either one. So an export has to decide which is the author's
+    /// manuscript.
+    ///
+    /// THE ANSWER IS NOT "THE SCENES, WHENEVER THERE ARE SCENES", and it is worth saying why, because that is
+    /// the rule this looks like it should be. The split is LOSSY: it slices plain text (so the chapter's
+    /// formatting is gone), it deletes the scene-break markers themselves, it DISCARDS any segment shorter
+    /// than <see cref="Analysis.SceneAutoSplitRules.MinSceneContentLength"/>, and it caps at
+    /// <see cref="Analysis.SceneAutoSplitRules.MaxScenesPerChapter"/>. Right after a split the scenes are
+    /// therefore a strictly poorer copy of the same prose, and preferring them would strip formatting and drop
+    /// text out of the manuscript of an author who never touched a scene - data loss introduced as the cure
+    /// for data loss.
+    ///
+    /// So the question asked is the narrower one that actually matters: HAS THE AUTHOR WRITTEN INTO THE SCENE
+    /// LAYER? <c>UpdatedAt > CreatedAt</c> answers it exactly in this product. The <c>SaveChanges</c> override
+    /// stamps a Scene's two timestamps equal on Add and bumps only <c>UpdatedAt</c> on Modify, the split Adds
+    /// every scene in one <c>SaveChanges</c>, and the only client call that modifies a scene is the editor's
+    /// content save. A scene created directly through the API with content and never touched again is the one
+    /// case this reads as "not written" - it is unreachable from the client, and reading it that way keeps the
+    /// pre-existing behaviour rather than inventing a new one.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DECIDE: the case where BOTH copies have been written (chapter, split,
+    /// scene, then the chapter node again). Neither copy is a superset, nothing records which the author
+    /// intended, and the honest resolutions all cost a persistence or product decision - see the be-c06
+    /// section of the wave 3 fixes plan. This takes the scenes and
+    /// <see cref="WarnIfBothCopiesLookWritten"/> makes it visible.
+    /// </summary>
+    internal static bool ScenesHoldTheChaptersCurrentText(IReadOnlyList<Scene>? scenes)
+        => scenes is { Count: > 0 } && scenes.Any(s => s.UpdatedAt > s.CreatedAt);
+
+    /// <summary>
+    /// <see cref="RenderableUnitsOf"/> plus the one thing a pure function cannot do: say out loud when the
+    /// export had to choose between two written copies of the same chapter. Both export paths go through this
+    /// rather than calling the resolver directly, so the warning cannot exist on one path only.
+    /// </summary>
+    private IReadOnlyList<string> ResolveUnitsFor(Chapter chapter, IReadOnlyList<Scene>? scenes)
+    {
+        WarnIfBothCopiesLookWritten(chapter, scenes);
+        return RenderableUnitsOf(chapter, scenes);
+    }
+
+    /// <summary>
+    /// Logs when a chapter's scenes hold the writing AND the chapter row was itself written afterwards. The
+    /// export takes the scenes; the chapter-level edit that landed later is not in the file, and nothing on
+    /// the wire can tell the author so (a DOCX download has no room for it and be-c02's headers are about
+    /// chapters left OUT, not about which copy of a chapter was taken).
+    ///
+    /// Not fatal, and deliberately not a skip: the scenes are still real text the author wrote, so shipping
+    /// them beats shipping nothing. This is the observability half of a defect whose real fix is a decision
+    /// about where the composite lives.
+    ///
+    /// The comparison is loose on purpose - <c>Chapter.UpdatedAt</c> is bumped by a title or order change too
+    /// (<c>ChapterService.SaveAsync</c>), so this can warn about a rename. A false warning costs a log line; a
+    /// missing one costs the author an explanation of where their paragraph went.
+    /// </summary>
+    private void WarnIfBothCopiesLookWritten(Chapter chapter, IReadOnlyList<Scene>? scenes)
+    {
+        if (_logger == null || !ScenesHoldTheChaptersCurrentText(scenes)) return;
+
+        var written = scenes!;
+        var newestScene = written.Max(s => s.UpdatedAt);
+        if (chapter.UpdatedAt <= newestScene) return;
+
+        _logger.LogWarning(
+            "Export of chapter {ChapterId} ('{ChapterTitle}', book {BookId}) took its {SceneCount} SCENES, " +
+            "whose newest write is {SceneUpdatedAt:o}, but the chapter row was itself written at " +
+            "{ChapterUpdatedAt:o}. A chapter and its scenes are separate stores and PageDraft does not merge " +
+            "them, so any chapter-level edit made after that scene write is not in the exported file.",
+            chapter.Id, chapter.Title, chapter.BookId, written.Count, newestScene, chapter.UpdatedAt);
+    }
+
+    /// <summary>
+    /// The SFDT documents a chapter contributes to an export, in reading order: its scenes when they hold the
+    /// writing (<see cref="ScenesHoldTheChaptersCurrentText"/>), otherwise the chapter's own stored document.
+    /// Empty means the chapter has nothing renderable, which the book path reports as a skipped chapter and
+    /// the chapter path answers as <see cref="BookExportOutcome.NothingWritten"/>.
+    ///
+    /// Unrenderable units are dropped by the same <see cref="HasRenderableContent"/> guard the chapter row
+    /// goes through - which already knows <see cref="SceneService"/>'s empty default. A chapter whose scenes
+    /// hold the writing but are ALL blank therefore contributes nothing and is reported, rather than silently
+    /// falling back to a pre-split draft the author has replaced with nothing.
+    /// </summary>
+    internal static IReadOnlyList<string> RenderableUnitsOf(Chapter chapter, IReadOnlyList<Scene>? scenes)
+    {
+        if (ScenesHoldTheChaptersCurrentText(scenes))
+        {
+            return scenes!
+                .Select(s => s.ContentSfdt)
+                .Where(HasRenderableContent)
+                .Select(sfdt => sfdt!)
+                .ToList();
+        }
+
+        return HasRenderableContent(chapter.ContentSfdt)
+            ? new[] { chapter.ContentSfdt }
+            : Array.Empty<string>();
     }
 
     /// <summary>
