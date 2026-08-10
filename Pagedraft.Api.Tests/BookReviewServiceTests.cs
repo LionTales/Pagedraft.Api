@@ -2094,6 +2094,53 @@ public class BookReviewServiceTests
         Assert.Equal(2, rows.Count);
     }
 
+    // ─── W6b (be-c05, ONE CASING POLICY). A row whose Status reads "Open" is counted as OPEN by the status
+    //         probe (FindingStatusPartition is case-insensitive, deliberately: the SQL column is CI-collated and a
+    //         differently-cased value carries no author decision). The reconciler used to ask the same question with
+    //         StringComparison.Ordinal, so it read that SAME row as user-acted and preserved it forever - the spine
+    //         would report it as still open on every rebuild while the row could never be cleared. Both sides now
+    //         route through FindingStatusPartition, so the two answers cannot diverge. ──────────────────────────────
+    [Fact]
+    public async Task BuildBookReviewAsync_VanishedOpenRow_IsDeletedRegardlessOfStatusCasing()
+    {
+        var holder = new WindowedResponseHolder
+        {
+            ByWindowIndex = new Dictionary<int, string?>
+            {
+                [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "Old ch0", 0)),
+                [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "Old ch1", 1)),
+            }
+        };
+        using var provider = BuildWindowedProvider(out _, holder);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var bookId = await SeedReviewableBookAsync(db, chapterCount: 2);
+
+        var svc = provider.GetRequiredService<BookReviewService>();
+        Assert.True((await svc.BuildBookReviewAsync(bookId, "he")).Ready);
+
+        // A hand-edited / imported row carrying the SAME vocabulary member in a different casing.
+        var oddlyCased = await db.BookFindings.FirstAsync(f => f.BookId == bookId && f.Rationale == "Old ch0");
+        oddlyCased.Status = "Open";
+        await db.SaveChangesAsync();
+
+        // PREMISE: the status probe (what the spine's progress line renders) counts it as open.
+        var status = await svc.GetStatusAsync(bookId, "he");
+        Assert.Equal(2, status.OpenFindingCount);
+
+        await TouchSummaryBaselineAsync(db, bookId);
+        holder.ByWindowIndex = new Dictionary<int, string?>
+        {
+            [1] = JsonCombinedFindings(new CombinedFindingSpec("plot", "improve", 2, "New ch0", 0)),
+            [2] = JsonCombinedFindings(new CombinedFindingSpec("character", "improve", 2, "New ch1", 1)),
+        };
+        Assert.True((await svc.BuildBookReviewAsync(bookId, "he")).Ready);
+
+        var rows = await db.BookFindings.AsNoTracking().Where(f => f.BookId == bookId).ToListAsync();
+        Assert.DoesNotContain(rows, f => f.Rationale == "Old ch0"); // NOT preserved as if the author had acted
+        Assert.DoesNotContain(rows, f => f.Rationale == "Old ch1");
+        Assert.Equal(2, rows.Count);
+    }
+
     // ─── W7a (be-c03 P1-2, THE HEADLINE FIX). A book with ONE GENUINELY EMPTY chapter (order 1: no brief, no
     //         summary, blank ContentText — a title-only "Part I" divider or a DOCX artefact). BookContextAssembler
     //         SKIPS it, so it is never a window primary and can NEVER be in reviewedPrimaryOrders — on this build or

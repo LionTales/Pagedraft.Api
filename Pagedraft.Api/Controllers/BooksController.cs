@@ -915,9 +915,10 @@ public class BooksController : ControllerBase
     }
 
     /// <summary>
-    /// Update the workflow status of a single whole-book finding. Body { status: acknowledge | dismiss | done
-    /// | open }; the imperative verbs map to the BookFinding.Status set (acknowledged | dismissed | done |
-    /// open). MIRRORS AnalysisController.UpdateSuggestionOutcome: validate the value (BadRequest on invalid),
+    /// Update the workflow status of a single whole-book finding. The accepted body values and the persisted
+    /// value each one maps to are declared by <see cref="FindingStatusPartition"/> (imperative verbs and the
+    /// stored adjectives are both accepted); this endpoint does not spell them, and neither should its
+    /// callers' docs. MIRRORS AnalysisController.UpdateSuggestionOutcome: validate the value (BadRequest on invalid),
     /// set + SaveChanges, return the updated finding. IDEMPOTENT: PATCH-ing the same status twice is a no-op
     /// success (setting a field to its current value + SaveChanges changes nothing).
     /// </summary>
@@ -931,8 +932,9 @@ public class BooksController : ControllerBase
         if (request == null || string.IsNullOrWhiteSpace(request.Status))
             return BadRequest("Status is required.");
 
-        if (!TryMapFindingStatus(request.Status, out var status))
-            return BadRequest("Invalid status. Must be acknowledge, dismiss, done, or open.");
+        if (!FindingStatusPartition.TryParse(request.Status, out var status))
+            return BadRequest(
+                "Invalid status. Must be one of: " + string.Join(", ", FindingStatusPartition.AcceptedInputs) + ".");
 
         var finding = await _db.BookFindings.FirstOrDefaultAsync(f => f.Id == id && f.BookId == bookId, ct);
         if (finding == null) return NotFound();
@@ -941,36 +943,6 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         return Ok(ToFindingDto(finding));
-    }
-
-    /// <summary>
-    /// Maps the FE's imperative status verb to the persisted BookFinding.Status value (case-insensitive).
-    /// Accepts both the verb form (acknowledge/dismiss) and the stored adjective form
-    /// (acknowledged/dismissed) so the endpoint is tolerant of either; "done" and "open" are identical in
-    /// both forms.
-    /// </summary>
-    private static bool TryMapFindingStatus(string raw, out string status)
-    {
-        switch (raw.Trim().ToLowerInvariant())
-        {
-            case "acknowledge":
-            case "acknowledged":
-                status = "acknowledged";
-                return true;
-            case "dismiss":
-            case "dismissed":
-                status = "dismissed";
-                return true;
-            case "done":
-                status = "done";
-                return true;
-            case "open":
-                status = "open";
-                return true;
-            default:
-                status = string.Empty;
-                return false;
-        }
     }
 
     private static BookReviewStatusDto ToReviewStatusDto(BookReviewStatus s) => new(

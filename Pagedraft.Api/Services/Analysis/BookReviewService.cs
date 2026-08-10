@@ -115,30 +115,6 @@ public sealed class BookReviewStatus
     public bool IsReady => HasBriefs && HasReview && !BuiltWithDifferentModel && !StaleVsBriefs;
 }
 
-/// <summary>
-/// The ONE place the persisted <c>BookFinding.Status</c> vocabulary (open | acknowledged | dismissed | done)
-/// is partitioned into "still to work through" and "resolved". Extracted for Wave 3 / M3 so the count on the
-/// status payload and the ledger's own grouping can never drift apart: the client's findings ledger renders
-/// open + acknowledged as its ACTIVE group and dismissed + done as its RESOLVED group, and a spine that
-/// counted differently would report progress the ledger contradicts on the next screen.
-/// </summary>
-public static class FindingStatusPartition
-{
-    public const string Open = "open";
-    public const string Acknowledged = "acknowledged";
-    public const string Dismissed = "dismissed";
-    public const string Done = "done";
-
-    /// <summary>Strictly <c>open</c>: never looked at. An acknowledged finding is NOT open.</summary>
-    public static bool IsOpen(string? status) =>
-        string.Equals(status, Open, StringComparison.OrdinalIgnoreCase);
-
-    /// <summary><c>dismissed</c> or <c>done</c>: the author is finished with it, either way.</summary>
-    public static bool IsResolved(string? status) =>
-        string.Equals(status, Dismissed, StringComparison.OrdinalIgnoreCase)
-        || string.Equals(status, Done, StringComparison.OrdinalIgnoreCase);
-}
-
 /// <summary>Result of a whole-book review build job.</summary>
 public sealed class BookReviewBuildResult
 {
@@ -2542,7 +2518,7 @@ public class BookReviewService
             EvidenceJson = JsonSerializer.Serialize(evidence, SerializeOpts),
             ChapterAnchorsJson = JsonSerializer.Serialize(anchors, SerializeOpts),
             SuggestedAction = string.IsNullOrWhiteSpace(item.SuggestedAction) ? null : item.SuggestedAction,
-            Status = "open",
+            Status = FindingStatusPartition.Open,
             DedupKey = dedupKey,
             LegacyDedupKeyV1 = legacyKey,
             BuiltWithModel = builtWithModel
@@ -2707,7 +2683,7 @@ public class BookReviewService
             }
 
             var prior = match.Row;
-            var priorIsUserActed = !string.Equals(prior.Status, "open", StringComparison.Ordinal);
+            var priorIsUserActed = FindingStatusPartition.IsUserActed(prior.Status);
             if (match.ViaReword)
             {
                 rewordFolds++;
@@ -2831,8 +2807,8 @@ public class BookReviewService
         {
             if (matchedExistingIds.Contains(stale.Id))
                 continue; // still present (matched on the current OR the legacy key) → handled above
-            if (!string.Equals(stale.Status, "open", StringComparison.Ordinal))
-                continue; // acknowledged/dismissed/done → preserve the user's decision (keep the row).
+            if (FindingStatusPartition.IsUserActed(stale.Status))
+                continue; // acknowledged/dismissed/done (or an unknown member) → preserve the user's decision.
             // be-c02 multi-anchor scope + b2 invalid-anchor exclusion + b3 no-anchor rule (be-c03: measured against
             // the REVIEWABLE set, not the raw chapter set) — see BookFindingReconciler.IsVanishedOpenDeletable.
             if (!BookFindingReconciler.IsVanishedOpenDeletable(

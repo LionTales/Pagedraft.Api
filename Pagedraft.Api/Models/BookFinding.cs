@@ -12,7 +12,7 @@ namespace Pagedraft.Api.Models;
 ///
 /// Dimension values: plot | character | pacing | tone | theme | continuity
 /// Verdict values:   keep | improve | cut
-/// Status values:    open | acknowledged | dismissed | done
+/// Status values:    declared by Services.Analysis.FindingStatusPartition (see Status below)
 ///
 /// Severity 1-3:
 ///   1 = minor (optional polish -- nice to have)
@@ -63,8 +63,10 @@ public class BookFinding
     /// <summary>Optional editorial action the model suggests (e.g. "Tighten chapter 3 opening").</summary>
     public string? SuggestedAction { get; set; }
 
-    /// <summary>Workflow status: open | acknowledged | dismissed | done. Defaults to "open".</summary>
-    public string Status { get; set; } = "open";
+    /// <summary>Workflow status. The vocabulary, its casing policy and the open/resolved split are declared
+    /// ONCE by <see cref="Services.Analysis.FindingStatusPartition"/>; read every status question from there
+    /// rather than comparing this string to a literal.</summary>
+    public string Status { get; set; } = Services.Analysis.FindingStatusPartition.Open;
 
     /// <summary>
     /// Deterministic dedup key used to preserve user-set Status across rebuild runs.

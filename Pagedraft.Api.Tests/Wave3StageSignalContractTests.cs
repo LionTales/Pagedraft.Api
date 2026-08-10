@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
@@ -332,6 +333,140 @@ public class Wave3StageSignalContractTests
     {
         Assert.Equal(isOpen, FindingStatusPartition.IsOpen(status));
         Assert.Equal(isResolved, FindingStatusPartition.IsResolved(status));
+    }
+
+    // ─── The MECHANICAL completeness oracle (be-c05) ──────────────────────────────────────────────
+    //
+    // The theory above states the vocabulary by hand on BOTH sides, so a FIFTH status member added to
+    // FindingStatusPartition would land in neither bucket and every assertion here would stay green. These
+    // tests DISCOVER the vocabulary instead - by reflecting over the declared string constants - so the
+    // member itself is the input and nobody has to remember to add a row. Adding a const without
+    // classifying it, without listing it in `All`, or without accepting it at the PATCH endpoint is RED.
+
+    /// <summary>Reflects the declared vocabulary. This is the DISCOVERED side of every oracle below: it must
+    /// never be replaced with a hand-written list, or the oracles become a restatement of the thing they check.</summary>
+    private static IReadOnlyList<string> DeclaredStatusMembers() =>
+        typeof(FindingStatusPartition)
+            .GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy)
+            .Where(f => f.IsLiteral && !f.IsInitOnly && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToList();
+
+    [Fact]
+    public void FindingStatusPartition_ClassifiesEveryMemberOfItsOwnVocabulary()
+    {
+        var members = DeclaredStatusMembers();
+
+        // Non-vacuity floor: a reflection query that silently returns nothing would pass every loop below.
+        Assert.NotEmpty(members);
+        Assert.Equal(members.Count, members.Distinct(StringComparer.Ordinal).Count());
+
+        foreach (var member in members)
+        {
+            Assert.True(
+                FindingStatusPartition.BucketOf(member) != FindingStatusBucket.Unknown,
+                $"Status member '{member}' is declared by FindingStatusPartition but BucketOf does not " +
+                "classify it, so it counts as neither open nor resolved on the spine's progress line AND is " +
+                "treated as user-acted by the rebuild reconciler. Give it a bucket in BucketOf.");
+        }
+    }
+
+    [Fact]
+    public void FindingStatusPartition_AllListsExactlyTheDeclaredMembers()
+    {
+        var declared = DeclaredStatusMembers();
+        Assert.NotEmpty(declared);
+
+        Assert.True(
+            declared.OrderBy(s => s, StringComparer.Ordinal)
+                .SequenceEqual(FindingStatusPartition.All.OrderBy(s => s, StringComparer.Ordinal)),
+            "FindingStatusPartition.All has drifted from the declared constants. Declared: [" +
+            string.Join(", ", declared.OrderBy(s => s, StringComparer.Ordinal)) + "]; All: [" +
+            string.Join(", ", FindingStatusPartition.All.OrderBy(s => s, StringComparer.Ordinal)) + "].");
+    }
+
+    [Fact]
+    public void FindingStatusPartition_EveryBucketIsReachableFromTheVocabulary()
+    {
+        var reached = DeclaredStatusMembers().Select(FindingStatusPartition.BucketOf).Distinct().ToList();
+        Assert.NotEmpty(reached);
+
+        foreach (FindingStatusBucket bucket in Enum.GetValues(typeof(FindingStatusBucket)))
+        {
+            if (bucket == FindingStatusBucket.Unknown) continue; // Unknown is by definition NOT a member's bucket
+            Assert.True(
+                reached.Contains(bucket),
+                $"No declared status member classifies as {bucket}, so that bucket is dead vocabulary: either " +
+                "a member was removed without removing the bucket, or the bucket was added without a member.");
+        }
+    }
+
+    [Fact]
+    public void FindingStatusPartition_AcceptsEveryMemberAtTheWriteEndpoint()
+    {
+        var members = DeclaredStatusMembers();
+        Assert.NotEmpty(members);
+
+        foreach (var member in members)
+        {
+            Assert.True(
+                FindingStatusPartition.TryParse(member, out var parsed),
+                $"Status member '{member}' is declared but PATCH .../review/findings/{{id}}/status rejects it, " +
+                "so nothing can ever write it. Add it to AcceptedByInput.");
+            Assert.Equal(member, parsed);
+            Assert.Contains(member, FindingStatusPartition.AcceptedInputs);
+        }
+    }
+
+    [Fact]
+    public void FindingStatusPartition_AppliesOneCasingPolicyToEveryMember()
+    {
+        // The policy is stated at FindingStatusPartition: TRIMMED and CASE-INSENSITIVE, everywhere. Pinned
+        // mechanically over the discovered vocabulary so it cannot hold for `open` and lapse for a later member,
+        // which is precisely how IsOpen (OrdinalIgnoreCase) and the reconciler (Ordinal) came to disagree.
+        var members = DeclaredStatusMembers();
+        Assert.NotEmpty(members);
+
+        foreach (var member in members)
+        {
+            var expected = FindingStatusPartition.BucketOf(member);
+            foreach (var variant in new[] { member.ToUpperInvariant(), "  " + member + " \t" })
+            {
+                Assert.Equal(expected, FindingStatusPartition.BucketOf(variant));
+                Assert.Equal(FindingStatusPartition.IsOpen(member), FindingStatusPartition.IsOpen(variant));
+                Assert.Equal(FindingStatusPartition.IsResolved(member), FindingStatusPartition.IsResolved(variant));
+                Assert.Equal(FindingStatusPartition.IsUserActed(member), FindingStatusPartition.IsUserActed(variant));
+                Assert.True(
+                    FindingStatusPartition.TryParse(variant, out var parsed) && parsed == member,
+                    $"TryParse does not apply the trimmed/case-insensitive policy to '{member}': the variant " +
+                    $"'{variant}' did not map back to it.");
+            }
+        }
+    }
+
+    [Fact]
+    public void FindingStatusPartition_TreatsAnUnknownMemberAsUserActedButNotResolved()
+    {
+        // The fail-CLOSED half of the policy, and the reason IsUserActed is NOT !IsResolved: a value this build
+        // does not know must never be deleted as regenerated noise, and must never be counted as progress.
+        const string future = "snoozed";
+        Assert.DoesNotContain(future, DeclaredStatusMembers()); // premise: not (yet) a real member
+
+        Assert.Equal(FindingStatusBucket.Unknown, FindingStatusPartition.BucketOf(future));
+        Assert.False(FindingStatusPartition.IsOpen(future));
+        Assert.False(FindingStatusPartition.IsResolved(future));
+        Assert.True(FindingStatusPartition.IsUserActed(future));
+        Assert.False(FindingStatusPartition.TryParse(future, out _));
+    }
+
+    [Fact]
+    public void FindingStatusPartition_IsUserActedIsTheExactComplementOfIsOpen()
+    {
+        // The single question the reconciler, the vanished-open delete and the near-duplicate fence all ask.
+        foreach (var value in DeclaredStatusMembers().Concat(new[] { "snoozed", "", "   " }))
+            Assert.Equal(!FindingStatusPartition.IsOpen(value), FindingStatusPartition.IsUserActed(value));
+
+        Assert.True(FindingStatusPartition.IsUserActed(null)); // null is unknown, never open
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────────────────────────────
