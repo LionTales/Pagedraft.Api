@@ -124,8 +124,10 @@ public class Wave3StageSignalContractTests
     [Fact]
     public async Task Update_ReturnsTheRealChapterCounts_NotZero()
     {
-        // PUT returns a BookDto, and the books list is refreshed from it. If the update response reported
-        // 0 chapters, renaming a book would tell the spine the book had been un-imported.
+        // PUT returns a BookDto, and ChapterCount/ChaptersWithTextCount are part of that typed contract - a
+        // caller is entitled to treat them as real. If the update response reported 0 chapters, renaming a
+        // book would be a typed lie that the book had been un-imported, even though no current client caller
+        // re-renders from this response today.
         using var provider = BuildProvider();
         var db = provider.GetRequiredService<AppDbContext>();
 
@@ -143,6 +145,65 @@ public class Wave3StageSignalContractTests
         Assert.Equal("After", dto.Title);
         Assert.Equal(2, dto.ChapterCount);
         Assert.Equal(1, dto.ChaptersWithTextCount);
+    }
+
+    [Fact]
+    public async Task Update_CommitsTheRename_EvenWhenTheRequestIsCancelledDuringTheCountsReread()
+    {
+        // Finding 28: the post-commit counts re-query used to run on the REQUEST token. A client abort (or a
+        // DB blip) landing in the window between SaveChangesAsync committing the rename and that re-query
+        // returning would throw AFTER the write already persisted - the caller sees a failed rename that in
+        // fact went through, and the UI and DB disagree until a reload. Reproduce that exact window with an
+        // interceptor that cancels the token the instant SaveChangesAsync finishes committing, then assert
+        // the rename still comes back 200 with the real, persisted counts instead of throwing.
+        var cts = new CancellationTokenSource();
+        var interceptor = new CancelTokenAfterSaveInterceptor(cts);
+        using var provider = BuildProvider(interceptor);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var book = new Book { Id = Guid.NewGuid(), Title = "Before", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 0, Title = "A", WordCount = 10 });
+        await db.SaveChangesAsync(); // seed write: the interceptor is not armed yet, so this does not cancel cts.
+
+        var controller = BuildController(provider);
+        interceptor.Armed = true; // only the rename's own SaveChangesAsync should trip the cancellation.
+
+        var result = await controller.Update(book.Id, new CreateBookRequest("After", null, "he"), cts.Token);
+
+        Assert.True(cts.IsCancellationRequested); // sanity: the race window was actually exercised.
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var dto = Assert.IsType<BookDto>(ok.Value);
+        Assert.Equal("After", dto.Title);
+        Assert.Equal(1, dto.ChapterCount);
+        Assert.Equal(1, dto.ChaptersWithTextCount);
+
+        // The rename is not just in the response - it is really committed, independent of the cancelled token.
+        var persisted = await db.Books.AsNoTracking().SingleAsync(b => b.Id == book.Id, CancellationToken.None);
+        Assert.Equal("After", persisted.Title);
+    }
+
+    /// <summary>
+    /// Cancels a caller-supplied <see cref="CancellationTokenSource"/> the instant a SaveChangesAsync call
+    /// commits, so a test can reproduce "the request token was cancelled in the window right after a write
+    /// landed" deterministically. Only fires while <see cref="Armed"/> is true, so seed-data writes done
+    /// before a test arms it are unaffected.
+    /// </summary>
+    private sealed class CancelTokenAfterSaveInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        private readonly CancellationTokenSource _cts;
+        public bool Armed;
+
+        public CancelTokenAfterSaveInterceptor(CancellationTokenSource cts) => _cts = cts;
+
+        public override ValueTask<int> SavedChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesCompletedEventData eventData,
+            int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Armed) _cts.Cancel();
+            return base.SavedChangesAsync(eventData, result, cancellationToken);
+        }
     }
 
     // ─── Stage 2 `behind`: magnitude AND every reason ─────────────────────────────────────────────
@@ -512,11 +573,16 @@ public class Wave3StageSignalContractTests
     /// Status-only wiring: a real in-memory DB plus the two status services. The router is mocked and
     /// returns nothing, because no test in this file builds anything - every assertion is about a READ.
     /// </summary>
-    private static ServiceProvider BuildProvider()
+    private static ServiceProvider BuildProvider(
+        Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor? interceptor = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
-        services.AddDbContext<AppDbContext>(opt => opt.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        services.AddDbContext<AppDbContext>(opt =>
+        {
+            opt.UseInMemoryDatabase(Guid.NewGuid().ToString());
+            if (interceptor != null) opt.AddInterceptors(interceptor);
+        });
         services.AddSingleton<SfdtConversionService>();
         services.AddSingleton<PromptFactory>();
 

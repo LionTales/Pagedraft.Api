@@ -1283,11 +1283,17 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         // The M1 counts are part of the BookDto contract, so the update response has to carry the REAL ones -
-        // a renamed book that came back reporting 0 chapters would tell the books list the book had been
-        // un-imported. Symmetric with GetAll: one SQL query aggregating both counts server-side via the same
-        // WithCounts projection (ChapterCount and ChaptersWithTextCount are both correlated COUNT subqueries),
-        // not a fetch of the chapter rows into memory to count them here.
-        var counts = await WithCounts(_db.Books.AsNoTracking().Where(b => b.Id == bookId)).FirstAsync(ct);
+        // a renamed book that came back reporting 0 chapters would be a typed lie about that contract, even
+        // though no current client caller re-renders from this response today. Symmetric with GetAll: one SQL
+        // query aggregating both counts server-side via the same WithCounts projection (ChapterCount and
+        // ChaptersWithTextCount are both correlated COUNT subqueries), not a fetch of the chapter rows into
+        // memory to count them here.
+        //
+        // Uses CancellationToken.None, not the request token ct: this read runs AFTER SaveChangesAsync has
+        // already committed the rename, so a client abort (or a DB blip that trips the request token) in this
+        // window must not be able to fail a response whose write already succeeded - that would show the
+        // caller a failed rename that in fact persisted, leaving the UI and DB disagreeing until a reload.
+        var counts = await WithCounts(_db.Books.AsNoTracking().Where(b => b.Id == bookId)).FirstAsync(CancellationToken.None);
 
         return Ok(ToDto(book, counts.ChapterCount, counts.ChaptersWithTextCount));
     }
