@@ -324,6 +324,68 @@ public class ProductChatServiceTests
     }
 
     /// <summary>
+    /// SHOW'S VOICE IS REGISTER, AND IT SITS AHEAD OF THE RULES (phase A.2, c2). The owner asked for a
+    /// less robotic assistant; the gate history says the way that request breaks the feature is by
+    /// buying warmth with a rule change. So what this pins is that the voice arrived as a PERSONA
+    /// sentence and nothing else, and three properties of where it sits:
+    ///
+    /// <para>(1) It is FIRST. The local provider concatenates system + instruction + input and Ollama
+    /// truncates from the START, so whatever opens the string is what is lost first when a Hebrew
+    /// prompt runs at 98% of the window (g4's measured peak). Persona is the right thing to lose;
+    /// "answer only from the guides" is not. Asserted as an index comparison rather than left to the
+    /// order the constant happens to be written in.</para>
+    ///
+    /// <para>(2) The Hebrew half is DESCRIPTIVE, not imperative. A Hebrew imperative in this string has
+    /// leaked verbatim into user-visible answers twice at two different clauses (g1/g2 F4 at the
+    /// book-specific refusal, and g4's new <c>e1</c> locus at the gap-framing clause), so the imperative
+    /// forms of the same instruction are pinned OUT.</para>
+    ///
+    /// <para>(3) It carries the assistant's NAME, which the client already renders on every turn
+    /// (f1's scope fence deferred the server-side half to this todo).</para>
+    ///
+    /// <para>What is NOT re-asserted here: that the grounding contract, the two refusal rules and
+    /// final-r02's scoped instruction 1 survived. Three tests above already own those by their own
+    /// words, and duplicating them here would make a future edit look guarded twice while actually
+    /// being guarded once.</para>
+    /// </summary>
+    [Fact]
+    public void BothGroundingStrings_OpenWithShowsVoice_AheadOfTheGroundingRule()
+    {
+        var en = ProductChatPrompt.SystemMessage("en");
+        var he = ProductChatPrompt.SystemMessage("he");
+
+        const string enPersona = "You are Show, the PageDraft product assistant. You write in the first person, " +
+                                 "warmly and briefly, and you open each reply from what was actually asked.";
+        const string hePersona = "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת.";
+
+        Assert.Contains(enPersona, en, StringComparison.Ordinal);
+        Assert.Contains(hePersona, he, StringComparison.Ordinal);
+
+        // (1) Persona first, grounding second, so truncation from the start spends the persona.
+        Assert.True(
+            en.IndexOf(enPersona, StringComparison.Ordinal)
+                < en.IndexOf("Answer ONLY from the guide content provided below", StringComparison.Ordinal),
+            "GroundingEn's persona sentence no longer precedes the grounding rule. Ollama truncates from the " +
+            "START of the concatenated prompt, so the rule must never be the thing that opens the string.");
+        Assert.True(
+            he.IndexOf(hePersona, StringComparison.Ordinal)
+                < he.IndexOf("ענה אך ורק מתוך תוכן המדריכים שמופיע למטה", StringComparison.Ordinal),
+            "GroundingHe's persona sentence no longer precedes the grounding rule, and Hebrew is the half that " +
+            "actually runs near the window ceiling (g4 peak 13,799 of 14,080).");
+
+        // (2) The Hebrew persona stays a self-description. The imperative forms are the F4 shape.
+        Assert.False(
+            he.Contains("דבר בגוף ראשון", StringComparison.Ordinal) || he.Contains("כתוב בגוף ראשון", StringComparison.Ordinal),
+            "GroundingHe now ORDERS the model to write in the first person instead of describing that it does. " +
+            "Every Hebrew instruction echo this feature has measured (g1/g2 F4, g4's e1) was an imperative read " +
+            "back to the user as prose.");
+
+        // (3) The name the client already puts on every assistant turn.
+        Assert.Contains("Show", en, StringComparison.Ordinal);
+        Assert.Contains("שואו", he, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// NO TERMINOLOGY MAPPING (d1 item 6). The guides still say "book summary" where Wave 3's
     /// reconciled vocabulary says "book briefs"; phase A ships against the guides exactly as they
     /// read, because an answer that says one while citing the other is the citation/text mismatch the

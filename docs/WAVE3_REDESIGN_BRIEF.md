@@ -539,10 +539,13 @@ it survives this redesign.
 
 **Two honest caveats the session must account for:**
 
-1. **The guides are not yet reachable from the app.** They ship as content files with the server and
-   there is currently no endpoint that serves them and no screen that reads them. Driving orientation
-   from the corpus therefore requires building that path. It is a small, well-defined piece of work,
-   and it is the same path the chatbot will need, so it is not throwaway. This is Q13 in section 8.
+1. **Update, 2026-08-11: the guides are now reachable from the app.** Chatbot phase A.2 built the
+   serving path this section called for and a reader on top of it: `/help` (index, grouped by stage)
+   and `/help/:guideId` (single guide, optional `?lang=he|en`), backed by `GET /api/guides?language=`
+   and `GET /api/guides/{id}?language=`. This is the same path Q13 in section 8 anticipated needing;
+   Wave 3 now wires orientation against an existing route instead of building one. (It ships on two
+   branches, API `api-chatbot-a2-guides` and client `client-chatbot-a2-show`; check that both are on
+   master before depending on the path.)
 2. **The guides currently carry the old vocabulary in two places.** They lead with "book summary"
    rather than "Book briefs", and their numbered stage list disagrees with their own recommended
    order section. Both need a copy edit as part of this wave, before anything is driven from them.
@@ -735,6 +738,15 @@ app yet (section 7).
 | **C. Hardcode tutorial copy now** | Fastest to a demo. **Explicitly recommended against:** it is the throwaway path, and it is how a third contradictory stage model gets born |
 
 Either A or B is defensible. C should be ruled out at the session rather than drifted into.
+
+**Update, 2026-08-11: option A's dependency is now built, not merely planned.** Chatbot phase A.2
+(`chatbot-phase-a2-show-2026-08-09`, gate `g5` PASS) built the general guides serving path as
+infrastructure for its own citation chips: `GET /api/guides?language=` (list) and
+`GET /api/guides/{id}?language=` (single guide body), plus a client reader mounted at `/help`
+(index, grouped by stage) and `/help/:guideId` (single guide, with a `?lang=he|en` toggle). Wave 3
+does not need to build this path; it needs to consume it. It ships on two branches, API
+`api-chatbot-a2-guides` and client `client-chatbot-a2-show`; check that both are on master before
+depending on the path.
 
 ---
 

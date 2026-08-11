@@ -2,7 +2,7 @@
 id: guides-index
 stage: index
 audience: author
-updated: 2026-08-06
+updated: 2026-08-11
 lang: en
 ---
 
@@ -37,5 +37,17 @@ when the interface changes. They name surfaces where that helps, and they avoid 
 - This corpus is a live retrieval source: the in-app product chat answers questions by selecting and
   quoting these files, and shows the guide it used as a citation. Editing a guide edits what the
   assistant says, not just what a reader sees here.
+- These files are also USER-VISIBLE PAGES. The app serves them read-only over `GET /api/guides` and
+  `GET /api/guides/{id}?language=...`, and the client renders them at the `/help` route, where the
+  assistant's citation chips link to. So editing a guide edits what an author reads directly, word for
+  word, on a page in the product. There is no separate "public" copy to edit instead.
+- The reader takes a guide's TITLE from its first H1, because the frontmatter has no `title` field and
+  deliberately never gained one (see the next bullet).
+- HEADINGS ARE A RETRIEVAL INDEX, so a copy edit to one is a change to the chatbot. `GuideSelector`
+  scores a question's tokens against each file's H1/H2 headings (weight 3.0) and its frontmatter
+  `id`/`stage` (1.0), and reads no body prose at all, so renaming a heading silently re-ranks which
+  guides reach the model. Keep the topic word in any new heading, and re-run
+  `dotnet test --filter "FullyQualifiedName~ProductChat"` after any heading edit. Renaming an H1 also
+  breaks the client's citation-title map: `ProductChatCorpusTests` will fail and name the file to fix.
 
 מדריכים לתהליך העריכה ב־PageDraft. גרסת העברית של כל מדריך נמצאת בקובץ עם הסיומת `.he.md`.

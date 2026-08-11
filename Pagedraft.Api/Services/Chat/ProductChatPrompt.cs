@@ -54,6 +54,28 @@ namespace Pagedraft.Api.Services.Chat;
 /// It is now given as the finished first-person sentence. The English twin never echoed (0 of 18) and
 /// is deliberately left alone, so the change carries no risk to a measured-clean bucket.</para>
 ///
+/// <para>VOICE, AND WHAT IT MAY NOT BUY (phase A.2, c2). The assistant is named Show, and the persona
+/// sentence that now opens both strings is REGISTER ONLY: first person, warm, brief, and opening from
+/// what was actually asked. It states no rule and scopes none. Everything g4 measured is byte-identical
+/// underneath it - the grounding contract, both refusal rules, and final-r02's scoped instruction 1 -
+/// because g4's PASS (0 fabricated product behaviors in 48 adjacent runs, 48 of 48 pivots intact) is a
+/// measurement of those exact sentences and of nothing else.</para>
+///
+/// <para>Two things were deliberately NOT written here, and both are the temptation this change had to
+/// walk past. (1) Nothing asks for varied or non-formulaic openings. Every clean refusal g4 recorded
+/// opens with the same honest formula ("The provided guides do not state which keyboard shortcut runs a
+/// pass such as Proofread"), and a demand to vary it applies pressure precisely on the question shape
+/// where the g2 and g3 fabrications lived. Variation is left to come out of "open from what was asked",
+/// which produces it per question without asking the model to leave that groove. (2) Nothing prefers
+/// paraphrase over quoting a guide. g4's pivots are clean because they are verbatim corpus lines, so
+/// "less guide-recitation" is answered in the assistant's VOICE and never in its sourcing.
+/// Friendliness comes out of voice, never out of facts.</para>
+///
+/// <para>The Hebrew persona sentence is DESCRIPTIVE ("אתה כותב"), not imperative, for the reason the
+/// paragraph below records twice over: an imperative in this string has leaked verbatim into
+/// user-visible Hebrew answers at two separate clauses (g1/g2 F4, and again at g4's new `e1` locus).
+/// A self-description gives the model a voice to speak in rather than an order to read back.</para>
+///
 /// <para>No em-dash appears in any string here: these strings reach the user, and the model echoes
 /// punctuation from its frame.</para>
 /// </summary>
@@ -62,7 +84,9 @@ public static class ProductChatPrompt
     // ─── The grounding contract, as instruction text (d1 items 2, 3 and 5) ───────────────────────
 
     private const string GroundingEn =
-        "You are the PageDraft product assistant. Answer ONLY from the guide content provided below. " +
+        "You are Show, the PageDraft product assistant. You write in the first person, warmly and " +
+        "briefly, and you open each reply from what was actually asked. " +
+        "Answer ONLY from the guide content provided below. " +
         "Do not use outside knowledge about PageDraft, and never state a setting, button, screen or " +
         "behavior that the provided guides do not state. " +
         "If the guides do not address the question, say so plainly. If another topic they DO cover is " +
@@ -81,7 +105,8 @@ public static class ProductChatPrompt
         "another language.";
 
     private const string GroundingHe =
-        "אתה העוזר של PageDraft. ענה אך ורק מתוך תוכן המדריכים שמופיע למטה. " +
+        "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת. " +
+        "ענה אך ורק מתוך תוכן המדריכים שמופיע למטה. " +
         "אל תשתמש בידע חיצוני על PageDraft, ולעולם אל תציין הגדרה, כפתור, מסך או התנהגות שאינם כתובים " +
         "במדריכים שניתנו. " +
         "אם המדריכים אינם עונים על השאלה, אמור זאת במפורש. אם יש נושא אחר שהם כן מכסים ורלוונטי " +
