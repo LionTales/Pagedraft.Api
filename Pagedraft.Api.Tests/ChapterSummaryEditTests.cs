@@ -923,6 +923,7 @@ public class ChapterSummaryEditTests
         chapterBrief: provider.GetRequiredService<ChapterBriefService>(),
         progress: provider.GetRequiredService<AnalysisProgressTracker>(),
         aiTierStatus: null!,
+        profileBuilds: null!,
         scopeFactory: provider.GetRequiredService<IServiceScopeFactory>(),
         appLifetime: new TestApplicationLifetime(),
         logger: NullLogger<BooksController>.Instance);

@@ -89,6 +89,7 @@ public class AiTierDtoDeidentificationTests
             chapterBrief: null!,
             progress: null!,
             aiTierStatus: tierStatus,
+            profileBuilds: null!,
             scopeFactory: scopeFactory.Object,
             appLifetime: lifetime.Object,
             logger: NullLogger<BooksController>.Instance);
@@ -362,6 +363,7 @@ public class AiTierConsentFlagTests
             chapterBrief: null!,
             progress: null!,
             aiTierStatus: tierStatus,
+            profileBuilds: null!,
             scopeFactory: scopeFactory.Object,
             appLifetime: lifetime.Object,
             logger: NullLogger<BooksController>.Instance);

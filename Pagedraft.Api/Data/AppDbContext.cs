@@ -279,7 +279,10 @@ public class AppDbContext : DbContext
             e.Property(x => x.Language).HasMaxLength(10);
             e.Property(x => x.Dimension).HasMaxLength(50);
             e.Property(x => x.Verdict).HasMaxLength(20);
-            e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("open");
+            // Same literal the migrations already stamped: the vocabulary is declared once by
+            // FindingStatusPartition, so the column default cannot drift from the entity default.
+            e.Property(x => x.Status).HasMaxLength(20)
+                .HasDefaultValue(Services.Analysis.FindingStatusPartition.Open);
             e.Property(x => x.DedupKey).HasMaxLength(64).IsRequired();
             e.Property(x => x.BuiltWithModel).HasMaxLength(200);
             e.Property(x => x.EvidenceJson).HasColumnType("nvarchar(max)");

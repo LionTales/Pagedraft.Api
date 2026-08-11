@@ -433,6 +433,7 @@ public class StyleBaselineServiceTests
             chapterBrief: null!,
             progress: progress,
             aiTierStatus: null!,
+            profileBuilds: null!,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
@@ -482,6 +483,7 @@ public class StyleBaselineServiceTests
             chapterBrief: null!,
             progress: progress,
             aiTierStatus: null!,
+            profileBuilds: null!,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
@@ -726,6 +728,7 @@ public class StyleBaselineServiceTests
             chapterBrief: null!,
             progress: progress,
             aiTierStatus: null!,
+            profileBuilds: null!,
             scopeFactory: scopeFactory,
             appLifetime: new TestApplicationLifetime(),
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);
@@ -1253,6 +1256,7 @@ public class StyleBaselineProgressJobTypeGuardTests
             chapterBrief: null!,
             progress: tracker,
             aiTierStatus: null!,
+            profileBuilds: null!,
             scopeFactory: null!,
             appLifetime: null!,
             logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<BooksController>.Instance);

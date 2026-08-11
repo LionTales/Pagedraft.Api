@@ -152,6 +152,11 @@ public class ChapterBriefService
                 // fallbacks by Language only, so it would assemble that mismatched-language prose into the
                 // requested book context. Clear the now-stale flat summary so it cannot leak; the flat path
                 // (SummarizeChaptersAsync) rebuilds it for the new locale when needed.
+                //
+                // be-c04: that last sentence is only true because the flat freshness guard now also asks
+                // whether SummaryText is non-empty. Blanking the text leaves CreatedAt untouched (it is the
+                // FLAT surface's stamp and this writer does not own it), so under a stamp-only guard the
+                // cleared row read as Fresh forever and the new-locale prose was never rebuilt.
                 if (!string.Equals(existing.Language, lang, StringComparison.Ordinal)
                     && !string.IsNullOrWhiteSpace(existing.SummaryText))
                 {

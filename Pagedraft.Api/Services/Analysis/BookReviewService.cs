@@ -25,6 +25,22 @@ public sealed class BookReviewStatus
     /// <summary>Total persisted findings for (BookId, Language).</summary>
     public int FindingCount { get; init; }
 
+    /// <summary>
+    /// Wave 3 / M3. Findings still at status <c>open</c> - never touched by the author. NOT derivable from
+    /// <see cref="FindingCount"/> minus <see cref="ResolvedFindingCount"/>, because <c>acknowledged</c> is a
+    /// third bucket that is neither.
+    /// </summary>
+    public int OpenFindingCount { get; init; }
+
+    /// <summary>
+    /// Wave 3 / M3. Findings at status <c>dismissed</c> or <c>done</c> - the same partition the shipped
+    /// findings ledger calls "resolved" (its active group is open + acknowledged). Working-through progress is
+    /// this over <see cref="FindingCount"/>, so the stage spine can render it WITHOUT downloading the whole
+    /// findings list. Read the split from <see cref="FindingStatusPartition"/>; do not re-spell the status
+    /// strings at a second call site.
+    /// </summary>
+    public int ResolvedFindingCount { get; init; }
+
     /// <summary>When the review was last (re)built (max UpdatedAt over the findings); null when none.</summary>
     public DateTimeOffset? LastUpdatedAt { get; init; }
 
@@ -310,10 +326,12 @@ public class BookReviewService
     {
         var lang = BaselineLanguageResolver.Normalize(language);
 
+        // Status rides along on the SAME projection (Wave 3 / M3): the working-through counts cost one more
+        // column on a query that already runs, not a second request and not the full findings payload.
         var findings = await _db.BookFindings
             .AsNoTracking()
             .Where(f => f.BookId == bookId && f.Language == lang)
-            .Select(f => new { f.UpdatedAt, f.BuiltWithModel })
+            .Select(f => new { f.UpdatedAt, f.BuiltWithModel, f.Status })
             .ToListAsync(ct);
 
         var hasReview = findings.Count > 0;
@@ -381,6 +399,8 @@ public class BookReviewService
             Language = lang,
             HasReview = hasReview,
             FindingCount = findings.Count,
+            OpenFindingCount = findings.Count(f => FindingStatusPartition.IsOpen(f.Status)),
+            ResolvedFindingCount = findings.Count(f => FindingStatusPartition.IsResolved(f.Status)),
             LastUpdatedAt = lastUpdatedAt,
             BuiltWithModel = builtWithModel,
             ActiveModel = activeModel,
@@ -2498,7 +2518,7 @@ public class BookReviewService
             EvidenceJson = JsonSerializer.Serialize(evidence, SerializeOpts),
             ChapterAnchorsJson = JsonSerializer.Serialize(anchors, SerializeOpts),
             SuggestedAction = string.IsNullOrWhiteSpace(item.SuggestedAction) ? null : item.SuggestedAction,
-            Status = "open",
+            Status = FindingStatusPartition.Open,
             DedupKey = dedupKey,
             LegacyDedupKeyV1 = legacyKey,
             BuiltWithModel = builtWithModel
@@ -2663,7 +2683,7 @@ public class BookReviewService
             }
 
             var prior = match.Row;
-            var priorIsUserActed = !string.Equals(prior.Status, "open", StringComparison.Ordinal);
+            var priorIsUserActed = FindingStatusPartition.IsUserActed(prior.Status);
             if (match.ViaReword)
             {
                 rewordFolds++;
@@ -2787,8 +2807,8 @@ public class BookReviewService
         {
             if (matchedExistingIds.Contains(stale.Id))
                 continue; // still present (matched on the current OR the legacy key) → handled above
-            if (!string.Equals(stale.Status, "open", StringComparison.Ordinal))
-                continue; // acknowledged/dismissed/done → preserve the user's decision (keep the row).
+            if (FindingStatusPartition.IsUserActed(stale.Status))
+                continue; // acknowledged/dismissed/done (or an unknown member) → preserve the user's decision.
             // be-c02 multi-anchor scope + b2 invalid-anchor exclusion + b3 no-anchor rule (be-c03: measured against
             // the REVIEWABLE set, not the raw chapter set) — see BookFindingReconciler.IsVanishedOpenDeletable.
             if (!BookFindingReconciler.IsVanishedOpenDeletable(

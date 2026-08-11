@@ -439,12 +439,17 @@ public class CharacterRegisterService
         // retreat coverage (this writer carries the ledger through untouched), but the client replaces
         // its whole register state from this response, so an omitted or zeroed coverage here would make
         // the coverage line collapse to "0 of 40" on every save and silently recover on the next GET.
+        //
+        // The coverage read itself runs on CancellationToken.None, not ct (the same rule as
+        // BooksController.Update's post-commit re-query): the author's edits are already committed by every
+        // branch above, so an abort in this window would report a failed save for edits that persisted -
+        // and this response is the only thing that tells the caller what the server actually kept.
         return (new CharacterRegisterDto(
             bookId,
             HasRegister: true,
             updated.UpdatedAt,
             entries.Select(ToDto).ToList(),
-            await BuildCoverageAsync(bookId, updated, ct)), null);
+            await BuildCoverageAsync(bookId, updated, CancellationToken.None)), null);
     }
 
     // ── internals ───────────────────────────────────────────────────────────────────────────────

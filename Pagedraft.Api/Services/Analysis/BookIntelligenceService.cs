@@ -14,9 +14,12 @@ namespace Pagedraft.Api.Services.Analysis;
 /// (genre, synopsis, characters, story structure), and answer Q&A.
 ///
 /// Invalidation strategy:
-///   - Each ChunkSummary records CreatedAt.
+///   - Each ChunkSummary records CreatedAt (the FLAT surface's freshness stamp; the structured surface has
+///     its own, StructuredBuiltAt).
 ///   - On RefreshProfileAsync, compare Chapter.UpdatedAt vs ChunkSummary.CreatedAt.
-///   - Only re-summarize chapters where UpdatedAt > ChunkSummary.CreatedAt (stale).
+///   - Re-summarize a chapter whose row is stale (UpdatedAt > CreatedAt) OR whose flat SummaryText is still
+///     empty (be-c04: the row is shared with the structured writer, which creates it with a NOW stamp and an
+///     empty flat surface, so the stamp alone never proves the flat summary exists).
 ///   - After re-summarizing stale chapters, rebuild the full BookProfile.
 ///
 /// FILE-SIZE WAIVER (CLAUDE.md's ~700-line soft ceiling) - recorded by f2 (2026-07-28), with the numbers
@@ -136,7 +139,9 @@ public class BookIntelligenceService
         /// <summary>The chapter's ContentText is empty or whitespace-only.</summary>
         NoContent,
 
-        /// <summary>The existing summary row is fresh: CreatedAt >= Chapter.UpdatedAt.</summary>
+        /// <summary>The existing summary row is fresh: it ALREADY CARRIES a flat SummaryText and its
+        /// CreatedAt is at/after Chapter.UpdatedAt (be-c04 - both halves, because the row is shared with the
+        /// structured writer, which creates it with a NOW stamp and an empty flat surface).</summary>
         Fresh,
 
         /// <summary>wb3-c04 clobber guard: the existing row's SummaryUserEdited is set.</summary>
@@ -204,7 +209,12 @@ public class BookIntelligenceService
     /// boundary was priced as "acceptable because the freshness guard makes a re-run idempotent, so it is
     /// never a correctness loss, only repeated work". That is true of CORRECTNESS and false of PROGRESS:
     /// repeated work that is aborted at the SAME POINT every time never converges. This method is awaited
-    /// INLINE on the request thread with the REQUEST token (BooksController.Summarize / RefreshProfile), the
+    /// INLINE on whatever thread its caller supplies, with THAT CALLER'S token - and the two callers no
+    /// longer supply the same kind of token (be-c03). BooksController.RefreshProfile now runs it on a
+    /// background DI scope under IHostApplicationLifetime.ApplicationStopping, so a client teardown cannot
+    /// abort it; BooksController.Summarize STILL awaits it on the request thread with the REQUEST token, so
+    /// for that one caller everything below is live (it has no client caller today - see the be-c03
+    /// investigation findings). The
     /// measured cost is ~18-27 s per chapter (section 19), and this project's own corpus contains an
     /// 80-chapter book - so a first pass over it is a 24-37 minute single request. Under one commit, a client
     /// reload, a gateway idle ceiling, or the OOM-wedged Ollama runner this host has actually produced
@@ -309,8 +319,26 @@ public class BookIntelligenceService
                 continue;
             }
 
+            // be-c04: the stamp is only evidence about a surface that HAS content. CreatedAt is a ROW-level
+            // column and this row has two writers, so a NOW stamp on it does not mean the FLAT surface was
+            // ever written. Two shipped writers create/leave a row whose CreatedAt is at/after the chapter's
+            // last edit while SummaryText is empty:
+            //   - the Q4-A fold's phase 1 (ChapterBriefService inserts the row for the STRUCTURED brief and
+            //     leaves SummaryText empty by design; the SaveChanges override then stamps CreatedAt = now),
+            //     so on a first build EVERY chapter read as Fresh here and the flat summary was never written
+            //     for the whole book;
+            //   - the language-flip guard in ChapterBriefService, which BLANKS a stale-locale SummaryText and
+            //     relies on this path to rebuild it.
+            // So the gate asks about the flat surface itself, exactly as the structured gate already does
+            // (ChapterBriefService.IsFresh opens with IsUsable(StructuredJson) for the mirror-image reason),
+            // and as BookContextAssembler already does when it filters blank flat summaries out of the
+            // assembly. A blank SummaryText is not a summary anywhere else in the system; it must not count
+            // as one here either. The user-edit clobber guard below is unaffected: a row that falls through
+            // this guard reaches it next, and a user-edited row can never be blank (UpdateChapterSummary
+            // rejects blank text, and the flip that blanks the text resets the flag with it).
             if (existingSummaries.TryGetValue(chapter.Id, out var existing) &&
-                existing.CreatedAt >= chapter.UpdatedAt)
+                existing.CreatedAt >= chapter.UpdatedAt &&
+                !string.IsNullOrWhiteSpace(existing.SummaryText))
             {
                 _logger.LogDebug("Chapter {ChapterId} summary is fresh, skipping", chapter.Id);
                 skipped.Add(new SkippedChapter(chapter.Id, ChapterSkipReason.Fresh));
@@ -620,6 +648,17 @@ public class BookIntelligenceService
 
     /// <summary>
     /// Refresh: re-summarize stale chapters, then rebuild the profile.
+    ///
+    /// PARTIALLY idempotent, and the asymmetry matters to callers (be-c03): phase 1 skips every chapter
+    /// whose summary is already fresh, but phase 2 (<see cref="BuildBookProfileAsync"/>) has NO freshness
+    /// gate and re-issues its four whole-book model calls on every invocation. So this is safe to call
+    /// twice, never free to call twice.
+    ///
+    /// NOT SAFE TO RUN CONCURRENTLY WITH ITSELF for the same book: both rows it writes are unique-indexed
+    /// and written read-then-add with no transaction (ChunkSummary on (BookId, ChapterId), BookProfile on
+    /// BookId), so two overlapping passes collide on the index and one loses a whole checkpoint window of
+    /// paid work. Callers must serialize - the HTTP path does so through
+    /// <see cref="BookProfileBuildCoordinator"/>.
     /// </summary>
     public async Task<BookProfile> RefreshProfileAsync(Guid bookId, string language, CancellationToken ct = default)
     {

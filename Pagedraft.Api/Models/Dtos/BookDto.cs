@@ -7,8 +7,46 @@ namespace Pagedraft.Api.Models.Dtos;
 /// repeat the defensive parse (<c>AiTierPolicy.Parse</c>) that the server already owns, or the two will
 /// eventually disagree about what an unrecognised value means.
 /// </summary>
-public record BookDto(Guid Id, string Title, string? Author, string Language, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string AiTier);
+/// <param name="ChapterCount">
+/// Wave 3 / M1. How many chapters the book has, so the BOOKS LIST can compute the Import stage instead of
+/// hardcoding it. This is the whole point of the field: the list is the one surface where importing is the
+/// next action, and until now it received no chapter signal at all, so the stage spine's first step was
+/// uncomputable exactly where it mattered - which is how the retired stepper ended up asserting a hardcoded
+/// "done" on a book with zero chapters.
+///
+/// A projection of the existing Chapters navigation. No new table, no new query per row: <c>GetAll</c>
+/// computes it inside its single books query.
+/// </param>
+/// <param name="ChaptersWithTextCount">
+/// Wave 3 / M1. Chapters that satisfy <see cref="Pagedraft.Api.Models.ChapterTextPredicate.HasText"/> - the
+/// ONE definition of "has text", shared by every site that needs it so the definition cannot drift between
+/// them. Present because "has chapter rows" and "has a manuscript" are DIFFERENT states and the spine has to
+/// tell them apart: a book whose chapters were created empty (hand-added, or an import that produced titles
+/// and no bodies) is not imported in any sense a user would recognise. The stage-1 derivation the audit
+/// fixed on is: <c>ChapterCount == 0</c> → not-started; <c>ChaptersWithTextCount &gt; 0</c> → ready; in
+/// between → the honest partial state (chapters exist but carry no text).
+///
+/// Deliberately NOT a "did the user check the split" flag - that signal was ruled out (M5) because the
+/// product cannot verify it, and a checkbox the product cannot verify is the same class of lie as the
+/// hardcoded stage.
+/// </param>
+public record BookDto(
+    Guid Id,
+    string Title,
+    string? Author,
+    string Language,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    string AiTier,
+    int ChapterCount,
+    int ChaptersWithTextCount);
 
+/// <summary>
+/// The single-book payload. It carries the full <paramref name="Chapters"/> list, so the two M1 counts are
+/// derivable here and are deliberately NOT duplicated onto it - one authority per fact. A client computing
+/// the Import stage on a book surface counts <c>chapters</c>; on the books list it reads
+/// <see cref="BookDto.ChapterCount"/> / <see cref="BookDto.ChaptersWithTextCount"/>.
+/// </summary>
 public record BookDetailDto(Guid Id, string Title, string? Author, string Language, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string AiTier, List<ChapterSummaryDto> Chapters);
 
 public record ChapterSummaryDto(Guid Id, string Title, string? PartName, int Order, int WordCount, DateTimeOffset UpdatedAt);

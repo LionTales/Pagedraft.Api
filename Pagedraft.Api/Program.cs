@@ -42,6 +42,7 @@ builder.Services.AddScoped<SfdtConversionService>();
 builder.Services.AddScoped<ChapterService>();
 builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
+builder.Services.AddScoped<BookExportService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
 // Value-scoped, fail-safe analysis-output repair (analysis-output-repair plan, p3). Scoped to match its
@@ -105,6 +106,12 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 // In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
 // registry so a running summary build never blocks a review build (and vice versa) for the same book.
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
+// Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
+// reason as the three registries above (one shared map across request scopes), and the runner is stateless.
+// Unlike them this one keys by BookId ALONE - BookProfile is one row per BOOK, so two languages contend for
+// the same row; see BookProfileBuildCoordinator for the full rationale.
+builder.Services.AddSingleton<IBookProfileBuilder, ScopedBookProfileBuilder>();
+builder.Services.AddSingleton<BookProfileBuildCoordinator>();
 
 // ─── Grounded product chat over the shipped guides (chatbot phase A, c1) ──────────────────────────
 // The corpus reader is SINGLETON and caches a successful load: Content/guides ships with the app and
@@ -183,10 +190,9 @@ builder.Services.AddSingleton<Pagedraft.Api.Services.LanguageEngine.Contracts.IL
 builder.Services.AddSignalR();
 builder.Services.AddCors(options =>
 {
-    options.AddDefaultPolicy(policy =>
-    {
-        policy.WithOrigins("http://localhost:4200").AllowAnyHeader().AllowAnyMethod().AllowCredentials();
-    });
+    // Extracted to Pagedraft.Api.CorsPolicyConfiguration so a test can build this exact policy and
+    // assert on its exposed headers without a running host or a database connection.
+    options.AddDefaultPolicy(Pagedraft.Api.CorsPolicyConfiguration.ConfigureDefault);
 });
 builder.Services.AddControllers();
 

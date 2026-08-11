@@ -92,7 +92,10 @@ public class ProductChatCorpusTests
         Assert.Equal("export", doc.Id);
         Assert.Equal("export", doc.Stage);
         Assert.Equal("author", doc.Audience);
-        Assert.Equal("2026-08-02", doc.Updated);
+        // Wave 3 / w4 rewrote this guide's availability section when the export SCREEN shipped, and moved
+        // the stamp with it. The field is asserted for its FORMAT and its freshness relative to the file it
+        // describes; a guide edit that leaves this date behind is the drift worth catching.
+        Assert.Equal("2026-08-10", doc.Updated);
         Assert.Equal("en", doc.Lang);
         Assert.Equal(50, doc.NumericPrefix);
         Assert.Contains("Exporting your book", doc.Headings);

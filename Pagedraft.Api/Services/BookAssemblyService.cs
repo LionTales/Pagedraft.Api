@@ -13,6 +13,16 @@ public class BookAssemblyService
         if (chapterDocxBuffers == null || chapterDocxBuffers.Count == 0)
         {
             using var empty = new WordDocument();
+            // A bare WordDocument has NO section, and serializing one throws "There are no sections present
+            // in the document" - so this branch, which reads as the safe empty-document fallback, in fact
+            // threw every time it was reached (an export of a book with no chapters answered 500). EnsureMinimal
+            // adds the section and paragraph a valid DOCX needs.
+            //
+            // NO PRODUCTION CALLER REACHES THIS ANY MORE. BookExportService answers NothingWritten before it
+            // would call in with an empty list, because a valid empty document is the one answer an export
+            // must never give an author. Kept, correct and tested, so this stays a safe fallback rather than a
+            // throw for any future caller - but a caller that lands here on an EXPORT path is a defect.
+            empty.EnsureMinimal();
             using var stream = new MemoryStream();
             empty.Save(stream, FormatType.Docx);
             return stream.ToArray();

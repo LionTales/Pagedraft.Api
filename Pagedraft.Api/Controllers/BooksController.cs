@@ -24,6 +24,7 @@ public class BooksController : ControllerBase
     private readonly ChapterBriefService _chapterBrief;
     private readonly AnalysisProgressTracker _progress;
     private readonly AiTierStatusService _aiTierStatus;
+    private readonly BookProfileBuildCoordinator _profileBuilds;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly ILogger<BooksController> _logger;
@@ -37,11 +38,13 @@ public class BooksController : ControllerBase
         ChapterBriefService chapterBrief,
         AnalysisProgressTracker progress,
         AiTierStatusService aiTierStatus,
+        BookProfileBuildCoordinator profileBuilds,
         IServiceScopeFactory scopeFactory,
         IHostApplicationLifetime appLifetime,
         ILogger<BooksController> logger)
     {
         _aiTierStatus = aiTierStatus;
+        _profileBuilds = profileBuilds;
         _db = db;
         _bookIntelligence = bookIntelligence;
         _styleBaseline = styleBaseline;
@@ -65,19 +68,42 @@ public class BooksController : ControllerBase
         };
         _db.Books.Add(book);
         await _db.SaveChangesAsync(ct);
-        return CreatedAtAction(nameof(GetById), new { bookId = book.Id }, ToDto(book));
+        // A book is created empty, so the M1 counts are 0/0 by construction - stated rather than re-queried.
+        return CreatedAtAction(nameof(GetById), new { bookId = book.Id }, ToDto(book, chapterCount: 0, chaptersWithTextCount: 0));
     }
 
+    /// <summary>
+    /// The books list. Since Wave 3 / M1 each row carries <c>chapterCount</c> and
+    /// <c>chaptersWithTextCount</c> so the stage spine can compute the Import stage HERE, on the one surface
+    /// where importing is the next action. Both are projected inside this single query (a correlated count per
+    /// row, not a request per book) - the cost of the list does not scale with the size of the manuscripts.
+    /// Uses the same <see cref="WithCounts"/> projection as <see cref="Update"/>, so the two are symmetric:
+    /// both compute both counts as SQL aggregates, never a re-query of the chapter rows.
+    /// </summary>
     [HttpGet]
     public async Task<ActionResult<List<BookDto>>> GetAll(CancellationToken ct)
     {
-        var orderedBooks = await _db.Books
-            .AsNoTracking()
-            .OrderBy(b => b.UpdatedAt)
-            .ToListAsync(ct);
+        var orderedBooks = await WithCounts(_db.Books.AsNoTracking().OrderBy(b => b.UpdatedAt)).ToListAsync(ct);
 
-        return Ok(orderedBooks.Select(ToDto).ToList());
+        return Ok(orderedBooks
+            .Select(row => ToDto(row.Book, row.ChapterCount, row.ChaptersWithTextCount))
+            .ToList());
     }
+
+    /// <summary>
+    /// Projects a books query into (book, chapterCount, chaptersWithTextCount) using ONE SQL query per
+    /// caller: <c>ChapterCount</c> and <c>ChaptersWithTextCount</c> (<see cref="ChapterTextPredicate.HasText"/>)
+    /// are both correlated COUNT subqueries, not a materialization of the chapter rows. The shared shape is
+    /// what keeps <see cref="GetAll"/> and <see cref="Update"/> symmetric - see <see cref="BooksControllerQueryShapeTests"/>
+    /// for the assertion that this stays translated to SQL rather than silently regressing to a per-row fetch.
+    /// </summary>
+    internal static IQueryable<BookWithCountsRow> WithCounts(IQueryable<Book> books) =>
+        books.Select(b => new BookWithCountsRow(
+            b,
+            b.Chapters.Count(),
+            b.Chapters.AsQueryable().Count(ChapterTextPredicate.HasText)));
+
+    internal sealed record BookWithCountsRow(Book Book, int ChapterCount, int ChaptersWithTextCount);
 
     [HttpGet("{bookId:guid}")]
     public async Task<ActionResult<BookDetailDto>> GetById(Guid bookId, CancellationToken ct)
@@ -205,7 +231,11 @@ public class BooksController : ControllerBase
             "tasks leaves this machine.",
             bookId, task?.ToString() ?? "(book default)", AiTierPolicy.ToStoredValue(tier));
 
-        return Ok(await BuildAiTierDtoAsync(book, ct));
+        // CancellationToken.None, not ct (be-f03's rule): the tier write is already committed above, and
+        // this read only assembles the response from it. A client abort here would report a failed tier
+        // change that in fact persisted, leaving the caller's idea of the tier and the tier that will
+        // actually route disagreeing until it re-reads.
+        return Ok(await BuildAiTierDtoAsync(book, CancellationToken.None));
     }
 
     /// <summary>
@@ -232,16 +262,22 @@ public class BooksController : ControllerBase
         var taskKey = AiTierPolicy.TaskKeyFor(parsedTask);
         var existing = await _db.BookAiTaskTiers
             .FirstOrDefaultAsync(t => t.BookId == bookId && t.TaskKey == taskKey, ct);
-        if (existing != null)
+        var cleared = existing != null;
+        if (cleared)
         {
-            _db.BookAiTaskTiers.Remove(existing);
+            _db.BookAiTaskTiers.Remove(existing!);
             await _db.SaveChangesAsync(ct);
             _logger.LogInformation(
                 "Book {BookId} model tier override for {Task} cleared; the task follows the book default again.",
                 bookId, taskKey);
         }
 
-        return Ok(await BuildAiTierDtoAsync(book, ct));
+        // The token depends on whether anything COMMITTED. When an override was removed this read runs after
+        // that write and must not be able to fail it (be-f03), so it drops the request token. On the
+        // idempotent no-op path nothing was written, the read IS the whole request, and the caller's token
+        // still governs its own observation - the be-c03 distinction between bounding a wait and bounding
+        // committed work.
+        return Ok(await BuildAiTierDtoAsync(book, cleared ? CancellationToken.None : ct));
     }
 
     /// <summary>
@@ -326,12 +362,64 @@ public class BooksController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Rebuild the book profile: re-summarize stale chapters, then rebuild the profile from them.
+    ///
+    /// THE REQUEST TOKEN GOVERNS THE WAIT, NEVER THE WORK (be-c03, review finding 6). This endpoint used
+    /// to await <see cref="BookIntelligenceService.RefreshProfileAsync"/> inline with <paramref name="ct"/>,
+    /// so an ordinary client teardown - closing the dashboard panel, entering focus mode, switching the
+    /// assistant to Edit help, reloading mid-build - did not merely stop OBSERVING a whole-book build that
+    /// costs minutes, it CANCELED it, and the book profile was silently never built while the row read
+    /// ready. The build now runs on its own DI scope under the SERVER's lifetime token, and
+    /// <c>WaitAsync(ct)</c> bounds only how long this request waits for it: an abandoned request returns,
+    /// the build commits.
+    ///
+    /// CONCURRENT CALLERS ARE DEDUPLICATED SERVER-SIDE (review finding 24). Two reattached tabs, or the
+    /// import-handoff card racing the dashboard's status row, join ONE build - see
+    /// <see cref="BookProfileBuildCoordinator"/> for why running it twice is not merely wasteful.
+    ///
+    /// NOT A TRACKED JOB. Unlike the briefs / review / style-baseline builds this returns no jobId and has
+    /// no progress route, so the response shape is unchanged (<see cref="BookProfileDto"/>) and the client
+    /// has nothing to reattach to. That was a costed decision, recorded in the be-c03 investigation
+    /// findings; do not read the absence as an oversight.
+    /// </summary>
     [HttpPost("{bookId:guid}/profile/refresh")]
     public async Task<ActionResult<BookProfileDto>> RefreshProfile(Guid bookId, [FromBody] RefreshProfileRequest req, CancellationToken ct)
     {
         if (await _db.Books.FindAsync(new object[] { bookId }, ct) == null) return NotFound();
+        // The RAW request value is what reaches the build, unchanged: the persistence layer normalizes for
+        // itself (SummarizeChaptersCoreAsync) and the prompts see the caller's value. Normalizing here
+        // would quietly change what the model is asked for, which be-c03 is not allowed to do.
         var language = req.Language ?? "he";
-        var profile = await _bookIntelligence.RefreshProfileAsync(bookId, language, ct);
+
+        var shutdownToken = _appLifetime.ApplicationStopping;
+        if (shutdownToken.IsCancellationRequested)
+            return StatusCode(503, new { error = "Server is shutting down; cannot start new build." });
+
+        var build = _profileBuilds.StartOrJoin(bookId, language, shutdownToken);
+        if (build.Joined)
+        {
+            _logger.LogInformation(
+                "Book profile refresh for {BookId} joined the build already in flight (requested {RequestedLanguage}, building {BuildLanguage}).",
+                bookId, language, build.BuildLanguage);
+        }
+
+        // ct is the WAIT bound only. If it fires, this throws and the response is abandoned - which is
+        // correct, because the only thing that cancels it is the caller going away - while the build keeps
+        // running on its own scope and commits.
+        await build.Completion.WaitAsync(ct);
+
+        // Re-read from THIS request's DbContext rather than returning the entity the build produced: the
+        // build ran in another scope, and a joining caller never had one at all. Both callers therefore
+        // return committed state, read the same way.
+        //
+        // Uses CancellationToken.None, not ct - the SAME rule as the post-commit counts re-query in
+        // <see cref="Update"/> (be-f03). ct bounds the WAIT above, which the caller is entitled to abandon;
+        // it must not bound this read, which only runs once the build has already COMMITTED. A client abort
+        // landing in that window would fail a response whose work succeeded, and the caller would be told
+        // its profile was never built while the row sits in the database.
+        var profile = await _db.Set<BookProfile>().AsNoTracking().FirstOrDefaultAsync(p => p.BookId == bookId, CancellationToken.None);
+        if (profile == null) return NotFound();
         return Ok(ToProfileDto(profile));
     }
 
@@ -851,9 +939,10 @@ public class BooksController : ControllerBase
     }
 
     /// <summary>
-    /// Update the workflow status of a single whole-book finding. Body { status: acknowledge | dismiss | done
-    /// | open }; the imperative verbs map to the BookFinding.Status set (acknowledged | dismissed | done |
-    /// open). MIRRORS AnalysisController.UpdateSuggestionOutcome: validate the value (BadRequest on invalid),
+    /// Update the workflow status of a single whole-book finding. The accepted body values and the persisted
+    /// value each one maps to are declared by <see cref="FindingStatusPartition"/> (imperative verbs and the
+    /// stored adjectives are both accepted); this endpoint does not spell them, and neither should its
+    /// callers' docs. MIRRORS AnalysisController.UpdateSuggestionOutcome: validate the value (BadRequest on invalid),
     /// set + SaveChanges, return the updated finding. IDEMPOTENT: PATCH-ing the same status twice is a no-op
     /// success (setting a field to its current value + SaveChanges changes nothing).
     /// </summary>
@@ -867,8 +956,9 @@ public class BooksController : ControllerBase
         if (request == null || string.IsNullOrWhiteSpace(request.Status))
             return BadRequest("Status is required.");
 
-        if (!TryMapFindingStatus(request.Status, out var status))
-            return BadRequest("Invalid status. Must be acknowledge, dismiss, done, or open.");
+        if (!FindingStatusPartition.TryParse(request.Status, out var status))
+            return BadRequest(
+                "Invalid status. Must be one of: " + string.Join(", ", FindingStatusPartition.AcceptedInputs) + ".");
 
         var finding = await _db.BookFindings.FirstOrDefaultAsync(f => f.Id == id && f.BookId == bookId, ct);
         if (finding == null) return NotFound();
@@ -877,36 +967,6 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         return Ok(ToFindingDto(finding));
-    }
-
-    /// <summary>
-    /// Maps the FE's imperative status verb to the persisted BookFinding.Status value (case-insensitive).
-    /// Accepts both the verb form (acknowledge/dismiss) and the stored adjective form
-    /// (acknowledged/dismissed) so the endpoint is tolerant of either; "done" and "open" are identical in
-    /// both forms.
-    /// </summary>
-    private static bool TryMapFindingStatus(string raw, out string status)
-    {
-        switch (raw.Trim().ToLowerInvariant())
-        {
-            case "acknowledge":
-            case "acknowledged":
-                status = "acknowledged";
-                return true;
-            case "dismiss":
-            case "dismissed":
-                status = "dismissed";
-                return true;
-            case "done":
-                status = "done";
-                return true;
-            case "open":
-                status = "open";
-                return true;
-            default:
-                status = string.Empty;
-                return false;
-        }
     }
 
     private static BookReviewStatusDto ToReviewStatusDto(BookReviewStatus s) => new(
@@ -926,7 +986,10 @@ public class BooksController : ControllerBase
         s.RanContinuityReduce,
         s.FailedWindows,
         s.ActiveBuildJobId,
-        s.IsReady);
+        s.IsReady,
+        // Wave 3 / M3: working-through progress without downloading the ledger.
+        s.OpenFindingCount,
+        s.ResolvedFindingCount);
 
     private static BookReviewFindingsDto ToReviewFindingsDto(BookReviewFindings f) => new(
         f.BookId,
@@ -1099,8 +1162,11 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         // Re-read AsNoTracking so the DTO reflects any SaveChanges-override stamps (CreatedAt on Add).
+        // CancellationToken.None, not ct (be-f03's rule): the author's summary edit is already committed, so
+        // a client abort in this window must not report a failed save for text that is in the database. The
+        // clobber guard makes that worse than cosmetic - the edit counts as the user's from now on.
         var saved = await _db.ChunkSummaries.AsNoTracking()
-            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, CancellationToken.None);
         return Ok(ToChapterSummaryViewDto(bookId, chapterId, lang, saved));
     }
 
@@ -1234,7 +1300,21 @@ public class BooksController : ControllerBase
         book.Author = req.Author;
         book.Language = req.Language ?? book.Language;
         await _db.SaveChangesAsync(ct);
-        return Ok(ToDto(book));
+
+        // The M1 counts are part of the BookDto contract, so the update response has to carry the REAL ones -
+        // a renamed book that came back reporting 0 chapters would be a typed lie about that contract, even
+        // though no current client caller re-renders from this response today. Symmetric with GetAll: one SQL
+        // query aggregating both counts server-side via the same WithCounts projection (ChapterCount and
+        // ChaptersWithTextCount are both correlated COUNT subqueries), not a fetch of the chapter rows into
+        // memory to count them here.
+        //
+        // Uses CancellationToken.None, not the request token ct: this read runs AFTER SaveChangesAsync has
+        // already committed the rename, so a client abort (or a DB blip that trips the request token) in this
+        // window must not be able to fail a response whose write already succeeded - that would show the
+        // caller a failed rename that in fact persisted, leaving the UI and DB disagreeing until a reload.
+        var counts = await WithCounts(_db.Books.AsNoTracking().Where(b => b.Id == bookId)).FirstAsync(CancellationToken.None);
+
+        return Ok(ToDto(book, counts.ChapterCount, counts.ChaptersWithTextCount));
     }
 
     [HttpDelete("{bookId:guid}")]
@@ -1341,14 +1421,18 @@ public class BooksController : ControllerBase
         s.ActiveBuildJobId,
         s.ChaptersToBuild,
         s.EstimatedSeconds,
-        s.EstimatedUsd);
+        s.EstimatedUsd,
+        // Wave 3 / w1: the third not-ready reason, computed all along and previously dropped on the floor.
+        s.SummaryCoversBuiltChapters);
 
     // Normalized on the way out (p3-4): the stored column is a nullable free string so a legacy or
     // hand-edited row degrades to the local tier instead of throwing, but the wire value is always exactly
     // "fast" or "thinking". Doing the defensive parse HERE means no client has to own a second copy of it.
-    private static BookDto ToDto(Book b) => new(
+    private static BookDto ToDto(Book b, int chapterCount, int chaptersWithTextCount) => new(
         b.Id, b.Title, b.Author, b.Language, b.CreatedAt, b.UpdatedAt,
-        AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(b.AiTier)));
+        AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(b.AiTier)),
+        chapterCount,
+        chaptersWithTextCount);
 
     private static BookProfileDto ToProfileDto(BookProfile p) => new(
         p.Id,

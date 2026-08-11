@@ -913,8 +913,10 @@ internal static class NearDuplicateCollapser
         double userActedAnchorMismatchThreshold = UserActedAnchorMismatchThreshold)
     {
         // "open" is the ONLY non-user-acted status the persist step writes; anything else (including an unknown
-        // future one) is treated as a user decision — fail-CLOSED, so a new status cannot quietly opt out of the fence.
-        var userActed = !string.Equals((rowStatus ?? string.Empty).Trim(), "open", StringComparison.OrdinalIgnoreCase);
+        // future one) is treated as a user decision - fail-CLOSED, so a new status cannot quietly opt out of the
+        // fence. That rule, its trimming and its casing policy live in FindingStatusPartition; do not re-spell
+        // the status strings here.
+        var userActed = FindingStatusPartition.IsUserActed(rowStatus);
 
         // The MayFold WILDCARD case, and ONLY it: exactly one side is book-wide, so the anchors carry no evidence
         // either way. Both anchored on the same chapter, or both book-wide, is agreement — not a mismatch.
