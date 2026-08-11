@@ -46,15 +46,41 @@ public static class GuidesCatalog
     /// value normalizes to itself lowercased rather than being coerced to a default: the lookup then
     /// simply finds no document and answers 404, which is more honest than silently serving English to
     /// someone who asked for French.</para>
+    ///
+    /// <para>THE PREFIX IS A BCP-47 SUBTAG PREFIX, NOT A STRING PREFIX, and the difference is the whole
+    /// reason this is written out rather than done with two <c>StartsWith</c> calls. This value arrives
+    /// from an untrusted query string, so a bare <c>StartsWith("he")</c> reads <c>help</c>, <c>hen</c>
+    /// and <c>hebridean</c> as Hebrew, and <c>StartsWith("en")</c> reads <c>english</c>, <c>entry</c>
+    /// and <c>enough</c> the same way - which contradicts the paragraph above in the one direction that
+    /// matters, by serving content in a language the caller did not ask for instead of the honest 404.
+    /// A tag matches only when it IS the code or continues with the <c>-</c> subtag separator.</para>
+    ///
+    /// <para>The predicate ranges over a closed set of three outcomes, so each gets a verdict here
+    /// rather than being left to the reader: <c>he</c> and <c>he-*</c> are Hebrew; <c>en</c> and
+    /// <c>en-*</c> are English; EVERYTHING ELSE, including a tag that merely begins with those two
+    /// letters, falls through to itself and therefore to a 404. The corpus ships only these two
+    /// languages, so there is no third code to add a rung for; a future one adds a case here and
+    /// nowhere else, because this is the only place a requested tag is interpreted.</para>
     /// </summary>
     public static string? NormalizeLanguage(string? requested)
     {
         var value = (requested ?? string.Empty).Trim().ToLowerInvariant();
         if (value.Length == 0) return null;
-        if (value.StartsWith("he", StringComparison.Ordinal)) return "he";
-        if (value.StartsWith("en", StringComparison.Ordinal)) return "en";
+        if (IsTagFor(value, "he")) return "he";
+        if (IsTagFor(value, "en")) return "en";
         return value;
     }
+
+    /// <summary>
+    /// True when <paramref name="value"/> is exactly <paramref name="code"/> or is a BCP-47 tag whose
+    /// primary subtag is <paramref name="code"/> (<c>he</c>, <c>he-il</c>). Both arguments are already
+    /// lower-cased by the caller, which is why the comparison is ordinal.
+    /// </summary>
+    private static bool IsTagFor(string value, string code)
+        => string.Equals(value, code, StringComparison.Ordinal) ||
+           (value.Length > code.Length &&
+            value[code.Length] == '-' &&
+            value.AsSpan(0, code.Length).SequenceEqual(code.AsSpan()));
 
     /// <summary>
     /// THE ONLY WAY A REQUEST REACHES A DOCUMENT, and the reason path traversal is not a risk on this

@@ -167,6 +167,49 @@ public class GuidesEndpointTests
         Assert.Empty(OkIndex(RealController(), "fr").Guides);
     }
 
+    /// <summary>
+    /// A tag that merely BEGINS with `he` or `en` is not that language, and the query string is
+    /// untrusted, so this is the difference between the honest empty result and silently handing a
+    /// caller Hebrew because they typed `help`. Each case names the language it would have been read
+    /// as under a bare string-prefix test.
+    ///
+    /// <para>The pairs below are the point: `he` and `he-IL` must still resolve, or a test that only
+    /// asserted emptiness could pass against a normalizer that matched NOTHING.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("help")]        // would have been "he"
+    [InlineData("hen")]
+    [InlineData("hebridean")]
+    [InlineData("english")]     // would have been "en"
+    [InlineData("entry")]
+    [InlineData("enough")]
+    [InlineData("he_IL")]       // underscore is not the BCP-47 separator
+    public void ATagThatMerelyStartsWithALanguageCode_IsNotThatLanguage(string tag)
+    {
+        Assert.Empty(OkIndex(RealController(), tag).Guides);
+
+        // The same tag on the content endpoint resolves no document either, rather than serving one.
+        Assert.IsType<NotFoundObjectResult>(RealController().Get("faq", tag).Result);
+    }
+
+    /// <summary>The other side of the theory above: the real codes and the real locale forms still
+    /// resolve, so the tightened rule cannot pass by rejecting everything.</summary>
+    [Theory]
+    [InlineData("he", "he")]
+    [InlineData("HE", "he")]
+    [InlineData("he-IL", "he")]
+    [InlineData("en", "en")]
+    [InlineData("en-US", "en")]
+    [InlineData("en-GB", "en")]
+    public void ARealTagOrLocale_StillResolvesToItsLanguage(string tag, string expected)
+    {
+        var index = OkIndex(RealController(), tag);
+
+        Assert.NotEmpty(index.Guides);
+        Assert.All(index.Guides, g => Assert.Equal(expected, g.Language));
+        Assert.Equal(expected, OkGuide(RealController(), "faq", tag).Language);
+    }
+
     /// <summary>The index arrives in the corpus's authored workflow order, so a client never has to
     /// know the filenames to present the stages in sequence.</summary>
     [Fact]
