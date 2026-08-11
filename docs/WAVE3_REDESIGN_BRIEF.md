@@ -12,21 +12,28 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > (`src/pagedraft-client`) as siblings. A reader of only this repo will not have that path on disk;
 > ask the owner for the plan file directly.
 >
-> | Q | Decision |
-> |---|---|
-> | Q1 | **D - route-adaptive spine**: compact in app chrome, full on book surfaces |
-> | Q2 | **A - stage 4 renders per-chapter**, no book-level state; never a hardcoded done |
-> | Q3 | **B - build a minimal export surface** this wave; stage 5 becomes real |
-> | Q4 | **A - fold the bare-arrow build into the formal build row**; one build, one ceremony |
-> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces |
-> | Q6 | **A - style baseline moves to the book dashboard** beside the other builds, WITH a new global directive: **dashboard elements become collapsible** - the big parts and the parts inside them, where it makes sense and does not complicate |
-> | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) |
-> | Q8 | **C - reframe the chapter-brief editing card as "the inputs to this build"**, visibly part of stage 2 |
-> | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed |
-> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them |
-> | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence |
-> | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine |
-> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency |
+> | Q | Decision | Status as of 2026-08-11 |
+> |---|---|---|
+> | Q1 | **D - route-adaptive spine**: compact in app chrome, full on book surfaces | SHIPPED (w2/w3) |
+> | Q2 | **A - stage 4 renders per-chapter**, no book-level state; never a hardcoded done | SHIPPED (w2) |
+> | Q3 | **B - build a minimal export surface** this wave; stage 5 becomes real | SHIPPED (w4) |
+> | Q4 | **A - fold the bare-arrow build into the formal build row**; one build, one ceremony | SHIPPED (w5) |
+> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces | **DEFERRED - GATED (w7).** Phase B has not shipped; both surfaces remain in the product on purpose. The gate reopens only once B ships **with** its raw chapter-text escalation (question-driven, so Show can read the chapter a user asks about the way Custom could), verified on B's own g1 bucket f, not on mere existence of phase B |
+> | Q6 | **A - style baseline moves to the book dashboard** beside the other builds, WITH a new global directive: **dashboard elements become collapsible** - the big parts and the parts inside them, where it makes sense and does not complicate | SHIPPED (w5) |
+> | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) | **DEFERRED - same gate as Q5 (w7).** Still present |
+> | Q8 | **C - reframe the chapter-brief editing card as "the inputs to this build"**, visibly part of stage 2 | SHIPPED (w5) |
+> | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed | As "Chapter recap" / "תמצית פרק", DRAFT Hebrew, native review pending. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
+> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | The rows are SHIPPED (w2). The first-run overlay ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
+> | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence | SHIPPED (w5) |
+> | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine | **SPLIT.** The running-state half SHIPPED (w3, moved into the spine). The scope-statement half is **NOT SHIPPED**: `editor-page.component.ts`'s `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of whether a scene is selected, while the adjacent `reviewContextMeta` getter correctly distinguishes "scene" / "chapter" - the exact contradiction this question was meant to resolve is still reproducible. Found during the f1 docs pass; not tracked by any prior w1-w8 todo |
+> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | Consuming the serving path chatbot phase A.2 built. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
+>
+> **What Wave 3 deliberately did not do, beyond the two gated items above (Q5/Q7):** no book-level
+> rollup for stage 4 (Q2-A declined it, not merely deferred it), no template library (Q7 removed the
+> feature instead of building one), no restyle of the editor canvas, and no AI behavior change
+> anywhere in the wave. Full per-question detail and the roadmap-level record live in the workspace
+> docs (outside this repo): `PAGEDRAFT_ROADMAP.md` (Wave 3 section) and `HEBREW_NATIVE_REVIEW.md`,
+> both at `src/docs/` relative to the workspace root described above.
 
 Everything below is written in product terms. Where a claim rests on code, the code lives in
 Appendix B and in the phase 0 plan referenced there. You do not need either to do the work.
