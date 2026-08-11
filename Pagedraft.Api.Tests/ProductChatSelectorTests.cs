@@ -477,6 +477,231 @@ public class ProductChatSelectorTests
         Assert.Equal(GuideSelector.HeadingWeight, GuideSelector.Score(tokens, both, "he"), precision: 9);
     }
 
+    // ─── Query-side synonym tolerance (A.2, c2) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// THE TABLE IS GROUNDED IN THE SHIPPED HEADINGS. Every expansion TARGET must occur verbatim as a
+    /// heading token somewhere in the real corpus, because a target the headings do not carry can never
+    /// fire and is therefore a claim about the corpus that nothing keeps true. This is also the test
+    /// that catches the corpus moving underneath the table: a copy-edit that renames
+    /// <c>## Proofread</c> takes <c>typos -> proofread</c> down with it, silently, and only this fails.
+    ///
+    /// <para>The heading population is proved non-empty and recognisable FIRST, in both scripts:
+    /// <see cref="GuidesCorpusReader"/> returns an empty corpus with a fault when its directory is
+    /// missing, and an empty heading set would green the sweep below while proving nothing.</para>
+    /// </summary>
+    [Fact]
+    public void EveryExpansionTarget_OccursVerbatimInAShippedGuideHeading()
+    {
+        var corpus = ProductChatCorpusTests.LoadRealCorpus();
+        Assert.NotEmpty(corpus.Documents);
+
+        var headingTokens = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var doc in corpus.Documents)
+        foreach (var heading in doc.Headings)
+        foreach (var token in GuideSelector.Tokenize(heading))
+            headingTokens.Add(token);
+
+        // Non-vacuity, in both scripts, before the "none is bad" sweep.
+        Assert.True(headingTokens.Count > 50, $"only {headingTokens.Count} heading tokens: the corpus did not load.");
+        Assert.Contains("proofread", headingTokens);
+        Assert.Contains("ייבוא", headingTokens);
+
+        var ungrounded = GuideQueryExpansion.Entries
+            .SelectMany(entry => entry.Value.Select(target => $"{entry.Key} -> {target}"))
+            .Where(pair => !headingTokens.Contains(pair.Split(" -> ")[1]))
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(Array.Empty<string>(), ungrounded);
+    }
+
+    /// <summary>
+    /// THE STRUCTURAL BOUNDS, asserted as properties of the table rather than re-listed by hand. Every
+    /// key must survive tokenization (a key that is a stop word or a single character could never be
+    /// produced by <see cref="GuideSelector.Tokenize"/> and so could never fire), and no entry may
+    /// cross scripts - which is what keeps an English question from reaching a Hebrew heading through
+    /// this path and leaves the cross-language behaviour g1-g4 measured exactly where it was.
+    /// </summary>
+    [Fact]
+    public void EveryExpansionEntry_KeepsItsKeyTokenizable_AndNeverCrossesScripts()
+    {
+        Assert.NotEmpty(GuideQueryExpansion.Entries);
+
+        foreach (var (key, targets) in GuideQueryExpansion.Entries)
+        {
+            Assert.Equal(new[] { key }, GuideSelector.Tokenize(key).ToArray());
+            Assert.NotEmpty(targets);
+
+            var keyIsHebrew = GuideQueryExpansion.IsAllHebrew(key);
+            foreach (var target in targets)
+            {
+                Assert.Equal(new[] { target }, GuideSelector.Tokenize(target).ToArray());
+                Assert.True(
+                    GuideQueryExpansion.IsAllHebrew(target) == keyIsHebrew,
+                    $"'{key} -> {target}' crosses scripts. Query expansion must stay inside one script, or an " +
+                    "English question gains a path to a Hebrew heading that F3's measurements never saw.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// The floor that bounds the clitic-stripped lookup: every HEBREW key is at least
+    /// <see cref="GuideSelector.MinInflectionStemLength"/> letters, so stripping one leading clitic can
+    /// only ever land on a curated four-letter-or-longer word. Without this a future two-letter key
+    /// would start matching half the language.
+    /// </summary>
+    [Fact]
+    public void EveryHebrewExpansionKey_IsAtLeastTheInflectionStemFloor()
+    {
+        var hebrewKeys = GuideQueryExpansion.Entries.Keys.Where(GuideQueryExpansion.IsAllHebrew).ToArray();
+
+        Assert.NotEmpty(hebrewKeys);
+        Assert.All(hebrewKeys, k => Assert.True(
+            k.Length >= GuideSelector.MinInflectionStemLength,
+            $"Hebrew expansion key '{k}' is shorter than the {GuideSelector.MinInflectionStemLength}-letter floor."));
+    }
+
+    /// <summary>
+    /// The lookup itself: as typed, and through at most ONE leading Hebrew clitic. Latin tokens are
+    /// never stripped, and a token the table does not carry expands to nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("upload", "import")]
+    [InlineData("typos", "proofread")]
+    [InlineData("קובץ", "קבצים")]
+    [InlineData("הקובץ", "קבצים")]        // one definite article
+    [InlineData("בסקירה", "התפתחותית")]   // one preposition
+    public void Expand_ReachesTheHeadingTerm_AsTypedAndThroughOneHebrewClitic(string token, string expected)
+        => Assert.Contains(expected, GuideQueryExpansion.Expand(token));
+
+    [Theory]
+    [InlineData("chapter")]          // an ordinary word the table does not carry
+    [InlineData("shortcut")]         // deliberately absent: the corpus has no such topic to route to
+    [InlineData("קיצור")]
+    [InlineData("ההקובץ")]           // two clitics: only one is ever stripped
+    public void Expand_ReturnsNothing_ForATokenTheTableDoesNotCarry(string token)
+        => Assert.Empty(GuideQueryExpansion.Expand(token));
+
+    /// <summary>
+    /// THE PAYLOAD: a paraphrase of the question now reaches the guide that answers it. Every row here
+    /// is a wording that ranked the WRONG guide first under exact and inflected matching alone, which
+    /// was verified by disabling the tolerance and watching all six go red rather than by reasoning
+    /// about the arithmetic. Two earlier candidates ("Where do I upload my manuscript?", "Which pass
+    /// catches typos and spelling?") were dropped for failing exactly that check: each carried a second
+    /// token that already won the ranking on its own, so they would have greened whether the tolerance
+    /// existed or not.
+    /// </summary>
+    [Theory]
+    [InlineData("Where do I upload the finished draft?", "en", "import")]
+    [InlineData("How do I fix spelling in what I wrote?", "en", "chapter-editing-passes")]
+    [InlineData("How do I download the finished book?", "en", "export")]
+    [InlineData("איך עושים העלאה של הקובץ?", "he", "import")]
+    [InlineData("מה כוללת הסקירה של הספר?", "he", "whole-book-review")]
+    [InlineData("איך מתקנים שגיאות כתיב בפרק?", "he", "chapter-editing-passes")]
+    public void AParaphrasedQuestion_NowRanksTheGuideThatAnswersIt_First(
+        string question, string language, string expectedId)
+    {
+        var corpus = ProductChatCorpusTests.LoadRealCorpus();
+        Assert.NotEmpty(corpus.Documents);
+
+        var tokens = GuideSelector.Tokenize(question);
+        var answering = Assert.Single(corpus.Documents, d => d.Id == expectedId && d.Lang == language);
+        Assert.True(GuideSelector.Score(tokens, answering, language) > 0,
+            "the guide that answers the paraphrase must SCORE for it, not arrive by tie-break.");
+
+        var selected = GuideSelector.Select(question, corpus.Documents, language);
+
+        Assert.Equal(GuideSelector.DefaultCount, selected.Count);
+        Assert.Equal(expectedId, selected[0].Id);
+        Assert.Equal(language, selected[0].Lang);
+    }
+
+    /// <summary>
+    /// THE REGRESSION FLOOR FOR THIS CHANGE, and the reason it is stated as WHOLE selections: the two
+    /// English selections g2 pinned and two Hebrew ones are asserted id-by-id and in order, so a
+    /// synonym that displaced a guide would fail here rather than surface as a subtly worse answer.
+    /// The Hebrew rows deliberately include a question whose tokens DO hit the table
+    /// (<c>לייבא -> ייבוא</c>), so what is pinned is the post-change selection of an already-correct
+    /// question, not merely the selections the table cannot touch.
+    ///
+    /// <para>The English rows are the same two <see cref="AnEnglishSelection_IsUnchanged_IncludingTheWrongLanguageTwinF3StillTakesASlot"/>
+    /// pins, restated here on purpose: that test's docstring is about the INFLECTION bound, and a
+    /// reader deleting this tolerance should not have to infer that it also guarded this one.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("How do I import a manuscript?", "en",
+        "import[en]|faq[en]|import[he]|workflow-overview[en]")]
+    [InlineData("How do I run the Literary pass on a chapter?", "en",
+        "chapter-editing-passes[en]|faq[en]|book-setup-and-intelligence[en]|chapter-editing-passes[he]")]
+    // The Latin token "pagedraft" matches book-setup-and-intelligence[en]'s H1 exactly and takes the
+    // last slot at the cross-language penalty. That is F3 in Hebrew, it predates this tolerance (which
+    // cannot touch it: the table has no Latin key for it), and it is pinned rather than hidden.
+    [InlineData("אילו סוגי קבצים אפשר לייבא ל-PageDraft?", "he",
+        "import[he]|book-setup-and-intelligence[he]|faq[he]|book-setup-and-intelligence[en]")]
+    [InlineData("איך מריצים מעבר על פרק?", "he",
+        "chapter-editing-passes[he]|faq[he]|book-setup-and-intelligence[he]|workflow-overview[he]")]
+    // g3/g4's adjacent-bucket `d4`. It is here because it is the ONE question in the measured gate set
+    // whose tokens reach this table at all: "לקובץ" strips its clitic to the key "קובץ". A change to
+    // what the model is shown on an ADJACENT question is the change most able to move the gate, so it
+    // is pinned rather than left for g5 to discover.
+    [InlineData("איך אני מייצא את הספר שלי לקובץ EPUB?", "he",
+        "export[he]|book-setup-and-intelligence[he]|whole-book-review[he]|faq[he]")]
+    public void TheseWholeSelections_AreUnchangedByTheSynonymTolerance(
+        string question, string language, string expected)
+    {
+        var corpus = ProductChatCorpusTests.LoadRealCorpus();
+        Assert.NotEmpty(corpus.Documents);
+
+        Assert.Equal(
+            expected.Split('|'),
+            GuideSelector.Select(question, corpus.Documents, language)
+                .Select(d => $"{d.Id}[{d.Lang}]").ToArray());
+    }
+
+    /// <summary>
+    /// BOUND 3 (strictly weakest, never double-counted), the synonym twin of
+    /// <see cref="AnExactHeadingMatch_OutranksAnInflectedOne_AndTheyAreNeverBothCounted"/>. A guide
+    /// whose heading carries the author's own word must outrank one reachable only by synonym, even
+    /// when the tie-break would have favoured the other.
+    /// </summary>
+    [Fact]
+    public void AnExactHeadingMatch_OutranksASynonymOne_AndTheyAreNeverBothCounted()
+    {
+        var exact = Doc("exact", "en", 90, "Where to start");
+        var synonym = Doc("synonym", "en", 10, "How to run a pass");
+
+        var selected = GuideSelector.Select("start", new[] { exact, synonym }, "en", count: 2);
+
+        // `synonym` has the LOWER numeric prefix, so an equal score would put it first. It does not.
+        Assert.Equal("exact", selected[0].Id);
+        Assert.True(GuideSelector.InflectedHeadingWeight > GuideSelector.SynonymHeadingWeight);
+        Assert.True(GuideSelector.SynonymHeadingWeight > GuideSelector.FrontmatterWeight);
+
+        // A heading carrying BOTH the word and its synonym is worth one exact match, not both.
+        var both = Doc("both", "en", 20, "Where to start", "How to run a pass");
+        Assert.Equal(GuideSelector.HeadingWeight, GuideSelector.Score(GuideSelector.Tokenize("start"), both, "en"),
+            precision: 9);
+    }
+
+    /// <summary>
+    /// The expansion reaches HEADINGS ONLY, never the frontmatter <c>id</c>/<c>stage</c>. Those slugs
+    /// are English on BOTH halves of an en/he pair and are the only mechanism by which a question
+    /// reaches a wrong-language twin, so keeping the table out of them is an independent guarantee that
+    /// the cross-language behaviour cannot move - the same guarantee be-c02's tolerance carries.
+    /// </summary>
+    [Fact]
+    public void TheSynonymTolerance_NeverReachesTheFrontmatter_OnlyTheHeadings()
+    {
+        var frontmatterOnly = Doc("import", "en", 10, "Something else entirely");
+        var headingOnly = Doc("other", "en", 20, "What import accepts");
+
+        var tokens = GuideSelector.Tokenize("upload");
+
+        Assert.Equal(GuideSelector.SynonymHeadingWeight, GuideSelector.Score(tokens, headingOnly, "en"), precision: 9);
+        Assert.Equal(0.0, GuideSelector.Score(tokens, frontmatterOnly, "en"), precision: 9);
+    }
+
     /// <summary>
     /// AND THE TWIN NEVER SNEAKS IN on the real corpus either, at any position - the same property as
     /// the synthetic test, verified where the filler slots are real. The Hebrew half of the corpus is

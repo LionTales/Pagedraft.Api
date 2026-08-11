@@ -55,6 +55,17 @@ public static class GuideSelector
     public const double InflectedHeadingWeight = 2.0;
 
     /// <summary>
+    /// Weight of a question token that reaches an H1/H2 heading only through
+    /// <see cref="GuideQueryExpansion"/>'s curated synonym table (A.2, c2). Strictly the WEAKEST of the
+    /// three heading paths and still above <see cref="FrontmatterWeight"/>: the author's own word beats
+    /// an inflection of it, which beats a synonym of it, which beats an English slug in the
+    /// frontmatter. Exact, inflected and synonym are mutually exclusive for one question token - the
+    /// strongest available wins and the weaker ones are not added on top - so this can add a document
+    /// to a selection without ever re-ordering two documents that both match a token more strongly.
+    /// </summary>
+    public const double SynonymHeadingWeight = 1.5;
+
+    /// <summary>
     /// Tokens carried by nearly every question or heading in either language. Excluded so the ranking
     /// is driven by topic words rather than by which guide happens to contain more prose in its
     /// headings. Deliberately SHORT: an aggressive stop list would start discarding real product
@@ -139,6 +150,7 @@ public static class GuideSelector
         {
             if (headingTokens.Contains(token)) raw += HeadingWeight;
             else if (MatchesByInflection(token, headingStems)) raw += InflectedHeadingWeight;
+            else if (MatchesByExpansion(token, headingTokens)) raw += SynonymHeadingWeight;
 
             if (frontmatterTokens.Contains(token)) raw += FrontmatterWeight;
         }
@@ -160,6 +172,26 @@ public static class GuideSelector
         foreach (var key in InflectionKeys(questionToken))
         {
             if (headingStems.Contains(key)) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when one of <paramref name="questionToken"/>'s curated synonyms (A.2, c2) occurs verbatim
+    /// among <paramref name="headingTokens"/>.
+    ///
+    /// <para>The expansion is QUERY-SIDE only: the heading tokens are compared as they are, never
+    /// expanded themselves, so this can never make two unrelated headings match each other through a
+    /// shared synonym. See <see cref="GuideQueryExpansion"/> for the table and its three bounds.</para>
+    /// </summary>
+    public static bool MatchesByExpansion(string questionToken, IReadOnlySet<string> headingTokens)
+    {
+        if (headingTokens.Count == 0) return false;
+
+        foreach (var term in GuideQueryExpansion.Expand(questionToken))
+        {
+            if (headingTokens.Contains(term)) return true;
         }
 
         return false;
