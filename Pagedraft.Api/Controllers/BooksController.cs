@@ -231,7 +231,11 @@ public class BooksController : ControllerBase
             "tasks leaves this machine.",
             bookId, task?.ToString() ?? "(book default)", AiTierPolicy.ToStoredValue(tier));
 
-        return Ok(await BuildAiTierDtoAsync(book, ct));
+        // CancellationToken.None, not ct (be-f03's rule): the tier write is already committed above, and
+        // this read only assembles the response from it. A client abort here would report a failed tier
+        // change that in fact persisted, leaving the caller's idea of the tier and the tier that will
+        // actually route disagreeing until it re-reads.
+        return Ok(await BuildAiTierDtoAsync(book, CancellationToken.None));
     }
 
     /// <summary>
@@ -258,16 +262,22 @@ public class BooksController : ControllerBase
         var taskKey = AiTierPolicy.TaskKeyFor(parsedTask);
         var existing = await _db.BookAiTaskTiers
             .FirstOrDefaultAsync(t => t.BookId == bookId && t.TaskKey == taskKey, ct);
-        if (existing != null)
+        var cleared = existing != null;
+        if (cleared)
         {
-            _db.BookAiTaskTiers.Remove(existing);
+            _db.BookAiTaskTiers.Remove(existing!);
             await _db.SaveChangesAsync(ct);
             _logger.LogInformation(
                 "Book {BookId} model tier override for {Task} cleared; the task follows the book default again.",
                 bookId, taskKey);
         }
 
-        return Ok(await BuildAiTierDtoAsync(book, ct));
+        // The token depends on whether anything COMMITTED. When an override was removed this read runs after
+        // that write and must not be able to fail it (be-f03), so it drops the request token. On the
+        // idempotent no-op path nothing was written, the read IS the whole request, and the caller's token
+        // still governs its own observation - the be-c03 distinction between bounding a wait and bounding
+        // committed work.
+        return Ok(await BuildAiTierDtoAsync(book, cleared ? CancellationToken.None : ct));
     }
 
     /// <summary>
@@ -402,7 +412,13 @@ public class BooksController : ControllerBase
         // Re-read from THIS request's DbContext rather than returning the entity the build produced: the
         // build ran in another scope, and a joining caller never had one at all. Both callers therefore
         // return committed state, read the same way.
-        var profile = await _db.Set<BookProfile>().AsNoTracking().FirstOrDefaultAsync(p => p.BookId == bookId, ct);
+        //
+        // Uses CancellationToken.None, not ct - the SAME rule as the post-commit counts re-query in
+        // <see cref="Update"/> (be-f03). ct bounds the WAIT above, which the caller is entitled to abandon;
+        // it must not bound this read, which only runs once the build has already COMMITTED. A client abort
+        // landing in that window would fail a response whose work succeeded, and the caller would be told
+        // its profile was never built while the row sits in the database.
+        var profile = await _db.Set<BookProfile>().AsNoTracking().FirstOrDefaultAsync(p => p.BookId == bookId, CancellationToken.None);
         if (profile == null) return NotFound();
         return Ok(ToProfileDto(profile));
     }
@@ -1146,8 +1162,11 @@ public class BooksController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         // Re-read AsNoTracking so the DTO reflects any SaveChanges-override stamps (CreatedAt on Add).
+        // CancellationToken.None, not ct (be-f03's rule): the author's summary edit is already committed, so
+        // a client abort in this window must not report a failed save for text that is in the database. The
+        // clobber guard makes that worse than cosmetic - the edit counts as the user's from now on.
         var saved = await _db.ChunkSummaries.AsNoTracking()
-            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, ct);
+            .FirstAsync(cs => cs.BookId == bookId && cs.ChapterId == chapterId, CancellationToken.None);
         return Ok(ToChapterSummaryViewDto(bookId, chapterId, lang, saved));
     }
 

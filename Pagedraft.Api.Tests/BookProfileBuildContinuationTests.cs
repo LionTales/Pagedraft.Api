@@ -93,6 +93,48 @@ public class BookProfileBuildContinuationTests
         Assert.Equal(Fixture.BuiltGenre, dto.Genre);
     }
 
+    /// <summary>
+    /// Bugbot (PR #55): ct bounds the WAIT, but it used to bound the POST-BUILD READ too. If the client went
+    /// away in the window between the build committing and that read returning, the read threw and the caller
+    /// was told the refresh failed - while the profile sat committed in the database. The twin of
+    /// <c>Wave3StageSignalContractTests.Update_CommitsTheRename_EvenWhenTheRequestIsCancelledDuringTheCountsReread</c>,
+    /// which be-f03 fixed on <c>BooksController.Update</c> without this endpoint noticing.
+    ///
+    /// WHY THE TRIGGER IS A <c>Set&lt;BookProfile&gt;()</c> OVERRIDE AND NOT be-f03's SaveChangesInterceptor.
+    /// Cancelling when the build's own SaveChangesAsync commits would land the cancellation while the endpoint
+    /// is still inside <c>Completion.WaitAsync(ct)</c>, and a cancelled WAIT is CONTRACTUAL here (be-c03: the
+    /// caller may stop waiting). That would test the wrong thing and fail even with the fix in place. The one
+    /// seam that puts the abort strictly BETWEEN the wait and the read is the read's own first move - asking
+    /// the request DbContext for the BookProfile set. No threads, no sleeps, no timing tolerance.
+    /// </summary>
+    [Fact]
+    public async Task RefreshProfile_ReturnsTheCommittedProfile_WhenTheRequestIsCancelledAfterTheBuildCommitted()
+    {
+        using var request = new CancellationTokenSource();
+        var fixture = new Fixture { CancelAtProfileRead = request };
+        fixture.Builder.Release();
+
+        var result = await fixture.NewController()
+            .RefreshProfile(fixture.BookId, new RefreshProfileRequest("he"), request.Token);
+
+        // Sanity: the window really was exercised - the read did begin with the request already aborted.
+        Assert.True(request.IsCancellationRequested);
+
+        // THE ASSERTION THAT NAMES THE DEFECT: the response still carries the profile the build committed,
+        // instead of the read throwing and turning finished, paid-for work into a reported failure.
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var dto = Assert.IsType<BookProfileDto>(ok.Value);
+        Assert.Equal(fixture.BookId, dto.BookId);
+        Assert.Equal(Fixture.BuiltGenre, dto.Genre);
+
+        // And what it reported is what is really in the database, read on a context that was never cancelled.
+        await using var verify = fixture.NewDbContext();
+        var committed = await verify.Set<BookProfile>()
+            .FirstOrDefaultAsync(p => p.BookId == fixture.BookId, CancellationToken.None);
+        Assert.NotNull(committed);
+        Assert.Equal(Fixture.BuiltGenre, committed!.Genre);
+    }
+
     [Fact]
     public async Task RefreshProfile_UnknownBook_IsStillNotFoundAndStartsNoBuild()
     {
@@ -347,6 +389,13 @@ public class BookProfileBuildContinuationTests
         public GatedProfileBuilder Builder { get; }
         public CancellationToken ShutdownToken { get; set; } = CancellationToken.None;
 
+        /// <summary>
+        /// When set, the CONTROLLER's DbContext (only - never the seed or verify ones) cancels this source
+        /// the moment the endpoint reaches its post-build BookProfile read, so a test can place a client
+        /// abort strictly between the wait and the read.
+        /// </summary>
+        public CancellationTokenSource? CancelAtProfileRead { get; init; }
+
         /// <summary>Completes when the endpoint logs that a caller joined an in-flight build.</summary>
         public Task JoinLogged => _logger.Joined;
 
@@ -357,8 +406,12 @@ public class BookProfileBuildContinuationTests
             var appLifetime = new Mock<IHostApplicationLifetime>();
             appLifetime.Setup(l => l.ApplicationStopping).Returns(() => ShutdownToken);
 
+            var db = CancelAtProfileRead == null
+                ? NewDbContext()
+                : new CancelOnProfileReadDbContext(_options, CancelAtProfileRead);
+
             return new BooksController(
-                NewDbContext(),
+                db,
                 bookIntelligence: null!,
                 styleBaseline: null!,
                 bookSummary: null!,
@@ -370,6 +423,26 @@ public class BookProfileBuildContinuationTests
                 scopeFactory: new Mock<IServiceScopeFactory>().Object,
                 appLifetime: appLifetime.Object,
                 logger: _logger);
+        }
+    }
+
+    /// <summary>
+    /// An <see cref="AppDbContext"/> that cancels a caller-supplied token the instant the endpoint asks it
+    /// for the <see cref="BookProfile"/> set - the first move of the POST-BUILD read, and therefore the only
+    /// point that is provably after the build committed and before the read observes any token. Filtered on
+    /// the entity type so nothing else the endpoint touches (the Books existence check) can trip it.
+    /// </summary>
+    private sealed class CancelOnProfileReadDbContext : AppDbContext
+    {
+        private readonly CancellationTokenSource _cts;
+
+        public CancelOnProfileReadDbContext(DbContextOptions<AppDbContext> options, CancellationTokenSource cts)
+            : base(options) => _cts = cts;
+
+        public override DbSet<TEntity> Set<TEntity>()
+        {
+            if (typeof(TEntity) == typeof(BookProfile)) _cts.Cancel();
+            return base.Set<TEntity>();
         }
     }
 

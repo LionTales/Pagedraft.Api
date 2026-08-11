@@ -61,8 +61,16 @@ public class SceneService
         _db.Scenes.Add(scene);
         await _db.SaveChangesAsync(ct);
 
+        // EVERY POST-COMMIT BROADCAST IN THIS FILE USES CancellationToken.None, NOT ct, and so does the
+        // post-commit read in ReorderAsync. Same rule as BooksController.Update's post-commit re-query:
+        // once SaveChangesAsync has landed the change, work that only ANNOUNCES or REPORTS it must not be
+        // bound to the caller's token. On the request token, a client that goes away in this window takes
+        // the announcement with it - the write is committed either way, but the other tabs open on this
+        // book never receive the event and keep rendering the pre-change scene list until someone reloads.
+        // ReorderAsync's trailing read is worse still: on a cancelled token it THROWS, so the caller is
+        // told a reorder that in fact persisted had failed.
         await _hubContext.Clients.Group($"book:{bookId}")
-            .SendAsync("SceneCreated", new SceneCreatedEvent(bookId, chapterId, scene.Id, scene.Title, scene.Order), ct);
+            .SendAsync("SceneCreated", new SceneCreatedEvent(bookId, chapterId, scene.Id, scene.Title, scene.Order), CancellationToken.None);
         return scene;
     }
 
@@ -78,7 +86,7 @@ public class SceneService
         await _db.SaveChangesAsync(ct);
 
         await _hubContext.Clients.Group($"book:{bookId}")
-            .SendAsync("SceneUpdated", new SceneUpdatedEvent(bookId, chapterId, sceneId, scene.UpdatedAt), ct);
+            .SendAsync("SceneUpdated", new SceneUpdatedEvent(bookId, chapterId, sceneId, scene.UpdatedAt), CancellationToken.None);
         return scene;
     }
 
@@ -91,7 +99,7 @@ public class SceneService
         await _db.SaveChangesAsync(ct);
 
         await _hubContext.Clients.Group($"book:{bookId}")
-            .SendAsync("SceneDeleted", new SceneDeletedEvent(bookId, chapterId, sceneId), ct);
+            .SendAsync("SceneDeleted", new SceneDeletedEvent(bookId, chapterId, sceneId), CancellationToken.None);
         return true;
     }
 
@@ -119,9 +127,9 @@ public class SceneService
 
         var list = newOrder.Select(x => new SceneOrderItem(x.SceneId, x.Order)).ToList();
         await _hubContext.Clients.Group($"book:{bookId}")
-            .SendAsync("ScenesReordered", new ScenesReorderedEvent(bookId, chapterId, list), ct);
+            .SendAsync("ScenesReordered", new ScenesReorderedEvent(bookId, chapterId, list), CancellationToken.None);
 
-        return await GetAllByChapterAsync(bookId, chapterId, ct);
+        return await GetAllByChapterAsync(bookId, chapterId, CancellationToken.None);
     }
 
     /// <summary>
@@ -164,7 +172,7 @@ public class SceneService
         foreach (var scene in created)
         {
             await _hubContext.Clients.Group($"book:{bookId}")
-                .SendAsync("SceneCreated", new SceneCreatedEvent(bookId, chapterId, scene.Id, scene.Title, scene.Order), ct);
+                .SendAsync("SceneCreated", new SceneCreatedEvent(bookId, chapterId, scene.Id, scene.Title, scene.Order), CancellationToken.None);
         }
 
         return created;
@@ -183,7 +191,7 @@ public class SceneService
         await _db.SaveChangesAsync(ct);
 
         await _hubContext.Clients.Group($"book:{bookId}")
-            .SendAsync("ScenesCleared", new ScenesClearedEvent(bookId, chapterId, clearedIds), ct);
+            .SendAsync("ScenesCleared", new ScenesClearedEvent(bookId, chapterId, clearedIds), CancellationToken.None);
 
         return true;
     }

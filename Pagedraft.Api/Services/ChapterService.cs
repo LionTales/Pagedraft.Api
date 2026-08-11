@@ -88,7 +88,13 @@ public class ChapterService
         await _db.SaveChangesAsync(ct);
         _bookEntities?.Invalidate(bookId); // be-c03: Chapter.ContentText is a harvest source
 
-        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, chapter.Id, chapter.Title, chapter.Order), ct);
+        // EVERY POST-COMMIT BROADCAST IN THIS FILE USES CancellationToken.None, NOT ct, and so does every
+        // read taken after a commit to build one. Same rule as BooksController.Update's post-commit
+        // re-query: once SaveChangesAsync has landed the change, work that only ANNOUNCES it must not be
+        // bound to the caller's token. On the request token, a client that goes away in this window takes
+        // the announcement with it - the write is committed either way, but the other tabs open on this
+        // book never receive the event and keep rendering the pre-change chapter list until someone reloads.
+        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, chapter.Id, chapter.Title, chapter.Order), CancellationToken.None);
         return chapter;
     }
 
@@ -112,8 +118,8 @@ public class ChapterService
         }
         await _db.SaveChangesAsync(ct);
         _bookEntities?.Invalidate(bookId); // be-c03: Chapter.ContentText is a harvest source
-        foreach (var ch in await _db.Chapters.Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync(ct))
-            await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, ch.Id, ch.Title, ch.Order), ct);
+        foreach (var ch in await _db.Chapters.Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync(CancellationToken.None))
+            await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, ch.Id, ch.Title, ch.Order), CancellationToken.None);
     }
 
     public async Task<Chapter?> SaveAsync(Guid bookId, Guid chapterId, string? contentSfdt, string? title, string? partName, int? order, CancellationToken ct = default)
@@ -141,7 +147,7 @@ public class ChapterService
             _bookEntities?.Invalidate(bookId);
         }
 
-        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterUpdated", new ChapterUpdatedEvent(bookId, chapter.Id, chapter.WordCount, chapter.UpdatedAt), ct);
+        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterUpdated", new ChapterUpdatedEvent(bookId, chapter.Id, chapter.WordCount, chapter.UpdatedAt), CancellationToken.None);
         return chapter;
     }
 
@@ -152,7 +158,7 @@ public class ChapterService
         _db.Chapters.Remove(chapter);
         await _db.SaveChangesAsync(ct);
         _bookEntities?.Invalidate(bookId); // be-c03: removing a chapter removes its prose from the harvest
-        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterDeleted", new ChapterDeletedEvent(bookId, chapterId), ct);
+        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterDeleted", new ChapterDeletedEvent(bookId, chapterId), CancellationToken.None);
         return true;
     }
 
@@ -191,7 +197,7 @@ public class ChapterService
         await _db.SaveChangesAsync(ct);
 
         var list = newOrder.Select(x => new ChapterOrderItem(x.ChapterId, x.Order)).ToList();
-        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterReordered", new ChapterReorderedEvent(bookId, list), ct);
+        await _hubContext.Clients.Group($"book:{bookId}").SendAsync("ChapterReordered", new ChapterReorderedEvent(bookId, list), CancellationToken.None);
     }
 
         public async Task<List<Chapter>> ImportFromPreviewAsync(
@@ -245,7 +251,7 @@ public class ChapterService
             foreach (var ch in created.OrderBy(c => c.Order))
             {
                 await _hubContext.Clients.Group($"book:{bookId}")
-                    .SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, ch.Id, ch.Title, ch.Order), ct);
+                    .SendAsync("ChapterCreated", new ChapterCreatedEvent(bookId, ch.Id, ch.Title, ch.Order), CancellationToken.None);
             }
 
             return created;

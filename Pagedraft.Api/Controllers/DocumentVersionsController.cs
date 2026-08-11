@@ -81,13 +81,17 @@ public class DocumentVersionsController : ControllerBase
         _db.DocumentVersions.Add(version);
         await _db.SaveChangesAsync(ct);
 
+        // CancellationToken.None, not ct (the same rule as BooksController.Update's post-commit re-query):
+        // the version row is already committed above and this lookup only decorates the response with the
+        // linked analysis's status. A client abort here would report a failed snapshot that in fact exists,
+        // and a retry would store a second copy of the same document version.
         string? analysisStatus = null;
         if (version.AnalysisResultId.HasValue)
         {
             analysisStatus = await _db.AnalysisResults.AsNoTracking()
                 .Where(a => a.Id == version.AnalysisResultId.Value)
                 .Select(a => a.Status.ToString())
-                .FirstOrDefaultAsync(ct);
+                .FirstOrDefaultAsync(CancellationToken.None);
         }
 
         return Ok(new DocumentVersionDto(
