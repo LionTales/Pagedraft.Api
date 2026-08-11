@@ -2,7 +2,7 @@
 id: book-setup-and-intelligence
 stage: book-intelligence
 audience: author
-updated: 2026-08-06
+updated: 2026-08-11
 lang: en
 ---
 
@@ -64,6 +64,31 @@ Every refresh rebuilds all of it from scratch, whether or not anything changed. 
 where asking again always costs a full rebuild, so refresh it when you have actually changed
 something.
 
+## Your book's writing style
+
+This is the third book-level build, beside the book briefs and the developmental review, and it sits
+with them on the book dashboard. It is a measurement of how this book usually reads: sentence
+length, vocabulary range, dialogue density and the other numbers a Linguistic pass compares one
+chapter against.
+
+It exists for one consumer. The Linguistic pass on a chapter reports deviations, and a deviation is
+only meaningful against a baseline, so without this measurement that pass can report what it found
+in the chapter but cannot say the chapter drifts from the rest of the book. When it is missing or
+out of date, the Linguistic result says so and points at the row that builds it.
+
+Like the other book-level builds it needs chapters with saved text, and nothing else. It is a
+whole-book run, so it asks for consent and shows an estimate before it starts, and if the book is on
+the thinking tier it also says that the chapter text leaves this machine.
+
+It goes out of date the same way everything else book-level does. Editing chapters after it was
+measured leaves it behind, and the row reports how many chapters have changed; building it under a
+different tier records that too, and the row asks to be refreshed. Nothing rebuilds it for you.
+
+The name is the same everywhere: the dashboard row, the activity list entry and the pointer in the
+Linguistic result all call it your book's writing style. It used to be reachable only from inside
+one chapter's analysis screen, which is why an older habit of looking for it there is worth
+unlearning.
+
 ## What the Story Bible is
 
 The view named Story Bible is not the profile above. It is a second way of reading the developmental
@@ -94,5 +119,7 @@ briefs.
   the review was built from the older briefs.
 - **Changing a tier** changes which model is active. Book-level material records which model built
   it, so a tier change is treated the same way as a content change and asks to be rebuilt.
+- **Your book's writing style** follows the same two rules: edited chapters leave the measurement
+  behind, and a tier change asks it to be refreshed.
 
 None of this rebuilds itself. PageDraft marks the state and waits for you.

@@ -2,7 +2,7 @@
 id: faq
 stage: faq
 audience: author
-updated: 2026-08-06
+updated: 2026-08-11
 lang: en
 ---
 
@@ -30,8 +30,8 @@ extra to confirm and the switch commits directly.
 ## Which passes can actually use the thinking tier?
 
 Proofread and Linguistic can. Line Edit and the developmental review show the control but always run
-on the fast tier, and they say so instead of leaving you guessing. Summarize and Custom have no tier
-control at all.
+on the fast tier, and they say so instead of leaving you guessing. Chapter recap and Custom have no
+tier control at all.
 
 There is also a language rule that outranks your choice: for an English book, proofreading always
 runs on the fast tier. That applies to proofreading only, not to Linguistic.
@@ -96,7 +96,7 @@ Edit, where you see every proposed change individually and nothing is applied wi
 **Change text, through suggestions you approve one at a time:** Proofread and Line Edit.
 
 **Report only, with nothing to accept:** Linguistic (measurements and flags that navigate you to the
-passage), Literary (a critique of the prose), Summarize (a summary of the chapter), and the
+passage), Literary (a critique of the prose), Chapter recap (a recap of the chapter), and the
 developmental review (findings with a status you set).
 
 **Custom** runs your own instruction against the text, so what comes back depends on what you asked
@@ -105,13 +105,14 @@ for.
 In no case is your manuscript rewritten without you. Even the passes that produce edits produce them
 as proposals.
 
-## What is the difference between running Summarize on a chapter and building the book briefs?
+## What is the difference between running Summarize, now the Chapter recap, on a chapter and building the book briefs?
 
-Summarize produces a summary of that one chapter that you read like any other result. The book
-briefs are a separate build that derives a structured brief for every chapter and composes them into
-one brief for the whole book, and that structure is what the developmental review reads.
+The chapter recap produces a recap of that one chapter that you read like any other result. It is
+the pass that used to be called Summarize; only the name changed. The book briefs are a separate
+build that derives a structured brief for every chapter and composes them into one brief for the
+whole book, and that structure is what the developmental review reads.
 
-Running Summarize on every chapter in turn does not add up to the book briefs.
+Running the chapter recap on every chapter in turn does not add up to the book briefs.
 
 ## The developmental review would not run
 

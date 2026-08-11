@@ -2,15 +2,18 @@
 id: chapter-editing-passes
 stage: chapter-editing
 audience: author
-updated: 2026-08-06
+updated: 2026-08-11
 lang: en
 ---
 
 # The chapter editing passes
 
 Six passes run against one chapter, or against one scene inside a chapter: Proofread, Line Edit,
-Linguistic, Literary, Summarize and Custom. They all need the same one thing, saved chapter text,
+Linguistic, Literary, Chapter recap and Custom. They all need the same one thing, saved chapter text,
 and they differ in what they read around it and in what they give you back.
+
+Chapter recap was called Summarize until this release. Only the name changed; the pass does the same
+work, and older results in the History tab are the same pass.
 
 ## They read what is saved
 
@@ -112,13 +115,14 @@ Of all the chapter passes, this is the one that gains most from book-level work.
 chapter's own brief and the whole-book brief when they exist, so running it after the book briefs
 are built gives it a view of where the chapter sits in the book rather than only what is on the page.
 
-## Summarize
+## Chapter recap (previously Summarize)
 
-Produces a summary of that one chapter, which you read like any other result.
+Produces a recap of that one chapter, which you read like any other result. It summarizes the
+chapter for you to read; it does not feed the book briefs.
 
 This is not the same thing as building the book briefs. The book briefs are a separate build that
-produces the structured briefs the developmental review consumes. Running Summarize on every chapter
-in turn does not produce the book briefs.
+produces the structured briefs the developmental review consumes. Running the chapter recap on every
+chapter in turn does not produce the book briefs.
 
 ## Custom
 
@@ -153,7 +157,7 @@ per run: picking a tier stores it and the next run uses it.
 
 Not every pass can actually move to the thinking tier. Proofread and Linguistic can. Line Edit shows
 the control but always runs on the fast tier, and it says so rather than pretending otherwise.
-Summarize and Custom have no tier control at all. Because Literary is routed through the same
+Chapter recap and Custom have no tier control at all. Because Literary is routed through the same
 underlying task as Linguistic, the two share one setting.
 
 There is one language rule that overrides the tier choice: for an English book, proofreading always
