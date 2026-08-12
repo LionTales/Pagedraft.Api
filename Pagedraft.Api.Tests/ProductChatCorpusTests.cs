@@ -196,6 +196,102 @@ public class ProductChatCorpusTests
         }
     }
 
+    /// <summary>
+    /// THE OTHER HALF OF THE CLIENT'S STAGE -> GUIDE MIRROR (wave 3 / w6, c03).
+    ///
+    /// <para>Read this if you arrived from the client repo. Two client files hold this corpus's
+    /// frontmatter <c>id</c> and <c>stage</c> values as CROSS-REPO LITERALS and cannot read this
+    /// directory:</para>
+    /// <list type="bullet">
+    /// <item><c>pagedraft-client/src/app/shared/stage-spine/stage-guide.ts</c> - <c>STAGE_GUIDE_LINKS</c>
+    /// joins each of the five spine stages to one guide <c>id</c> (which is also the
+    /// <c>/help/:guideId</c> route parameter the stage rows navigate to) plus that guide's <c>stage</c>
+    /// slug, and <c>OVERVIEW_GUIDE_ID</c> names the guide the first-run orientation panel reads.</item>
+    /// <item><c>pagedraft-client/src/app/core/i18n/guides-strings.ts</c> - <c>STAGE_LABELS_HE</c> /
+    /// <c>STAGE_LABELS_EN</c> are keyed by these same <c>stage</c> slugs and name the groups on
+    /// <c>/help</c>.</item>
+    /// </list>
+    ///
+    /// <para>So renaming an <c>id</c> here sends a spine row to the reader's "that guide does not exist"
+    /// page, and renaming a <c>stage</c> here drops a group on <c>/help</c> back to its raw slug. Both
+    /// edits happen in THIS repo, on a separate PR from the client's, which is why the pin is here: the
+    /// failure has to land in the change that causes it. If you are here because this test failed, you
+    /// renamed a guide's id or stage; update the two client files above and their specs
+    /// (<c>stage-guide.spec.ts</c>, <c>guides-strings.spec.ts</c>) in the same shipment.</para>
+    ///
+    /// <para>What this test does NOT know: it pins the corpus's own set and nothing about
+    /// <c>STAGE_GUIDE_LINKS</c>'s contents, so it cannot see a client that points at a
+    /// <em>different</em> shipped guide than it should. The client's spec pins that side. Together they
+    /// bracket the mirror; neither one sees both halves.</para>
+    ///
+    /// <para>The pinned set covers EVERY shipped guide, not only the five the spine links: the two that
+    /// join no stage (<c>workflow-overview</c>/overview, which the orientation panel reads, and
+    /// <c>faq</c>/faq, which is cross-cutting) and the index (<c>guides-index</c>/index, README.md) are
+    /// members too, so a rename of one of those cannot slip through under "the spine does not link it".</para>
+    ///
+    /// <para>WHAT WAS ALREADY COVERED, measured rather than assumed, so nobody deletes the wrong guard
+    /// later. Renaming an <c>id</c> was already loud: drifting <c>import</c> to <c>importing</c> fails 11
+    /// tests, led by <c>GuidesEndpointTests.TheIndex_IsNotEmpty_AndCarriesTheKnownShippedGuides</c> (which
+    /// asserts each of the eight ids is present in both languages) plus the selector's ranking pins.
+    /// Renaming a <c>STAGE</c> was silent: before this test, drifting <c>whole-book-review</c>'s stage to
+    /// <c>developmental-review</c> failed NOTHING, because only <c>export</c>'s stage was pinned by value
+    /// (in <c>AShippedGuide_ParsesItsIdStageAudienceUpdatedAndLang</c> above). So the stage slugs are what
+    /// this test adds; for the ids it adds set COMPLETENESS in the other direction, which the existing
+    /// per-id <c>Assert.Contains</c> loop cannot give (it cannot see a guide the pin never heard of).</para>
+    /// </summary>
+    [Fact]
+    public void EveryShippedGuidesIdAndStage_IsWhatTheClientsStageGuideAndStageLabelMapsMirror()
+    {
+        var documents = LoadRealCorpus().Documents;
+
+        // The PINNED side: every (id, stage) pair the corpus ships. One member per guide FAMILY, not per
+        // file - an en/he pair deliberately shares one id and one stage (see the citation test above).
+        var pinned = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "workflow-overview/overview",              // no spine stage; the first-run orientation reads it
+            "import/import",                           // spine stage `import`
+            "book-setup-and-intelligence/book-intelligence",  // spine stage `briefs` (guide is broader)
+            "chapter-editing-passes/chapter-editing",  // spine stage `chapter-passes`
+            "whole-book-review/whole-book-review",     // spine stage `review`
+            "export/export",                           // spine stage `export`
+            "faq/faq",                                 // no spine stage; cross-cutting
+            "guides-index/index",                      // README.md; the reader redirects it to /help
+        };
+
+        // The DISCOVERED side is the loaded corpus, never a second literal list: one side of a
+        // completeness oracle has to be discovered or the check goes stale the moment a guide lands.
+        var discovered = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var doc in documents)
+        {
+            var key = $"{doc.Id}/{doc.Stage}";
+            if (!discovered.TryGetValue(key, out var files)) discovered[key] = files = new List<string>();
+            files.Add(doc.FileName);
+        }
+
+        // ANTI-VACUITY, asserted BEFORE anything is asserted about the set. GuidesCorpusReader returns an
+        // empty collection for a directory it cannot read, and an empty discovered set trivially satisfies
+        // "nothing extra". A corpus that failed to copy to the output directory is a real failure mode in
+        // this repo, not a hypothetical one - see TheCsproj_StillShipsTheGuidesToTheOutputAndPublishDirectories.
+        Assert.NotEmpty(discovered);
+
+        // Compared as a SET IN BOTH DIRECTIONS, and reported by name. A per-member loop over the pinned
+        // side alone would SKIP a guide the pin has never heard of, which is the failure mode that makes
+        // an oracle blind: a new or renamed guide would arrive silently pinned by nothing.
+        var missing = pinned.Where(p => !discovered.ContainsKey(p)).OrderBy(p => p, StringComparer.Ordinal).ToList();
+        var unexpected = discovered.Keys.Where(d => !pinned.Contains(d))
+            .Select(d => $"{d} (in {string.Join(", ", discovered[d])})").ToList();
+
+        Assert.True(missing.Count == 0 && unexpected.Count == 0,
+            "The shipped guides' (id/stage) set no longer matches the set pinned in this test." +
+            (missing.Count > 0 ? $"\n  PINNED BUT NOT SHIPPED: {string.Join("; ", missing)}" : "") +
+            (unexpected.Count > 0 ? $"\n  SHIPPED BUT NOT PINNED: {string.Join("; ", unexpected)}" : "") +
+            "\n  A guide's frontmatter id or stage changed. The client repo mirrors both as literals it " +
+            "cannot verify: pagedraft-client/src/app/shared/stage-spine/stage-guide.ts (STAGE_GUIDE_LINKS " +
+            "guideId/guideStage, OVERVIEW_GUIDE_ID) and pagedraft-client/src/app/core/i18n/guides-strings.ts " +
+            "(STAGE_LABELS_HE / STAGE_LABELS_EN). Update those, their specs, and the pinned set above in " +
+            "the same shipment, or a spine row lands on the reader's \"that guide does not exist\" page.");
+    }
+
     // ─── Frontmatter edge cases, on fixtures ────────────────────────────────────────────────────
 
     [Fact]

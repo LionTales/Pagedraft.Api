@@ -2,7 +2,7 @@
 id: workflow-overview
 stage: overview
 audience: author
-updated: 2026-08-06
+updated: 2026-08-11
 lang: en
 ---
 
@@ -19,8 +19,8 @@ work that was never going to produce anything.
    whole book.
 3. **Developmental review.** Findings across six dimensions: plot, character, pacing, tone, theme
    and continuity.
-4. **Chapter editing passes.** Proofread, Line Edit, Linguistic, Literary, Summarize and Custom,
-   each run on one chapter or one scene at a time.
+4. **Chapter editing passes.** Proofread, Line Edit, Linguistic, Literary, Chapter recap and
+   Custom, each run on one chapter or one scene at a time.
 5. **Export.** Your chapters back out as a DOCX file.
 
 ## What actually depends on what
@@ -85,14 +85,16 @@ chapters have changed since they were built, and material built under a differen
 separately.
 
 Two older names for the same things still turn up: the book briefs are sometimes called the book
-summary, and the developmental review the whole-book review.
+summary, and the developmental review the whole-book review. A third older name is the chapter pass
+now called Chapter recap, which used to be called Summarize.
 
 ## Two things that are easy to mix up
 
-**Summarize on a chapter is not the book briefs build.** Running Summarize from the chapter analysis
-picker produces a summary result for that one chapter that you read like any other analysis result.
-The book briefs are a separate build that produces the structured briefs the developmental review
-consumes. Running Summarize on every chapter one by one does not add up to the book briefs.
+**The chapter recap is not the book briefs build.** Running Chapter recap, previously Summarize,
+from the chapter analysis picker produces a recap of that one chapter that you read like any other
+analysis result. The book briefs are a separate build that produces the structured briefs the
+developmental review consumes. Running the chapter recap on every chapter one by one does not add up
+to the book briefs.
 
 **Linguistic and Literary share one setting.** They are two different reports, but they are routed
 through the same underlying task, so the fast or thinking choice you make for one applies to the
