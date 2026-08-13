@@ -662,12 +662,8 @@ public sealed class BookChatContextReader : IBookChatContextReader
             // stamped, not content. Content wants surfaces; a key wants the key.
             foreach (var dimension in keys.Dimensions)
             {
-                var surfaces = BookArtifactSelector.SurfacesOf(dimension);
-                if (brief.ThematicMarkers.Any(
-                        m => surfaces.Any(s => m.Contains(s, StringComparison.OrdinalIgnoreCase))))
-                {
+                if (brief.ThematicMarkers.Any(m => BookArtifactSelector.MarkerNamesDimension(m, dimension)))
                     rank += 1.0;
-                }
             }
 
             ranked.Add((brief, rank));

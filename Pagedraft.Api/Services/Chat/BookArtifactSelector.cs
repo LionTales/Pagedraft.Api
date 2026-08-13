@@ -727,6 +727,42 @@ public static class BookArtifactSelector
         return entry.Surfaces ?? new[] { canonical };
     }
 
+    /// <summary>
+    /// Whether a chapter brief's thematic marker NAMES <paramref name="canonical"/>, matched as WHOLE
+    /// TOKENS and never as a substring.
+    ///
+    /// <para>THE SUBSTRING VERSION OF THIS WAS A CR BOT FINDING AND IT DESERVED TO BE. The vocabulary
+    /// carries short stems - <c>pace</c>, <c>cast</c>, <c>mood</c>, <c>tone</c>, <c>consistent</c> - and
+    /// a marker is ordinary manuscript prose, so <c>Contains</c> matched <c>space</c>, <c>outcast</c>,
+    /// <c>inconsistent</c> and <c>stone</c>. The cost is not noise, it is INVERTED SELECTION: one false
+    /// hit keys that brief, and <c>RankChapterBriefs</c> then drops every chapter that keyed nothing, so
+    /// a pacing question would ground in the one chapter that happened to mention a space station and in
+    /// no chapter that is actually about pacing.</para>
+    ///
+    /// <para>Tokens make this SYMMETRIC with how the question side already resolves a dimension
+    /// (<see cref="ResolveDimensions"/> tests surfaces against question tokens), so both ends of the
+    /// comparison now obey one rule instead of two. Hebrew keeps its inflection tolerance through the
+    /// one shared <see cref="GuideSelector.InflectionKeys"/>, so a marker written <c>הקצב</c> still
+    /// names <c>pacing</c>.</para>
+    /// </summary>
+    internal static bool MarkerNamesDimension(string? marker, string canonical)
+    {
+        if (string.IsNullOrWhiteSpace(marker)) return false;
+
+        var tokens = GuideSelector.Tokenize(marker);
+        if (tokens.Count == 0) return false;
+
+        var keys = InflectionKeysOf(tokens);
+
+        foreach (var surface in SurfacesOf(canonical))
+        {
+            if (tokens.Contains(surface)) return true;
+            if (GuideSelector.MatchesByInflection(surface, keys)) return true;
+        }
+
+        return false;
+    }
+
     /// <summary>The positional cue the question carries, if any: true = start of the book, false = end.
     /// Null when it names no position. The FIRST cue in vocabulary order wins, so a question carrying
     /// both is resolved deterministically rather than by word order.</summary>

@@ -369,6 +369,7 @@ public class ProductChatBookServiceTests
     /// </summary>
     [Theory]
     [InlineData("קצב הסצנות איטי")]   // Hebrew marker, the case that was broken
+    [InlineData("הקצב של הפרק")]      // Hebrew, INFLECTED, so the tolerance is exercised too
     [InlineData("the pacing drags")]  // English marker, the case that always worked
     public void ADimensionQuestion_RanksBriefsWhoseMarkersNameItInEitherLanguage(string marker)
     {
@@ -388,6 +389,41 @@ public class ProductChatBookServiceTests
         // marked chapter being the ONLY survivor is what says the marker actually scored.
         Assert.Equal(new[] { 7 }, ranked.Select(r => r.Brief.Order));
         Assert.True(ranked[0].Rank > 0, "a named dimension must raise the rank of a brief that carries it");
+    }
+
+    /// <summary>
+    /// A MARKER THAT MERELY CONTAINS A DIMENSION STEM DOES NOT NAME THAT DIMENSION.
+    ///
+    /// <para>The vocabulary carries short stems (<c>pace</c>, <c>cast</c>, <c>mood</c>, <c>consistent</c>)
+    /// and a thematic marker is ordinary manuscript prose, so a substring test matched <c>space</c>,
+    /// <c>outcast</c> and <c>inconsistent</c>. Found by a CR bot on the fix for the Hebrew-ranking defect
+    /// above, which is to say the fix over-reached and this is the fence.</para>
+    ///
+    /// <para>THE COST IS INVERTED SELECTION, NOT NOISE, which is why this is a real defect and not a
+    /// tidiness one: one false hit keys that brief, and RankChapterBriefs then DROPS every chapter that
+    /// keyed nothing. So a pacing question would have grounded in the single chapter that mentions a
+    /// space station and in no chapter actually about pacing. The assertion checks exactly that: the
+    /// genuinely-about-pacing chapter is the one that survives.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("a space station above the ridge")]  // contains "pace"
+    [InlineData("the outcast returns")]              // contains "cast"
+    [InlineData("an inconsistent account")]          // contains "consistent"
+    [InlineData("a stone bridge at dusk")]           // contains "tone"
+    public void AMarkerThatMerelyContainsADimensionStem_DoesNotKeyThatDimension(string decoy)
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: Array.Empty<int>(), CharacterNames: Array.Empty<string>(),
+            Dimensions: new[] { "pacing", "character", "continuity", "tone" }, HasLocationCue: false,
+            EscalationChapterOrders: Array.Empty<int>());
+
+        var decoyBrief = Brief(2) with { ThematicMarkers = new[] { decoy } };
+        var realBrief = Brief(9) with { ThematicMarkers = new[] { "the pacing drags" } };
+
+        var ranked = BookChatContextReader.RankChapterBriefs(
+            new[] { decoyBrief, realBrief }, keys, Array.Empty<int>());
+
+        Assert.Equal(new[] { 9 }, ranked.Select(r => r.Brief.Order));
     }
 
     /// <summary>
