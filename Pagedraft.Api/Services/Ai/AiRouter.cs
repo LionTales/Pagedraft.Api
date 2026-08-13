@@ -27,7 +27,11 @@ public class AiRouter : IAiRouter
         if (!_providers.TryGetValue(selection.Provider, out var provider))
             throw new InvalidOperationException($"Unknown AI provider: {selection.Provider}. Configured: {string.Join(", ", _providers.Keys)}");
 
-        var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        var (factorySystemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        // A caller that knows something the TASK TYPE cannot express may supply the system message itself
+        // (see AiRequest.SystemMessageOverride). Null on every call site but ProductChat's, so this line is
+        // an identity for every other task rather than a behaviour change they all now share.
+        var systemMessage = request.SystemMessageOverride ?? factorySystemMessage;
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
             ? pipelineInstruction
             : ShouldUseUnifiedInstructionVerbatim(request)
@@ -59,7 +63,11 @@ public class AiRouter : IAiRouter
         if (provider is not IStreamingAiAnalysisProvider streaming)
             throw new NotSupportedException($"Provider {selection.Provider} does not support streaming.");
 
-        var (systemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        var (factorySystemMessage, pipelineInstruction) = _promptFactory.GetPrompt(request.TaskType, request.Language);
+        // A caller that knows something the TASK TYPE cannot express may supply the system message itself
+        // (see AiRequest.SystemMessageOverride). Null on every call site but ProductChat's, so this line is
+        // an identity for every other task rather than a behaviour change they all now share.
+        var systemMessage = request.SystemMessageOverride ?? factorySystemMessage;
         var resolvedInstruction = string.IsNullOrEmpty(request.Instruction)
             ? pipelineInstruction
             : ShouldUseUnifiedInstructionVerbatim(request)
