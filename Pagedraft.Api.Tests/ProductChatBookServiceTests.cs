@@ -354,6 +354,43 @@ public class ProductChatBookServiceTests
     }
 
     /// <summary>
+    /// A DIMENSION QUESTION RANKS A HEBREW BOOK'S CHAPTER BRIEFS, which it could not do at all before.
+    ///
+    /// <para>A resolved dimension is a CANONICAL slug (<c>pacing</c>), while a brief's
+    /// <c>ThematicMarkers</c> are model-written prose in the BOOK's language. Matching the two directly
+    /// could only ever succeed on an English book - <c>"קצב".Contains("pacing")</c> is false - so every
+    /// Hebrew book ranked its briefs as though the question had named no dimension, and fell back to book
+    /// order. Found by a CR bot on the PR, which reported it as a fixture that "does not exercise the
+    /// brief-ranking behavior its comments describe"; the fixture was the symptom and this was the
+    /// cause.</para>
+    ///
+    /// <para>Both languages are asserted in one test on purpose: the English half is what made the defect
+    /// invisible, so a Hebrew-only assertion would pin the fix without pinning what hid it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("קצב הסצנות איטי")]   // Hebrew marker, the case that was broken
+    [InlineData("the pacing drags")]  // English marker, the case that always worked
+    public void ADimensionQuestion_RanksBriefsWhoseMarkersNameItInEitherLanguage(string marker)
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: Array.Empty<int>(), CharacterNames: Array.Empty<string>(),
+            Dimensions: new[] { "pacing" }, HasLocationCue: false,
+            EscalationChapterOrders: Array.Empty<int>());
+
+        var marked = Brief(7);
+        marked = marked with { ThematicMarkers = new[] { marker } };
+        var unmarked = Brief(1) with { ThematicMarkers = new[] { "אהבה ואובדן" } };
+
+        var ranked = BookChatContextReader.RankChapterBriefs(
+            new[] { unmarked, marked }, keys, Array.Empty<int>());
+
+        // Not merely "it survived": an unkeyed brief is dropped entirely once ANY brief is keyed, so the
+        // marked chapter being the ONLY survivor is what says the marker actually scored.
+        Assert.Equal(new[] { 7 }, ranked.Select(r => r.Brief.Order));
+        Assert.True(ranked[0].Rank > 0, "a named dimension must raise the rank of a brief that carries it");
+    }
+
+    /// <summary>
     /// With NO keys at all, the selection falls back to book order rather than to nothing: "what happens
     /// in my book" is a real question and it grounds in the opening chapters.
     /// </summary>

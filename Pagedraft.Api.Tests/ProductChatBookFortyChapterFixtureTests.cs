@@ -246,6 +246,13 @@ public partial class ProductChatBookFortyChapterFixtureTests
     /// SHAPE 5: a dimension question pulling many findings. Ten seeded "pacing" findings exceed
     /// <see cref="BookChatContextReader.MaxFindings"/> (8), so the selection CAP has something real to
     /// trim, and pacing-anchored chapters (every 5th) outrank the rest for the chapter-brief slots too.
+    ///
+    /// <para>THAT SECOND CLAUSE WAS FALSE UNTIL A CR BOT CAUGHT IT. The fixture plants the Hebrew marker
+    /// on every fifth brief, and <c>RankChapterBriefs</c> compared it against the canonical English slug,
+    /// so the planted markers scored nothing and this shape exercised only the findings half of what it
+    /// describes. The unit that pins the ranking itself is
+    /// <c>ProductChatBookServiceTests.ADimensionQuestion_RanksBriefsWhoseMarkersNameItInEitherLanguage</c>,
+    /// which asserts both languages because the English half is what made the defect invisible here.</para>
     /// </summary>
     [Fact]
     public void Shape5_DimensionQuestion_CapsAtMaxFindings_RankedByTheDimension()

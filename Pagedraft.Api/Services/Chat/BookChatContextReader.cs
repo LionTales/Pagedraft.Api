@@ -653,10 +653,21 @@ public sealed class BookChatContextReader : IBookChatContextReader
                 }
             }
 
+            // AGAINST THE DIMENSION'S SURFACE FORMS, NOT ITS CANONICAL SLUG. `keys.Dimensions` holds
+            // canonical slugs (`pacing`), while `ThematicMarkers` is model-written prose in the BOOK's
+            // language, so comparing the two directly could only ever match on an English book:
+            // `"קצב".Contains("pacing")` is false, and a Hebrew book therefore ranked every chapter brief
+            // as though the question had named no dimension at all. Note the sibling comparison in
+            // FindingRank stays slug-to-slug and is correct: a finding's Dimension is a KEY the review
+            // stamped, not content. Content wants surfaces; a key wants the key.
             foreach (var dimension in keys.Dimensions)
             {
-                if (brief.ThematicMarkers.Any(m => m.Contains(dimension, StringComparison.OrdinalIgnoreCase)))
+                var surfaces = BookArtifactSelector.SurfacesOf(dimension);
+                if (brief.ThematicMarkers.Any(
+                        m => surfaces.Any(s => m.Contains(s, StringComparison.OrdinalIgnoreCase))))
+                {
                     rank += 1.0;
+                }
             }
 
             ranked.Add((brief, rank));

@@ -148,8 +148,12 @@ public partial class ProductChatBookFortyChapterFixtureTests
             .Select(k => ThematicMarkerBank[(themeStart + k) % ThematicMarkerBank.Length])
             .Distinct()
             .ToList();
-        // Every 5th chapter names "pacing" explicitly, so shape 5's dimension question has real,
-        // content-anchored chapters to rank - not just the findings.
+        // Every 5th chapter names pacing explicitly, IN THE BOOK'S LANGUAGE, so shape 5's dimension
+        // question has real, content-anchored chapters to rank and not just the findings. The Hebrew
+        // surface form is the point rather than an incidental choice: this fixture is a Hebrew book, and
+        // for the whole of this fixture's first life the marker scored NOTHING, because RankChapterBriefs
+        // compared it against the canonical English slug. The claim on this line was false and the shape-5
+        // assertion below rested on it. Keep the marker in Hebrew; it is what holds that fix down.
         if (order % 5 == 0 && !themes.Contains("קצב")) themes.Add("קצב");
 
         var threadStart = (order * 5) % OpenThreadBank.Length;

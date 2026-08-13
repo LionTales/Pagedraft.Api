@@ -705,6 +705,28 @@ public static class BookArtifactSelector
         return matched;
     }
 
+    /// <summary>
+    /// The surface forms of one canonical dimension slug, in BOTH languages, or just the slug itself for
+    /// a canonical this vocabulary does not carry.
+    ///
+    /// <para>WHY A CONSUMER NEEDS THE SURFACES AND NOT THE SLUG. A dimension resolved from a question is
+    /// CANONICAL (<c>pacing</c>), because that is what <see cref="BookReviewService.Dimensions"/> declares
+    /// and what a <c>BookFinding.Dimension</c> is stamped with. But a chapter brief's
+    /// <c>ThematicMarkers</c> are MODEL-WRITTEN PROSE in the BOOK's language, so matching them against the
+    /// canonical slug can only ever succeed on an English book: <c>"קצב".Contains("pacing")</c> is false,
+    /// and every Hebrew book therefore ranked its chapter briefs as though no dimension had been named.
+    /// Comparing against the surfaces is what makes the two sides speak the same language.</para>
+    ///
+    /// <para>Its sibling comparison is correct as it stands and must not be "fixed" to match: a finding's
+    /// <c>Dimension</c> is a canonical slug written by the review, not prose, so it compares slug to slug.
+    /// The distinction is whether the other side of the comparison is CONTENT or a KEY.</para>
+    /// </summary>
+    internal static IReadOnlyList<string> SurfacesOf(string canonical)
+    {
+        var entry = DimensionVocabulary.FirstOrDefault(d => d.Canonical == canonical);
+        return entry.Surfaces ?? new[] { canonical };
+    }
+
     /// <summary>The positional cue the question carries, if any: true = start of the book, false = end.
     /// Null when it names no position. The FIRST cue in vocabulary order wins, so a question carrying
     /// both is resolved deterministically rather than by word order.</summary>
