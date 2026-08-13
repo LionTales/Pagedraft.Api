@@ -96,7 +96,26 @@ public static class ProductChatBudget
     }
 
     /// <summary>What was composed, what it cost, and what had to be given up to make it fit.</summary>
-    /// <param name="Instruction">The composed instruction to send.</param>
+    /// <param name="SystemMessage">
+    /// THE SYSTEM SLOT FOR THIS TURN, and the reason it lives here rather than being recomputed by the
+    /// caller. Whether the turn is book-aware is a predicate over the blocks that SURVIVED the trim, and
+    /// three places need the answer: the token estimate below, the head of
+    /// <see cref="ProductChatPrompt.ComposeInstruction"/>, and the request's
+    /// <c>SystemMessageOverride</c>. Deriving it three times is three chances to disagree, and the ONE
+    /// disagreement that ever mattered here shipped the book refusal and the book-grounding rule in the
+    /// same prompt (g1 F-1). It is derived ONCE, on the same iteration that produced
+    /// <paramref name="Instruction"/>, so "exactly one rule reaches the model" is a property of there
+    /// being exactly one string, not of two call sites happening to agree.
+    ///
+    /// <para>With no surviving book block this is byte-identical to what
+    /// <c>PromptFactory.GetPrompt(AiTaskType.ProductChat, ...)</c> returns, which is what makes phase A's
+    /// byte-identity fence hold BY CONSTRUCTION rather than by the caller remembering to skip the
+    /// override.</para>
+    /// </param>
+    /// <param name="Instruction">The composed instruction to send. It OPENS with
+    /// <paramref name="SystemMessage"/>, restated at the head of the user message exactly as phase A
+    /// restates it, because Ollama truncates from the START and a rule that lived only in the system slot
+    /// is the first thing lost.</param>
     /// <param name="Guides">The guides that SURVIVED, in selection order. Use this - not the original
     /// selection - for citations, or the answer can cite a guide it never saw.</param>
     /// <param name="History">The history turns that survived, oldest first.</param>
@@ -105,71 +124,201 @@ public static class ProductChatBudget
     /// case the history alone could absorb.</param>
     /// <param name="EstimatedTokens">Estimated input tokens of what is actually being sent.</param>
     /// <param name="BudgetTokens">The budget it was fitted against.</param>
+    /// <param name="BookBlocks">The book artifacts that SURVIVED, in prompt order. Use this - not what
+    /// the reader retrieved - for citations, exactly as <paramref name="Guides"/> is used, or the answer
+    /// can cite an artifact it never saw.</param>
+    /// <param name="DroppedBookRefs">Book-artifact references dropped to fit, in drop order.</param>
     public sealed record Composition(
+        string SystemMessage,
         string Instruction,
         IReadOnlyList<GuideDocument> Guides,
         IReadOnlyList<ProductChatTurn> History,
         int DroppedTurns,
         IReadOnlyList<string> DroppedGuideIds,
         int EstimatedTokens,
-        int BudgetTokens)
+        int BudgetTokens,
+        IReadOnlyList<BookArtifactBlock> BookBlocks,
+        IReadOnlyList<string> DroppedBookRefs)
     {
-        public bool Trimmed => DroppedTurns > 0 || DroppedGuideIds.Count > 0;
+        public bool Trimmed => DroppedTurns > 0 || DroppedGuideIds.Count > 0 || DroppedBookRefs.Count > 0;
 
-        /// <summary>True when even <see cref="MinGuides"/> guide(s) and no history do not fit. Nothing
-        /// further can be given up without giving up the grounding itself, so the caller sends it and
-        /// says so loudly.</summary>
+        /// <summary>True when even <see cref="MinGuides"/> guide(s), no history and the undroppable book
+        /// artifacts do not fit. Nothing further can be given up without giving up the grounding itself,
+        /// so the caller sends it and says so loudly.</summary>
         public bool StillOverBudget => EstimatedTokens > BudgetTokens;
+
+        /// <summary>
+        /// Every citation reference this turn licenses: the surviving guide ids AND the surviving
+        /// book-artifact refs. THE ONE PLACE that answer is computed, because the whole point of deriving
+        /// it from the SURVIVORS is that a trim can never leave a citation behind for grounding that was
+        /// dropped - the exact failure phase A's latent-budget finding warned about, since Ollama
+        /// truncates from the START where the context sits.
+        /// </summary>
+        public IReadOnlyList<string> AcceptableReferences => Guides
+            .Select(g => g.Id)
+            .Concat(BookBlocks.SelectMany(b => b.References))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     /// <summary>
-    /// Composes the instruction and trims it until it fits <paramref name="budgetTokens"/>, dropping
-    /// the OLDEST history turn first and only then the LOWEST-ranked guide.
+    /// Composes the instruction and trims it until it fits <paramref name="budgetTokens"/>.
+    ///
+    /// <para>DROP ORDER (phase A's, extended by d1 section (2) for the book artifacts), drop-first to
+    /// drop-last: history turns oldest first; then book artifacts by
+    /// <see cref="BookArtifactKind"/> ascending and lowest RANK first within a kind; then guides beyond
+    /// <see cref="MinGuides"/>; then the remaining book artifacts, up to and including the book-level
+    /// brief. The statuses are never dropped while a book is in scope, and the escalated raw chapter text
+    /// is protected by sitting BELOW the guides in that order rather than by a special case, which is
+    /// what makes "escalation never evicts the artifact that triggered it" a property of the ordering
+    /// instead of a rule someone has to remember.</para>
     /// </summary>
     /// <param name="question">Sent separately as the request's input text, so it is measured here even
     /// though <see cref="ProductChatPrompt.ComposeInstruction"/> does not contain it.</param>
+    /// <param name="bookBlocks">Retrieved book artifacts, or null/empty when the request carried no
+    /// bookId. Empty makes every line below a no-op and the composition byte-identical to phase A's.</param>
+    /// <param name="ambiguousChapterNumbers">
+    /// Numbers the question wrote that resolved to two real chapters
+    /// (<c>BookQuestionKeys.AmbiguousChapterNumbers</c>). Passed HERE rather than turned into a note by
+    /// the caller because the note is only true of the blocks that SURVIVE the trim, and that set is not
+    /// known until this loop settles; it is derived per iteration for the same reason
+    /// <see cref="Composition.SystemMessage"/> is.
+    /// </param>
+    /// <param name="needsChapterClarification">
+    /// <c>BookQuestionKeys.NeedsChapterClarification</c> (d2 section (5)): the question was about a
+    /// chapter, and none resolved and none was escalated. It emits the BOOK section's note, so the model
+    /// can ASK in prose for a client that does not render chapter chips; the RESPONSE flag the client
+    /// branches on is set from the same boolean and never from what the model wrote.
+    /// </param>
     public static Composition Compose(
         string language,
         IReadOnlyList<GuideDocument> guides,
         IReadOnlyList<ProductChatTurn> history,
         string question,
-        int budgetTokens)
+        int budgetTokens,
+        IReadOnlyList<BookArtifactBlock>? bookBlocks = null,
+        string? bookTitle = null,
+        IReadOnlyList<int>? ambiguousChapterNumbers = null,
+        bool needsChapterClarification = false)
     {
         var keptGuides = guides.ToList();
         var keptHistory = history.ToList();
+        var keptBlocks = OrderForPrompt(bookBlocks);
         var droppedTurns = 0;
         var droppedGuideIds = new List<string>();
+        var droppedBookRefs = new List<string>();
 
         while (true)
         {
-            var instruction = ProductChatPrompt.ComposeInstruction(language, keptGuides, keptHistory);
+            // DERIVED ONCE PER ITERATION AND THEN CARRIED, never re-derived downstream. The system message
+            // is the BOOK-AWARE one exactly when book artifacts survive, so this same string is what the
+            // estimate measures, what ComposeInstruction restates at the head of the user message, and
+            // what the caller puts in the request's system slot. See Composition.SystemMessage.
+            var systemMessage = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
+            var instruction = ProductChatPrompt.ComposeInstruction(
+                language, keptGuides, keptHistory, keptBlocks, bookTitle,
+                BookArtifactBlocks.BookSectionNote(
+                    ambiguousChapterNumbers, keptBlocks, needsChapterClarification));
 
             // What the provider actually sends: the system slot, the composed instruction (which
             // restates the rule) and the question appended after it.
-            var estimated = EstimateTokens(ProductChatPrompt.SystemMessage(language))
+            var estimated = EstimateTokens(systemMessage)
                           + EstimateTokens(instruction)
                           + EstimateTokens(question);
 
             var fits = estimated <= budgetTokens;
-            var nothingLeftToGiveUp = keptHistory.Count == 0 && keptGuides.Count <= MinGuides;
+            var nothingLeftToGiveUp =
+                keptHistory.Count == 0
+                && keptGuides.Count <= MinGuides
+                && !keptBlocks.Any(IsDroppable);
 
             if (fits || nothingLeftToGiveUp)
             {
                 return new Composition(
-                    instruction, keptGuides, keptHistory, droppedTurns, droppedGuideIds,
-                    estimated, budgetTokens);
+                    systemMessage, instruction, keptGuides, keptHistory, droppedTurns, droppedGuideIds,
+                    estimated, budgetTokens, keptBlocks, droppedBookRefs);
             }
 
             if (keptHistory.Count > 0)
             {
                 keptHistory.RemoveAt(0);       // oldest turn: the least useful context to lose
                 droppedTurns++;
+                continue;
             }
-            else
+
+            // Book artifacts ABOVE the guides in the drop order: findings, analysis history, chapter
+            // briefs, the register.
+            if (TryDropBookBlock(keptBlocks, BookArtifactKind.Register, droppedBookRefs)) continue;
+
+            if (keptGuides.Count > MinGuides)
             {
                 droppedGuideIds.Add(keptGuides[^1].Id);
-                keptGuides.RemoveAt(keptGuides.Count - 1);   // lowest-ranked guide, last resort
+                keptGuides.RemoveAt(keptGuides.Count - 1);   // lowest-ranked guide
+                continue;
+            }
+
+            // Book artifacts BELOW the guides: the escalated raw chapter text, then the book brief. The
+            // statuses are excluded by IsDroppable and so are never reached here.
+            if (TryDropBookBlock(keptBlocks, BookArtifactKind.BookBrief, droppedBookRefs)) continue;
+
+            // Unreachable: nothingLeftToGiveUp above covers exactly this state. Stated rather than
+            // assumed so a future tier added to BookArtifactKind cannot spin this loop forever.
+            var finalSystem = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
+            var final = ProductChatPrompt.ComposeInstruction(
+                language, keptGuides, keptHistory, keptBlocks, bookTitle,
+                BookArtifactBlocks.BookSectionNote(
+                    ambiguousChapterNumbers, keptBlocks, needsChapterClarification));
+            return new Composition(
+                finalSystem, final, keptGuides, keptHistory, droppedTurns, droppedGuideIds,
+                EstimateTokens(finalSystem) + EstimateTokens(final) + EstimateTokens(question),
+                budgetTokens, keptBlocks, droppedBookRefs);
+        }
+    }
+
+    /// <summary>
+    /// Prompt order for the book artifacts: statuses first (they are the tutoring backbone and the one
+    /// thing that must survive a runtime truncation from the START), then the book brief, then the rest
+    /// by descending survival priority. This is the REVERSE of the drop order, so the block most likely
+    /// to be dropped sits last in the prompt too - the two orders agree instead of being maintained
+    /// separately.
+    /// </summary>
+    internal static List<BookArtifactBlock> OrderForPrompt(IReadOnlyList<BookArtifactBlock>? blocks)
+        => (blocks ?? Array.Empty<BookArtifactBlock>())
+            .OrderByDescending(b => (int)b.Kind)
+            .ThenByDescending(b => b.Rank)
+            .ThenBy(b => b.References.Count == 0 ? string.Empty : b.References[0], StringComparer.Ordinal)
+            .ToList();
+
+    /// <summary>The statuses are the tutoring floor: "the answer is the status plus the next action" is
+    /// only possible while they are in the prompt, so they are not droppable at any pressure.</summary>
+    private static bool IsDroppable(BookArtifactBlock block) => block.Kind != BookArtifactKind.Status;
+
+    /// <summary>
+    /// Drops ONE block: the lowest <see cref="BookArtifactKind"/> present at or below
+    /// <paramref name="maxKind"/>, and within that kind the lowest <see cref="BookArtifactBlock.Rank"/>.
+    /// Returns false when nothing in range remains.
+    /// </summary>
+    private static bool TryDropBookBlock(
+        List<BookArtifactBlock> blocks, BookArtifactKind maxKind, List<string> droppedRefs)
+    {
+        BookArtifactBlock? victim = null;
+
+        foreach (var block in blocks)
+        {
+            if (!IsDroppable(block) || block.Kind > maxKind) continue;
+
+            if (victim == null
+                || block.Kind < victim.Kind
+                || (block.Kind == victim.Kind && block.Rank < victim.Rank))
+            {
+                victim = block;
             }
         }
+
+        if (victim == null) return false;
+
+        blocks.Remove(victim);
+        droppedRefs.AddRange(victim.References);
+        return true;
     }
 }
