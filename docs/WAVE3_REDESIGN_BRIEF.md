@@ -18,15 +18,15 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > | Q2 | **A - stage 4 renders per-chapter**, no book-level state; never a hardcoded done | SHIPPED (w2) |
 > | Q3 | **B - build a minimal export surface** this wave; stage 5 becomes real | SHIPPED (w4) |
 > | Q4 | **A - fold the bare-arrow build into the formal build row**; one build, one ceremony | SHIPPED (w5) |
-> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces | **DEFERRED - GATED (w7).** Phase B has not shipped; both surfaces remain in the product on purpose. The gate reopens only once B ships **with** its raw chapter-text escalation (question-driven, so Show can read the chapter a user asks about the way Custom could), verified on B's own g1 bucket f, not on mere existence of phase B |
+> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces | **DEFERRED - GATED (w7). The EQUIVALENCE EVIDENCE now exists; the merge does not (2026-08-12).** Both surfaces remain in the product on purpose. The gate reopens only once B ships **with** its raw chapter-text escalation (question-driven, so Show can read the chapter a user asks about the way Custom could), verified on B's own bucket f, not on mere existence of phase B. **Bucket f PASSED in BOTH of B's gates with identical selector output on all 6 runs of every case, 12/12 negatives asserted from run artifacts** - a named chapter answered from its text, an over-budget chapter degrading to labeled excerpts, and no raw text pulled for a location-free question. So the capability question is answered YES, twice, on two different code states. What is outstanding is that B is uncommitted on `api-chatbot-phase-b` / `client-chatbot-phase-b`. Do not open w7 before B is merged; do not re-argue the capability after it is |
 > | Q6 | **A - style baseline moves to the book dashboard** beside the other builds, WITH a new global directive: **dashboard elements become collapsible** - the big parts and the parts inside them, where it makes sense and does not complicate | SHIPPED (w5) |
 > | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) | **DEFERRED - same gate as Q5 (w7).** Still present |
 > | Q8 | **C - reframe the chapter-brief editing card as "the inputs to this build"**, visibly part of stage 2 | SHIPPED (w5) |
 > | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed | As "Chapter recap" / "תמצית פרק", DRAFT Hebrew, native review pending. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
-> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | The rows are SHIPPED (w2). The first-run overlay ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
+> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | The rows are SHIPPED (w2). The first-run overlay ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it. **NEW SUB-DECISION OPEN as of 2026-08-12:** the chatbot can now tutor from real build status, so whether the overlay DEFERS to it, EMBEDS it, or stays static - see the update under Q10 below |
 > | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence | SHIPPED (w5) |
 > | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine | **SPLIT.** The running-state half SHIPPED (w3, moved into the spine). The scope-statement half is **NOT SHIPPED**: `editor-page.component.ts`'s `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of whether a scene is selected, while the adjacent `reviewContextMeta` getter correctly distinguishes "scene" / "chapter" - the exact contradiction this question was meant to resolve is still reproducible. Found during the f1 docs pass; not tracked by any prior w1-w8 todo |
-> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | Consuming the serving path chatbot phase A.2 built. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
+> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | Consuming the serving path chatbot phase A.2 built. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it. **A SECOND content source now exists (2026-08-12)**: the chatbot answers the same orientation questions from THIS book's real status rather than from generic guide prose - see the update under Q10 below |
 >
 > **What Wave 3 deliberately did not do, beyond the two gated items above (Q5/Q7):** no book-level
 > rollup for stage 4 (Q2-A declined it, not merely deferred it), no template library (Q7 removed the
@@ -708,6 +708,64 @@ Constraint on all options: **the guided steps trigger long-running AI builds** (
 Any flow that assumes the user waits in place will fail in practice. Whatever is chosen must survive
 the user navigating away and coming back, which is also why the activity list matters.
 
+#### Update, 2026-08-12: the tutoring prototype is REAL, and it changes the shape of this question
+
+**Read this before the next design pass touches orientation.** Q10-D and Q13-A were decided when the
+only orientation content that could exist was guide prose - the same words for every author, whatever
+state their book was in. That is no longer the only option. **Chatbot phase B is built and has passed its
+gate, and it answers process-state questions from the book's own real build status**, not from generic
+copy. Decide WITH the prototype, not around it: it exists, it can be run, and its behaviour is measured.
+
+**What B actually does that is relevant here, with the measurement rather than the claim.** The three
+status DTOs the Wave 3 spine reads (`BookSummaryStatus`, `BookReviewStatus`, `BookStyleBaselineStatus`)
+are always in the assistant's prompt when a book is open, and they are the ONE thing the budget trimmer
+may never drop - so "what should I run next", "why is my review out of date" and "can I export yet" are
+answered from this book's real state, including the `behind` state this brief calls the state that
+matters most.
+
+- **36 of 36 runs across the seeded status permutations (fresh, behind-by-N, absent, review-blocked)
+  asserted no wrong status**, and 33 of 36 also named the right next action. A wrong status counts as
+  fabrication under that gate's own rule, so this is a hard number, not an impression.
+- The tutoring floor held under real budget pressure: on a 40-chapter book at 99.8% of the context
+  budget, the trimmer gave up four low-ranked review findings and kept **all three status blocks**.
+- The assistant speaks the reconciled five-stage vocabulary this brief defines rather than a third stage
+  model. Be precise about what was checked: that cross-check was run against the product-question
+  assistant in 2026-08-06 and PASSED, and it has NOT been re-run against the book-aware prompt. If an
+  option below puts the assistant's words on the orientation surface, re-run it.
+
+**What B does NOT do, so no option below can quietly assume it.** No cross-book or series answers. No
+server-side conversation history (the client holds the transcript and resends it; close the drawer and
+the thread is the client's problem). No token or quota display. No personalization. And it is a MODEL
+call: **with no streaming at all** - the citation is part of the contract and is only known once the
+answer is complete, so the user sees nothing until the whole answer lands. Order of magnitude for the
+wait, derived from the gate's own totals rather than timed directly: 282 answers consumed 40.3 GPU
+minutes on the dev machine, which averages roughly 8 to 9 seconds each. Treat that as a floor for
+planning, not a target: it is one local model on one machine, and the longest prompts in that set were
+the slowest. A first-run surface that puts a model call on the critical path of someone's first
+sixty seconds is making a real bet.
+
+**The three options, and the evidence each one would need before it is chosen.**
+
+| Option | What it means | Tradeoff | Evidence it needs first |
+|---|---|---|---|
+| **1. DEFER.** The orientation surface stops carrying tutoring content and points at the assistant | One tutoring voice, always current with the book's real state, no second copy to maintain. The orientation panel shrinks to an introduction plus a way in | Puts a model call, its latency and its residual defects on the first-run path, in a product whose primary language is Hebrew. Also couples first-run orientation to the assistant being reachable at all | A first-run latency budget (is 8 to 9 seconds acceptable with no streaming?), a decision on what the panel shows when the model is unreachable, and a Hebrew native reading of the assistant's answers - which does not exist yet |
+| **2. EMBED.** The orientation surface asks the assistant on the user's behalf and renders the answer inline | The strongest version of "the product explains itself": the first thing a new author reads is about THEIR book. Reuses one grounded answer path instead of authoring a second body of copy | Every failure mode of the assistant becomes a failure mode of first-run orientation, and the surface has to render a fail-safe, a latency state and a citation chip set that a first-time user has no context for. It also spends a GPU call before the user has asked for anything | A rendered prototype at the product's narrowest supported width in Hebrew, the fail-safe copy actually rendered (it never has been), and a decision on whether a first-run user should be spending model time at all |
+| **3. STAY STATIC-WITH-LINKS.** The overlay keeps its guide-driven content and simply links to the assistant | Zero new risk, and it is what already ships on `client-wave3-orientation`. Two tutoring voices coexist, which is honest: guides explain the MECHANISM, the assistant explains THIS BOOK | The generic-copy problem Q13 was trying to solve stays half-solved: the panel can say what a stage is, never where this author actually stands | Nothing new. This is the do-nothing option and it is defensible; it should be chosen deliberately rather than by default |
+
+**Two facts that should move the decision.** First, the assistant is the only surface that can say
+"you are behind by three chapters, rebuild before trusting this", and that is precisely the state this
+brief's section 1 identifies as the one the old design could not express. Second, B is **gate-passed but
+uncommitted**, on branches `api-chatbot-phase-b` / `client-chatbot-phase-b` - so option 1 or 2 takes a
+dependency on a merge that has not happened. Confirm it is on master before building on it, the same
+check this brief already asks for on the A.2 serving path.
+
+**Known rough edges, stated so an option is not chosen on a flattering summary.** The assistant's gate
+(`g2`) returned no blocking defect and explicitly did not return a clean bill of health. Relevant to a
+first-run surface: it sometimes states specific chapter numbers the status block never gave it (a count
+is not a list), and that failure gets WORSE as a book gets longer; an internal `[EXCERPT]` label
+occasionally leaks into Hebrew prose; and none of its Hebrew has been read by a native speaker. Full
+rates: `PAGEDRAFT_DESIGN.md` §2.8.1 and the gate section named there.
+
 ### Q11. Where does the per-task tier control belong?
 
 It sits on a per-chapter screen, its value applies to the whole book, it collapses several pass types
@@ -754,6 +812,14 @@ infrastructure for its own citation chips: `GET /api/guides?language=` (list) an
 does not need to build this path; it needs to consume it. It ships on two branches, API
 `api-chatbot-a2-guides` and client `client-chatbot-a2-show`; check that both are on master before
 depending on the path.
+
+**Update, 2026-08-12: guide prose is no longer the only content orientation could be driven from.**
+Chatbot phase B is built and gate-passed, and it answers the same "where am I / what do I run next"
+questions from THIS book's real build status rather than from generic copy, measured 36 of 36 with no
+wrong status. That does not reverse Q13-A - the guides are still the right source for explaining the
+MECHANISM - but it means the surface now has two possible content sources rather than one, and the
+choice between them is the sub-decision written up under **Q10 above**. Read that before designing the
+orientation panel's content.
 
 ---
 
