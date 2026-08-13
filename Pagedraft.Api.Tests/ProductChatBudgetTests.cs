@@ -60,14 +60,53 @@ public class ProductChatBudgetTests
         Mock<IAiRouter> router,
         out CapturingLogger<ProductChatService> logger,
         string? guidesDirectory,
-        AiOptions? aiOptions)
+        AiOptions? aiOptions,
+        IBookChatContextReader? bookContext = null)
     {
         logger = new CapturingLogger<ProductChatService>();
         var reader = new GuidesCorpusReader(
             guidesDirectory ?? ProductChatCorpusTests.RealGuidesDirectory(),
             ProductChatCorpusTests.NullLoggerFor<GuidesCorpusReader>());
         return new ProductChatService(
-            reader, router.Object, Microsoft.Extensions.Options.Options.Create(aiOptions ?? AiConfig()), logger);
+            reader, router.Object, Microsoft.Extensions.Options.Options.Create(aiOptions ?? AiConfig()),
+            // NEVER-CALLED BY DEFAULT: every phase-A test sends no bookId, and this stub throws if one
+            // ever reaches it, so a request that silently gained a book context would fail loudly here
+            // rather than quietly changing what a phase-A test measures.
+            bookContext ?? new ThrowingBookChatContextReader(),
+            logger);
+    }
+
+    /// <summary>The book reader a book-less turn must never reach.</summary>
+    internal sealed class ThrowingBookChatContextReader : IBookChatContextReader
+    {
+        public Task<BookChatContext> ReadAsync(
+            Guid bookId, string question, string language, AmbientChapterContext ambient, CancellationToken ct)
+            => throw new InvalidOperationException(
+                "A request with no bookId must never read a book context (phase A byte-identity).");
+    }
+
+    /// <summary>A reader that returns exactly what a test hands it.</summary>
+    internal sealed class StubBookChatContextReader : IBookChatContextReader
+    {
+        private readonly BookChatContext _context;
+
+        public StubBookChatContextReader(BookChatContext context) => _context = context;
+
+        public Guid? LastBookId { get; private set; }
+        public string? LastQuestion { get; private set; }
+
+        /// <summary>What the SERVICE passed through, so a test can assert the ambient key reached the
+        /// reader rather than being dropped between the DTO and the read.</summary>
+        public AmbientChapterContext? LastAmbient { get; private set; }
+
+        public Task<BookChatContext> ReadAsync(
+            Guid bookId, string question, string language, AmbientChapterContext ambient, CancellationToken ct)
+        {
+            LastBookId = bookId;
+            LastQuestion = question;
+            LastAmbient = ambient;
+            return Task.FromResult(_context);
+        }
     }
 
     private static Mock<IAiRouter> AnsweringRouter(List<AiRequest> captured, string content = "An answer.")

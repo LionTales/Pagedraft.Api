@@ -73,20 +73,47 @@ public class ProductChatService
     private const string AnswerUnavailableEn =
         "The guides are available, but I could not produce an answer right now. Please try again in a moment.";
 
+    /// <summary>
+    /// How many guides ride along when a bookId IS present (phase B, d1 section (2)). Phase A's default
+    /// of 4 is kept for every book-less request.
+    ///
+    /// <para>THIS IS ARITHMETIC, NOT TASTE. Phase A's own measured Hebrew worst case sits at
+    /// 13,806 of 14,080 tokens, which is ~274 tokens of headroom, and d1 measured ONE formatted chapter
+    /// brief at ~700-800 tokens against the real dev DB. Book artifacts cannot be appended on top of an
+    /// unmodified phase-A payload; the gap is multiples, not a rounding error. Halving the guide count
+    /// frees the room proactively instead of leaving every book-scoped turn to the reactive trimmer. The
+    /// floor stays <see cref="ProductChatBudget.MinGuides"/>, so a mixed question never loses ALL product
+    /// grounding.</para>
+    ///
+    /// <para>g1 should watch specifically whether 2 guides starves the PRODUCT half of a mixed question;
+    /// no live measurement stands behind this number, only the token arithmetic.</para>
+    /// </summary>
+    public const int BookAwareGuideCount = 2;
+
+    private const string BookUnreachableHe =
+        "אינני מצליח לראות כרגע את הספר שלכם, ולכן לא אענה עליו מתוך ניחוש. נסו שוב בעוד רגע.";
+
+    private const string BookUnreachableEn =
+        "I cannot see your book right now, so I will not answer about it from guesswork. " +
+        "Please try again in a moment.";
+
     private readonly GuidesCorpusReader _guides;
     private readonly IAiRouter _router;
     private readonly IOptions<AiOptions> _aiOptions;
+    private readonly IBookChatContextReader _bookContext;
     private readonly ILogger<ProductChatService> _logger;
 
     public ProductChatService(
         GuidesCorpusReader guides,
         IAiRouter router,
         IOptions<AiOptions> aiOptions,
+        IBookChatContextReader bookContext,
         ILogger<ProductChatService> logger)
     {
         _guides = guides;
         _router = router;
         _aiOptions = aiOptions;
+        _bookContext = bookContext;
         _logger = logger;
     }
 
@@ -113,7 +140,9 @@ public class ProductChatService
             return FailSafe(language, fault);
         }
 
-        var selected = GuideSelector.Select(question, corpus.Documents, language);
+        var selected = GuideSelector.Select(
+            question, corpus.Documents, language,
+            request.BookId.HasValue ? BookAwareGuideCount : GuideSelector.DefaultCount);
         if (selected.Count == 0)
         {
             // Unreachable while the corpus is non-empty (the selector never refuses on a weak match),
@@ -129,11 +158,41 @@ public class ProductChatService
         var receivedTurns = request.History?.Count ?? 0;
         var history = CapHistory(request.History);
 
+        // ─── The BOOK half (phase B). Absent bookId = no read, no blocks, no prompt change ───────
+        //
+        // It runs in its OWN try beside the guides half, and a failure here NEVER takes the guides half
+        // down: one broken status lookup must not silence an otherwise-fine guide-grounded answer.
+        var book = BookChatContext.None;
+        if (request.BookId.HasValue)
+        {
+            // The ambient open chapter travels with the read and NOWHERE else: it is a retrieval input,
+            // not a second book scope. With both fields null this is byte-identical to the pre-ambient
+            // path, which is what keeps g2's verdict a measurement of this code too.
+            var ambient = new AmbientChapterContext(request.AmbientChapterId, request.AmbientChapterOrder);
+
+            book = await ReadBookContextAsync(request.BookId.Value, question, language, ambient, ct)
+                .ConfigureAwait(false);
+
+            if (book.IsBlind)
+            {
+                _logger.LogWarning(
+                    "Product chat REFUSED to answer about book {BookId} ({Faults}): not one book artifact " +
+                    "could be read, not even the statuses. Answering about a manuscript nothing was read " +
+                    "from is exactly the failure this refusal exists to prevent, so the caller gets the " +
+                    "honest fail-safe instead.",
+                    request.BookId.Value, string.Join(", ", book.Faults));
+                return BookFailSafe(language, book.Faults);
+            }
+        }
+
         // THE PROMPT IS BOUNDED HERE, not by the turn cap above (g1 F2). Ollama truncates from the
-        // START - the grounding rule and the guides - so an overrun returns a confident ungrounded
-        // answer that still claims to be grounded. History is dropped first, guides only as a last
-        // resort, and the SURVIVING guides are what the citation is computed against.
-        var composed = ProductChatBudget.Compose(language, selected, history, question, InputTokenBudget());
+        // START - the grounding rule, the guides and the book artifacts - so an overrun returns a
+        // confident ungrounded answer that still claims to be grounded. History is dropped first, then
+        // the book artifacts in d1's priority order, guides only near the last resort, and the SURVIVING
+        // guides and artifacts are what the citation is computed against.
+        var composed = ProductChatBudget.Compose(
+            language, selected, history, question, InputTokenBudget(), book.Blocks, book.BookTitle,
+            book.Keys.AmbiguousChapterNumbers, book.Keys.NeedsChapterClarification);
         var instruction = composed.Instruction;
         selected = composed.Guides;
         LogTrim(composed, history.Count);
@@ -147,7 +206,17 @@ public class ProductChatService
                 Instruction = instruction,
                 TaskType = AiTaskType.ProductChat,
                 Language = language,
-                SourceId = "product-chat"
+                SourceId = "product-chat",
+                // THE SYSTEM SLOT CARRIES THE SAME STRING THE INSTRUCTION OPENS WITH - literally the same
+                // string, taken from the composition rather than recomputed here (g1 F-1). PromptFactory
+                // sees only the task type, so left to itself it always returned the BOOK-LESS message, and
+                // a book-scoped turn then told the model both "answer from the BOOK section below" and
+                // "say that answering about a specific book is not available yet". Two emphatic rules that
+                // collide are resolved by the model rather than by the author; exactly one rule reaches it
+                // now, because exactly one string exists. With no surviving book block that string is
+                // byte-identical to PromptFactory's, so phase A's gate verdict is untouched BY
+                // CONSTRUCTION and not by this call site remembering to opt out.
+                SystemMessageOverride = composed.SystemMessage
             }, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -173,7 +242,13 @@ public class ProductChatService
             return FailSafe(language, ProductChatFaults.EmptyAnswer);
         }
 
-        var (answer, guideIds) = ProductChatCitations.Extract(response.Content.Trim(), selected);
+        // Citations are computed against what SURVIVED composition, guides and book artifacts alike, so a
+        // trim can never leave a citation pointing at grounding that was dropped.
+        var (answer, references) = ProductChatCitations.Extract(
+            response.Content.Trim(), composed.AcceptableReferences);
+
+        var guideIds = references.Where(r => !BookArtifactRefs.LooksLikeArtifactRef(r)).ToList();
+        var artifactRefs = references.Where(BookArtifactRefs.LooksLikeArtifactRef).ToList();
 
         // PUNCTUATION REPAIR RUNS AFTER THE CITATION PARSE, never before. The parser reads the answer's
         // LAST line, where the label sits on it, and the character immediately before that label (its
@@ -202,13 +277,79 @@ public class ProductChatService
 
         _logger.LogInformation(
             "Product chat answered in {Language} from guides [{CitedGuideIds}] (selected [{SelectedGuideIds}]) " +
-            "via {Provider}/{Model}. Question {QuestionChars} chars, history {ForwardedTurns} of {ReceivedTurns} " +
+            "and book artifacts [{CitedArtifactRefs}] (carried [{CarriedArtifactRefs}]) via {Provider}/{Model}. " +
+            "Question {QuestionChars} chars, history {ForwardedTurns} of {ReceivedTurns} " +
             "turns forwarded, instruction {InstructionChars} chars, ~{EstimatedTokens} of {BudgetTokens} input tokens.",
             language, string.Join(", ", guideIds), string.Join(", ", Ids(selected)),
+            string.Join(", ", artifactRefs),
+            string.Join(", ", composed.BookBlocks.SelectMany(b => b.References)),
             response.Provider, response.Model, question.Length, composed.History.Count, receivedTurns,
             instruction.Length, composed.EstimatedTokens, composed.BudgetTokens);
 
-        return new ProductChatResponseDto(answer, guideIds, language, IsGrounded: true, FaultReason: null);
+        return new ProductChatResponseDto(
+            answer, guideIds, language, IsGrounded: true, FaultReason: null,
+            ArtifactRefs: artifactRefs,
+            BookFaultReason: book.Faults.Count > 0 ? book.Faults[0] : null,
+            // FROM THE SELECTION, NEVER FROM THE ANSWER. The model is also told to ask in prose when this
+            // is true, but nothing it writes can set or clear the flag: that is what makes "Show never
+            // asks when the chapter resolved" a property of the code rather than of the model's
+            // compliance. BookChatContext.None carries Keys.Empty, so this is false on every book-less
+            // turn without a second condition to keep in step.
+            NeedsChapterClarification: book.Keys.NeedsChapterClarification);
+    }
+
+    /// <summary>
+    /// Retrieves the book half. Never throws for a broken SOURCE - the reader records typed faults for
+    /// that - so this catch exists for the case it breaks its own contract, and it still logs, because a
+    /// catch that keeps the endpoint non-throwing and says nothing ships its failures invisibly.
+    ///
+    /// <para>THE TWO HALVES FAIL INDEPENDENTLY, AND THE GRANULARITY IS THE POINT. A PARTIAL fault (the
+    /// review status threw while the briefs read fine) leaves faults on the context and lets the turn
+    /// proceed with whatever survived, because a thinner answer beats a refusal. Only
+    /// <see cref="BookChatContext.IsBlind"/> - not one artifact readable, faults recorded - earns the
+    /// fail-safe, and the caller handles that; see <see cref="BookFailSafe"/>.</para>
+    /// </summary>
+    private async Task<BookChatContext> ReadBookContextAsync(
+        Guid bookId, string question, string language, AmbientChapterContext ambient, CancellationToken ct)
+    {
+        try
+        {
+            return await _bookContext.ReadAsync(bookId, question, language, ambient, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Product chat's book-context reader THREW for book {BookId}, which its own contract says it " +
+                "does not do for a broken source ({Fault}). The turn degrades to the honest book fail-safe " +
+                "rather than to an answer about a manuscript nothing was read from.",
+                bookId, BookChatFaults.BookUnavailable);
+            return BookChatContext.None with { Faults = new[] { BookChatFaults.BookUnavailable } };
+        }
+    }
+
+    /// <summary>
+    /// The BOOK fail-safe, mirroring phase A's exactly: an honest sentence, <c>isGrounded=false</c>, and
+    /// a machine-readable reason. Reached only when NOTHING about the book could be read - not even the
+    /// statuses, which are the cheapest and most robust source.
+    ///
+    /// <para>It is a DETERMINISTIC string rather than a sentence the model is asked to produce from an
+    /// artifact, for the same reason phase A's is: "never from priors" cannot be a property of the model's
+    /// behaviour under a prompt, it has to be a property of the code path. It costs the guides half of a
+    /// mixed question in a state that means the user's book row is unreadable, which is a state where a
+    /// confident answer would be the worse trade.</para>
+    /// </summary>
+    private static ProductChatResponseDto BookFailSafe(string language, IReadOnlyList<string> faults)
+    {
+        var fault = faults.Count > 0 ? faults[0] : BookChatFaults.BookUnavailable;
+        var answer = ChatLanguage.IsHebrew(language) ? BookUnreachableHe : BookUnreachableEn;
+
+        return new ProductChatResponseDto(
+            answer, Array.Empty<string>(), language, IsGrounded: false, FaultReason: fault,
+            ArtifactRefs: Array.Empty<string>(), BookFaultReason: fault);
     }
 
     /// <summary>
@@ -239,24 +380,31 @@ public class ProductChatService
             _logger.LogWarning(
                 "Product chat TRIMMED the prompt to fit the context budget: ~{EstimatedTokens} estimated input " +
                 "tokens against {BudgetTokens}. Dropped {DroppedTurns} of {CappedTurns} history turn(s), oldest " +
-                "first, and {DroppedGuideCount} guide(s) [{DroppedGuideIds}]. History is given up BEFORE guides on " +
+                "first, {DroppedGuideCount} guide(s) [{DroppedGuideIds}] and {DroppedBookCount} book-artifact " +
+                "ref(s) [{DroppedBookRefs}]. History is given up BEFORE guides and book artifacts on " +
                 "purpose: an answer missing conversation context is recoverable, an answer missing its source is " +
-                "the ungrounded answer this feature exists to prevent. Guides kept: [{KeptGuideIds}].",
+                "the ungrounded answer this feature exists to prevent. Guides kept: [{KeptGuideIds}]. " +
+                "Book artifacts kept: [{KeptBookRefs}].",
                 composed.EstimatedTokens, composed.BudgetTokens, composed.DroppedTurns, cappedTurns,
                 composed.DroppedGuideIds.Count, string.Join(", ", composed.DroppedGuideIds),
-                string.Join(", ", Ids(composed.Guides)));
+                composed.DroppedBookRefs.Count, string.Join(", ", composed.DroppedBookRefs),
+                string.Join(", ", Ids(composed.Guides)),
+                string.Join(", ", composed.BookBlocks.SelectMany(b => b.References)));
         }
 
         if (composed.StillOverBudget)
         {
             _logger.LogWarning(
                 "Product chat prompt STILL exceeds the context budget after trimming: ~{EstimatedTokens} " +
-                "estimated input tokens against {BudgetTokens}, with {GuideCount} guide(s) [{KeptGuideIds}] and " +
-                "{HistoryTurns} history turn(s). Nothing further can be given up without giving up the grounding " +
+                "estimated input tokens against {BudgetTokens}, with {GuideCount} guide(s) [{KeptGuideIds}], " +
+                "{HistoryTurns} history turn(s) and {BookBlockCount} undroppable book artifact(s) " +
+                "[{KeptBookRefs}]. Nothing further can be given up without giving up the grounding " +
                 "itself, so it is sent as is and the runtime may truncate it from the START. Widen " +
                 "Ai:ProviderSettings:Ollama_ProductChat NumCtx or shorten the guides.",
                 composed.EstimatedTokens, composed.BudgetTokens, composed.Guides.Count,
-                string.Join(", ", Ids(composed.Guides)), composed.History.Count);
+                string.Join(", ", Ids(composed.Guides)), composed.History.Count,
+                composed.BookBlocks.Count,
+                string.Join(", ", composed.BookBlocks.SelectMany(b => b.References)));
         }
     }
 
@@ -291,6 +439,10 @@ public class ProductChatService
             ? (isHebrew ? AnswerUnavailableHe : AnswerUnavailableEn)
             : (isHebrew ? GuidesUnreachableHe : GuidesUnreachableEn);
 
-        return new ProductChatResponseDto(answer, Array.Empty<string>(), language, IsGrounded: false, FaultReason: fault);
+        // ArtifactRefs is EMPTY and BookFaultReason is NULL on every phase-A fail-safe: the guides half
+        // failed, which says nothing about the book half and must not be reported as if it did.
+        return new ProductChatResponseDto(
+            answer, Array.Empty<string>(), language, IsGrounded: false, FaultReason: fault,
+            ArtifactRefs: Array.Empty<string>(), BookFaultReason: null);
     }
 }

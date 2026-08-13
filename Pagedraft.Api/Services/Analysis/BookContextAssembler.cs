@@ -1185,7 +1185,13 @@ public class BookContextAssembler
         return (head.ToString(), themesTrimmed || synopsisTrimmed);
     }
 
-    private static string FormatChapterBrief(ChapterBrief ch)
+    /// <summary>
+    /// Renders one chapter brief as prose. INTERNAL, not private, since chatbot phase B: the chat's
+    /// book-context assembler renders the SAME chapter brief the whole-book review reads, through this same
+    /// formatter, so an answer grounded in a chapter brief can never describe it differently than the review
+    /// that produced a finding about it.
+    /// </summary>
+    internal static string FormatChapterBrief(ChapterBrief ch)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"## Chapter {ch.Order}: {ch.Title}");

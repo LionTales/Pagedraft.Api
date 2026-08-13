@@ -9,10 +9,18 @@ namespace Pagedraft.Api.Controllers;
 /// with citations (chatbot phase A, c1).
 ///
 /// <para>Deliberately its own controller and its own route family rather than a method on
-/// <c>AnalysisController</c>: this endpoint is APP-LEVEL, not book-scoped and not chapter-scoped. It
-/// takes no bookId, reads no database, and answers only about the product. Book-aware answers are
-/// phase B and will need a different route shape (and a different grounding contract) when they
-/// arrive.</para>
+/// <c>AnalysisController</c>: the endpoint is APP-LEVEL, and stays app-level in phase B. The book
+/// arrives as an OPTIONAL <c>bookId</c> on the body rather than as a route segment, because the drawer
+/// that calls it is app chrome that sometimes happens to be open inside a book - a
+/// <c>/books/{id}/chat</c> route would make the book mandatory and force a second route for the case
+/// the client actually starts in.</para>
+///
+/// <para>PHASE B, IN ONE LINE: <c>bookId</c> absent is phase A byte-for-byte, including its
+/// "answering questions about a specific book is not available yet" refusal; <c>bookId</c> present
+/// lets the assistant answer from THAT book's artifacts (briefs, findings, register, statuses, and
+/// question-escalated raw chapter text), cited by artifact. There is no cross-book retrieval of any
+/// kind: the field is a single value from the client's current book, never a list and never inferred
+/// server-side.</para>
 ///
 /// <para>Thin by design: retrieval, prompt composition, the history cap and every fail-safe live in
 /// <see cref="ProductChatService"/> and the pure helpers beside it, so the endpoint cannot drift from
@@ -31,10 +39,15 @@ public class ProductChatController : ControllerBase
     /// ids it was grounded in.
     ///
     /// <para>400 only when the question itself is blank. Everything else is 200, INCLUDING the
-    /// fail-safe states (an unreachable guides corpus, an unreachable model): the response carries
-    /// <c>isGrounded=false</c> and a machine-readable <c>faultReason</c> so the client renders an
-    /// honest failure rather than an assistant answer. A 5xx would be the wrong shape here because
-    /// the endpoint DID do its job, which in that situation is to refuse.</para>
+    /// fail-safe states (an unreachable guides corpus, an unreachable model, and phase B's unreadable
+    /// book): the response carries <c>isGrounded=false</c> and a machine-readable <c>faultReason</c> so
+    /// the client renders an honest failure rather than an assistant answer. A 5xx would be the wrong
+    /// shape here because the endpoint DID do its job, which in that situation is to refuse.</para>
+    ///
+    /// <para>A bookId naming a book that does not exist is NOT a 404 either, for the same reason: the
+    /// endpoint answers, and what it answers is the honest "I cannot see your book right now" with
+    /// <c>bookFaultReason=book-unavailable</c>. Turning it into a 404 would make the drawer show a
+    /// transport error where the user asked a question and deserves a sentence.</para>
     ///
     /// <para>Streaming is deliberately not offered in phase A. The answer's citation is part of the
     /// contract and is only known once the answer is complete, so a streamed reply would render prose

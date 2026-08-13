@@ -82,8 +82,17 @@ namespace Pagedraft.Api.Services.Chat;
 public static class ProductChatPrompt
 {
     // ─── The grounding contract, as instruction text (d1 items 2, 3 and 5) ───────────────────────
+    //
+    // PHASE B SPLIT THESE STRINGS IN THREE AND CHANGED NO CHARACTER OF THEM. The HEAD carries the
+    // persona and the whole product-grounding contract including final-r02's scoped refusal pivot; the
+    // TAIL carries the citation line and the language rule; between them sits EXACTLY ONE swappable
+    // sentence group. Phase A's system message is head + BookRefusal + tail, byte-for-byte what g4 and
+    // g5 measured, and phase B's is head + BookGrounding + tail. The split exists so B can lift the one
+    // refusal it is licensed to lift WITHOUT re-typing a single sentence that carries a gate verdict;
+    // ProductChatPromptIdentityTests pins the reassembly against a literal so the property is checked
+    // rather than trusted.
 
-    private const string GroundingEn =
+    private const string GroundingEnHead =
         "You are Show, the PageDraft product assistant. You write in the first person, warmly and " +
         "briefly, and you open each reply from what was actually asked. " +
         "Answer ONLY from the guide content provided below. " +
@@ -94,17 +103,32 @@ public static class ProductChatPrompt
         "answer. Do not assemble a guess out of partially relevant material. " +
         "State it as a gap in the guides, not as a fact about the product: do not say that PageDraft " +
         "lacks the thing or does not support it. And do not describe what the guides say about a topic " +
-        "they do not address, not even to report what they mention about it. " +
+        "they do not address, not even to report what they mention about it. ";
+
+    private const string BookRefusalEn =
         "If the question is about the content or state of the user's own book (its characters, its " +
         "plot, what a specific chapter says, what a review found), say that answering questions about " +
         "a specific book is not available yet and is coming, and offer help with general product and " +
-        "workflow questions instead. Do not attempt an answer from the guides in that case. " +
+        "workflow questions instead. Do not attempt an answer from the guides in that case. ";
+
+    // PHASE B'S f2 SPLIT THE TAIL ONE FURTHER, AND CHANGED NO CHARACTER OF PHASE A'S HALF. The tail is
+    // now CitationLine + Language, and the book-aware assembly swaps the citation sentence for one that
+    // covers BOTH families of reference. That swap is the whole F-3 fix and it is a COLLISION fix, not a
+    // new rule: B used to add "also name the book artifacts" in the middle of the message while phase A's
+    // tail still ended it with "naming the guide ids you used, and nothing else on that line" - later,
+    // unconditional, and narrower. The model resolved that collision toward the tail, which is exactly
+    // what 80-85% empty artifactRefs looks like from the outside. There is now exactly ONE sentence about
+    // the citation line in any composed message.
+
+    private const string CitationLineEn =
         "End your reply with a line of the form 'Guides: <id>, <id>' naming the guide ids you used, " +
-        "and nothing else on that line. " +
+        "and nothing else on that line. ";
+
+    private const string LanguageEn =
         "Answer in English, because the question is in English, even where a guide you used is in " +
         "another language.";
 
-    private const string GroundingHe =
+    private const string GroundingHeHead =
         "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת. " +
         "ענה אך ורק מתוך תוכן המדריכים שמופיע למטה. " +
         "אל תשתמש בידע חיצוני על PageDraft, ולעולם אל תציין הגדרה, כפתור, מסך או התנהגות שאינם כתובים " +
@@ -113,27 +137,316 @@ public static class ProductChatPrompt
         "לשאלה, ציין אותו לפי המזהה שלו; אם אין, די בסירוב בלבד. אל תרכיב ניחוש מתוך חומר שרק חלקית " +
         "רלוונטי. " +
         "נסח זאת כפער במדריכים ולא כעובדה על המוצר: אל תאמר ש-PageDraft אינו תומך בכך. ואל תתאר מה " +
-        "המדריכים אומרים על נושא שאינם עוסקים בו, גם לא כדי לציין מה מוזכר בהם לגביו. " +
+        "המדריכים אומרים על נושא שאינם עוסקים בו, גם לא כדי לציין מה מוזכר בהם לגביו. ";
+
+    private const string BookRefusalHe =
         "אם השאלה נוגעת לתוכן או למצב של הספר הספציפי של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק " +
         "מסוים, מה סקירה מצאה), ענה בגוף ראשון במשמעות הזו: 'מענה על שאלות לגבי ספר מסוים עדיין אינו " +
         "זמין, והיכולת בדרך. אשמח לעזור בשאלות כלליות על המוצר ועל תהליך העריכה.' אל תנסה לענות מתוך " +
-        "המדריכים במקרה כזה. " +
+        "המדריכים במקרה כזה. ";
+
+    private const string CitationLineHe =
         "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את מזהי המדריכים שהשתמשת בהם, " +
-        "ובלי דבר נוסף באותה שורה. " +
+        "ובלי דבר נוסף באותה שורה. ";
+
+    private const string LanguageHe =
         "השב בעברית, כי השאלה נשאלה בעברית, גם אם מדריך שהשתמשת בו כתוב בשפה אחרת.";
+
+    // ─── The book-aware citation sentence (phase B, f2, g1 finding F-3) ──────────────────────────
+    //
+    // FOUR THINGS IN ONE SENTENCE GROUP, because four prohibitions would collide with each other and
+    // with the rule above them. It names the LABEL ("Sources"), which is what the line is: asking for a
+    // book artifact under a label that reads "Guides" is a contradiction the model resolved by listing
+    // guides. It says a guide is named "by its id alone", which is where g1's invented heading anchors
+    // (guide-id#a-heading-that-does-not-exist) came from and, since guide headings are this codebase's
+    // retrieval index, an invented anchor points at a retrieval key. It says an artifact is named by the
+    // ref "written in that artifact's own header", which is the ONE place the correct ref is visible and
+    // is the difference between citing chapter-text:3 and guessing chapter-brief:2 for the same answer.
+    // And it says where refs live, which is what keeps a finding's raw guid out of the prose.
+    //
+    // The parser accepts BOTH labels (see ProductChatCitations), so a model falling back to the phase-A
+    // wording out of habit still parses. That is deliberate: the label is the one part of this mechanism
+    // that g1 measured working, and it is not being bet on.
+
+    private const string CitationLineBookAwareEn =
+        "End your reply with a line of the form 'Sources: <ref>, <ref>' and nothing else on that line, " +
+        "naming what you actually used: a guide by its id alone, and a book artifact by the ref in its " +
+        "own header, for example 'Sources: chapter-text:7, status:review'. Refs belong on that line and " +
+        "not in your sentences, where a finding is named by its dimension. ";
+
+    private const string CitationLineBookAwareHe =
+        "סיים את התשובה בשורה בצורה 'מקורות: <מזהה>, <מזהה>' ובלי דבר נוסף באותה שורה, שמציינת את מה " +
+        "שבאמת השתמשת בו: מדריך לפי המזהה שלו בלבד, ופריט של הספר לפי המזהה שבכותרת שלו, לדוגמה " +
+        "'מקורות: chapter-text:7, status:review'. המזהים שייכים לשורה הזו ולא למשפטים שלך, שבהם ממצא " +
+        "נקרא לפי הממד שלו. ";
+
+    // ─── The B grounding rule (phase B, d1 section (3)) ──────────────────────────────────────────
+    //
+    // THE SAME SHAPE THAT CLOSED A'S GATE: it SCOPES what may be asserted and where it may come from.
+    // It opens by scoping ITSELF against the head's guides rule ("the rule above ... governs questions
+    // about PageDraft itself"), which is why no sentence of the head had to be reworded to make room for
+    // it. It deliberately does NOT stack prohibitions: g3 measured a fourth prohibition failing to close
+    // a class that a single scoping sentence then closed, because two emphatic rules that collide are
+    // resolved by the model, not by the author.
+    //
+    // Its clauses map one-to-one onto d1: (1) answer from the book artifacts, and who you are answering;
+    // (2) the briefs are SUMMARIES, so a gap is a gap in the briefs and never a fact about the book -
+    // the phrase the plan names as carrying the whole risk; (3) the whole-chapter vs excerpt label
+    // decides which of the two shapes applies, which is why the label exists at all; (4) what the status
+    // artifact licenses, and the answer when the briefs are behind, because a refusal there is a worse
+    // answer than the truth; (5) the retrieval's own recorded ambiguity.
+    //
+    // WHAT f2 CHANGED, AND WHY THE CLAUSE COUNT DID NOT GROW. g1 returned four defects that all live in
+    // this string, and the temptation each of them creates is a fresh prohibition. That is the move this
+    // class has already recorded failing twice (g3's fourth prohibition; F-1's two emphatic rules), so
+    // each defect is closed by WIDENING THE SCOPE STATEMENT OF THE CLAUSE THAT ALREADY OWNS IT, and B's
+    // own citation sentence moved OUT to the tail, where phase A's already lived. That move is the F-3
+    // fix: two sentences about one line, the later and narrower of which said "the guide ids you used",
+    // is the same collision F-1 was, and 80-85% of book-scoped runs resolved it toward the tail.
+    //
+    // (1) gains the READER. g1's `m1` opened by addressing the author as "מירב," - a character out of
+    //     their own manuscript. Nothing in the prompt had ever said who is being written to, so the
+    //     artifacts' cast was the only roster of names in scope.
+    // (3) gains who the LABELS are for. The whole/EXCERPT label is a d1 section (3) safety property and it
+    //     passed 12/12, so it is not being removed or softened; what leaked (5 of 6 and 6 of 6 runs) is
+    //     the model quoting the raw token at the author. Saying the author never sees it, and that the
+    //     distinction therefore has to travel in the sentence, keeps the label doing its job for the model.
+    // (4) gains WHAT A STATUS LICENSES, which is the F-5 fix and the one place the wording is lifted from
+    //     the transcript rather than invented: g1 recorded "the status artifact indicates that three
+    //     chapters are missing or out of date; it does not specify which ones they are" occurring
+    //     naturally. A count is not a list, a number is to be given as written (it was restated wrong 2 of
+    //     3 runs on a scalar the block states literally), and a reason the status names is this book's
+    //     reason (the Hebrew twin of a question English got 3/3 recited the guides' generic list of
+    //     causes instead, 0/6).
+    // WHAT a1 (AMBIENT CHAPTER, d2) CHANGED, AND WHY THE CLAUSE COUNT STILL DID NOT GROW. Two clauses were
+    // WIDENED and no sixth was added, which is the move this file has now recorded working three times.
+    // (1) gains what a co-present GUIDE may be used for. d2 section (6), from the defect that opened this
+    //     plan: the owner's turn carried 13 book artifacts - the chapter's own brief, their own edited
+    //     summary, five findings - and the answer came out of the faq guide citing no book artifact at
+    //     all. BookAwareGuideCount = 2 means 1-2 guides ride along on EVERY book-scoped turn, so an
+    //     irrelevant alternative source is always sitting beside the book artifacts; clause (1) scoped
+    //     which RULE applied to which question but never said what a guide is still good FOR once a
+    //     book-scoped answer is being built. The added sentence is PERMISSIVE about process content (a
+    //     mixed question still legitimately cites a guide, measured clean 6/6 in g2) and restrictive only
+    //     about content the book artifacts already cover. It scopes; it does not prohibit.
+    // (5) gains the SECOND note. The BOOK section now carries one of two mutually exclusive notes (see
+    //     BookArtifactBlocks.BookSectionNote), and the clause that already owned "a note in the BOOK
+    //     section" now says what to do with either, rather than a new clause about asking which chapter.
+    //     The asking is only ever the FALLBACK: when a chapter resolved - explicitly or from the chapter
+    //     the author has open - no note is emitted, because the flag that emits it is false by
+    //     construction, so this sentence cannot fire on a turn that already knows its chapter.
+    //
+    // WHAT be-c02 (THE CHAPTER-NUMBERING SEAM, review finding #1, the P0) CHANGED. Clause (3) was WIDENED
+    // again and no sixth clause was added, which is the fourth time this move has been used here.
+    //
+    // THE DEFECT. A deictic question on a chapter at order 0 produced an answer opening 'בפרק שנקרא "צל
+    // הירח" (שהוא למעשה פרק 0...)' while the citation chip rendered directly beneath it in the same answer
+    // card read "הטקסט של פרק 1". Same chapter, two numbers, one card. The server is 0-based everywhere by
+    // construction (labels, refs, the brief heading, the history lines) and the client's chapterDisplayNumber
+    // is documented as "the ONLY thing a human ever reads (order + 1)", and the two conventions met NOWHERE:
+    // neither grounding string said a word about which numbering the author uses. Three gates missed it
+    // because every one of their questions named a chapter EXPLICITLY, where the model echoes the author's
+    // own number back and the offset is invisible.
+    //
+    // WHY THIS SEAM AND NOT A RENDERING ONE. The alternative was to render the human-readable half of each
+    // block in the author's numbering while the refs kept the wire key, and that is normally the stronger
+    // choice because it is verifiable by READING rather than by a model run. It cannot work here, for two
+    // reasons found by enumerating every site (the tables are in the plan's investigation section):
+    //   1. The chapter-brief block's BODY is BookContextAssembler.FormatChapterBrief's "## Chapter {order}:
+    //      {title}", shared verbatim with the whole-book review by a d1 decision. PromptFactory's
+    //      ChapterOrderRuleEn/He instructs every BookReview surface to copy the order EXACTLY as it appears
+    //      in that heading and states that orders start at 0, and ChapterAnchorResolver resolves the model's
+    //      answer against real 0-based orders and DROPS what does not resolve. Renumbering it breaks finding
+    //      anchoring; forking a chat-only copy re-creates this very defect one layer down.
+    //   2. The REF cannot move (the client parses it), and the model has been OBSERVED quoting a ref into
+    //      prose. Rendering "[CHAPTER 1, whole chapter]" directly above "ref=chapter-text:0" would put the
+    //      two numbers for one chapter INSIDE the prompt, which is strictly worse than one honest
+    //      convention plus a translation rule.
+    // So the artifacts keep ONE convention (0-based, the wire's) and the prompt carried ONE translation
+    // rule, in the clause that already says those bracketed labels are internal and that only the model's
+    // own sentence carries them across to the author.
+    //
+    // WHAT final-r02 CHANGED, AND WHY THAT SENTENCE IS GONE. g4 measured be-c02's rule and it did not hold:
+    // 16 of the 20 answers that named a chapter number disagreed with the chips rendered on the same answer,
+    // and the split was sharp - order 0 (the order the rule's own worked example used) scored 4 pass /
+    // 3 fail, every order above it scored 0 pass / 9 fail. The model reproduced the ONE worked example and
+    // never applied +1 as an operation. The owner's decision was to fix the SEAM rather than the prompt: the
+    // author-facing name is now PRE-COMPUTED and rendered on every chapter-scoped block
+    // (BookArtifactBlocks.AuthorFacingChapterName), so the model's cheapest correct action is to copy a
+    // finished string. Note this does NOT reverse the two reasons above - the refs and the brief heading
+    // still may not move, and the block's own internal label is unchanged; a LABELLED author-facing line
+    // beside a LABELLED internal one is a different thing from option 2's two unlabelled numbers.
+    //
+    // The clause therefore stops teaching the offset and points at that line instead. It is a NARROWING,
+    // not a fifth prohibition: naming the token in order to keep it internal is what final-r03 believes
+    // taught the model to print [CHAPTER n] into the author's prose (g4: 3 of 38), so no literal bracketed
+    // label is quoted in either grounding string any more, and none may be re-introduced.
+    //
+    // THE INVARIANT: no surface the author can read shows two different numbers for one chapter. Pinned by
+    // ProductChatChapterNumberingTests, whose cross-stack half names the client spec that pins the other
+    // side of it. THE RENDERED LINE'S SHAPE IS VERIFIABLE BY READING; WHETHER THE MODEL COPIES IT IS NOT,
+    // so the class stays a hypothesis until the measurement that follows final-r02 runs.
+    //
+    // WHAT be-c03 (A CARRIED REF IN THE PROSE, review finding #3) CHANGED. Clause (3) was widened ONE MORE
+    // sentence, into the same internal-vs-author-facing statement be-c02 had just put there, and again no
+    // clause was added.
+    //
+    // THE DEFECT. A Hebrew answer read '...כפי שמסומן בקובץ chapter-text:0)' - "as marked in the file
+    // chapter-text:0" - so the model handed the author a wire key and described it as a FILE they could
+    // look at. The RTL consequence made it worse than jargon: an LTR slug inside Hebrew prose drags its
+    // closing parenthesis to the wrong end, so it rendered as "chapter-text:0 ),". Nothing downstream
+    // removes it either, by an explicit decision in ProductChatCitations (a leaked label mid-answer is
+    // cosmetic; a deleted sentence is not).
+    //
+    // WHY THE CITATION SENTENCE WAS NOT THE PLACE. It already says where refs BELONG ("Refs belong on that
+    // line and not in your sentences"), which is a rule the model was given and did not follow. Restating
+    // it there, harder, is the prohibition-stacking move this file has recorded failing twice. What was
+    // missing is not a place-rule but the IDENTITY of the token: nothing said a ref is an internal key the
+    // author never sees. Clause (3) is where that fact already lives for the bracketed labels, and it is
+    // one sentence away, so the refs join it. The two clauses now divide the work the way they already
+    // did for the labels: (3) says what the token IS, the citation sentence says where it GOES.
+    //
+    // The old "Their numbers are internal too" was subsumed rather than dropped: the clause after it stated
+    // the numbering in full, so be-c02's seam was byte-unchanged in what it asserted. THAT SECOND HALF IS
+    // NOW GONE (final-r02, see above) and the identity statement is what survives - the refs and the labels
+    // are internal, and their numbers are internal counting. That is the half be-c03 needed; nothing it
+    // asserts depended on the offset being spelled out. UNVERIFIABLE BY READING, like every prompt edit
+    // here: g4 measured whether the leak rate actually falls, and it did not close (5 of 38).
+    //
+    // FINDING #7 (the chapter named by the BOOK's title) IS NOT HERE, ON PURPOSE. It was a RENDERING
+    // defect - two titles in one section with nothing marking which was which - and it is fixed where it
+    // was rendered (the Book line below, and BookArtifactBlocks.BookBrief/ChapterText), for zero prompt
+    // tokens and with the result checkable by reading the composed string.
+    //
+    // (5) is NEW and it is the only added clause: the assembler deliberately grounds BOTH candidates for a
+    //     bare "chapter N" because Order is 0-based and authors count from 1. g1 confirmed the model does
+    //     not merge them into one false claim - it silently picks one. The honest ambiguity existed in the
+    //     data and was thrown away at the prompt boundary; the note that now carries it is emitted ONLY
+    //     when both candidates actually rode, so no ordinary chapter answer acquires a hedge.
+    //
+    // EVERY SENTENCE HERE IS PAID FOR TWICE (system slot + instruction head) AND THE HEBREW RATE IS
+    // 1.8 chars/token, so the wording above went through a deliberate concision pass after the first
+    // draft measured 40 tokens over what the 40-chapter worst case had left. ProductChatBookPromptTests
+    // reports the size of both modes in both languages, so the next edit here starts from a number.
+
+    private const string BookGroundingEn =
+        "If the question is about the content or state of the user's own book (its characters, its " +
+        "plot, what a specific chapter says, what a review found), answer it from the BOOK section " +
+        "below and from nothing else; the rule above about the guides governs questions about " +
+        "PageDraft itself. A guide may still help explain how the product works, but it does not stand " +
+        "in for what the book artifacts themselves say. " +
+        "You are writing to the AUTHOR of this book; the names in these artifacts are " +
+        "the people in it. " +
+        "Every book artifact carries a ref in its header, and what you say about the book is what those " +
+        "artifacts say. The chapter briefs are SUMMARIES of the chapters, so where they do not cover " +
+        "something, say that the briefs do not mention it; whether it happens in the book is something " +
+        "they cannot tell you. " +
+        "A chapter given to you as 'whole chapter' is that chapter's complete text, so for that one " +
+        "chapter you can say what it does and does not contain. A chapter given to you as 'EXCERPT' is " +
+        "part of it, so there say what the parts you could read do and do not mention. Each of those " +
+        "covers its own chapter and no other. Those bracketed labels are for you and the author never " +
+        "sees them, so only your own sentence carries that difference to them. The refs are internal " +
+        "too and the author never sees them either, and so are their numbers. Each chapter's block " +
+        "carries a line with the name the author has for it; name a chapter by copying that line. " +
+        "The status artifact gives counts and states, not lists: a count of chapters that are behind is " +
+        "what you know, which chapters they are is something it does not say, and where it names a " +
+        "reason, that reason is this book's reason. Give its numbers exactly as written. When what the " +
+        "question needs is missing or out of date, the answer is that state plus the next step it calls " +
+        "for. " +
+        "A note in the BOOK section about what the question could have meant belongs in the answer: " +
+        "where it says a number could have meant two chapters, say which one you answered for and that " +
+        "it could have meant the other; where it says no chapter was identified, ask which chapter they " +
+        "mean before answering about a particular one. ";
+
+    private const string BookGroundingHe =
+        "אם השאלה נוגעת לתוכן או למצב של הספר של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק מסוים, מה " +
+        "סקירה מצאה), ענה עליה מתוך מקטע הספר שמופיע למטה ומשום מקור אחר; הכלל שלמעלה לגבי המדריכים " +
+        "חל על שאלות על PageDraft עצמו. מדריך עדיין יכול לעזור להסביר איך המוצר עובד, אך הוא אינו " +
+        "מחליף את מה שפריטי הספר עצמם אומרים. " +
+        "אתה כותב אל המחבר של הספר הזה; השמות שבפריטים האלה הם הדמויות " +
+        "שבו. " +
+        "לכל פריט של הספר יש מזהה בכותרת שלו, ומה שאתה אומר על הספר הוא מה שהפריטים האלה אומרים. " +
+        "תקצירי הפרקים הם סיכומים של הפרקים, ולכן כאשר הם אינם מכסים משהו, אמור שהתקצירים אינם מזכירים " +
+        "זאת; האם זה קורה בספר הוא דבר שהם אינם יכולים לומר לך. " +
+        "פרק שניתן לך כ'whole chapter' הוא הטקסט המלא של אותו פרק, ולכן לגבי אותו פרק בלבד תוכל לומר " +
+        "מה יש בו ומה אין בו. פרק שניתן לך כ'EXCERPT' הוא חלק ממנו, ולכן שם אמור מה החלקים שהצלחת " +
+        "לקרוא מזכירים ומה אינם מזכירים. כל אחד מהם חל על הפרק שלו ולא על פרק אחר. התוויות בסוגריים " +
+        "נועדו לך והמחבר אינו רואה אותן, ולכן רק המשפט שלך מעביר אליו את ההבחנה הזו. גם המזהים " +
+        "פנימיים והמחבר אינו רואה גם אותם, וגם לא את המספרים שבהם. בבלוק של כל פרק יש שורה עם השם " +
+        "שהמחבר משתמש בו; ציין פרק בהעתקת השורה הזו. " +
+        "פריט הסטטוס נותן מספרים ומצבים ולא רשימות: מספר הפרקים שמפגרים מאחור הוא מה שידוע לך, אילו " +
+        "פרקים אלה הוא אינו אומר, וכאשר הוא נוקב בסיבה, הסיבה הזו היא הסיבה של הספר הזה. מסור את " +
+        "המספרים שלו בדיוק כפי שהם כתובים. כאשר מה שהשאלה צריכה חסר או אינו מעודכן, התשובה היא המצב " +
+        "הזה יחד עם הצעד הבא שהוא מחייב. " +
+        "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: כאשר היא אומרת שמספר יכול היה " +
+        "להתכוון לשני פרקים, אמור על איזה פרק ענית ושהוא יכול היה להתכוון לאחר; כאשר היא אומרת שלא " +
+        "זוהה פרק, שאל על איזה פרק מדובר לפני שתענה על פרק מסוים. ";
 
     // ─── Section markers. ASCII and language-independent so a test can assert on them ────────────
 
     internal const string GuidesMarker = "[GUIDES]";
+    internal const string BookMarker = "[BOOK]";
+
+    /// <summary>
+    /// THE BOOK'S OWN TITLE, SAID TO BE THE BOOK'S (be-c03, review finding #7). It used to render as a
+    /// bare <c>Book: &lt;title&gt;</c> at the head of the BOOK section, where the only other titles in
+    /// scope are CHAPTER titles (the <c>ChapterText</c> heading and the brief's "## Chapter N: title"),
+    /// and an answer was OBSERVED naming the open chapter by the book's title: 'בפרק שנקרא "צל הירח"',
+    /// where צל הירח is the book and the chapter is הנמל האפל. Two titles in one section with nothing
+    /// marking which was which.
+    ///
+    /// <para>IT IS A RENDERING FIX ON PURPOSE: it costs no prompt clause, it is paid ONCE per request
+    /// rather than twice like every sentence in the system message, and unlike a prompt rule it can be
+    /// checked by reading the composed string. The parenthesis is the load-bearing half - "Book title:"
+    /// alone still sits above a chapter's title with nothing contrasting them.</para>
+    ///
+    /// <para>IT IS NOT THE WHOLE FIX, AND SAYING SO WAS WRONG (final-r01). This docstring used to open
+    /// "THIS IS THE WHOLE FIX FOR THAT FINDING". <c>g4</c> then measured the class and it REPRODUCED: an
+    /// answer named the chapter by the book's title in 5 of 38 book-scoped runs, and 4 of 4 on the
+    /// review's own question. What this line provably buys is that the COMPOSED PROMPT now says whose
+    /// each title is; whether the model stops reaching for the wrong one is a separate, measured,
+    /// still-OPEN question. Note the shape of the residual, because it points at where the next attempt
+    /// goes: asking about the same chapter BY TITLE named it correctly 2 of 2, so the confusion is
+    /// specific to the DEICTIC path, where the question supplies no title and the model reaches for the
+    /// nearest one it was shown. Do not read a rendering fix's readability as the class being closed.</para>
+    ///
+    /// <para>IT IS DELIBERATELY NOT SHAPED LIKE <c>=== ARTIFACT ref=... ===</c>. This line carries no ref
+    /// and is not citable, and be-f01 had just finished removing a header that advertised a ref the parser
+    /// rejects (<c>ref=status</c>, which g2 measured the model writing out verbatim). A second uncitable
+    /// thing wearing the artifact costume would re-create that defect on the one line that is never
+    /// dropped.</para>
+    ///
+    /// <para>English, like every other line of the BOOK section (see <c>BookArtifactBlocks</c>): none of
+    /// that section is user-facing.</para>
+    /// </summary>
+    internal const string BookTitleLabel = "Book title (not a chapter title): ";
     internal const string HistoryMarker = "[CONVERSATION]";
     internal const string QuestionMarker = "[QUESTION]";
 
     /// <summary>
     /// The system message for <c>AiTaskType.ProductChat</c>. <c>PromptFactory</c> returns THIS rather
     /// than keeping a second copy, so the grounding wording has one owner.
+    ///
+    /// <para>With <paramref name="bookAware"/> false (the default, and every request that carries no
+    /// bookId) this is BYTE-IDENTICAL to what phase A shipped. That is not an accident of construction:
+    /// A's gate verdict is a measurement of these exact sentences, so B is only allowed to change the
+    /// prompt in the situation A never measured.</para>
     /// </summary>
-    public static string SystemMessage(string language)
-        => ChatLanguage.IsHebrew(language) ? GroundingHe : GroundingEn;
+    public static string SystemMessage(string language, bool bookAware = false)
+    {
+        var hebrew = ChatLanguage.IsHebrew(language);
+
+        var head = hebrew ? GroundingHeHead : GroundingEnHead;
+        var middle = bookAware
+            ? (hebrew ? BookGroundingHe : BookGroundingEn)
+            : (hebrew ? BookRefusalHe : BookRefusalEn);
+        var citation = bookAware
+            ? (hebrew ? CitationLineBookAwareHe : CitationLineBookAwareEn)
+            : (hebrew ? CitationLineHe : CitationLineEn);
+        var languageRule = hebrew ? LanguageHe : LanguageEn;
+
+        return head + middle + citation + languageRule;
+    }
 
     /// <summary>
     /// Composes the complete user-message instruction: the grounding rule, then the selected guides
@@ -148,15 +461,41 @@ public static class ProductChatPrompt
     /// Already capped by <c>ProductChatService</c>. This method does no capping of its own on purpose:
     /// a budget rule enforced in two places is a budget rule that will disagree with itself.
     /// </param>
+    /// <param name="book">
+    /// The retrieved book artifacts, already ordered and already trimmed by
+    /// <see cref="ProductChatBudget"/>. EMPTY means no bookId was supplied, and the composed instruction
+    /// is then byte-identical to phase A's: no <see cref="BookMarker"/>, no book-aware system message,
+    /// no book context line. That identity is what keeps A's gate verdict valid through B.
+    /// </param>
+    /// <param name="bookTitle">
+    /// Stated so the assistant can name WHICH book it is looking at. Facts about the title are not
+    /// inferable from it; it is a label, and the artifacts are the grounding. Rendered under
+    /// <see cref="BookTitleLabel"/>, which says whose title it is - see that constant for the answer
+    /// that named a chapter with it.
+    /// </param>
+    /// <param name="bookNote">
+    /// What the RETRIEVAL knew and the prompt used to throw away: a short internal note about how the
+    /// question resolved, emitted only when there is genuinely something to say (today: a bare "chapter
+    /// N" that grounded both the 0-based and the 1-based candidate). It is rendered in English beside the
+    /// title line, like every other line of the BOOK section, because nothing in that section is
+    /// user-facing; the RULE that governs what the model does with it is in both languages.
+    ///
+    /// <para>Null or blank emits nothing at all, so the ordinary chapter answer is unchanged and does not
+    /// acquire a hedge it has no reason for.</para>
+    /// </param>
     public static string ComposeInstruction(
         string language,
         IReadOnlyList<GuideDocument> guides,
-        IReadOnlyList<ProductChatTurn> history)
+        IReadOnlyList<ProductChatTurn> history,
+        IReadOnlyList<BookArtifactBlock>? book = null,
+        string? bookTitle = null,
+        string? bookNote = null)
     {
         var isHebrew = ChatLanguage.IsHebrew(language);
+        var bookBlocks = book ?? Array.Empty<BookArtifactBlock>();
         var sb = new StringBuilder();
 
-        sb.Append(SystemMessage(language)).Append("\n\n");
+        sb.Append(SystemMessage(language, bookAware: bookBlocks.Count > 0)).Append("\n\n");
 
         sb.Append(GuidesMarker).Append('\n');
         foreach (var guide in guides)
@@ -166,6 +505,21 @@ public static class ProductChatPrompt
               .Append(" ===\n")
               .Append(guide.Body)
               .Append("\n\n");
+        }
+
+        if (bookBlocks.Count > 0)
+        {
+            sb.Append(BookMarker).Append('\n');
+            if (!string.IsNullOrWhiteSpace(bookTitle))
+                sb.Append(BookTitleLabel).Append(bookTitle!.Trim()).Append('\n');
+
+            if (!string.IsNullOrWhiteSpace(bookNote))
+                sb.Append("Note: ").Append(bookNote!.Trim()).Append('\n');
+
+            foreach (var block in bookBlocks)
+            {
+                sb.Append(block.Text).Append("\n\n");
+            }
         }
 
         if (history.Count > 0)

@@ -250,8 +250,12 @@ public sealed class BookReviewFindings
 public class BookReviewService
 {
     /// <summary>The six editorial dimensions the review fans out over. Order is stable for deterministic
-    /// progress reporting and dedup-iteration; the model is instructed to stamp each finding's dimension.</summary>
-    private static readonly string[] Dimensions =
+    /// progress reporting and dedup-iteration; the model is instructed to stamp each finding's dimension.
+    ///
+    /// <para>INTERNAL, not private, since chatbot phase B: <c>BookArtifactSelector</c>'s dimension-word key
+    /// resolves against THIS array rather than re-declaring the vocabulary, so a chat question can never name
+    /// a seventh dimension that exists nowhere else in the product.</para></summary>
+    internal static readonly string[] Dimensions =
         { "plot", "character", "pacing", "tone", "theme", "continuity" };
 
     // NIT-5: internal (not private) so SynthesisMergeMap.cs — which round-trips the SAME BookFinding.ChapterAnchorsJson
