@@ -125,6 +125,12 @@ builder.Services.AddSingleton<GuidesCorpusReader>();
 // it could be a singleton, but it is Scoped to match every other service here and to keep the door
 // open for phase B's book-aware context, which will need the scoped DbContext.
 builder.Services.AddScoped<ProductChatService>();
+// Phase B's book-artifact retrieval. Scoped, because it reads through the scoped AppDbContext and the
+// three scoped status services the stage spine already reads; a singleton would have to resolve them
+// per call from a scope factory for no gain. Registered against the interface so ProductChatService's
+// tests can pin the prompt without a database - the selection, excerpting, rendering and budgeting it
+// feeds are all pure and pinned on their own.
+builder.Services.AddScoped<IBookChatContextReader, BookChatContextReader>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
