@@ -47,7 +47,42 @@ public record BookDto(
 /// the Import stage on a book surface counts <c>chapters</c>; on the books list it reads
 /// <see cref="BookDto.ChapterCount"/> / <see cref="BookDto.ChaptersWithTextCount"/>.
 /// </summary>
-public record BookDetailDto(Guid Id, string Title, string? Author, string Language, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string AiTier, List<ChapterSummaryDto> Chapters);
+/// <param name="ExportableChapterCount">
+/// w8 / F2. How many chapters THE EXPORTER could actually put in a file, straight from
+/// <see cref="Pagedraft.Api.Services.BookExportService.CountExportableChaptersAsync"/>, scene rule included.
+/// That method calls <see cref="Pagedraft.Api.Services.BookExportService.RenderableUnitsOf"/> directly - the
+/// SAME rule the export endpoints apply through their own <c>ResolveUnitsFor</c> wrapper, which adds only a
+/// same-chapter warning log on top of it. So the count and the file agree because a TEST says so
+/// (<c>BookExportServiceTests</c>'s export-readiness fixtures), not because the two callers share one call.
+///
+/// IT IS NOT DERIVABLE FROM <see cref="ChapterSummaryDto"/>, which is why it is on the payload rather than
+/// being counted client-side like the two M1 counts. "Has text" (<c>WordCount &gt; 0</c>) and "can be
+/// rendered into a document" are different questions and a book can satisfy the first and fail the second -
+/// which is exactly the state the stage spine used to render as <c>Export: Ready</c> while the export
+/// endpoint answered 409 <c>nothingWritten</c>. The spine's Export stage reads THIS.
+///
+/// <c>ExportableChapterCount == 0</c> collapses two conditions the exporter itself keeps apart: no chapters at
+/// all versus chapters that exist but hold nothing renderable (the book path's
+/// <see cref="Pagedraft.Api.Services.BookExportOutcome.NothingToExport"/> and
+/// <see cref="Pagedraft.Api.Services.BookExportOutcome.NothingWritten"/>, respectively). This is DELIBERATE,
+/// not a defect: the client already has the chapter list's length on this same payload and disambiguates the
+/// two cases with it, so a second field carrying "zero chapters" versus "zero exportable" would duplicate
+/// information the client already has. Recorded here so nobody re-derives the collapse as a bug.
+///
+/// DELIBERATELY NOT ON <see cref="BookDto"/>, i.e. not on the books list. The two M1 counts are correlated
+/// SQL COUNTs and the list touches no chapter content at all; this one cannot be expressed in SQL (it parses
+/// the stored SFDT) and would turn the list into a per-row scene-and-manuscript read. On this book-scoped
+/// payload the chapter rows are already materialized, so an UNSPLIT chapter costs one JSON parse over a row
+/// already in memory; a SPLIT chapter costs a full read of its own scene layer (every scene's
+/// <c>ContentSfdt</c>, not previously loaded here) plus one parse per scene - see
+/// <see cref="Pagedraft.Api.Services.BookExportService.CountExportableChaptersAsync"/> for the shape in full.
+/// Either way it is paid on every <c>GET /api/books/{id}</c>, which the editor, dashboard, import and export
+/// pages all fetch, and the placement decision (book payload yes, list no) still stands: the list would pay
+/// that same cost per row with nothing already materialized to offset it. The books list therefore keeps
+/// reporting the Export stage as "not known here", which its compact spine already does honestly for stages 2
+/// to 4.
+/// </param>
+public record BookDetailDto(Guid Id, string Title, string? Author, string Language, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, string AiTier, List<ChapterSummaryDto> Chapters, int ExportableChapterCount);
 
 public record ChapterSummaryDto(Guid Id, string Title, string? PartName, int Order, int WordCount, DateTimeOffset UpdatedAt);
 

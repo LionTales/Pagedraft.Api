@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
+using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
@@ -105,16 +106,31 @@ public class BooksController : ControllerBase
 
     internal sealed record BookWithCountsRow(Book Book, int ChapterCount, int ChaptersWithTextCount);
 
+    /// <summary>
+    /// One book with its chapter list.
+    ///
+    /// <c>exportableChapterCount</c> (w8 / F2) is answered by <see cref="BookExportService"/> itself rather
+    /// than counted here: the stage spine's Export stage and the export endpoints have to agree about whether a
+    /// file can be produced, and they disagreed - the spine read <c>WordCount &gt; 0</c> and rendered `ready`
+    /// on a book whose export answered 409 <c>nothingWritten</c>. See <see cref="BookDetailDto"/> for why the
+    /// count is on THIS payload and not on the books list.
+    ///
+    /// The chapter rows this endpoint already materializes are handed straight to that helper, so the count
+    /// costs one extra query (the scenes) and no second read of the manuscript.
+    /// </summary>
     [HttpGet("{bookId:guid}")]
     public async Task<ActionResult<BookDetailDto>> GetById(Guid bookId, CancellationToken ct)
     {
         var book = await _db.Books.Include(b => b.Chapters.OrderBy(c => c.Order)).FirstOrDefaultAsync(b => b.Id == bookId, ct);
         if (book == null) return NotFound();
-        var chapters = book.Chapters.Select(c => new ChapterSummaryDto(c.Id, c.Title, c.PartName, c.Order, c.WordCount, c.UpdatedAt)).ToList();
+        var orderedChapters = book.Chapters.ToList();
+        var chapters = orderedChapters.Select(c => new ChapterSummaryDto(c.Id, c.Title, c.PartName, c.Order, c.WordCount, c.UpdatedAt)).ToList();
+        var exportableChapterCount = await BookExportService.CountExportableChaptersAsync(_db, orderedChapters, ct);
         return Ok(new BookDetailDto(
             book.Id, book.Title, book.Author, book.Language, book.CreatedAt, book.UpdatedAt,
             AiTierPolicy.ToStoredValue(AiTierPolicy.Parse(book.AiTier)),
-            chapters));
+            chapters,
+            exportableChapterCount));
     }
 
     /// <summary>

@@ -302,9 +302,21 @@ public class BookExportService
     /// reasoning as the chapters this export also loads (see the note on
     /// <see cref="ChapterService.GetAllByBookAsync"/>): nothing here mutates a scene either.
     /// </summary>
-    private async Task<Dictionary<Guid, List<Scene>>> LoadScenesAsync(IReadOnlyCollection<Guid> chapterIds, CancellationToken ct)
+    private Task<Dictionary<Guid, List<Scene>>> LoadScenesAsync(IReadOnlyCollection<Guid> chapterIds, CancellationToken ct)
+        => LoadScenesAsync(_db, chapterIds, ct);
+
+    /// <summary>
+    /// <see cref="LoadScenesAsync(IReadOnlyCollection{Guid}, CancellationToken)"/> over a caller's context, so
+    /// the READ-ONLY question "how many of these chapters could be exported" can be answered without
+    /// constructing an export service (and its Syncfusion conversion dependencies) to ask it. Same query, same
+    /// grouping, same ordering: this is the one place the scene half of an export's input is assembled.
+    /// </summary>
+    private static async Task<Dictionary<Guid, List<Scene>>> LoadScenesAsync(
+        AppDbContext db,
+        IReadOnlyCollection<Guid> chapterIds,
+        CancellationToken ct)
     {
-        var scenes = await _db.Scenes
+        var scenes = await db.Scenes
             .AsNoTracking()
             .Where(s => chapterIds.Contains(s.ChapterId))
             .ToListAsync(ct);
@@ -314,6 +326,77 @@ public class BookExportService
             // Order, then CreatedAt as a deterministic tiebreak: Order is what the split assigns, what the
             // editor's chapter tree renders, and what SceneService.GetAllByChapterAsync already sorts by.
             .ToDictionary(g => g.Key, g => g.OrderBy(s => s.Order).ThenBy(s => s.CreatedAt).ToList());
+    }
+
+    /// <summary>
+    /// HOW MANY OF THESE CHAPTERS THE EXPORTER COULD ACTUALLY PUT IN A FILE - the export-readiness signal, asked
+    /// of the export path itself rather than approximated by a second predicate.
+    ///
+    /// <para>WHY THIS EXISTS (w8 / F2). The stage spine's Export stage used to read `ready` off the chapters
+    /// whose <c>WordCount</c> is greater than zero, while THIS service decides what to export by asking whether
+    /// the stored SFDT holds a renderable block (<see cref="RenderableUnitsOf"/>). Those are two different
+    /// questions, and the difference was defended in the client as an honest warning - which it is for a
+    /// PARTIAL skip, where the file is produced and the skipped chapters are named on the response headers. It
+    /// is not honest for the all-or-nothing case: a book whose chapters carry word counts but no renderable
+    /// document rendered <c>Export: Ready</c> while <c>GET /api/document/export/book/{id}</c> answered 409
+    /// <c>nothingWritten</c>. One claim, one source. The spine now reads this.</para>
+    ///
+    /// <para>IT INCLUDES THE SCENE RULE, which is the reason it lives here and is not a predicate over
+    /// <c>Chapter.ContentSfdt</c> alone: a chapter the author has split and written into is exported from its
+    /// SCENES, and its own row is then a frozen pre-split copy. A chapter-only check would answer differently
+    /// from the exporter in both directions on exactly those chapters.</para>
+    ///
+    /// <para>It goes through <see cref="RenderableUnitsOf"/> and deliberately NOT through the instance method
+    /// <c>ResolveUnitsFor</c>: the warning that wrapper emits is about an export that had to choose between two
+    /// written copies, and this is a read that exports nothing. A readiness poll must not write export warnings
+    /// into the log - that is the POLICY reason. It is also FORCED: this method is <c>static</c> and carries no
+    /// logger (<c>ResolveUnitsFor</c> and the warning it emits both live on the instance, off <c>_logger</c>),
+    /// so calling it would mean constructing a <see cref="BookExportService"/> just to ask a read-only question
+    /// - the exact thing being <c>static</c> exists to avoid. Both reasons hold today; if this method ever stops
+    /// being static, the policy reason on its own is still enough to keep the bypass.</para>
+    ///
+    /// <para>COST, IN BOTH SHAPES. The extra query is the scenes, and for the many books nobody has split it
+    /// returns no rows for that chapter, so the cost there is exactly one JSON parse over a chapter row the
+    /// CALLER has already materialized (<see cref="HasRenderableContent"/> on <c>chapter.ContentSfdt</c>). A
+    /// SPLIT chapter is a different shape: <see cref="LoadScenesAsync(AppDbContext, IReadOnlyCollection{Guid}, CancellationToken)"/>
+    /// pulls every one of that chapter's <see cref="Scene"/> rows INCLUDING their <c>ContentSfdt</c> bodies -
+    /// content the caller had not already read - and <see cref="RenderableUnitsOf"/> then runs
+    /// <see cref="HasRenderableContent"/> over EVERY scene, not once per chapter. A book with split chapters
+    /// therefore pays a full read of its scene layer plus one JSON parse per scene on this call, and it pays it
+    /// on every <c>GET /api/books/{id}</c> - the request the editor, dashboard, import and export pages all
+    /// make. That is still affordable on this book-scoped payload, whose caller has already paid to read the
+    /// chapter rows this reuses, and the placement decision (book payload yes, list no) stands with the
+    /// corrected cost - if anything the split case makes the books list even less affordable than the old
+    /// sentence implied, since that surface touches no chapter content at all today (two correlated SQL
+    /// COUNTs) and would become a full scene-layer read per row. See <c>BookDetailDto.ExportableChapterCount</c>.</para>
+    ///
+    /// <para>A COROLLARY GAP, LEFT OPEN BY DESIGN. <see cref="HasRenderableContent"/> treats a
+    /// corrupt-but-non-empty SFDT (not JSON at all, or JSON that does not have the shape it expects) as
+    /// renderable ON PURPOSE - a parse fault is meant to surface as a failure, not to quietly drop the chapter
+    /// - so this counter reports such a chapter as exportable and the spine reads <c>Ready</c>. When the export
+    /// actually runs, the SFDT conversion cannot turn that same corrupt document into a file, and the caller
+    /// gets <c>500</c> instead of the clean 409 this counter exists to prevent. Same claim shape as the
+    /// readiness/actual-export mismatch this counter was built to close (w8 / F2), landing on a fault this time
+    /// rather than a 409. Pre-existing behaviour of <see cref="HasRenderableContent"/>, not introduced by this
+    /// counter and not changed here.</para>
+    /// </summary>
+    public static async Task<int> CountExportableChaptersAsync(
+        AppDbContext db,
+        IReadOnlyList<Chapter> chapters,
+        CancellationToken ct = default)
+    {
+        if (chapters.Count == 0) return 0;
+
+        var scenesByChapter = await LoadScenesAsync(db, chapters.Select(c => c.Id).ToList(), ct);
+
+        var exportable = 0;
+        foreach (var chapter in chapters)
+        {
+            scenesByChapter.TryGetValue(chapter.Id, out var scenes);
+            if (RenderableUnitsOf(chapter, scenes).Count > 0) exportable++;
+        }
+
+        return exportable;
     }
 
     /// <summary>
