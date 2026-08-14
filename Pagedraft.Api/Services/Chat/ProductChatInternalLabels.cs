@@ -153,8 +153,15 @@ namespace Pagedraft.Api.Services.Chat;
 /// <para>FOUR EDGE CASES OF THE NARROWED SURFACE (review findings A11-A14), fixed once the shapes above
 /// stopped moving. A11: a bidi control mark sits directly against a slug in RTL prose to fix its rendering
 /// direction, and a bare removal orphans it - not whitespace, so <see cref="JoinAtSeam"/> cannot reach it,
-/// and an un-consumed embedding initiator still opens a directional run; <see cref="ExpandOverWrapper"/>
-/// now consumes it, the same way it already consumes an emptied markdown wrapper. A12: a plain
+/// and an un-consumed embedding initiator still opens a directional run.
+/// <see cref="ExpandOverOrphanedBidiMarks"/> consumes it, the same way a removal already consumes an
+/// emptied markdown wrapper - and it is applied at the one place a removal is added to the list
+/// (<c>Cut</c> in <see cref="StripLine"/>) rather than by each path for itself, with one declared opt-out
+/// (unlinking a markdown link, whose words survive the removal that its marks bound). A11 first shipped on
+/// the SLUG path alone, and the whole-parenthetical path - the one that
+/// removes all five measured leaks - kept its marks, so a gloss written as <c>LRE(EXCERPT)PDF</c> came back
+/// as a bare LRE/PDF pair that went on steering the rest of the Hebrew line. That is the harm A11 named,
+/// reached through the path A11 did not cover. A12: a plain
 /// <c>TrimEnd()</c> in <see cref="Tidy"/> could not tell a removal's own trailing space from a markdown
 /// HARD LINE BREAK (two trailing spaces) the model wrote elsewhere on the same line, merging two lines into
 /// one paragraph only on lines a token happened to leak on; the break is now read before the trim and
@@ -296,7 +303,7 @@ public static class ProductChatInternalLabels
     /// the whole span, and an unmatched backtick then flips <c>ProductChatPunctuation</c>'s own code-span
     /// parity for every character AFTER it in the ANSWER - that layer runs one pass over the whole text and
     /// never resets the state at a newline. So the inline case is removed, wrapper and all
-    /// (<see cref="ExpandOverWrapper"/>), the same as any other wrapped slug.</para>
+    /// (<see cref="ExpandOverWrapperDelimiters"/>), the same as any other wrapped slug.</para>
     /// </summary>
     private static readonly Regex FenceDelimiter = new(
         @"^[ \t]{0,3}(`{3,}|~{3,})", RegexOptions.CultureInvariant);
@@ -308,11 +315,16 @@ public static class ProductChatInternalLabels
     /// directional boundary against the token they sit beside, so once the token is gone they are inert
     /// noise: not whitespace, so <see cref="JoinAtSeam"/>'s space collapse cannot reach them, and an
     /// un-consumed embedding initiator (LRE/RLE/LRO/RLO) still opens a directional run the rest of the
-    /// answer never closes. The bracketed-label half of this class needs no equivalent -
-    /// <see cref="BracketedLabel"/>'s own <c>\s</c> does not match a Cf character either, so a mark between
-    /// the bracket and its digits just defeats the match and the label is left alone, which fails safe. The
-    /// parenthetical half (shape 2) needs no equivalent either: <see cref="ResidueWord"/> already ignores
-    /// Cf, so a mark inside a gloss that goes whole goes with it.
+    /// answer never closes.
+    ///
+    /// <para>This is about the marks OUTSIDE a removal, touching it. A mark INSIDE one needs no rule: it is
+    /// deleted with everything else in the span, and <see cref="ResidueWord"/> does not count it as a word
+    /// so it cannot hold a gloss back from going whole. A mark inside a <c>[CHAPTER 7]</c> label is the one
+    /// case that changes an outcome rather than being carried by one, and it fails safe:
+    /// <see cref="BracketedLabel"/>'s <c>\s</c> does not match a Cf character, so the match is defeated and
+    /// the label is left alone. This paragraph used to conclude from that that the parenthetical half
+    /// "needs no equivalent", which was true of the marks inside a gloss and false of the ones around it -
+    /// the case that carried every measured leak.</para>
     /// </summary>
     private static bool IsBidiControl(char c) =>
         c == '\u200E' || c == '\u200F'                    // LRM, RLM
@@ -440,6 +452,20 @@ public static class ProductChatInternalLabels
         var covered = new bool[tokens.Count];
         var removed = 0;
 
+        // A11 IS A RULE OF THE REMOVAL LIST, NOT OF ANY ONE PATH. Every removal this method makes is added
+        // HERE, so "a removal may not orphan the bidi controls it emptied" has exactly ONE implementation
+        // and a path added later inherits it without being told. It shipped as a rule of the slug path
+        // alone, and the whole-parenthetical path - the one that removes all five measured leaks - skipped
+        // it, so an LRE/RLE that had wrapped a gloss survived the gloss and went on steering the rest of a
+        // Hebrew line (Bugbot on final-r03; the slug path's own A11 test could not see it).
+        // `boundsSurvivingText` is the ONE opt-out and has one caller: unlinking a markdown link KEEPS the
+        // words between the marks, so those marks still bound live text and taking them would strip the
+        // direction off prose the author reads.
+        void Cut(int start, int end, bool boundsSurvivingText = false)
+            => removals.Add(boundsSurvivingText
+                ? (start, end)
+                : ExpandOverOrphanedBidiMarks(line, start, end));
+
         foreach (var group in groups)
         {
             var inside = new List<int>();
@@ -465,20 +491,26 @@ public static class ProductChatInternalLabels
             // a one-sided delimiter is either the model's own or, at the head of a line, this line's list
             // marker, and eating a bullet would defeat the bare-marker guard below.
             var (wrapStart, wrapEnd) = ExpandOverWrapperDelimiters(line, group.Start, group.End);
-            removals.Add(wrapStart < group.Start && wrapEnd > group.End
+            var (cutStart, cutEnd) = wrapStart < group.Start && wrapEnd > group.End
                 ? (wrapStart, wrapEnd)
-                : (group.Start, group.End));
-            foreach (var i in inside) covered[i] = true;
-            removed += inside.Count;
+                : (group.Start, group.End);
 
             // DECISION 5. This group is a markdown link's TARGET, so the brackets around the link's text
-            // go with it and the text itself stays: `[chapter 1](chapter-text:0)` leaves `chapter 1`.
+            // go with it and the text itself stays: `[chapter 1](chapter-text:0)` leaves `chapter 1`. That
+            // is an UNLINK and not a deletion, which is why all THREE of its spans opt out of A11: the
+            // marks around such a link bound the words that survive it, and `ראה <LRE>chapter 1<PDF>
+            // בהמשך.` is the rendering those marks were written for.
             var link = LinkWhoseTargetIs(links, group);
+
+            Cut(cutStart, cutEnd, link != null);
             if (link != null)
             {
-                removals.Add((link.Index, link.Index + 1));
-                removals.Add((group.Start - 1, group.Start));
+                Cut(link.Index, link.Index + 1, true);
+                Cut(group.Start - 1, group.Start, true);
             }
+
+            foreach (var i in inside) covered[i] = true;
+            removed += inside.Count;
         }
 
         for (var i = 0; i < tokens.Count; i++)
@@ -491,7 +523,8 @@ public static class ProductChatInternalLabels
             // 8)` used to come back as `(an of chapter 8)`. Leaving the word is the safe direction.
             if (tokens[i].GroupOnly) continue;
 
-            removals.Add(ExpandOverWrapper(line, tokens[i].Start, tokens[i].End));
+            var (wrapStart, wrapEnd) = ExpandOverWrapperDelimiters(line, tokens[i].Start, tokens[i].End);
+            Cut(wrapStart, wrapEnd);
             removed++;
         }
 
@@ -541,25 +574,33 @@ public static class ProductChatInternalLabels
                                      && m.Groups["target"].Index == group.ContentStart);
 
     /// <summary>
-    /// DECISION 5, plus A11. A removal takes the delimiters it emptied, or the whitespace it stranded
-    /// against one, and now also the bidi control characters ITS OWN REMOVAL orphaned - scoped, like every
-    /// other rule here, to the characters TOUCHING the removal, never to the line. Wrapper consumption is
-    /// computed first (unchanged from before A11), then the result is expanded outward over any run of
-    /// <see cref="IsBidiControl"/> characters touching it, on both sides, in one final pass: a mark can sit
-    /// directly against the token (a Hebrew RLM immediately before and after <c>chapter-text:0</c>, no
-    /// space) or against a wrapper the first pass already consumed, and either way it is noise once what it
-    /// bounded is gone.
+    /// A11. Called from <c>Cut</c> in <see cref="StripLine"/>, the single place a removal is added to the
+    /// list, so it reaches every path that exists or is added later except the one that declares itself an
+    /// unlink. A removal takes with it the bidi control characters ITS OWN REMOVAL
+    /// orphaned - scoped, like every other rule here, to the characters TOUCHING the span, never to the
+    /// line. A mark can sit directly against the token (a Hebrew RLM immediately before and after
+    /// <c>chapter-text:0</c>, no space), against a wrapper <see cref="ExpandOverWrapperDelimiters"/> has
+    /// already consumed, or against the bracket of a whole parenthetical, and in every one of those what
+    /// the mark bounded is what just went.
+    ///
+    /// <para>The scan cannot run off either end (it stops at 0 and at <c>line.Length</c>), and a span that
+    /// grows to the whole line is not a special case here: an answer with nothing left to read comes back
+    /// untouched one level up (DECISION 6), marks included.</para>
     /// </summary>
-    private static (int Start, int End) ExpandOverWrapper(string line, int start, int end)
+    private static (int Start, int End) ExpandOverOrphanedBidiMarks(string line, int start, int end)
     {
-        var (s, e) = ExpandOverWrapperDelimiters(line, start, end);
+        while (start > 0 && IsBidiControl(line[start - 1])) start--;
+        while (end < line.Length && IsBidiControl(line[end])) end++;
 
-        while (s > 0 && IsBidiControl(line[s - 1])) s--;
-        while (e < line.Length && IsBidiControl(line[e])) e++;
-
-        return (s, e);
+        return (start, end);
     }
 
+    /// <summary>
+    /// DECISION 5. A removal takes the delimiters it emptied, or the whitespace it stranded against one.
+    /// The bidi rule is deliberately NOT here: this is the markdown half, it is the only half the
+    /// whole-group path wants on its own terms (balanced pairs only, see <see cref="StripLine"/>), and
+    /// A11 belongs to every removal rather than to the ones that happen to call this.
+    /// </summary>
     private static (int Start, int End) ExpandOverWrapperDelimiters(string line, int start, int end)
     {
         var left = start;

@@ -1065,4 +1065,218 @@ public class ProductChatInternalLabelStripTests
             $"leaves alone.\nBEFORE: {Visible(leaked)}\nAFTER : {Visible(text)}");
         Assert.Equal(0, removed);
     }
+
+    // ─── A11 belongs to EVERY removal path, not just the slug one (Bugbot, final-r03) ─────────────
+
+    /// <summary>
+    /// Bidi controls made legible, because an orphaned LRE is INVISIBLE in a diff and in a test failure
+    /// alike: two Hebrew strings that differ only by an unclosed embedding print identically. Every
+    /// reason below renders both sides through this.
+    /// </summary>
+    private static string VisibleBidi(string text)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        foreach (var c in text)
+            sb.Append(c switch
+            {
+                '\u200E' => "<LRM>",
+                '\u200F' => "<RLM>",
+                '\u202A' => "<LRE>",
+                '\u202B' => "<RLE>",
+                '\u202C' => "<PDF>",
+                '\u2066' => "<LRI>",
+                '\u2069' => "<PDI>",
+                _ => c.ToString()
+            });
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// A11 REACHED THROUGH THE PATH IT DID NOT COVER. A11 taught the SLUG removal to consume the bidi
+    /// controls touching it, so a removal could never leave an embedding initiator open. The
+    /// WHOLE-PARENTHETICAL removal - the path that deletes all five measured leaks - was never taught the
+    /// same thing, so <c>LRE(EXCERPT)PDF</c> came back as a bare <c>LRE PDF</c> pair with the gloss gone
+    /// from between them, and an LRE/RLE with nothing left inside it goes on steering every character
+    /// after it on the line. Strictly worse than the leak it was removing.
+    ///
+    /// <para>THE INPUTS ARE THE MEASURED LEAKS WITH THE MARKS A MODEL WRITING RTL ACTUALLY PUTS THERE, and
+    /// the expectation is the SAME <c>*Expected</c> constant the no-marks test above asserts, so what these
+    /// pin is that the marks change nothing about the sentence that survives.</para>
+    /// </summary>
+    public static TheoryData<string, string, int, string> BidiWrappedLeaks => new()
+    {
+        {
+            Leak3.Replace("(EXCERPT)", "\u202A(EXCERPT)\u202C", StringComparison.Ordinal),
+            Leak3Expected, 1, "LRE ... PDF around the gloss (an embedding, the harmful case)"
+        },
+        {
+            Leak5.Replace("(EXCERPT)", "\u200F(EXCERPT)\u200F", StringComparison.Ordinal),
+            Leak5Expected, 1, "RLM on both sides of the gloss, beside an ordinary parenthetical"
+        },
+        {
+            Leak2.Replace("(מצא פתיחה:", "\u2066(מצא פתיחה:", StringComparison.Ordinal)
+                 .Replace(").", ")\u2069.", StringComparison.Ordinal),
+            Leak2Expected, 1, "LRI ... PDI (an isolate) around the finding-guid gloss"
+        },
+        {
+            Leak3.Replace("(EXCERPT)", "(EXCERPT)\u202C", StringComparison.Ordinal),
+            Leak3Expected, 1, "a lone trailing PDF, with no initiator of its own on the line"
+        },
+        {
+            Leak3.Replace("(EXCERPT)", "\u202A**(EXCERPT)**\u202C", StringComparison.Ordinal),
+            Leak3Expected, 1, "marks OUTSIDE the markdown wrapper the group removal already consumes"
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(BidiWrappedLeaks))]
+    public void AWholeParentheticalRemoval_TakesTheBidiMarksThatBoundedIt(
+        string leaked, string expected, int expectedRemovals, string what)
+    {
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            $"a whole-parenthetical removal ({what}) left the bidi control marks that had bounded the " +
+            "gloss behind. They are not whitespace, so nothing downstream can collapse them, and an " +
+            "embedding left open re-orders every character after it on the line - the exact harm A11 was " +
+            "written for, reached through the removal path A11 never covered.\n" +
+            $"EXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(expectedRemovals, removed, "the marks must not change what the strip counts.");
+    }
+
+    /// <summary>
+    /// AND THE EXPANSION IS SCOPED TO THE REMOVAL, NOT THE LINE - the rule every other pass in this class
+    /// obeys, and the one a line-wide "drop the stray marks" fix would break. An ordinary parenthetical the
+    /// strip decided to KEEP keeps the marks around it, on a line where a gloss elsewhere was removed with
+    /// its own.
+    /// </summary>
+    [Fact]
+    public void AParentheticalTheStripKeeps_KeepsTheBidiMarksAroundIt()
+    {
+        const string leaked = "בספר \u200F(ישנם 40 פרקים)\u200F \u202A(EXCERPT)\u202C.";
+        const string expected = "בספר \u200F(ישנם 40 פרקים)\u200F.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            "the bidi expansion reached marks the strip's own removal did not orphan. It is scoped to the " +
+            "characters TOUCHING a removal for the same reason every other rule here is: a line-wide pass " +
+            "reaches the model's own text, which is how the deleted DropUnmatchedBrackets pass manufactured " +
+            $"the malformation it was written to prevent.\nEXPECTED: {VisibleBidi(expected)}\n" +
+            $"ACTUAL  : {VisibleBidi(text)}");
+        AssertCount(1, removed, "only the gloss was internal.");
+    }
+
+    /// <summary>
+    /// THE ONE DELIBERATE OPT-OUT. Unlinking a markdown link (DECISION 5) KEEPS the words between the
+    /// marks - <c>[chapter 1](chapter-text:0)</c> leaves <c>chapter 1</c> - so the marks around it are
+    /// still bounding live text and taking them would strip the direction off LTR prose the author reads,
+    /// which is the defect this whole class of rules exists to avoid. Pinned so that "make the expansion
+    /// unconditional" is a failing change and not a quiet one.
+    /// </summary>
+    [Fact]
+    public void AnUnlinkedMarkdownLink_KeepsTheMarksAroundTheTextThatSurvives()
+    {
+        const string leaked = "ראה \u202A[chapter 1](chapter-text:0)\u202C בהמשך.";
+        const string expected = "ראה \u202Achapter 1\u202C בהמשך.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            "unlinking a markdown link ate the bidi marks around it, but the link's TEXT survives the " +
+            "removal: those marks still bound live LTR words inside Hebrew prose, and without them the " +
+            $"surviving words render in the wrong place.\nEXPECTED: {VisibleBidi(expected)}\n" +
+            $"ACTUAL  : {VisibleBidi(text)}");
+        AssertCount(1, removed, "the link target was the one internal token.");
+    }
+
+    /// <summary>
+    /// TWO REMOVALS THAT WOULD BOTH CLAIM THE SAME MARK. Adjacent glosses separated by a single RLM: the
+    /// first removal's right-hand expansion and the second's left-hand expansion both reach it, so the two
+    /// spans overlap. <c>Apply</c> merges overlapping spans before splicing, which is what stops the second
+    /// splice from cutting text the first already took.
+    /// </summary>
+    [Fact]
+    public void TwoAdjacentRemovalsClaimingOneMark_TakeItOnceAndKeepTheSentence()
+    {
+        const string leaked = "אלא רק חלקים מהם \u200F(EXCERPT)\u200F(whole chapter)\u200F, ולכן.";
+        const string expected = "אלא רק חלקים מהם, ולכן.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            "two adjacent whole-parenthetical removals sharing one bidi mark did not come back as the " +
+            "sentence without either gloss - either a mark survived between them or the merge cut text " +
+            $"that was not theirs.\nEXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(2, removed, "both glosses were internal and both went.");
+    }
+
+    /// <summary>
+    /// A REFUSAL RETURNS THE ORIGINAL, MARKS INCLUDED (DECISION 6). An answer whose whole content is a
+    /// wrapped gloss expands to the whole line, strips to nothing, and comes back VERBATIM - the marks are
+    /// not "half removed" on the way out, because the refusal returns the input string rather than a
+    /// rebuilt one. The tokens are reported as kept, not removed.
+    /// </summary>
+    [Theory]
+    [InlineData("\u202A(EXCERPT)\u202C")]
+    [InlineData("\u202A(EXCERPT)\u202C.")]
+    public void AnAnswerRefusedToAvoidEmptyingIt_ComesBackWithItsMarksIntact(string leaked)
+    {
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked, out var kept);
+
+        AssertText(leaked, text,
+            "the refusal that keeps this layer from returning an empty answer did not return the ORIGINAL " +
+            "text: the bidi expansion had already reached the ends of the line, and what came back is a " +
+            $"partially rewritten answer instead of the untouched one.\nBEFORE: {VisibleBidi(leaked)}\n" +
+            $"AFTER : {VisibleBidi(text)}");
+        AssertCount(0, removed, "nothing was removed: the whole answer came back.");
+        AssertCount(1, kept, "a refusal that reports nothing is indistinguishable from a clean answer.");
+    }
+
+    /// <summary>
+    /// THE SHARED RULE, PINNED AS A RULE. The defect Bugbot found was not that one path forgot the bidi
+    /// expansion; it was that the expansion was a property of a PATH at all, so a second path could
+    /// disagree with it in silence and a third could be added never having heard of it. There is now
+    /// exactly ONE place a removal enters the list - <c>Cut</c> in <c>StripLine</c> - and this test fails
+    /// the moment a future path splices a span in beside it.
+    ///
+    /// <para>A source-shape assertion for the same reason <c>ProductChatComposedSystemSlotTests</c> makes
+    /// one: no behavioural test can cover a removal path that does not exist yet, and the invariant being
+    /// defended is structural. The class's own history is the argument - the strip's rules have been
+    /// re-derived per path three times, and each time the copy drifted.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRemovalPath_AddsItsSpanThroughTheOneBidiExpansion()
+    {
+        var path = System.IO.Path.Combine(
+            System.IO.Directory.GetParent(ProductChatCorpusTests.RealGuidesDirectory())!.Parent!.FullName,
+            "Services", "Chat", "ProductChatInternalLabels.cs");
+
+        Assert.True(System.IO.File.Exists(path),
+            $"could not find the class under test at {path}, so this guard asserted nothing at all.");
+
+        var source = System.IO.File.ReadAllText(path);
+
+        const string gate = "void Cut(int start, int end, bool boundsSurvivingText = false)";
+        var gateAt = source.IndexOf(gate, StringComparison.Ordinal);
+        Assert.True(gateAt >= 0,
+            "the single gate every removal goes through is gone or was renamed, so the rest of this test " +
+            $"would pass vacuously. Expected to find:\n    {gate}\nin {path}");
+
+        var adds = source.Split("removals.Add(").Length - 1;
+        Assert.True(adds == 1,
+            $"{adds} places add a span to the removal list, and there must be exactly one. A11's rule - a " +
+            "removal may not orphan the bidi control marks it emptied - lives in Cut, so a path that " +
+            "calls removals.Add directly skips it. That is precisely how the whole-parenthetical path " +
+            "came to leave an LRE open around a deleted gloss while the slug path beside it did not.");
+
+        var body = source[gateAt..];
+        var addAt = body.IndexOf("removals.Add(", StringComparison.Ordinal);
+        var expansionAt = body.IndexOf("ExpandOverOrphanedBidiMarks(", StringComparison.Ordinal);
+        Assert.True(addAt >= 0 && expansionAt > addAt && expansionAt < addAt + 300,
+            "the one removals.Add is no longer inside Cut, or Cut no longer applies " +
+            "ExpandOverOrphanedBidiMarks to what it adds. The gate is then a gate over nothing.");
+    }
 }
