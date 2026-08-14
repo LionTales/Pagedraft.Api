@@ -161,7 +161,12 @@ namespace Pagedraft.Api.Services.Chat;
 /// the SLUG path alone, and the whole-parenthetical path - the one that
 /// removes all five measured leaks - kept its marks, so a gloss written as <c>LRE(EXCERPT)PDF</c> came back
 /// as a bare LRE/PDF pair that went on steering the rest of the Hebrew line. That is the harm A11 named,
-/// reached through the path A11 did not cover. A12: a plain
+/// reached through the path A11 did not cover. AND THE FIX FOR THAT SHIPPED ITS MIRROR: taking every
+/// ADJACENT control took closers that still wrapped surviving text, so the same removal that used to strand
+/// a closer began stranding an initiator instead - opposite halves of one unbalanced pair. The rule now
+/// asks whether the removal ORPHANS a control rather than whether it TOUCHES one, which is what the method
+/// name had been asserting all along; the three control classes and the two things the rule declines to
+/// decide are on the method. A12: a plain
 /// <c>TrimEnd()</c> in <see cref="Tidy"/> could not tell a removal's own trailing space from a markdown
 /// HARD LINE BREAK (two trailing spaces) the model wrote elsewhere on the same line, merging two lines into
 /// one paragraph only on lines a token happened to leak on; the break is now read before the trim and
@@ -311,11 +316,21 @@ public static class ProductChatInternalLabels
     private static bool IsFenceDelimiter(string line) => FenceDelimiter.IsMatch(line);
 
     /// <summary>
-    /// The bidi control characters (Unicode category Cf) a removal must not orphan (A11). They mark a
-    /// directional boundary against the token they sit beside, so once the token is gone they are inert
-    /// noise: not whitespace, so <see cref="JoinAtSeam"/>'s space collapse cannot reach them, and an
-    /// un-consumed embedding initiator (LRE/RLE/LRO/RLO) still opens a directional run the rest of the
-    /// answer never closes.
+    /// The bidi control characters (Unicode category Cf) a removal must reason about (A11), IN THE THREE
+    /// CLASSES THAT DO NOT BEHAVE ALIKE. Conflating them is how this rule was got wrong twice in a row, in
+    /// opposite directions: a rule written for one class and applied to all three took too little the first
+    /// time and too much the second.
+    ///
+    /// <list type="bullet">
+    ///   <item>IMPLICIT MARKS - LRM, RLM, ALM. They open nothing and close nothing. They act only on the
+    ///   neutrals directly beside them, so a mark touching a removal has lost the very characters it acted
+    ///   on, and taking it can leave nothing unbalanced.</item>
+    ///   <item>EMBEDDINGS AND OVERRIDES - LRE, RLE, LRO, RLO, each closed by PDF. An initiator left open
+    ///   steers every character after it; a PDF taken away from surviving text leaves its initiator open.
+    ///   Both halves are harmful, which is why neither "always take" nor "never take" is the rule.</item>
+    ///   <item>ISOLATES - LRI, RLI, FSI, closed by PDI. Structurally the same pairing as the embeddings and
+    ///   handled by the same code, with their own terminator: a PDF does not close an LRI.</item>
+    /// </list>
     ///
     /// <para>This is about the marks OUTSIDE a removal, touching it. A mark INSIDE one needs no rule: it is
     /// deleted with everything else in the span, and <see cref="ResidueWord"/> does not count it as a word
@@ -326,10 +341,33 @@ public static class ProductChatInternalLabels
     /// "needs no equivalent", which was true of the marks inside a gloss and false of the ones around it -
     /// the case that carried every measured leak.</para>
     /// </summary>
-    private static bool IsBidiControl(char c) =>
-        c == '\u200E' || c == '\u200F'                    // LRM, RLM
-        || (c >= '\u202A' && c <= '\u202E')                // LRE, RLE, PDF, LRO, RLO
-        || (c >= '\u2066' && c <= '\u2069');               // LRI, RLI, FSI, PDI
+    private static bool IsImplicitMark(char c) =>
+        c is '\u200E' or '\u200F' or '\u061C';             // LRM, RLM, ALM
+
+    /// <inheritdoc cref="IsImplicitMark"/>
+    private static bool IsEmbeddingInitiator(char c) =>
+        c is '\u202A' or '\u202B' or '\u202D' or '\u202E'; // LRE, RLE, LRO, RLO
+
+    /// <inheritdoc cref="IsImplicitMark"/>
+    private static bool IsIsolateInitiator(char c) =>
+        c is '\u2066' or '\u2067' or '\u2068';             // LRI, RLI, FSI
+
+    /// <summary>Closes an embedding or an override, and only those.</summary>
+    private const char PopDirectionalFormatting = '\u202C';
+
+    /// <summary>Closes an isolate, and only an isolate.</summary>
+    private const char PopDirectionalIsolate = '\u2069';
+
+    private static bool IsInitiator(char c) => IsEmbeddingInitiator(c) || IsIsolateInitiator(c);
+
+    private static bool IsTerminator(char c) =>
+        c == PopDirectionalFormatting || c == PopDirectionalIsolate;
+
+    private static char TerminatorFor(char initiator) =>
+        IsIsolateInitiator(initiator) ? PopDirectionalIsolate : PopDirectionalFormatting;
+
+    private static bool OpensWhat(char c, char terminator) =>
+        terminator == PopDirectionalIsolate ? IsIsolateInitiator(c) : IsEmbeddingInitiator(c);
 
     /// <summary>
     /// Removes the internal tokens that reached the prose, returning the cleaned answer and HOW MANY were
@@ -460,7 +498,10 @@ public static class ProductChatInternalLabels
         // Hebrew line (Bugbot on final-r03; the slug path's own A11 test could not see it).
         // `boundsSurvivingText` is the ONE opt-out and has one caller: unlinking a markdown link KEEPS the
         // words between the marks, so those marks still bound live text and taking them would strip the
-        // direction off prose the author reads.
+        // direction off prose the author reads. It still earns its place under the narrowed rule, and the
+        // test that pins it had to be re-pointed to say so: the PAIRED marks it was written with are now
+        // kept by the general rule anyway (their partner survives), so only an IMPLICIT mark - which has no
+        // partner to ask about - still distinguishes the opt-out from its absence.
         void Cut(int start, int end, bool boundsSurvivingText = false)
             => removals.Add(boundsSurvivingText
                 ? (start, end)
@@ -576,12 +617,36 @@ public static class ProductChatInternalLabels
     /// <summary>
     /// A11. Called from <c>Cut</c> in <see cref="StripLine"/>, the single place a removal is added to the
     /// list, so it reaches every path that exists or is added later except the one that declares itself an
-    /// unlink. A removal takes with it the bidi control characters ITS OWN REMOVAL
-    /// orphaned - scoped, like every other rule here, to the characters TOUCHING the span, never to the
-    /// line. A mark can sit directly against the token (a Hebrew RLM immediately before and after
-    /// <c>chapter-text:0</c>, no space), against a wrapper <see cref="ExpandOverWrapperDelimiters"/> has
-    /// already consumed, or against the bracket of a whole parenthetical, and in every one of those what
-    /// the mark bounded is what just went.
+    /// unlink. Scoped, like every other rule here, to the characters TOUCHING the span, never to the line.
+    ///
+    /// <para>THE RULE, AND IT IS THE NAME: a control goes only when the removal leaves it bounding no
+    /// surviving text - an implicit mark touching the span (it bounded nothing but the span to begin with),
+    /// a paired control whose partner the removal takes, and a terminator that closes nothing at all - and
+    /// never a control that still bounds text the reader keeps.</para>
+    ///
+    /// <para>WHY THE RULE IS NOT "TAKE EVERY ADJACENT CONTROL", which is what this did and what Bugbot
+    /// found second. That version shipped the MIRROR of the bug it fixed. Before it, a whole-parenthetical
+    /// removal took too little and left an initiator open; after it, the same removal took too much: in
+    /// <c>LRE abc PDF LRE (EXCERPT) PDF</c> - the standard PDF+LRE seam between two adjacent directional
+    /// runs, which carries NO SPACE between them - the left scan walked past the gloss's own LRE onto the
+    /// PDF that closed <c>abc</c>, and <c>abc</c>'s LRE was left open steering the rest of the Hebrew line.
+    /// Both versions leave an unbalanced control; they just leave opposite halves of one. Hence a rule that
+    /// asks about the PARTNER instead of the neighbourhood, and an INVARIANT strong enough to rule out both
+    /// directions at once: this method never changes the embedding level of a character that survives it,
+    /// because every control it takes has its partner (if it has one, and if that partner does anything)
+    /// taken in the same removal.</para>
+    ///
+    /// <para>WHAT IT DELIBERATELY DOES NOT DECIDE. (1) An unmatched control the AUTHOR's own text already
+    /// carried is not this removal's to fix: an LRE with no PDF on the line steered the rest of the line
+    /// before the strip ran and still does after, so it stays, and taking it would re-order surviving prose
+    /// on the strength of a malformation this layer did not make - the same argument that deleted the
+    /// line-wide <c>DropUnmatchedBrackets</c> pass (DECISION 3). An unmatched TERMINATOR is the one
+    /// exception and it is not a judgement call: a PDF or PDI that closes nothing is inert by the Unicode
+    /// algorithm, so taking it cannot move a surviving character either way. (2) A PDI also implicitly
+    /// closes embeddings opened inside its isolate; the pairing here is per-class, so a mixed
+    /// <c>LRI ... LRE ... PDI</c> nest resolves as "no match" and the control is kept. (3) An implicit mark
+    /// can still influence a surviving NEUTRAL on its far side; the removal took the neutrals on the near
+    /// side, and this rule cannot tell the two apart.</para>
     ///
     /// <para>The scan cannot run off either end (it stops at 0 and at <c>line.Length</c>), and a span that
     /// grows to the whole line is not a special case here: an answer with nothing left to read comes back
@@ -589,10 +654,90 @@ public static class ProductChatInternalLabels
     /// </summary>
     private static (int Start, int End) ExpandOverOrphanedBidiMarks(string line, int start, int end)
     {
-        while (start > 0 && IsBidiControl(line[start - 1])) start--;
-        while (end < line.Length && IsBidiControl(line[end])) end++;
+        // Each pass may uncover a control the last one hid, so this runs to a fixpoint: LRE LRM (EXCERPT)
+        // LRM PDF needs the marks taken before the pair can see that it hugs the span.
+        while (true)
+        {
+            var moved = false;
 
-        return (start, end);
+            while (start > 0 && IsImplicitMark(line[start - 1])) { start--; moved = true; }
+            while (end < line.Length && IsImplicitMark(line[end])) { end++; moved = true; }
+
+            // A PAIR THAT HUGS THE SPAN closes over nothing once the span is gone - the shape every
+            // measured leak wrapped in an embedding has, `LRE(EXCERPT)PDF`. Both halves go together, which
+            // is what keeps the level of everything outside them exactly as it was.
+            if (start > 0 && end < line.Length && IsInitiator(line[start - 1])
+                && MatchingTerminatorOf(line, start - 1) == end)
+            {
+                start--;
+                end++;
+                moved = true;
+                continue;
+            }
+
+            if (start > 0 && IsOrphanedBy(line, start - 1, start, end)) { start--; moved = true; }
+            if (end < line.Length && IsOrphanedBy(line, end, start, end)) { end++; moved = true; }
+
+            if (!moved) return (start, end);
+        }
+    }
+
+    /// <summary>
+    /// Whether removing <c>[start, end)</c> leaves the control at <paramref name="at"/> with nothing to
+    /// bound: its partner is inside the span, or - for a terminator only - there is no partner anywhere on
+    /// the line, which by the Unicode algorithm makes it a character that does nothing.
+    /// </summary>
+    private static bool IsOrphanedBy(string line, int at, int start, int end)
+    {
+        var c = line[at];
+
+        if (IsInitiator(c))
+        {
+            var terminator = MatchingTerminatorOf(line, at);
+            return terminator >= start && terminator < end;
+        }
+
+        if (IsTerminator(c))
+        {
+            var initiator = MatchingInitiatorOf(line, at);
+            return initiator < 0 || (initiator >= start && initiator < end);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The index of the terminator that closes the initiator at <paramref name="at"/>, or -1. Counts depth
+    /// over that initiator's OWN class only, because a PDF does not close an isolate and a PDI does not
+    /// close an embedding.
+    /// </summary>
+    private static int MatchingTerminatorOf(string line, int at)
+    {
+        var terminator = TerminatorFor(line[at]);
+        var depth = 0;
+
+        for (var i = at; i < line.Length; i++)
+        {
+            if (OpensWhat(line[i], terminator)) depth++;
+            else if (line[i] == terminator && --depth == 0) return i;
+        }
+
+        return -1;
+    }
+
+    /// <summary>The mirror of <see cref="MatchingTerminatorOf"/>: the initiator this terminator closes, or -1.</summary>
+    private static int MatchingInitiatorOf(string line, int at)
+    {
+        var terminator = line[at];
+        var depth = 0;
+
+        for (var i = at; i >= 0; i--)
+        {
+            if (line[i] == terminator) depth++;
+            else if (OpensWhat(line[i], terminator) && --depth == 0) return i;
+        }
+
+        return -1;
     }
 
     /// <summary>

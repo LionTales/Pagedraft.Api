@@ -1082,10 +1082,15 @@ public class ProductChatInternalLabelStripTests
             {
                 '\u200E' => "<LRM>",
                 '\u200F' => "<RLM>",
+                '\u061C' => "<ALM>",
                 '\u202A' => "<LRE>",
                 '\u202B' => "<RLE>",
                 '\u202C' => "<PDF>",
+                '\u202D' => "<LRO>",
+                '\u202E' => "<RLO>",
                 '\u2066' => "<LRI>",
+                '\u2067' => "<RLI>",
+                '\u2068' => "<FSI>",
                 '\u2069' => "<PDI>",
                 _ => c.ToString()
             });
@@ -1170,23 +1175,35 @@ public class ProductChatInternalLabelStripTests
     }
 
     /// <summary>
-    /// THE ONE DELIBERATE OPT-OUT. Unlinking a markdown link (DECISION 5) KEEPS the words between the
-    /// marks - <c>[chapter 1](chapter-text:0)</c> leaves <c>chapter 1</c> - so the marks around it are
-    /// still bounding live text and taking them would strip the direction off LTR prose the author reads,
-    /// which is the defect this whole class of rules exists to avoid. Pinned so that "make the expansion
-    /// unconditional" is a failing change and not a quiet one.
+    /// THE ONE DELIBERATE OPT-OUT, RE-VERIFIED AGAINST THE NARROWED RULE. Unlinking a markdown link
+    /// (DECISION 5) KEEPS the words between the marks - <c>[chapter 1](chapter-text:0)</c> leaves
+    /// <c>chapter 1</c> - so the marks around it are still bounding live text, and taking them would strip
+    /// the direction off LTR prose the author reads.
+    ///
+    /// <para>AND THE FIRST CASE NO LONGER PINS IT, WHICH IS WHY THERE IS A SECOND. This shipped with the
+    /// LRE/PDF case alone, and the narrowed rule now keeps that pair on its own terms: those marks bound
+    /// the link's surviving text, so their partner is OUTSIDE every span the unlink cuts and the general
+    /// rule declines them with no opt-out involved. Deleting <c>boundsSurvivingText</c> leaves that case
+    /// green. An IMPLICIT mark has no partner to ask about, so it is the one the general rule would take
+    /// and the only one the opt-out still saves - which makes the RLM case the whole reason the flag is
+    /// alive. A rule change that quietly voids a neighbouring exception, or that leaves the exception
+    /// standing with nothing behind it, is exactly what this pair is here to catch.</para>
     /// </summary>
-    [Fact]
-    public void AnUnlinkedMarkdownLink_KeepsTheMarksAroundTheTextThatSurvives()
+    [Theory]
+    [InlineData("ראה \u202A[chapter 1](chapter-text:0)\u202C בהמשך.",
+        "ראה \u202Achapter 1\u202C בהמשך.",
+        "an LRE/PDF pair, which the general rule keeps anyway - this case alone cannot see the opt-out go")]
+    [InlineData("ראה \u200F[chapter 1](chapter-text:0)\u200F בהמשך.",
+        "ראה \u200Fchapter 1\u200F בהמשך.",
+        "RLMs, which have no partner to ask about: the ONLY case that fails if the opt-out is deleted")]
+    public void AnUnlinkedMarkdownLink_KeepsTheMarksAroundTheTextThatSurvives(
+        string leaked, string expected, string what)
     {
-        const string leaked = "ראה \u202A[chapter 1](chapter-text:0)\u202C בהמשך.";
-        const string expected = "ראה \u202Achapter 1\u202C בהמשך.";
-
         var (text, removed) = ProductChatInternalLabels.Strip(leaked);
 
         AssertText(expected, text,
-            "unlinking a markdown link ate the bidi marks around it, but the link's TEXT survives the " +
-            "removal: those marks still bound live LTR words inside Hebrew prose, and without them the " +
+            $"unlinking a markdown link ({what}) ate the bidi marks around it, but the link's TEXT survives " +
+            "the removal: those marks still bound live LTR words inside Hebrew prose, and without them the " +
             $"surviving words render in the wrong place.\nEXPECTED: {VisibleBidi(expected)}\n" +
             $"ACTUAL  : {VisibleBidi(text)}");
         AssertCount(1, removed, "the link target was the one internal token.");
@@ -1222,6 +1239,9 @@ public class ProductChatInternalLabelStripTests
     [Theory]
     [InlineData("\u202A(EXCERPT)\u202C")]
     [InlineData("\u202A(EXCERPT)\u202C.")]
+    [InlineData("\u2066(EXCERPT)\u2069")]
+    [InlineData("(EXCERPT)\u202C")]
+    [InlineData("\u200F(EXCERPT)\u200F")]
     public void AnAnswerRefusedToAvoidEmptyingIt_ComesBackWithItsMarksIntact(string leaked)
     {
         var (text, removed) = ProductChatInternalLabels.Strip(leaked, out var kept);
@@ -1234,6 +1254,164 @@ public class ProductChatInternalLabelStripTests
         AssertCount(0, removed, "nothing was removed: the whole answer came back.");
         AssertCount(1, kept, "a refusal that reports nothing is indistinguishable from a clean answer.");
     }
+
+    /// <summary>
+    /// THE MIRROR OF THE DEFECT THE A11 FIX CLOSED (Bugbot, round 2, on round 1). The fix generalised to
+    /// "take every bidi control TOUCHING the removal", which is right for the marks that bounded the gloss
+    /// and wrong for every other control that happens to sit against one. The shape it breaks contains no
+    /// space, which is exactly why RTL prose produces it: two adjacent directional runs meet as
+    /// <c>PDF LRE</c> with nothing between them, so a gloss opening the second run has the FIRST run's
+    /// closer hard against its bracket. The greedy scan walked over the gloss's own mark onto that closer,
+    /// and the surviving run's initiator was left open - the same unbalanced-control harm A11 was written
+    /// for, reached from the other side. Round 1 stranded a closer by taking too little; round 2 stranded
+    /// an initiator by taking too much.
+    ///
+    /// <para>ONE CASE PER CONTROL CLASS AND PER CLASS MEMBER, because they do not behave alike - the
+    /// implicit marks pair with nothing, the embeddings and overrides close on PDF, the isolates close on
+    /// PDI - and a rule written for one class and applied to all three is how both rounds happened.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("בספר \u202Aabc\u202C\u202A(EXCERPT)\u202C כתוב.", "בספר \u202Aabc\u202C כתוב.",
+        "an embedding: the PDF+LRE seam between two adjacent runs, no space, the shape Bugbot named")]
+    [InlineData("בספר \u202Aabc(EXCERPT)\u202C כתוב.", "בספר \u202Aabc\u202C כתוב.",
+        "an embedding closer that still wraps surviving text in its own run")]
+    [InlineData("בספר \u202A(EXCERPT)\u202C\u202Aabc\u202C כתוב.", "בספר \u202Aabc\u202C כתוב.",
+        "the NEXT run's initiator, sitting directly after the gloss's own closer")]
+    [InlineData("בספר \u202Babc\u202C\u202B(EXCERPT)\u202C כתוב.", "בספר \u202Babc\u202C כתוב.",
+        "an RLE, the class member a Hebrew-writing model reaches for first")]
+    [InlineData("בספר \u202Dabc\u202C\u202D(EXCERPT)\u202C כתוב.", "בספר \u202Dabc\u202C כתוב.",
+        "an LRO override, closed by the same PDF as an embedding")]
+    [InlineData("בספר \u202Eabc\u202C\u202E(EXCERPT)\u202C כתוב.", "בספר \u202Eabc\u202C כתוב.",
+        "an RLO override")]
+    [InlineData("בספר \u2066abc\u2069\u2066(EXCERPT)\u2069 כתוב.", "בספר \u2066abc\u2069 כתוב.",
+        "an LRI isolate, whose terminator is PDI and not PDF")]
+    [InlineData("בספר \u2067abc\u2069\u2067(EXCERPT)\u2069 כתוב.", "בספר \u2067abc\u2069 כתוב.",
+        "an RLI isolate")]
+    [InlineData("בספר \u2068abc\u2069\u2068(EXCERPT)\u2069 כתוב.", "בספר \u2068abc\u2069 כתוב.",
+        "an FSI isolate")]
+    public void AMarkThatStillBoundsSurvivingText_IsNotTakenWithTheGloss(
+        string leaked, string expected, string what)
+    {
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            $"the gloss removal took a bidi control it did not orphan ({what}). The control still bounds " +
+            "text the reader keeps, so its partner is now open and re-orders the rest of the Hebrew line - " +
+            "the same harm as leaving an initiator behind, from the opposite side. A control goes only " +
+            "when the removal leaves it bounding nothing.\n" +
+            $"EXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(1, removed, "the gloss was the one internal token, marks or no marks.");
+    }
+
+    /// <summary>
+    /// THE OTHER DIRECTION, PINNED BESIDE IT SO THE NEXT EDIT CANNOT SWING BACK. Narrowing the rule to
+    /// "only what the removal orphans" is one over-correction away from the round-1 defect it replaced, so
+    /// every control the removal DOES orphan is asserted here, class by class: a pair that hugged the gloss
+    /// and now closes over nothing, a pair one half of which the gloss itself carried, an implicit mark
+    /// that never bounded anything but the span, and a terminator that closes nothing on the line at all
+    /// and is therefore inert by the Unicode algorithm.
+    /// </summary>
+    [Theory]
+    [InlineData("בספר \u202A(EXCERPT)\u202C כתוב.",
+        "an embedding pair that hugged the gloss (LRE/PDF)")]
+    [InlineData("בספר \u202B(EXCERPT)\u202C כתוב.",
+        "an RLE/PDF pair")]
+    [InlineData("בספר \u202D(EXCERPT)\u202C כתוב.",
+        "an LRO/PDF pair")]
+    [InlineData("בספר \u202E(EXCERPT)\u202C כתוב.",
+        "an RLO/PDF pair")]
+    [InlineData("בספר \u2066(EXCERPT)\u2069 כתוב.",
+        "an LRI/PDI isolate pair")]
+    [InlineData("בספר \u2067(EXCERPT)\u2069 כתוב.",
+        "an RLI/PDI isolate pair")]
+    [InlineData("בספר \u2068(EXCERPT)\u2069 כתוב.",
+        "an FSI/PDI isolate pair")]
+    [InlineData("בספר \u200E(EXCERPT)\u200E כתוב.",
+        "LRM, an implicit mark: it bounds nothing, so the gloss was all it had")]
+    [InlineData("בספר \u200F(EXCERPT)\u200F כתוב.",
+        "RLM")]
+    [InlineData("בספר \u061C(EXCERPT)\u061C כתוב.",
+        "ALM, which this rule did not recognise as a control at all until now")]
+    [InlineData("בספר (\u202AEXCERPT)\u202C כתוב.",
+        "a PDF outside the gloss whose LRE the gloss itself carried")]
+    [InlineData("בספר \u202A(EXCERPT\u202C) כתוב.",
+        "the mirror: an LRE outside the gloss whose PDF the gloss carried")]
+    [InlineData("בספר (EXCERPT)\u202C כתוב.",
+        "a PDF that closes nothing on the line, so taking it moves no surviving character")]
+    [InlineData("בספר (EXCERPT)\u2069 כתוב.",
+        "a PDI that closes nothing")]
+    public void AMarkTheRemovalOrphans_IsStillTakenWithIt(string leaked, string what)
+    {
+        var expected = "בספר כתוב.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            $"the gloss removal left behind a bidi control it orphaned ({what}). They are not whitespace, " +
+            "so nothing downstream can collapse them, and an embedding left open re-orders every character " +
+            "after it on the line - the harm A11 was written for. Narrowing the rule to what a removal " +
+            "actually orphans must not narrow it past this.\n" +
+            $"EXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(1, removed, "the gloss was the one internal token, marks or no marks.");
+    }
+
+    /// <summary>
+    /// THE FAILURE BRANCH: A MALFORMATION THE AUTHOR'S OWN TEXT ALREADY CARRIED. An LRE with no PDF
+    /// anywhere on the line steered everything after it BEFORE the strip ran and steers the same surviving
+    /// characters after it, so this removal did not orphan it and does not get to take it. Taking it would
+    /// re-order prose on the strength of a malformation this layer did not make, which is the argument
+    /// that deleted the line-wide <c>DropUnmatchedBrackets</c> pass (DECISION 3), and it is the one place
+    /// the two directions above disagree about the same character.
+    ///
+    /// <para>An unmatched TERMINATOR is not the same case and is not a judgement call: a PDF or PDI that
+    /// closes nothing is inert by the Unicode algorithm, so taking it cannot move a surviving character
+    /// either way - see the last two cases of <see cref="AMarkTheRemovalOrphans_IsStillTakenWithIt"/>.</para>
+    /// </summary>
+    [Fact]
+    public void AnUnmatchedControlTheAuthorWrote_IsNotThisRemovalsToFix()
+    {
+        const string leaked = "בספר \u202A(EXCERPT) כתוב.";
+        const string expected = "בספר \u202A כתוב.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            "the strip took an embedding initiator that was ALREADY unmatched before it ran. The removal " +
+            "did not orphan it - it opened a run over the rest of the line before the gloss went and over " +
+            "the same surviving characters after - so taking it silently re-orders prose the author " +
+            $"wrote.\nEXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(1, removed, "the gloss went; only the author's own stray mark stayed.");
+    }
+
+    /// <summary>
+    /// RE-ENTRY: TWO REMOVALS WITH A LIVE DIRECTIONAL RUN BETWEEN THEM. Each removal's expansion is
+    /// computed against the ORIGINAL line and the spans are merged before any splice, so the first
+    /// removal's expansion cannot change what the second is allowed to see. The run between them keeps its
+    /// own pair, which the greedy rule ate from both sides at once - the first removal's right-hand scan
+    /// took its opener and the second's left-hand scan took its closer, so the two glosses between them
+    /// stripped the direction off a word neither of them contained.
+    ///
+    /// <para><see cref="TwoAdjacentRemovalsClaimingOneMark_TakeItOnceAndKeepTheSentence"/> is the same
+    /// method's other half: there the two expansions CLAIM one shared mark and the merge must not splice
+    /// it twice. Here they must both keep their hands off two.</para>
+    /// </summary>
+    [Fact]
+    public void TwoAdjacentRemovalsAroundASurvivingRun_LeaveThatRunsOwnPairAlone()
+    {
+        const string leaked =
+            "בספר \u202A(EXCERPT)\u202C\u202Aabc\u202C\u202A(whole chapter)\u202C סוף.";
+        const string expected = "בספר \u202Aabc\u202C סוף.";
+
+        var (text, removed) = ProductChatInternalLabels.Strip(leaked);
+
+        AssertText(expected, text,
+            "two glosses on either side of a live directional run took that run's marks with them. Each " +
+            "removal only orphaned its OWN pair; the pair around the surviving word is bounding text the " +
+            "reader keeps, and a removal on either side of it is not entitled to either half.\n" +
+            $"EXPECTED: {VisibleBidi(expected)}\nACTUAL  : {VisibleBidi(text)}");
+        AssertCount(2, removed, "both glosses were internal and both went.");
+    }
+
 
     /// <summary>
     /// THE SHARED RULE, PINNED AS A RULE. The defect Bugbot found was not that one path forgot the bidi
