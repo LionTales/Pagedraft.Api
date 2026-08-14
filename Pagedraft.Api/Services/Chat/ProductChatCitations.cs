@@ -349,6 +349,21 @@ public static class ProductChatCitations
         => Labels.FirstOrDefault(l => line.StartsWith(l, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// True when <paramref name="line"/> is a citation line BY POSITION - the whole-line shape this parser
+    /// owns end to end, including its deliberate choice to leave a refused one in place.
+    ///
+    /// <para>EXPOSED FOR <see cref="ProductChatInternalLabels"/> (final-r03), which strips internal tokens
+    /// out of the answer PROSE and must not reach across that boundary: a refs-only line is what a citation
+    /// line looks like, so a strip that ran on it would gut the one line here that is supposed to carry
+    /// refs. Sharing the test rather than re-deriving it keeps the two layers from disagreeing about what a
+    /// label is, which is the same reason <c>StrictTokens</c> is shared rather than copied. The INLINE
+    /// trailing shape is deliberately NOT covered: there the label sits at the end of a sentence the author
+    /// reads, which is prose.</para>
+    /// </summary>
+    internal static bool OpensWithCitationLabel(string line)
+        => LabelAtStart(Clean(line)) != null;
+
+    /// <summary>
     /// Index of the LAST label occurrence on the line (a model that names two labels, or repeats one,
     /// meant the final one), or -1. Matching is case-insensitive throughout; Hebrew has no case, so the
     /// looser comparison costs the Hebrew labels nothing.
