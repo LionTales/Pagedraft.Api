@@ -2,15 +2,15 @@
 id: chapter-editing-passes
 stage: chapter-editing
 audience: author
-updated: 2026-08-11
+updated: 2026-08-13
 lang: en
 ---
 
 # The chapter editing passes
 
-Six passes run against one chapter, or against one scene inside a chapter: Proofread, Line Edit,
-Linguistic, Literary, Chapter recap and Custom. They all need the same one thing, saved chapter text,
-and they differ in what they read around it and in what they give you back.
+Five passes run against one chapter, or against one scene inside a chapter: Proofread, Line Edit,
+Linguistic, Literary and Chapter recap. They all need the same one thing, saved chapter text, and
+they differ in what they read around it and in what they give you back.
 
 Chapter recap was called Summarize until this release. Only the name changed; the pass does the same
 work, and older results in the History tab are the same pass.
@@ -31,14 +31,13 @@ the sequence is short:
    the pass to run on that scene rather than on the whole chapter.
 2. In the Assistant panel, stay on **Edit help** rather than Book review, and on the **Analysis**
    view rather than Language. If the panel has been closed, the Assistant button brings it back.
-3. Pick the pass from the analysis picker, which is a row of six buttons carrying the names above.
+3. Pick the pass from the analysis picker, which is a row of five buttons carrying the names above.
    That pick is the whole choice of what will run.
 4. Press **Run analysis**.
 
-The button is unavailable until a chapter is open, and for Custom until you have written an
-instruction in the box that appears with it. While a pass is running the button reads "Running" and
-will not start a second run on the same chapter or scene, though you can move to a different chapter
-and start one there.
+The button is unavailable until a chapter is open. While a pass is running the button reads "Running"
+and will not start a second run on the same chapter or scene, though you can move to a different
+chapter and start one there.
 
 Two things happen between the press and the run:
 
@@ -124,14 +123,29 @@ This is not the same thing as building the book briefs. The book briefs are a se
 produces the structured briefs the developmental review consumes. Running the chapter recap on every
 chapter in turn does not produce the book briefs.
 
-## Custom
+## Custom, and where free-form questions went
 
-Runs your own instruction against the chapter or scene text. What you get back depends entirely on
-what you asked for.
+Custom was a sixth pass. You wrote your own instruction, it ran against the chapter or scene text,
+and what came back depended entirely on what you asked for. It has been retired, and asking Show is
+what replaces it.
 
-One property is worth knowing before you write the prompt: Custom is given the raw text and nothing
-else. No book briefs, no character information, no style context is loaded for it. If your
-instruction depends on something outside the passage, put that something in the prompt.
+Ask Show from the assistant button in the corner of any screen. Inside a book it reads your book: the
+briefs, the review findings, the character register and the chapter text itself, and it says which of
+those it read. That is more context than Custom ever had, because Custom was given the raw passage
+and nothing else.
+
+Two differences are worth knowing rather than discovering:
+
+- **Show reads less text at once.** A Custom run put a whole chapter in front of the model. Show
+  works to a budget and reads up to about 3,500 tokens of manuscript per question, spread across at
+  most two chapters, and switches to excerpts above that. For a question about a passage, point Show
+  at the chapter and ask about the passage.
+- **A Custom run left a saved result.** It landed in the History tab and you could go back to it
+  weeks later. Show's answers are a conversation and are not saved as analysis results. If you need
+  an answer on the record, copy it somewhere that keeps it.
+
+Custom runs you produced before this release are untouched. They are still in the History tab, still
+under their own filter, and they still open and read the way they always did.
 
 ## Chapter or scene
 
@@ -157,8 +171,8 @@ per run: picking a tier stores it and the next run uses it.
 
 Not every pass can actually move to the thinking tier. Proofread and Linguistic can. Line Edit shows
 the control but always runs on the fast tier, and it says so rather than pretending otherwise.
-Chapter recap and Custom have no tier control at all. Because Literary is routed through the same
-underlying task as Linguistic, the two share one setting.
+Chapter recap has no tier control at all. Because Literary is routed through the same underlying
+task as Linguistic, the two share one setting.
 
 There is one language rule that overrides the tier choice: for an English book, proofreading always
 runs on the fast tier. That restriction applies to proofreading only, not to the Linguistic pass.
