@@ -716,6 +716,106 @@ public class ProductChatServiceTests
             m => m.Contains(ProductChatFaults.EmptyAnswer, StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// THE STRIP MAY NOT EMPTY THE ANSWER (A3). The emptiness check above runs on <c>response.Content</c>,
+    /// which is UPSTREAM of every rewrite, so a rewrite that deletes the last word of a one-line answer used
+    /// to ship <c>Answer: ""</c> with <c>IsGrounded: true</c> and no fault - an empty card claiming to be
+    /// grounded, which is worse than any leaked token. <c>"(EXCERPT)"</c> is exactly that answer: the whole
+    /// of it is a gloss the strip removes whole.
+    ///
+    /// <para>The contract asserted here is the SIBLING's (<c>ProductChatCitations</c> holds it at three
+    /// sites): the words come back untouched. Leaving jargon in beats returning nothing.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerThatIsNOTHINGButAGloss_ShipsItsWords_RatherThanAnEmptyGroundedCard()
+    {
+        var svc = Service(AnsweringRouter(new List<AiRequest>(), "(EXCERPT)"), out var logger);
+
+        var result = await svc.AnswerAsync(Ask("How do I export my book?"), CancellationToken.None);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.Answer),
+            "the answer the strip returned was EMPTY, and it shipped as a grounded card: " +
+            $"Answer='{result.Answer}', IsGrounded={result.IsGrounded}, FaultReason={result.FaultReason ?? "null"}. " +
+            "A rewrite layer must never delete the whole answer - leaving an internal token in the prose is " +
+            "cosmetic, and an empty card that claims to be grounded is not.");
+        Assert.Equal("(EXCERPT)", result.Answer);
+        Assert.True(result.IsGrounded);
+        Assert.Null(result.FaultReason);
+
+        Assert.Contains(logger.AtLeast(LogLevel.Warning),
+            m => m.Contains("KEPT", StringComparison.Ordinal) && m.Contains("emptied", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A17, the removal half. The count the strip returns is TOKENS, and one token can carry a whole
+    /// parenthetical away with it, so "REMOVED 1" alone cannot tell a gloss from a clause. The characters
+    /// are logged beside it. Lengths, never the text - the same rule that keeps the question out of the log.
+    /// </summary>
+    [Fact]
+    public async Task TheStripLog_SaysHowManyCHARACTERSWent_NotOnlyHowManyTokens()
+    {
+        const string leaked = "Chapter 8 slows the pace (EXCERPT).";
+        var svc = Service(AnsweringRouter(new List<AiRequest>(), leaked), out var logger);
+
+        var result = await svc.AnswerAsync(Ask("What happens in chapter 8?"), CancellationToken.None);
+
+        Assert.Equal("Chapter 8 slows the pace.", result.Answer);
+
+        var line = Assert.Single(logger.AtLeast(LogLevel.Warning),
+            m => m.Contains("REMOVED", StringComparison.Ordinal));
+        Assert.Contains("1 internal token(s)", line, StringComparison.Ordinal);
+        Assert.Contains("10 of 35 chars", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("EXCERPT).", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A17, the denominator. The strip used to log only when it removed something, so "ran and found
+    /// nothing" and "never ran" were one silence - and a leak rate whose denominator is "answers that
+    /// logged a removal" is the numerator twice. Debug, because it fires on nearly every answer.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerWithNothingToStrip_SaysSo_SoTheDENOMINATORIsObservable()
+    {
+        var svc = Service(AnsweringRouter(new List<AiRequest>()), out var logger);
+
+        await svc.AnswerAsync(Ask("How do I export my book?"), CancellationToken.None);
+
+        var debug = logger.At(LogLevel.Debug);
+        Assert.True(debug.Any(m => m.Contains("NO internal tokens", StringComparison.Ordinal)),
+            "the strip ran over a clean answer and said nothing, so 'ran and found nothing' is " +
+            "indistinguishable from 'never ran' and any leak rate read off this log has no denominator. " +
+            $"Debug lines logged: {(debug.Count == 0 ? "(none)" : string.Join(" | ", debug))}");
+        Assert.DoesNotContain(logger.AtLeast(LogLevel.Warning),
+            m => m.Contains("REMOVED", StringComparison.Ordinal)
+                 && m.Contains("internal token", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// final-r01. THE BRACES IS LIVE COVERAGE, not only a structural fence. The comment at that branch used
+    /// to say no test could reach it without first breaking the strip's never-empty belt. That is true of
+    /// the STRIP and false of the chain: only <c>ProductChatInternalLabels</c> carries a never-empty guard,
+    /// and <c>ProductChatPunctuation</c> DROPS an em-dash that both opens and ends its line. A model answer
+    /// of one em-dash therefore passes the upstream <c>IsNullOrWhiteSpace</c> (it is not whitespace), passes
+    /// the strip untouched (no internal token), and is emptied by the punctuation layer. Without this
+    /// re-check the DTO ships <c>Answer: ""</c> with <c>IsGrounded: true</c>.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerThePUNCTUATIONLayerEmpties_StillReachesTheFailSafe()
+    {
+        var svc = Service(AnsweringRouter(new List<AiRequest>(), "—"), out var logger);
+
+        var result = await svc.AnswerAsync(Ask("How do I export my book?"), CancellationToken.None);
+
+        Assert.False(result.IsGrounded,
+            "a rewrite layer OTHER than the strip emptied the answer and it shipped as a grounded card: " +
+            $"Answer='{result.Answer}', IsGrounded={result.IsGrounded}, FaultReason={result.FaultReason ?? "null"}. " +
+            "The strip's never-empty guard does not cover this route, which is the whole reason the " +
+            "re-check sits after all three rewrites rather than inside one of them.");
+        Assert.Equal(ProductChatFaults.EmptyAnswer, result.FaultReason);
+        Assert.Contains(logger.AtLeast(LogLevel.Error),
+            m => m.Contains("REWROTE THE ANSWER AWAY", StringComparison.Ordinal));
+    }
+
     /// <summary>The refusal answers in the QUESTION's language: an author who asked in Hebrew and got
     /// an English apology has been failed twice.</summary>
     [Fact]

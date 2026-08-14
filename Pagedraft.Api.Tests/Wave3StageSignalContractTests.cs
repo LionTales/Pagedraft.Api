@@ -107,6 +107,61 @@ public class Wave3StageSignalContractTests
         Assert.Equal(1, dto.ChaptersWithTextCount);
     }
 
+    // ─── w8 / F2: the book payload carries the EXPORTER's own readiness, not a proxy for it ───────
+
+    [Fact]
+    public async Task GetById_ReportsNoExportableChapters_WhenTheChaptersHaveTextButNoRenderableDocument()
+    {
+        // THE STATE THE SUITE'S SEED SPACE DID NOT HOLD. Every fixture gave a chapter both a word count and a
+        // real document, or neither, so "has text" and "can be exported" never disagreed and no assertion could
+        // notice that two different predicates were answering one claim. This book has word counts and the
+        // entity-default "{}" document - imported, never opened in the editor - and it is the book the live
+        // gate found rendering `Export: Ready` over an endpoint answering 409 nothingWritten.
+        using var provider = BuildProvider();
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var book = new Book { Id = Guid.NewGuid(), Title = "יובא, לא נערך", Language = "he" };
+        db.Books.Add(book);
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 0, Title = "פרק א", ContentText = "טקסט", WordCount = 120, ContentSfdt = "{}" });
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "פרק ב", ContentText = "טקסט", WordCount = 340, ContentSfdt = "{}" });
+        await db.SaveChangesAsync();
+
+        var ok = Assert.IsType<OkObjectResult>((await BuildController(provider).GetById(book.Id, CancellationToken.None)).Result);
+        var dto = Assert.IsType<BookDetailDto>(ok.Value);
+
+        // The premise: on this payload the two questions genuinely disagree, so the second one is load-bearing.
+        Assert.Equal(2, dto.Chapters.Count);
+        Assert.Equal(2, dto.Chapters.Count(c => c.WordCount > 0));
+        Assert.Equal(0, dto.ExportableChapterCount);
+    }
+
+    [Fact]
+    public async Task GetById_CountsAChapterWithARealDocumentAsExportable()
+    {
+        using var provider = BuildProvider();
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var book = new Book { Id = Guid.NewGuid(), Title = "Written", Language = "en" };
+        db.Books.Add(book);
+        db.Chapters.Add(new Chapter
+        {
+            BookId = book.Id,
+            Order = 0,
+            Title = "One",
+            ContentText = "Real prose.",
+            WordCount = 2,
+            ContentSfdt = SfdtConversionService.CreateMinimalSfdtFromText("Real prose.")
+        });
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "Empty", WordCount = 0, ContentSfdt = "{}" });
+        await db.SaveChangesAsync();
+
+        var ok = Assert.IsType<OkObjectResult>((await BuildController(provider).GetById(book.Id, CancellationToken.None)).Result);
+        var dto = Assert.IsType<BookDetailDto>(ok.Value);
+
+        Assert.Equal(2, dto.Chapters.Count);
+        Assert.Equal(1, dto.ExportableChapterCount);
+    }
+
     [Fact]
     public async Task Create_ReportsAnEmptyBook_NotAnUnknownOne()
     {

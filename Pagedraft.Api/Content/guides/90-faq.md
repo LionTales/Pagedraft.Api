@@ -2,7 +2,7 @@
 id: faq
 stage: faq
 audience: author
-updated: 2026-08-11
+updated: 2026-08-13
 lang: en
 ---
 
@@ -11,7 +11,7 @@ lang: en
 ## How do I run a pass on a chapter?
 
 With the chapter open in the editor, use the Assistant panel: stay on Edit help, choose the Analysis
-view, pick the pass you want from the row of six, and press Run analysis. The pass runs on the scene
+view, pick the pass you want from the row of five, and press Run analysis. The pass runs on the scene
 you have selected, or on the whole chapter when none is selected, so there is no separate scope
 control to set. The chapter editing passes guide has the full sequence, including the confirmation
 you get when a previous run left pending suggestions, and why a run cannot be canceled once started.
@@ -30,8 +30,8 @@ extra to confirm and the switch commits directly.
 ## Which passes can actually use the thinking tier?
 
 Proofread and Linguistic can. Line Edit and the developmental review show the control but always run
-on the fast tier, and they say so instead of leaving you guessing. Chapter recap and Custom have no
-tier control at all.
+on the fast tier, and they say so instead of leaving you guessing. Chapter recap has no tier control
+at all.
 
 There is also a language rule that outranks your choice: for an English book, proofreading always
 runs on the fast tier. That applies to proofreading only, not to Linguistic.
@@ -99,8 +99,9 @@ Edit, where you see every proposed change individually and nothing is applied wi
 passage), Literary (a critique of the prose), Chapter recap (a recap of the chapter), and the
 developmental review (findings with a status you set).
 
-**Custom** runs your own instruction against the text, so what comes back depends on what you asked
-for.
+**Custom** used to run your own instruction against the text. It has been retired; ask Show instead,
+and see the chapter editing passes guide for what changed with the swap. Custom results you already
+have are still in the History tab.
 
 In no case is your manuscript rewritten without you. Even the passes that produce edits produce them
 as proposals.

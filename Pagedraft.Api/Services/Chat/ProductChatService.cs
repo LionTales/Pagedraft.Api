@@ -250,6 +250,79 @@ public class ProductChatService
         var guideIds = references.Where(r => !BookArtifactRefs.LooksLikeArtifactRef(r)).ToList();
         var artifactRefs = references.Where(BookArtifactRefs.LooksLikeArtifactRef).ToList();
 
+        // THE INTERNAL-TOKEN STRIP RUNS AFTER THE CITATION PARSE FOR THE SAME REASON THE PUNCTUATION REPAIR
+        // DOES, and before it because it only ever DELETES: it removes bracketed labels, wire refs and the
+        // whole/EXCERPT gloss from the PROSE (final-r03), leaving the citation line - the one place a ref
+        // belongs - to the parser above, which has already taken it out of the answer when it accepted it.
+        // A token WRAPPED in backticks is removed WITH its wrapper, on both the token path and the
+        // whole-group path, so neither leaves the code-span parity the repair below depends on worse than
+        // it found it. That is load-bearing rather than tidy, and it was measured: when the group path
+        // still left the wrapper behind, an answer reading "Text `(EXCERPT)` and a dash [em-dash] here"
+        // stripped to a stray backtick pair and the repair below then found ZERO em-dashes in an answer
+        // that had two, because that layer's code-span state is never reset at a newline.
+        // ProductChatInternalLabelStripTests pins both paths. It is not an absolute: a whole-group removal
+        // deletes the group's CONTENT too, which can hold an odd number of backticks the model wrote
+        // itself. That direction only ever RESTORES parity the model had already broken, so it is left.
+        var (stripped, internalLabels) = ProductChatInternalLabels.Strip(answer, out var keptInsteadOfEmptying);
+        var strippedChars = answer.Length - stripped.Length;
+
+        if (keptInsteadOfEmptying > 0)
+        {
+            // THE STRIP REFUSED (ProductChatInternalLabels DECISION 6): every word of this answer was
+            // internal, so removing them would have left the reader an empty card. The tokens ship. This is
+            // logged at WARNING and not folded into the count below because it is a different event with a
+            // different owner: the count says the RENDERING guard fired, this says the MODEL returned an
+            // answer that was nothing but its own scaffolding, which is a prompt/grounding question. It is
+            // also the branch that keeps the emission rate honest - these tokens were emitted, and a gate
+            // reading only removals would not see them.
+            _logger.LogWarning(
+                "Product chat KEPT {KeptInternalLabelCount} internal token(s) in the answer prose that it " +
+                "would otherwise have removed: the strip would have emptied the answer, and an empty card " +
+                "that claims to be grounded is worse than a leaked token. The answer was {AnswerChars} " +
+                "chars and nothing else survived the strip. Answered in {Language} via {Provider}/{Model}. " +
+                "This means the MODEL returned an answer made only of its own scaffolding, which is a " +
+                "grounding question and not a rendering one.",
+                keptInsteadOfEmptying, answer.Length, language, response.Provider, response.Model);
+        }
+        else if (internalLabels > 0)
+        {
+            // Same rule as the em-dash count below: a silent rewrite of model output that says nothing is
+            // a layer that ships its failures invisibly. THIS COUNT AND THE KEPT COUNT ABOVE ARE THE ONLY
+            // PLACE THE UNDERLYING RATE STAYS VISIBLE once the strip is on, and a gate scoring the returned
+            // answer is scoring the POST-strip text: what the author sees changed here, what the model
+            // emits did not. The measured rates this is calibrated against are g4's 3 of 38 bracketed
+            // labels and 5 of 38 refs, and final-r03's attribution run at 4 of 16 (pre-be-c02 clause)
+            // against 1 of 16 (HEAD).
+            //
+            // THE CHARACTER COUNT IS LOGGED BESIDE THE TOKEN COUNT because a token is not a quantity: one
+            // token can carry a whole parenthetical away with it (bounded at
+            // ProductChatInternalLabels.MaxGroupChars), so "REMOVED 1" alone cannot tell a gloss from a
+            // clause. It is a LENGTH, never the text - the same rule as the question.
+            _logger.LogWarning(
+                "Product chat REMOVED {InternalLabelCount} internal token(s), {RemovedChars} of " +
+                "{AnswerChars} chars, from the answer prose before returning it: bracketed chapter labels, " +
+                "artifact refs or whole/EXCERPT glosses, none of which the author can act on and all of " +
+                "which malform inside RTL prose. Answered in {Language} via {Provider}/{Model}. This is a " +
+                "RENDERING guard, not a fix to what the model emits: a rate materially above the measured " +
+                "~1 in 16 book-scoped answers wants a look at the grounding clause, but NOT a prohibition " +
+                "naming the token, which this program has recorded failing three times.",
+                internalLabels, strippedChars, answer.Length, language, response.Provider, response.Model);
+        }
+        else
+        {
+            // RAN AND FOUND NOTHING IS NOT THE SAME EVENT AS DID NOT RUN, and with only the warning above
+            // the two are one silence. A gate computing a leak rate needs the DENOMINATOR - answers this
+            // layer inspected - and a denominator taken from "answers that logged a removal" is the rate
+            // itself. Debug, because it fires on every clean answer, which is nearly all of them.
+            _logger.LogDebug(
+                "Product chat found NO internal tokens in the answer prose ({AnswerChars} chars); the strip " +
+                "ran and changed nothing. Answered in {Language} via {Provider}/{Model}. This line is the " +
+                "denominator: without it a clean answer and an answer this layer never saw look identical.",
+                answer.Length, language, response.Provider, response.Model);
+        }
+
+        answer = stripped;
+
         // PUNCTUATION REPAIR RUNS AFTER THE CITATION PARSE, never before. The parser reads the answer's
         // LAST line, where the label sits on it, and the character immediately before that label (its
         // Guard A refuses a label glued to a letter or digit). Rewriting punctuation first would change
@@ -274,6 +347,37 @@ public class ProductChatService
         }
 
         answer = repaired;
+
+        // THE BRACES. The emptiness check at the top of this method runs on response.Content, which is
+        // UPSTREAM OF EVERY REWRITE: it says the MODEL answered, and says nothing about what these three
+        // layers left of it. This says what the AUTHOR gets. Until this line the DTO below could ship
+        // Answer: "" with IsGrounded: true and FaultReason: null - an empty card claiming to be grounded -
+        // and it did: an answer of "(EXCERPT)" is entirely a gloss, and the strip removed all of it.
+        //
+        // The belt is ProductChatInternalLabels' own never-empty guard (its DECISION 6), which returns the
+        // ORIGINAL text rather than nothing and is where the STRIP's half of the defect is fixed. This
+        // branch is unreachable THROUGH THE STRIP while that guard holds - and it is reachable through the
+        // other two layers, which have no such guard, so it is live coverage and not only a fence. The
+        // measured route: an answer of a single em-dash passes the IsNullOrWhiteSpace check above (it is
+        // not whitespace), the strip finds no token and returns it unchanged, and ProductChatPunctuation
+        // DROPS a dash that both opens and ends its line, leaving "". A test reaches this without touching
+        // the belt. Keeping the check here rather than in each layer is deliberate: it covers ALL THREE
+        // rewrites, so a future change to any of them degrades to an honest refusal, not a blank answer.
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            _logger.LogError(
+                "Product chat REWROTE THE ANSWER AWAY: the model returned {ModelChars} chars and the " +
+                "citation, internal-token and punctuation layers between them left {FinalChars}. Returning " +
+                "the fail-safe ({Fault}) rather than an empty answer flagged as grounded. This is a defect " +
+                "in a rewrite layer, not a model failure. Read the layer counts on the lines above before " +
+                "blaming the strip: only ProductChatInternalLabels carries a never-empty guard, so an " +
+                "answer emptied with its removal count at zero was emptied by one of the other two. " +
+                "Answered in " +
+                "{Language} via {Provider}/{Model}.",
+                response.Content.Length, answer.Length, ProductChatFaults.EmptyAnswer,
+                language, response.Provider, response.Model);
+            return FailSafe(language, ProductChatFaults.EmptyAnswer);
+        }
 
         _logger.LogInformation(
             "Product chat answered in {Language} from guides [{CitedGuideIds}] (selected [{SelectedGuideIds}]) " +

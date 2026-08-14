@@ -2,7 +2,7 @@
 id: workflow-overview
 stage: overview
 audience: author
-updated: 2026-08-11
+updated: 2026-08-13
 lang: en
 ---
 
@@ -19,8 +19,8 @@ work that was never going to produce anything.
    whole book.
 3. **Developmental review.** Findings across six dimensions: plot, character, pacing, tone, theme
    and continuity.
-4. **Chapter editing passes.** Proofread, Line Edit, Linguistic, Literary, Chapter recap and
-   Custom, each run on one chapter or one scene at a time.
+4. **Chapter editing passes.** Proofread, Line Edit, Linguistic, Literary and Chapter recap, each
+   run on one chapter or one scene at a time.
 5. **Export.** Your chapters back out as a DOCX file.
 
 ## What actually depends on what

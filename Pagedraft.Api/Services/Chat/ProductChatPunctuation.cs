@@ -38,7 +38,11 @@ namespace Pagedraft.Api.Services.Chat;
 ///   construction, in the prose or on a citation line this turn's parser refused.</item>
 ///   <item>Text inside backticks is copied verbatim: a code span is content, not prose. An unbalanced
 ///   backtick therefore leaves the rest of the answer untouched, which fails in the safe direction (an
-///   em-dash survives) rather than by mangling a span.</item>
+///   em-dash survives) rather than by mangling a span. <c>ProductChatInternalLabels</c> (review finding
+///   A14) agrees with this policy for a FENCED block, but DELIBERATELY DISAGREES for a bare inline span: it
+///   still removes an internal token found inside one, because a wire ref in backticks is styling for a
+///   leak, not a real code example, and leaving it would risk a stray unmatched backtick reaching THIS
+///   layer's own parity toggle above. See that class's A14 note for the full reasoning.</item>
 ///   <item>The result is bounded, and it never grows by more than ONE character per em-dash removed:
 ///   a spaced dash gives back a character, a dash that opens or ends a line is dropped outright, a
 ///   dash following punctuation that already ends a clause is length-neutral, and only the glued case

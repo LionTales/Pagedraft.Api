@@ -2,7 +2,7 @@
 id: guides-index
 stage: index
 audience: author
-updated: 2026-08-11
+updated: 2026-08-14
 lang: en
 ---
 
@@ -21,7 +21,7 @@ when the interface changes. They name surfaces where that helps, and they avoid 
 | [00 Workflow overview](00-workflow-overview.md) | The five stages, what depends on what, and what goes out of date | [עברית](00-workflow-overview.he.md) |
 | [10 Import](10-import.md) | Turning a DOCX manuscript into chapters, and fixing a bad split | [עברית](10-import.he.md) |
 | [20 Book setup and intelligence](20-book-setup-and-intelligence.md) | The book briefs, the book profile, your book's writing style, and asking questions about the book | [עברית](20-book-setup-and-intelligence.he.md) |
-| [30 Chapter editing passes](30-chapter-editing-passes.md) | Proofread, Line Edit, Linguistic, Literary, Chapter recap and Custom | [עברית](30-chapter-editing-passes.he.md) |
+| [30 Chapter editing passes](30-chapter-editing-passes.md) | Proofread, Line Edit, Linguistic, Literary and Chapter recap | [עברית](30-chapter-editing-passes.he.md) |
 | [40 Developmental review](40-whole-book-review.md) | Findings across plot, character, pacing, tone, theme and continuity | [עברית](40-whole-book-review.he.md) |
 | [50 Export](50-export.md) | Getting your manuscript back out as DOCX | [עברית](50-export.he.md) |
 | [90 FAQ](90-faq.md) | Tiers, staleness, run-to-run variation, and what changes text | [עברית](90-faq.he.md) |

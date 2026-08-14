@@ -539,6 +539,372 @@ public class BookExportServiceTests
         Assert.Equal("Act 1.docx", name);
     }
 
+    // ─── Export readiness, as a surface that speaks for the exporter must read it (w8 / F2) ───────
+    //
+    // THE STATE THESE TESTS SEED IS THE ONE NO FIXTURE HELD. The stage spine's Export stage read "chapters
+    // whose WordCount is greater than zero" while this service decides by asking whether the stored SFDT holds
+    // a renderable block, and every book in every fixture satisfied both predicates or neither - so a green
+    // suite could not see the gap. The live gate could: a book seeded with word counts and the entity-default
+    // "{}" document rendered `Export: Ready` above a card saying the file would be empty, and the endpoint
+    // answered 409. Each test below therefore seeds THAT book and asserts the two answers together.
+
+    [Fact]
+    public async Task ExportableCount_AndTheEndpoint_AgreeOnABookWithWordCountsButNoRenderableDocument()
+    {
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "יובא, לא נערך", Language = "he" };
+        db.Books.Add(book);
+        // Word counts and plain text over the entity-default document: exactly the shape the seeded gate
+        // books carry, and exactly the divergence. SEEDED, not produced - no production write reaches it,
+        // because ChapterService derives every WordCount from the SFDT it stores - which is the point: a row
+        // can hold it, so the two predicates must be allowed to disagree on it.
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 0, Title = "פרק א", ContentText = "טקסט", WordCount = 120, ContentSfdt = "{}" });
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "פרק ב", ContentText = "טקסט", WordCount = 340, ContentSfdt = "{}" });
+        await db.SaveChangesAsync();
+
+        var chapters = await db.Chapters.Where(c => c.BookId == book.Id).ToListAsync();
+        // The premise, asserted rather than assumed: the word-count predicate - still live for stage 1, but
+        // no longer read by the Export stage - says this book is ready to export.
+        Assert.Equal(2, chapters.Count(ChapterTextPredicate.HasText.Compile()));
+
+        var exportable = await BookExportService.CountExportableChaptersAsync(db, chapters, CancellationToken.None);
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.Equal(0, exportable);
+        Assert.Equal("nothingWritten", Assert.IsType<ExportUnavailableDto>(Assert.IsType<ConflictObjectResult>(result).Value).Reason);
+    }
+
+    [Fact]
+    public async Task ExportableCount_AndTheEndpoint_AgreeOnABookThatReallyHasDocuments()
+    {
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Written", Language = "en" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, 0, "One", "The first chapter, really written."));
+        db.Chapters.Add(NewChapter(book.Id, 1, "Two", "The second chapter, also written."));
+        await db.SaveChangesAsync();
+
+        var chapters = await db.Chapters.Where(c => c.BookId == book.Id).ToListAsync();
+
+        var exportable = await BookExportService.CountExportableChaptersAsync(db, chapters, CancellationToken.None);
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.Equal(2, exportable);
+        Assert.IsType<FileContentResult>(result); // a real file, so `ready` is a claim the exporter backs.
+    }
+
+    [Fact]
+    public async Task ExportableCount_CountsOnlyTheChaptersTheFileWouldContain()
+    {
+        // The PARTIAL book, which is the case the spine's old warning was written for and got right. The count
+        // is not a boolean: it has to survive being read as "how many chapters would be in the file".
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Half written", Language = "en" };
+        db.Books.Add(book);
+        db.Chapters.Add(NewChapter(book.Id, 0, "Written", "This one exists."));
+        db.Chapters.Add(new Chapter { BookId = book.Id, Order = 1, Title = "Blank", WordCount = 90, ContentSfdt = "{}" });
+        await db.SaveChangesAsync();
+
+        var chapters = await db.Chapters.Where(c => c.BookId == book.Id).ToListAsync();
+
+        var exportable = await BookExportService.CountExportableChaptersAsync(db, chapters, CancellationToken.None);
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.Equal(1, exportable);
+        Assert.IsType<FileContentResult>(result);
+        Assert.Equal("1", SkippedCount(controller)); // the exporter left out exactly the one this did not count
+    }
+
+    [Fact]
+    public async Task ExportableCount_ReadsTheSCENES_WhenTheySpeakForTheChapter()
+    {
+        // WHY THIS IS NOT A PREDICATE OVER Chapter.ContentSfdt. A chapter the author split and then wrote into
+        // is exported from its scenes, and its own row is a frozen pre-split copy - here, an empty one. A
+        // chapter-only check would report this book as unexportable while the endpoint happily produces a file.
+        var (controller, db) = await BuildAsync();
+        var book = new Book { Id = Guid.NewGuid(), Title = "Split", Language = "en" };
+        db.Books.Add(book);
+        var chapter = new Chapter { Id = Guid.NewGuid(), BookId = book.Id, Order = 0, Title = "Split", WordCount = 0, ContentSfdt = "{}" };
+        db.Chapters.Add(chapter);
+        var scene = new Scene { Id = Guid.NewGuid(), ChapterId = chapter.Id, Order = 0, Title = "Scene one", ContentSfdt = "{}" };
+        db.Scenes.Add(scene);
+        await db.SaveChangesAsync();
+
+        // A second write is what makes a scene "written" (UpdatedAt > CreatedAt) - the same route the editor
+        // takes, rather than hand-stamping the timestamps this rule is defined on.
+        scene.ContentSfdt = SfdtConversionService.CreateMinimalSfdtFromText("The scene the author actually wrote.");
+        await db.SaveChangesAsync();
+
+        var chapters = await db.Chapters.Where(c => c.BookId == book.Id).ToListAsync();
+
+        var exportable = await BookExportService.CountExportableChaptersAsync(db, chapters, CancellationToken.None);
+        var result = await controller.ExportBook(book.Id, CancellationToken.None);
+
+        Assert.Equal(1, exportable);
+        Assert.IsType<FileContentResult>(result);
+    }
+
+    /// <summary>
+    /// The short-circuit, asserted through a seam that can actually see it.
+    ///
+    /// <para>This test used to promise "WithoutQueryingForScenes" in its name and assert only the returned
+    /// zero, so an implementation with the <c>chapters.Count == 0</c> guard deleted passed it identically -
+    /// a name a future reader would trust for a guarantee nothing was checking. A DISPOSED context is the
+    /// cheap seam: EF throws <c>ObjectDisposedException</c> the moment a query is composed against it, so
+    /// the guard is the only reason this call can return at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task ExportableCount_IsZeroForABookWithNoChapters_WithoutQueryingForScenes()
+    {
+        var (_, db) = await BuildAsync();
+        await db.DisposeAsync();
+
+        var count = -1;
+        var fault = await Record.ExceptionAsync(async () =>
+            count = await BookExportService.CountExportableChaptersAsync(db, new List<Chapter>(), CancellationToken.None));
+
+        Assert.True(fault == null,
+            "CountExportableChaptersAsync went to the database for a book with NO chapters: the " +
+            "`chapters.Count == 0` short-circuit this test's name promises is gone, so every books payload " +
+            $"for an un-imported book now pays a scenes query for nothing. ({fault?.GetType().Name}: {fault?.Message})");
+        Assert.Equal(0, count);
+    }
+
+    // ─── The invariant the two export loops must satisfy together ────────────────────────────────
+    //
+    // WHAT IS ACTUALLY TRUE, AND WHY IT NEEDED PINNING. The readiness signal is only honest if
+    //
+    //     CountExportableChaptersAsync(db, chapters) == (the chapters ExportBookAsync put in the file)
+    //
+    // and those two numbers are produced by two INDEPENDENT `foreach` loops in BookExportService
+    // (ExportBookAsync and CountExportableChaptersAsync), which share only the pure RenderableUnitsOf
+    // predicate. Nothing in the type system makes them agree. Before these tests the invariant was asserted
+    // once, on one two-chapter fixture, and the scene test never compared against the skipped header at all,
+    // so a `continue` added to the export loop that drops a chapter WITHOUT recording it as skipped passed
+    // every test in this file.
+    //
+    // So the shapes below are chosen to vary the thing the two loops can disagree about rather than to add
+    // more books: nothing to iterate, every chapter included, none included, a mixture, a chapter whose
+    // SCENES hold its current text (the case the shared predicate exists for), and a chapter whose scenes
+    // hold its text but are all blank - the state between "there are scenes" and "the scenes have content",
+    // which no fixture in this repo held.
+    //
+    // WHAT THIS CANNOT SEE, said plainly: the invariant is AGREEMENT, so a change applied to both loops
+    // identically stays green by construction. It catches divergence, not a shared wrong answer; the
+    // per-shape endpoint assertions below are what pin the answer itself.
+
+    private const string NoChapters = "no chapters";
+    private const string EveryChapterExportable = "every chapter exportable";
+    private const string NoChapterExportable = "no chapter exportable";
+    private const string SomeChaptersExportable = "some chapters exportable";
+    private const string ScenesHoldTheText = "a chapter whose scenes hold its text";
+    private const string ScenesWrittenThenEmptied = "a chapter whose scenes were written then emptied";
+    private const string OnlyAChapterWhoseScenesWereEmptied = "only a chapter whose scenes were emptied";
+
+    [Theory]
+    [InlineData(NoChapters)]
+    [InlineData(EveryChapterExportable)]
+    [InlineData(NoChapterExportable)]
+    [InlineData(SomeChaptersExportable)]
+    [InlineData(ScenesHoldTheText)]
+    [InlineData(ScenesWrittenThenEmptied)]
+    [InlineData(OnlyAChapterWhoseScenesWereEmptied)]
+    public async Task TheExportableCount_EqualsWhatTheExporterPutInTheFile_AndTheEndpointAgrees(string shape)
+    {
+        var (controller, db, exporter) = Build();
+        var bookId = await SeedExportShapeAsync(db, shape);
+
+        // ONE fixture, read by both sides. Two hand-written numbers would be two opinions about a book;
+        // this is the same chapter list handed to the counter and to the exporter.
+        var chapters = await db.Chapters.Where(c => c.BookId == bookId).OrderBy(c => c.Order).ToListAsync();
+
+        var counted = await BookExportService.CountExportableChaptersAsync(db, chapters, CancellationToken.None);
+        var result = await exporter.ExportBookAsync(bookId, CancellationToken.None);
+
+        var included = result.Outcome switch
+        {
+            BookExportOutcome.Ok => chapters.Count - result.SkippedChapters.Count,
+            // Both terminal outcomes mean the assembled document would hold NOTHING, so the exporter
+            // included no chapter at all. Neither populates SkippedChapters (see BookExportResult), so the
+            // subtraction above cannot be reused here: zero comes from the outcome's own definition.
+            BookExportOutcome.NothingToExport or BookExportOutcome.NothingWritten => 0,
+            _ => throw new Xunit.Sdk.XunitException(
+                $"[{shape}] ExportBookAsync answered {result.Outcome} for a book that exists, which is " +
+                "neither a file nor one of the two 'nothing to download' outcomes.")
+        };
+
+        var skippedList = result.SkippedChapters.Count == 0
+            ? "none"
+            : string.Join("; ", result.SkippedChapters.Select(c => $"order {c.Order} '{c.Title}'"));
+
+        Assert.True(counted == included,
+            $"[{shape}] THE EXPORT READINESS INVARIANT IS BROKEN. " +
+            $"CountExportableChaptersAsync says {counted} of this book's {chapters.Count} chapters are " +
+            $"exportable, but ExportBookAsync ({result.Outcome}) put {included} of them in the file and " +
+            $"named these as skipped: {skippedList}. Those two answers come from two INDEPENDENT foreach " +
+            "loops over the same chapters in Services/BookExportService.cs (ExportBookAsync and " +
+            "CountExportableChaptersAsync). When they diverge the stage spine says Export: Ready over an " +
+            "endpoint that answers 409, or a downloaded manuscript is quietly missing a chapter that " +
+            "nothing on the response mentions. Whichever loop you changed, change both.");
+
+        // AND the endpoint's own answer, from the same fixture: the count is a claim ABOUT this call, so a
+        // test that never makes it is pinning arithmetic rather than the promise the client reads.
+        var httpResult = await controller.ExportBook(bookId, CancellationToken.None);
+
+        if (counted == 0)
+        {
+            var conflict = Assert.IsType<ConflictObjectResult>(httpResult);
+            var reason = Assert.IsType<ExportUnavailableDto>(conflict.Value).Reason;
+            var expected = chapters.Count == 0 ? ExportUnavailableDto.NoChapters : ExportUnavailableDto.NothingWritten;
+            Assert.True(expected == reason,
+                $"[{shape}] Nothing is exportable and the book has {chapters.Count} chapters, so the " +
+                $"endpoint owes the reason token '{expected}'; it answered '{reason}'. The two tokens lead " +
+                "the author to different next actions (import a manuscript, versus write something).");
+        }
+        else
+        {
+            Assert.IsType<FileContentResult>(httpResult);
+            var header = SkippedCount(controller);
+            Assert.False(header == null,
+                $"[{shape}] A file was produced but the skipped-count header is absent, so a client " +
+                "cannot tell a complete manuscript from one with chapters missing.");
+            Assert.True(chapters.Count - counted == int.Parse(header!),
+                $"[{shape}] The count says {counted} of {chapters.Count} chapters are exportable, so " +
+                $"{chapters.Count - counted} should be reported as skipped on the wire; the header says " +
+                $"{header}. The header is what the export screen renders.");
+        }
+    }
+
+    /// <summary>
+    /// Seeds one book per shape and returns its id. Every shape is a real state of this product, reached the
+    /// way the product reaches it - in particular a scene becomes "written" by being SAVED a second time
+    /// (<c>UpdatedAt &gt; CreatedAt</c>), which is the rule <c>RenderableUnitsOf</c> reads, rather than by
+    /// hand-stamping the timestamps that rule is defined on.
+    /// </summary>
+    private static async Task<Guid> SeedExportShapeAsync(AppDbContext db, string shape)
+    {
+        var book = new Book { Id = Guid.NewGuid(), Title = "מסע", Language = "he" };
+        db.Books.Add(book);
+
+        switch (shape)
+        {
+            case NoChapters:
+                break;
+
+            case EveryChapterExportable:
+                db.Chapters.Add(NewChapter(book.Id, 0, "One", "The first chapter, really written."));
+                db.Chapters.Add(NewChapter(book.Id, 1, "Two", "The second chapter, also written."));
+                db.Chapters.Add(NewChapter(book.Id, 2, "Three", "The third chapter, written as well."));
+                break;
+
+            case NoChapterExportable:
+                db.Chapters.Add(Imported(book.Id, 0, "פרק א"));
+                db.Chapters.Add(Imported(book.Id, 1, "פרק ב"));
+                db.Chapters.Add(Imported(book.Id, 2, "פרק ג"));
+                break;
+
+            case SomeChaptersExportable:
+                db.Chapters.Add(NewChapter(book.Id, 0, "Written", "This one exists."));
+                db.Chapters.Add(Imported(book.Id, 1, "Blank"));
+                db.Chapters.Add(NewChapter(book.Id, 2, "Written again", "So does this one."));
+                db.Chapters.Add(Imported(book.Id, 3, "Blank again"));
+                break;
+
+            case ScenesHoldTheText:
+            {
+                db.Chapters.Add(NewChapter(book.Id, 0, "Unsplit", "A chapter nobody ever split."));
+                var split = Imported(book.Id, 1, "Split");
+                db.Chapters.Add(split);
+                await db.SaveChangesAsync();
+                // Its own row is a frozen pre-split copy; the manuscript is in the scenes.
+                await WriteScenesAsync(db, split.Id,
+                    SfdtConversionService.CreateMinimalSfdtFromText("The first scene the author wrote."),
+                    SfdtConversionService.CreateMinimalSfdtFromText("And the second one."));
+                break;
+            }
+
+            case ScenesWrittenThenEmptied:
+            {
+                db.Chapters.Add(NewChapter(book.Id, 0, "Unsplit", "A chapter nobody ever split."));
+                var emptied = Imported(book.Id, 1, "Split, then emptied");
+                db.Chapters.Add(emptied);
+                await db.SaveChangesAsync();
+                // THE STATE BETWEEN THE TWO PREDICATES. The scenes speak for this chapter (they were saved
+                // into) and hold nothing renderable, so it contributes no unit and must be REPORTED as
+                // skipped rather than falling back to the pre-split draft the author replaced with nothing.
+                await WriteScenesAsync(db, emptied.Id, EditorEmptiedSfdt, EditorEmptiedSfdt);
+                break;
+            }
+
+            case OnlyAChapterWhoseScenesWereEmptied:
+            {
+                // The same state as the whole book, so it lands on NothingWritten rather than on a partial
+                // skip: the all-or-nothing branch of the export loop, seeded through the scene layer.
+                var only = Imported(book.Id, 0, "Split, then emptied");
+                db.Chapters.Add(only);
+                await db.SaveChangesAsync();
+                await WriteScenesAsync(db, only.Id, EditorEmptiedSfdt);
+                break;
+            }
+
+            default:
+                throw new Xunit.Sdk.XunitException($"Unknown export shape '{shape}'.");
+        }
+
+        await db.SaveChangesAsync();
+        return book.Id;
+    }
+
+    /// <summary>
+    /// What the editor saves for a document the author has emptied, and <c>SceneService</c>'s own default for
+    /// a scene created with no content: a well-formed SFDT whose single section holds no blocks. Not the
+    /// entity default <c>"{}"</c> - these are different shapes of the same empty-document family and
+    /// <c>HasRenderableContent</c> handles them on different branches.
+    /// </summary>
+    private const string EditorEmptiedSfdt = "{\"sections\":[{\"blocks\":[]}]}";
+
+    /// <summary>
+    /// Plain text and a word count over the entity-default document. This is the shape that made the
+    /// word-count predicate and the exporter disagree, and it is SEEDED rather than produced: no production
+    /// write reaches it, because ChapterService derives every WordCount from the SFDT it stores. The name
+    /// records what the gate's books looked like on the row, not a path that writes them.
+    /// </summary>
+    private static Chapter Imported(Guid bookId, int order, string title) => new()
+    {
+        Id = Guid.NewGuid(),
+        BookId = bookId,
+        Order = order,
+        Title = title,
+        ContentText = "טקסט שיובא",
+        WordCount = 120,
+        ContentSfdt = "{}"
+    };
+
+    /// <summary>
+    /// Adds scenes to a chapter and then SAVES them again with the given documents, which is what makes a
+    /// scene count as written (<c>UpdatedAt &gt; CreatedAt</c>). The initial content is deliberately
+    /// different from the final content in every case, so the second save is a real EF modification even
+    /// when the author's edit emptied the scene.
+    /// </summary>
+    private static async Task WriteScenesAsync(AppDbContext db, Guid chapterId, params string[] finalSfdt)
+    {
+        var scenes = finalSfdt
+            .Select((_, i) => new Scene
+            {
+                Id = Guid.NewGuid(),
+                ChapterId = chapterId,
+                Order = i,
+                Title = $"Scene {i + 1}",
+                ContentSfdt = SfdtConversionService.CreateMinimalSfdtFromText("What the split put here.")
+            })
+            .ToList();
+        db.Scenes.AddRange(scenes);
+        await db.SaveChangesAsync();
+
+        for (var i = 0; i < scenes.Count; i++) scenes[i].ContentSfdt = finalSfdt[i];
+        await db.SaveChangesAsync();
+    }
+
     // ─── helpers ──────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>The raw skipped-count header, as a client would read it - no default, no coercion.</summary>
@@ -581,6 +947,18 @@ public class BookExportServiceTests
 
     private static Task<(DocumentController Controller, AppDbContext Db)> BuildAsync()
     {
+        var (controller, db, _) = Build();
+        return Task.FromResult((controller, db));
+    }
+
+    /// <summary>
+    /// <see cref="BuildAsync"/> plus the export SERVICE itself, for the tests that need the
+    /// <see cref="BookExportResult"/> rather than the HTTP projection of it - the skipped-chapter list is
+    /// bounded on the wire (see the header cap in <c>DocumentController</c>), so an invariant stated over
+    /// the header would be stating it about a truncation.
+    /// </summary>
+    private static (DocumentController Controller, AppDbContext Db, BookExportService Export) Build()
+    {
         var options = new DbContextOptionsBuilder<AppDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
@@ -597,6 +975,6 @@ public class BookExportServiceTests
             // rides on RESPONSE HEADERS, and a controller with no context cannot write one.
             ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
         };
-        return Task.FromResult((controller, db));
+        return (controller, db, export);
     }
 }

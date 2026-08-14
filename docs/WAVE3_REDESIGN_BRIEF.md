@@ -7,33 +7,65 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > All thirteen questions in section 8 are DECIDED. Section 8 remains below as the options record;
 > this block is the authoritative answer sheet, and the implementation plan is written from it. That
 > plan is not part of this repo - it lives in the PageDraft workspace's plan tree, which is not a git
-> repo itself, at `src/.cursor/plans/_todo/wave3-implementation-2026-08-09.plan.md` relative to the
+> repo itself, at `src/.cursor/plans/_archive/wave3-implementation-2026-08-09.plan.md` relative to the
 > workspace root that also holds this repo's checkout (`src/Pagedraft.Api-repo`) and the client's
 > (`src/pagedraft-client`) as siblings. A reader of only this repo will not have that path on disk;
 > ask the owner for the plan file directly.
 >
-> | Q | Decision | Status as of 2026-08-11 |
+> **Wave 3 is SHIPPED as of 2026-08-13.** Twelve of the thirteen decisions shipped; Q12 split and its
+> second half did not.
+>
+> **THREE THINGS ARE STILL OPEN, not one.** This headline used to say "the one thing still open across
+> the whole wave is a human reading, not code", which its own table below contradicted on the same
+> screen. Corrected 2026-08-14. What is actually open:
+>
+> 1. **Q12's scope-statement half is NOT SHIPPED, and it is code.** `editor-page.component.ts`'s
+>    `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of scene selection,
+>    so the exact contradiction Q12 was written to resolve is still reproducible today. See the Q12 row.
+> 2. **The Q10 sub-decision is undecided.** Whether the first-run overlay eventually defers to the
+>    chatbot, embeds it, or stays static is open; the static overlay is what ships. See the Q10 row.
+> 3. **The Hebrew native-speaker sweep**, which is the human reading: the guides corpus, the strings the
+>    `w7` removals added, and three export failure strings reworded 2026-08-14. Tracked at
+>    `HEBREW_NATIVE_REVIEW.md` (see the pointer at the foot of this block).
+>
+> | Q | Decision | Status as of 2026-08-13 |
 > |---|---|---|
 > | Q1 | **D - route-adaptive spine**: compact in app chrome, full on book surfaces | SHIPPED (w2/w3) |
 > | Q2 | **A - stage 4 renders per-chapter**, no book-level state; never a hardcoded done | SHIPPED (w2) |
 > | Q3 | **B - build a minimal export surface** this wave; stage 5 becomes real | SHIPPED (w4) |
 > | Q4 | **A - fold the bare-arrow build into the formal build row**; one build, one ceremony | SHIPPED (w5) |
-> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces | **DEFERRED - GATED (w7). The EQUIVALENCE EVIDENCE now exists; the merge does not (2026-08-12).** Both surfaces remain in the product on purpose. The gate reopens only once B ships **with** its raw chapter-text escalation (question-driven, so Show can read the chapter a user asks about the way Custom could), verified on B's own bucket f, not on mere existence of phase B. **Bucket f PASSED in BOTH of B's gates with identical selector output on all 6 runs of every case, 12/12 negatives asserted from run artifacts** - a named chapter answered from its text, an over-budget chapter degrading to labeled excerpts, and no raw text pulled for a location-free question. So the capability question is answered YES, twice, on two different code states. What is outstanding is that B is uncommitted on `api-chatbot-phase-b` / `client-chatbot-phase-b`. Do not open w7 before B is merged; do not re-argue the capability after it is |
+> | Q5 | **REMOVE BOTH free-form prompt surfaces** (beyond any listed option): the chapter Custom prompt block and the dashboard ask-about-the-book. The chatbot (Show) is the ask surface. Removal is sequenced AFTER chatbot phase B ships, so the product never has zero whole-book ask surfaces | **SHIPPED (w7, 2026-08-13). BOTH halves of the gate were met and the equivalence half was VERIFIED, not assumed.** Bucket f passed with identical selector output in both of B's own gates and then held 53 of 53 chapter-resolving runs at B's final re-gate, asserted from the API log's selector line and never from answer wording; B is merged. Removed: the dashboard ask-about-the-book card, the per-chapter Custom free-form block (Custom also left the pass picker) and save-as-template. **Scope fence held and was verified live:** `AnalysisType.Custom`, its persisted rows and its analysis-repair entry all stay, and a real persisted Custom result still renders and is still filterable by type. **Fence correction:** the dashboard card was `AnalysisType.QA`, not Custom, and `QA` stays. **THE EQUIVALENCE DELTA, accepted by the owner rather than papered over, and stated to authors in the guides in both languages:** Show reads at most ~3,500 estimated tokens of manuscript per question across at most 2 chapters and degrades to labeled excerpts above that, where a Custom run put a whole chapter in a ~14,336-token window; scene scope has NO successor, since Show resolves chapters and Custom could run on one scene; and a Custom run produced a persisted, revisitable analysis result, while Show's answers are conversational and land nowhere. Both vacated slots keep a pointer to Show for one release |
 > | Q6 | **A - style baseline moves to the book dashboard** beside the other builds, WITH a new global directive: **dashboard elements become collapsible** - the big parts and the parts inside them, where it makes sense and does not complicate | SHIPPED (w5) |
-> | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) | **DEFERRED - same gate as Q5 (w7).** Still present |
+> | Q7 | **A - remove "Save as template"** (falls out of Q5 anyway; Phase C personalization is the real version) | **SHIPPED (w7, 2026-08-13).** It went with the Custom prompt box it sat beside. The client's template read/write methods and DTO went too; the API's `TemplatesController` and `PromptTemplate` entity are untouched and still serve `/api/templates` |
 > | Q8 | **C - reframe the chapter-brief editing card as "the inputs to this build"**, visibly part of stage 2 | SHIPPED (w5) |
-> | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed | As "Chapter recap" / "תמצית פרק", DRAFT Hebrew, native review pending. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it |
-> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | The rows are SHIPPED (w2). The first-run overlay ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it. **NEW SUB-DECISION OPEN as of 2026-08-12:** the chatbot can now tutor from real build status, so whether the overlay DEFERS to it, EMBEDS it, or stays static - see the update under Q10 below |
+> | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed | **SHIPPED (w6).** As "Chapter recap" / "תמצית פרק", with the relationship statement on the run tab and on the book-briefs row. **The Hebrew is CLEARED, not draft:** the owner read it on 2026-08-11 and the load-bearing check passed, `תמצית` reading as distinct from `תקציר` (`תקצירי ספר`) to a native ear. Shipped on `client-wave3-orientation` / `api-wave3-orientation` |
+> | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | **SHIPPED (w2 + w6).** The rows explain themselves, state their prerequisite and offer the next action; the first-run overlay renders from the served `workflow-overview` guide, dismisses permanently per book and re-opens from a named affordance, all re-verified live 2026-08-13. **ONE SUB-DECISION STAYS OPEN as of 2026-08-13:** the chatbot can now tutor from this book's real build status, so whether the overlay eventually DEFERS to it, EMBEDS it, or stays static is undecided - see the update under Q10 below. The static overlay is what ships today |
 > | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence | SHIPPED (w5) |
 > | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine | **SPLIT.** The running-state half SHIPPED (w3, moved into the spine). The scope-statement half is **NOT SHIPPED**: `editor-page.component.ts`'s `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of whether a scene is selected, while the adjacent `reviewContextMeta` getter correctly distinguishes "scene" / "chapter" - the exact contradiction this question was meant to resolve is still reproducible. Found during the f1 docs pass; not tracked by any prior w1-w8 todo |
-> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | Consuming the serving path chatbot phase A.2 built. Ships on `client-wave3-orientation` / `api-wave3-orientation`; check master before depending on it. **A SECOND content source now exists (2026-08-12)**: the chatbot answers the same orientation questions from THIS book's real status rather than from generic guide prose - see the update under Q10 below |
+> | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | **SHIPPED (w6)**, consuming the serving path chatbot phase A.2 built. All ten stage-to-guide links were re-verified landing on the right guide, in the right language, 2026-08-13. **A SECOND content source now exists (2026-08-12)**: the chatbot answers the same orientation questions from THIS book's real status rather than from generic guide prose - see the update under Q10 below. **A constraint this decision created and that the w8 gate then had to enforce:** the guides are a retrieval index as well as content, so a stage renamed in the app cannot simply be renamed in the guide headings - see the note under the deliberately-did-not-do list below |
 >
-> **What Wave 3 deliberately did not do, beyond the two gated items above (Q5/Q7):** no book-level
-> rollup for stage 4 (Q2-A declined it, not merely deferred it), no template library (Q7 removed the
-> feature instead of building one), no restyle of the editor canvas, and no AI behavior change
-> anywhere in the wave. Full per-question detail and the roadmap-level record live in the workspace
-> docs (outside this repo): `PAGEDRAFT_ROADMAP.md` (Wave 3 section) and `HEBREW_NATIVE_REVIEW.md`,
-> both at `src/docs/` relative to the workspace root described above.
+> **What Wave 3 deliberately did not do:** no book-level rollup for stage 4 (Q2-A declined it, not
+> merely deferred it), no template library (Q7 removed the feature instead of building one), no
+> restyle of the editor canvas, and no AI behavior change anywhere in the wave - including `w7`,
+> which removed two client entry points and changed no prompt and no model route.
+>
+> **Four more things the w7/w8 close deliberately did not do, added 2026-08-13:** there is no
+> successor for scene-scoped free-form asking (Custom could run on one scene; Show resolves
+> chapters); there is no persistence for Show's answers, so a free-form answer worth keeping must be
+> copied out; `AnalysisType.Custom` was not deleted, only its UI entry point, and existing Custom
+> results still render and still filter; and **the guide H1s were NOT renamed to the app's canonical
+> stage-4 name.** That last one is a constraint rather than an oversight: `Services/Chat/GuideSelector`
+> scores question tokens against H1/H2 headings at weight 3.0 and the frontmatter `id`/`stage` at 1.0,
+> and reads no body prose at all, so a guide heading IS the chatbot's retrieval index and a copy edit
+> to one silently re-ranks which guides reach the model. The w8 gate found four Hebrew names for stage
+> 4, two of them rendering in a single viewport, and renamed only the two that carry no retrieval
+> weight. Stage 4 therefore ships under two names on purpose, and whether that is one name too many is
+> an open naming decision for the owner.
+>
+> Full per-question detail and the roadmap-level record live in the workspace docs (outside this
+> repo): `PAGEDRAFT_ROADMAP.md` (Wave 3 section) and `HEBREW_NATIVE_REVIEW.md`, both at `src/docs/`
+> relative to the workspace root described above. The implementation plan is archived at
+> `src/.cursor/plans/_archive/wave3-implementation-2026-08-09.plan.md`.
 
 Everything below is written in product terms. Where a claim rests on code, the code lives in
 Appendix B and in the phase 0 plan referenced there. You do not need either to do the work.
@@ -222,10 +254,19 @@ collides head-on with the per-chapter "Summarize" pass, and "Book briefs" does n
 | 4 | Chapter editing passes | מעברי עריכה על פרק |
 | 5 | Export | ייצוא |
 
-**All five Hebrew names are DRAFT and are pending native-speaker review before sign-off.** Two of
-them are already visible in the shipped product, but they were flagged DRAFT when they shipped and
-are not exempt now. One specific thing a native reader must confirm: stages 3 and 4 both contain the
-word עריכה, and the pair must not read as one concept.
+**All five Hebrew names were DRAFT and pending native-speaker review when this table was written.**
+Two of them were already visible in the shipped product, but they were flagged DRAFT when they shipped
+and were not exempt then. One specific thing a native reader had to confirm: stages 3 and 4 both
+contain the word עריכה, and the pair must not read as one concept.
+
+> **Update 2026-08-14 (the table above is the design-time record and is left as written).** All five
+> names were READ AND ADJUDICATED by the owner, a native speaker, on 2026-08-11, and they are CLEARED.
+> Stage 4 was renamed in that sweep: `מעברי עריכה על פרק` became **`עריכת פרק`**, because `מעברים` reads
+> as "transitions" rather than "passes". The owner also cleared the עריכה overlap between stages 3 and 4
+> knowingly. What is still open is the wider `מעבר` terminology question, deliberately deferred by the
+> owner on 2026-08-12, and it is why the guides' own H1 still says `מעברי העריכה על פרק`: guide headings
+> are the chatbot's retrieval index, so a rename there re-ranks retrieval. Record:
+> `HEBREW_NATIVE_REVIEW.md` in the workspace docs.
 
 Do not treat the Hebrew column as settled copy. Design so the labels can change length and wording
 without breaking layout.
@@ -550,9 +591,10 @@ it survives this redesign.
    serving path this section called for and a reader on top of it: `/help` (index, grouped by stage)
    and `/help/:guideId` (single guide, optional `?lang=he|en`), backed by `GET /api/guides?language=`
    and `GET /api/guides/{id}?language=`. This is the same path Q13 in section 8 anticipated needing;
-   Wave 3 now wires orientation against an existing route instead of building one. (It ships on two
-   branches, API `api-chatbot-a2-guides` and client `client-chatbot-a2-show`; check that both are on
-   master before depending on the path.)
+   Wave 3 now wires orientation against an existing route instead of building one. (It was built on API
+   `api-chatbot-a2-guides` and client `client-chatbot-a2-show`, and it is **on master since 2026-08-11,
+   shipped as `Pagedraft.Api#56` + `pagedraft-client#39`** - the "check that both are on master before
+   depending on the path" caveat this line used to carry is discharged. Corrected 2026-08-14.)
 2. **The guides currently carry the old vocabulary in two places.** They lead with "book summary"
    rather than "Book briefs", and their numbered stage list disagrees with their own recommended
    order section. Both need a copy edit as part of this wave, before anything is driven from them.
@@ -754,10 +796,11 @@ sixty seconds is making a real bet.
 
 **Two facts that should move the decision.** First, the assistant is the only surface that can say
 "you are behind by three chapters, rebuild before trusting this", and that is precisely the state this
-brief's section 1 identifies as the one the old design could not express. Second, B is **gate-passed but
-uncommitted**, on branches `api-chatbot-phase-b` / `client-chatbot-phase-b` - so option 1 or 2 takes a
-dependency on a merge that has not happened. Confirm it is on master before building on it, the same
-check this brief already asks for on the A.2 serving path.
+brief's section 1 identifies as the one the old design could not express. Second, B is **gate-passed and
+MERGED**, as `Pagedraft.Api#58` + `pagedraft-client#41`, off branches `api-chatbot-phase-b` /
+`client-chatbot-phase-b` - so option 1 or 2 no longer takes a dependency on a merge that has not
+happened. (This paragraph read "gate-passed but uncommitted ... confirm it is on master before building
+on it" until 2026-08-14, which would have discouraged an option that is in fact available.)
 
 **Known rough edges, stated so an option is not chosen on a flattering summary.** The assistant's gate
 (`g2`) returned no blocking defect and explicitly did not return a clean bill of health. Relevant to a
@@ -809,9 +852,10 @@ Either A or B is defensible. C should be ruled out at the session rather than dr
 infrastructure for its own citation chips: `GET /api/guides?language=` (list) and
 `GET /api/guides/{id}?language=` (single guide body), plus a client reader mounted at `/help`
 (index, grouped by stage) and `/help/:guideId` (single guide, with a `?lang=he|en` toggle). Wave 3
-does not need to build this path; it needs to consume it. It ships on two branches, API
-`api-chatbot-a2-guides` and client `client-chatbot-a2-show`; check that both are on master before
-depending on the path.
+does not need to build this path; it needs to consume it. It was built on API `api-chatbot-a2-guides`
+and client `client-chatbot-a2-show` and is on master since 2026-08-11 (`Pagedraft.Api#56` +
+`pagedraft-client#39`), so the "check both are on master first" caveat this line used to carry is
+discharged. Corrected 2026-08-14.
 
 **Update, 2026-08-12: guide prose is no longer the only content orientation could be driven from.**
 Chatbot phase B is built and gate-passed, and it answers the same "where am I / what do I run next"
@@ -845,7 +889,7 @@ orientation panel's content.
 This brief lifts its conclusions from two completed audit sections. Both cite specific files and line
 numbers and were verified by reading the code, not by recall.
 
-- **Plan file:** `src/.cursor/plans/_todo/wave3-ia-audit-and-design-brief-2026-08-02.plan.md`
+- **Plan file:** `src/.cursor/plans/_archive/wave3-ia-audit-and-design-brief-2026-08-02.plan.md`
   - `## c1 reconciled stage model` - the canonical stage list with per-stage signal derivation, the
     eight conflicts between the two models and which wins in each, the verdict on `Polish`, and the
     five missing signals **M1** through **M5** with a proposed source for each. Sections 1, 2 and 5

@@ -2,7 +2,7 @@
 id: book-setup-and-intelligence
 stage: book-intelligence
 audience: author
-updated: 2026-08-11
+updated: 2026-08-13
 lang: en
 ---
 
@@ -97,12 +97,23 @@ list. It sits beside the findings and appears only once a review has been built.
 
 ## Asking questions about the book
 
-You can ask a question about the book and get an answer written against your own manuscript rather
-than against general knowledge. The answer is grounded in your chapter summaries together with the
-book brief and what is known about the characters.
+Ask Show. It is the assistant behind the button in the corner of every screen, and inside a book it
+answers against your own manuscript rather than against general knowledge.
 
-Because it reads the chapter summaries, it cannot be answered until they exist. Produce chapter
-summaries first.
+There used to be a small ask box on this dashboard instead. It has been removed and Show does the
+same job better: the box read your chapter summaries, the book brief and what was known about the
+characters, and Show reads those plus the developmental review findings, the character register and
+the chapter text itself, then tells you which of them the answer came from. There is a pointer to it
+where the box used to sit.
+
+What Show can answer still depends on what you have built. With no chapter summaries it can tell you
+what is missing and how to build it, but it cannot summarize chapters that have never been read. The
+more of this stage you have built, the more of your book it can answer from.
+
+Two things are worth knowing. Show reads a bounded amount of manuscript per question, about 3,500
+tokens across at most two chapters, so a question aimed at one chapter gets more of that chapter than
+a question aimed at the whole book. And Show's answers are a conversation rather than saved results:
+nothing lands in a history tab, so copy anything you want to keep.
 
 ## Book-level context that chapter passes use
 
