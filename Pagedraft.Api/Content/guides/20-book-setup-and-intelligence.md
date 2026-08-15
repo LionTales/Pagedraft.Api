@@ -110,7 +110,7 @@ What Show can answer still depends on what you have built. With no chapter summa
 what is missing and how to build it, but it cannot summarize chapters that have never been read. The
 more of this stage you have built, the more of your book it can answer from.
 
-Two things are worth knowing. Show reads a bounded amount of manuscript per question, about 3,500
+Two things are worth knowing. Show reads a bounded amount of manuscript per question, about 7,200
 tokens across at most two chapters, so a question aimed at one chapter gets more of that chapter than
 a question aimed at the whole book. And Show's answers are a conversation rather than saved results:
 nothing lands in a history tab, so copy anything you want to keep.

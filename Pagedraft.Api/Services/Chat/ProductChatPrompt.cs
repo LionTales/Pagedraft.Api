@@ -318,16 +318,50 @@ public static class ProductChatPrompt
     // was rendered (the Book line below, and BookArtifactBlocks.BookBrief/ChapterText), for zero prompt
     // tokens and with the result checkable by reading the composed string.
     //
-    // (5) is NEW and it is the only added clause: the assembler deliberately grounds BOTH candidates for a
-    //     bare "chapter N" because Order is 0-based and authors count from 1. g1 confirmed the model does
-    //     not merge them into one false claim - it silently picks one. The honest ambiguity existed in the
-    //     data and was thrown away at the prompt boundary; the note that now carries it is emitted ONLY
-    //     when both candidates actually rode, so no ordinary chapter answer acquires a hedge.
+    // (5) was NEW at the time and was the only added clause: at that point the assembler deliberately
+    //     grounded BOTH candidates for a bare "chapter N" because Order is 0-based and authors count from
+    //     1. g1 confirmed the model did not merge them into one false claim - it silently picked one. The
+    //     honest ambiguity existed in the data and was thrown away at the prompt boundary; the note that
+    //     carried it was emitted ONLY when both candidates actually rode, so no ordinary chapter answer
+    //     acquired a hedge. w9 later replaced the manufactured pair with deterministic resolution and
+    //     be-c01 rewrote this clause for the notes w9 now emits - see "THE NOTE CLAUSE" below for what is
+    //     true now.
     //
     // EVERY SENTENCE HERE IS PAID FOR TWICE (system slot + instruction head) AND THE HEBREW RATE IS
     // 1.8 chars/token, so the wording above went through a deliberate concision pass after the first
     // draft measured 40 tokens over what the 40-chapter worst case had left. ProductChatBookPromptTests
     // reports the size of both modes in both languages, so the next edit here starts from a number.
+    //
+    // ─── THE NOTE CLAUSE, LAST SENTENCE OF BOTH STRINGS (be-c01) ────────────────────────────────
+    //
+    // IT DEFERS TO THE NOTE INSTEAD OF ENUMERATING NOTES, and that is the whole of the fix. It used to
+    // hard-code two branches - "where it says a number could have meant two chapters, say which one you
+    // answered for and that it could have meant the other; where it says no chapter was identified, ask
+    // which chapter they mean". w9 then rewrote what the notes SAY, and every one of those three facts
+    // went false at once: the ambiguity note now ASKS rather than licensing an answer for one of the
+    // candidates (answering for a chapter picked by sort order is the defect w9 exists to remove), it
+    // names up to five candidates rather than two, and two of the three note shapes it must govern (a
+    // shared TITLE, and a number the book does not have) match neither branch and reached the model with
+    // no rule at all, next to a sentence telling it to answer for one. Observed in the composed prompt in
+    // both languages on exactly the input w9 was built for.
+    //
+    // THE FIX IS A SCOPE, NOT A FOURTH PROHIBITION. This prompt has three recorded instances of being
+    // made measurably WORSE by stacking another rule onto a collision (g3's fourth prohibition; F-1's two
+    // rules; phase A be-c03, whose added prohibition raised the rate it was meant to lower), and what has
+    // worked here every time is scoping an instruction. Two of the three notes now carry their own
+    // instruction in their own text, so the clause says to do what the note says; only the flat "no
+    // chapter was identified" note is bare, and the clause's second half supplies the ask for it WITHOUT
+    // naming it, by keying on the note saying no step rather than on its trigger words. The enumeration
+    // is what broke, so nothing here enumerates. It refers to "the note" generically for a second reason:
+    // quoting an internal literal in order to instruct about it TEACHES the literal (measured: naming
+    // [CHAPTER 0] in this clause's neighbourhood put it in the author's prose 3 of 38; deleting the
+    // exemplar took it to 0 of 114).
+    //
+    // WHAT IS PROVEN AND WHAT IS NOT. The suite pins the ASSEMBLY only: that both languages carry the new
+    // clause, that neither carries the answer-for-one wording, and that all three note shapes still reach
+    // the composed instruction. IT PROVES NOTHING ABOUT WHAT THE MODEL DOES WITH THE NEW CLAUSE. The
+    // behavioural half is UNMEASURED - no GPU gate has been run against this wording in either language,
+    // so the class this clause was rewritten for is NOT closed. Do not read the green suite as a verdict.
 
     private const string BookGroundingEn =
         "If the question is about the content or state of the user's own book (its characters, its " +
@@ -353,10 +387,9 @@ public static class ProductChatPrompt
         "reason, that reason is this book's reason. Give its numbers exactly as written. When what the " +
         "question needs is missing or out of date, the answer is that state plus the next step it calls " +
         "for. " +
-        "A note in the BOOK section about what the question could have meant belongs in the answer: " +
-        "where it says a number could have meant two chapters, say which one you answered for and that " +
-        "it could have meant the other; where it says no chapter was identified, ask which chapter they " +
-        "mean before answering about a particular one. ";
+        "A note in the BOOK section about what the question could have meant belongs in the answer: do " +
+        "what the note says, and where it does not say what to do, ask about what remains unclear " +
+        "before answering about a particular chapter. ";
 
     private const string BookGroundingHe =
         "אם השאלה נוגעת לתוכן או למצב של הספר של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק מסוים, מה " +
@@ -378,9 +411,8 @@ public static class ProductChatPrompt
         "פרקים אלה הוא אינו אומר, וכאשר הוא נוקב בסיבה, הסיבה הזו היא הסיבה של הספר הזה. מסור את " +
         "המספרים שלו בדיוק כפי שהם כתובים. כאשר מה שהשאלה צריכה חסר או אינו מעודכן, התשובה היא המצב " +
         "הזה יחד עם הצעד הבא שהוא מחייב. " +
-        "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: כאשר היא אומרת שמספר יכול היה " +
-        "להתכוון לשני פרקים, אמור על איזה פרק ענית ושהוא יכול היה להתכוון לאחר; כאשר היא אומרת שלא " +
-        "זוהה פרק, שאל על איזה פרק מדובר לפני שתענה על פרק מסוים. ";
+        "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: עשה מה שההערה אומרת, וכאשר היא " +
+        "אינה אומרת מה לעשות, שאל על מה שנותר לא ברור לפני שתענה על פרק מסוים. ";
 
     // ─── Section markers. ASCII and language-independent so a test can assert on them ────────────
 
@@ -416,8 +448,14 @@ public static class ProductChatPrompt
     /// thing wearing the artifact costume would re-create that defect on the one line that is never
     /// dropped.</para>
     ///
-    /// <para>English, like every other line of the BOOK section (see <c>BookArtifactBlocks</c>): none of
-    /// that section is user-facing.</para>
+    /// <para>English, like MOST of the BOOK section. That used to read "like every other line of the BOOK
+    /// section: none of that section is user-facing", and be-c04 found the claim false in two places at
+    /// once: <c>BookArtifactBlocks.AuthorFacingChapterName</c> has been written in the answer's language
+    /// since final-r05, and the section's note is written in it too, because the grounding clause puts a
+    /// note's content in the author's answer. THIS line is genuinely machine-facing - nothing instructs the
+    /// model to say it, and its job is done the moment the model can tell a book title from a chapter
+    /// title - so it stays English; what changed is that "the whole section is machine-facing" is no longer
+    /// available as a reason for anything.</para>
     /// </summary>
     internal const string BookTitleLabel = "Book title (not a chapter title): ";
     internal const string HistoryMarker = "[CONVERSATION]";
@@ -474,11 +512,16 @@ public static class ProductChatPrompt
     /// that named a chapter with it.
     /// </param>
     /// <param name="bookNote">
-    /// What the RETRIEVAL knew and the prompt used to throw away: a short internal note about how the
-    /// question resolved, emitted only when there is genuinely something to say (today: a bare "chapter
-    /// N" that grounded both the 0-based and the 1-based candidate). It is rendered in English beside the
-    /// title line, like every other line of the BOOK section, because nothing in that section is
-    /// user-facing; the RULE that governs what the model does with it is in both languages.
+    /// What the RETRIEVAL knew and the prompt used to throw away: a short note about how the question
+    /// resolved, emitted only when there is genuinely something to say. Before w9 the one shape that fired
+    /// this was a bare "chapter N" that grounded both the 0-based and the 1-based candidate; w9 replaced
+    /// that with deterministic resolution, so today the note fires only for ambiguity the book really has
+    /// (the same number or title naming more than one chapter) or a named chapter the book does not have
+    /// (<see cref="BookArtifactBlocks.BookSectionNote"/>). IT ARRIVES ALREADY IN THE ANSWER'S LANGUAGE
+    /// (be-c04) - the caller resolves it before this method ever sees it - and it is user-facing by
+    /// contract: the grounding clause instructs the model to act on it and relay its facts into the
+    /// answer, so "nothing in that section is user-facing" no longer holds for this one line. The RULE
+    /// that governs what the model does with it is in both grounding strings below.
     ///
     /// <para>Null or blank emits nothing at all, so the ordinary chapter answer is unchanged and does not
     /// acquire a hedge it has no reason for.</para>

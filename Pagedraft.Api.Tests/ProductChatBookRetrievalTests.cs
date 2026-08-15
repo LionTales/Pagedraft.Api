@@ -385,8 +385,9 @@ public class ProductChatBookRetrievalTests
             chapterTextForLastChapter: "מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.",
             authorEditedSummaryForLastChapter: authorSummary);
 
-        // "פרק 8" resolves ONLY to order 7 on an 8-chapter book (order 8 does not exist), so the usual
-        // 0-based/1-based dual match collapses to one chapter and these assertions name a single target.
+        // "פרק 8" resolves ONLY to order 7 on an 8-chapter book (order 8 does not exist; w9 resolves a
+        // bare number to the one chapter the author counted to, not the manufactured 0-based/1-based
+        // pair), so these assertions name a single target.
         var context = await ReadAsync(provider, bookId, HebrewQuestionAboutChapter, answerLanguage: "he");
         var refs = context.References;
 
@@ -495,7 +496,16 @@ public class ProductChatBookRetrievalTests
 
         // VACUITY GUARD: the stale number names a REAL chapter of this book, so it could have been used -
         // the id winning is a decision, not the only option that would have resolved.
-        Assert.Contains(BookArtifactRefs.ChapterBrief(2), context.References);
+        //
+        // ASSERTED BY RESOLVING THAT NUMBER ON ITS OWN (w9). It used to be asserted as "chapter 2's brief
+        // is in the prompt", which stopped being true for a better reason than this test is about: a
+        // question that reaches a chapter no longer drags the briefs of chapters it never named
+        // (BookChatContextReader.RankChapterBriefs). Sending the same stale order with NO id proves the
+        // same thing more directly - order 2 really is resolvable on this book - and it cannot be
+        // falsified by an unrelated change to which briefs ride.
+        var orderAlone = await ReadAsync(
+            provider, bookId, HebrewDeicticQuestion, "he", new AmbientChapterContext(null, ChapterOrder: 2));
+        Assert.Equal(new[] { 2 }, orderAlone.Keys.ChapterOrders);
     }
 
     /// <summary>
@@ -530,8 +540,20 @@ public class ProductChatBookRetrievalTests
     [Fact]
     public async Task AnAmbientChapterTooLargeToRideWhole_ExcerptsAndSaysSo()
     {
-        var longChapter = string.Join(
-            " ", Enumerable.Repeat("מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.", 200));
+        // SIZED OFF THE BUDGET CONSTANT, NOT OFF A LITERAL REPEAT COUNT (w9). It used to be a flat 200
+        // repetitions, which was "too large" only against the escalation slice of the day: raising that
+        // slice from 3,500 to 7,200 made this fixture ride WHOLE and the test failed while asserting
+        // nothing was wrong with the code. Deriving the length from the constant keeps "too large to ride
+        // whole" true by construction, whatever the slice becomes.
+        var sentence = "מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.";
+        var repeats = 1;
+        while (ProductChatBudget.EstimateTokens(string.Join(" ", Enumerable.Repeat(sentence, repeats)))
+               <= BookChatExcerpts.EscalationBudgetTokens)
+        {
+            repeats *= 2;
+        }
+
+        var longChapter = string.Join(" ", Enumerable.Repeat(sentence, repeats));
 
         using var provider = BuildProvider();
         var bookId = Seed(

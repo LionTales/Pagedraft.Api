@@ -613,8 +613,18 @@ public class ProductChatAmbientChapterTests
     /// until now nothing but a GPU gate would have noticed.
     ///
     /// <para>The book shapes are the gate's own: book A (<c>צל הירח</c>) has 8 chapters and book C
-    /// (<c>Draft Zero</c>) has 4, which is what makes "chapter 3"/"פרק 5" resolve to a PAIR under the
-    /// 0-based/1-based rule.</para>
+    /// (<c>Draft Zero</c>) has 4.</para>
+    ///
+    /// <para>TWO OF THE THREE SIGNATURES MOVED IN w9, DELIBERATELY, AND THIS IS THE RECORD OF IT. gf6 and
+    /// gf7 were pairs only because of the 0-based/1-based rule that w9 removed - the very rule whose
+    /// downstream cost (a split raw-text slice, both briefs withheld, an answer hedging about a chapter
+    /// the author never named) was the defect w9 exists to fix. So the pinning is doing its job here: it
+    /// forced the change to be stated rather than absorbed. The gate signatures these lines quote are
+    /// therefore HISTORICAL for gf6/gf7 - a re-run would now log <c>sel[2] whole[2]</c> and
+    /// <c>sel[4] whole[4]</c> - and the assertions below are updated to the intended behaviour, not to
+    /// whatever the code happens to do. gp1 is untouched: it carries no number, so no rule of w9's
+    /// reaches it, and bucket (f) - the pass/fail signature that licenses Wave 3's removal of the Custom
+    /// pass - still resolves through the positional pair exactly as three gates measured it.</para>
     /// </summary>
     [Fact]
     public void TheBucketFAndPositionalPairSignatures_AreExactlyWhatThreeGatesMeasured()
@@ -623,20 +633,22 @@ public class ProductChatAmbientChapterTests
         var bookC = Chapters().Take(4).ToList();                   // 4 chapters, orders 0-3
         var register = HebrewRegister();
 
-        // gf6, book C, "What happens in chapter 3 of my book?" with chapter 0 open: sel[2,3] whole[2,3].
+        // gf6, book C, "What happens in chapter 3 of my book?" with chapter 0 open. No title in book C
+        // names chapter 3, so the author is COUNTING and their third chapter is order 2 - alone.
         var gf6 = BookArtifactSelector.Select(
             "What happens in chapter 3 of my book?", bookC, register, ambientChapterOrder: 0);
-        Assert.Equal(new[] { 2, 3 }, gf6.ChapterOrders);
-        Assert.Equal(new[] { 2, 3 }, gf6.EscalationChapterOrders);
+        Assert.Equal(new[] { 2 }, gf6.ChapterOrders);
+        Assert.Equal(new[] { 2 }, gf6.EscalationChapterOrders);
         Assert.Equal(BookArtifactSelector.AmbientChapterMatch.None, gf6.AmbientMatch);
         Assert.False(gf6.NeedsChapterClarification);
 
-        // gf7, book A, "מה קורה בפרק 5?" with chapter 0 open: sel[4,5], and the reader splits that pair
-        // into whole[4] exc[5] downstream - the SELECTION is what this class owns.
+        // gf7, book A, "מה קורה בפרק 5?" with chapter 0 open. Book A's order 4 is TITLED "Chapter 5", so
+        // the title decides and the whole escalation slice goes to that one chapter - no pair for the
+        // reader to split into whole[4] exc[5] any more.
         var gf7 = BookArtifactSelector.Select(
             "מה קורה בפרק 5?", bookA, register, ambientChapterOrder: 0);
-        Assert.Equal(new[] { 4, 5 }, gf7.ChapterOrders);
-        Assert.Equal(new[] { 4, 5 }, gf7.EscalationChapterOrders);
+        Assert.Equal(new[] { 4 }, gf7.ChapterOrders);
+        Assert.Equal(new[] { 4 }, gf7.EscalationChapterOrders);
         Assert.Equal(BookArtifactSelector.AmbientChapterMatch.None, gf7.AmbientMatch);
         Assert.False(gf7.NeedsChapterClarification);
 

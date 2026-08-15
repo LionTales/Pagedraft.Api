@@ -25,15 +25,42 @@ namespace Pagedraft.Api.Services.Chat;
 public static class BookChatExcerpts
 {
     /// <summary>
-    /// The escalation budget slice, in estimated tokens (d1 section (2)). Sized just BELOW the measured
-    /// average chapter (~3,895 tokens) on purpose: an average chapter usually escalates whole, and a long
-    /// one predictably degrades to excerpts. A tighter cap would make escalation excerpt-only in practice;
-    /// a looser one would let one escalated chapter eat the whole remaining budget.
+    /// The escalation budget slice, in estimated tokens (d1 section (2)).
+    ///
+    /// <para>IT WAS 3,500 AND THAT NUMBER CONTRADICTED ITS OWN REASON (w9). The comment said it was sized
+    /// so "an average chapter usually escalates whole" - but it was set just BELOW d1's measured average
+    /// of ~3,895 tokens, so the average chapter was precisely the one that could NOT ride whole. Every
+    /// average-or-longer chapter degraded to a lexical excerpt, which is a retrieval mechanism that can
+    /// only find what shares vocabulary with the question. The owner's measured case: a 2,588-word Hebrew
+    /// chapter (~6,900 tokens at <see cref="ProductChatBudget.HebrewCharsPerToken"/>) asked "how did they
+    /// communicate the problem, by what method" - words its prose never uses - so the excerpt scored
+    /// nothing, fell back to the chapter's OPENING three sentences, and the answer was "the chapter does
+    /// not cover this" about a chapter that does.</para>
+    ///
+    /// <para>7,200 IS SIZED AGAINST THE WHOLE BUDGET, NOT AGAINST A CHAPTER, AND ITS CEILING WAS MEASURED
+    /// RATHER THAN CHOSEN. The input budget is 14,080 tokens; what else rides on a chapter-naming turn -
+    /// three statuses, the book brief, the register, the author's own summary, the findings, the history
+    /// and the book-aware guides - is what decides the room, and w9 freed a large part of it by no longer
+    /// sending six unrelated chapter briefs (see <c>BookChatContextReader.RankChapterBriefs</c>).</para>
+    ///
+    /// <para>THE UPPER BOUND IS THE REGISTER. Raising this to 8,000 was tried first and
+    /// <c>ProductChatBookFortyChapterFixtureTests.TheAuthorSummaryOfAnEscalatedChapter_CostsLittle_AndDropsNothing</c>
+    /// caught it: on the deliberately saturated case - 40 chapters, an over-budget escalation and phase
+    /// A's full 8-turn Hebrew history - the trimmer reached past the findings and the history and dropped
+    /// the REGISTER, which is the first tier the design says it must not reach ("what turns a NAME into a
+    /// person"). 7,200 leaves that invariant intact on the same case. So this constant is bounded ABOVE by
+    /// a measured trim outcome and BELOW by the chapter it has to carry, and it is not free to drift
+    /// upward without that test being re-read.</para>
+    ///
+    /// <para>It is NOT a context-window widening: NumCtx is untouched, which this program has a recorded
+    /// reason to leave alone. And under pressure the ORDERING still protects the right things - findings,
+    /// then history, then the remaining briefs all sit below <see cref="BookArtifactKind.ChapterText"/>,
+    /// so an overrun costs the cheapest blocks rather than the artifact the question asked for.</para>
     ///
     /// <para>This is a slice for the WHOLE escalation, shared when a question names more than one chapter,
     /// not a per-chapter allowance.</para>
     /// </summary>
-    public const int EscalationBudgetTokens = 3_500;
+    public const int EscalationBudgetTokens = 7_200;
 
     /// <summary>
     /// Sentences taken either side of a matched sentence, so an excerpt reads as prose rather than as a

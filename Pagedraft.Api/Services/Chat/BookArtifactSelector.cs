@@ -187,6 +187,35 @@ public static class BookArtifactSelector
     // ─── Result ─────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// One reference the question made that names more than one chapter of THIS book. Two shapes reach it,
+    /// and they are the same defect through two doors:
+    /// <list type="bullet">
+    ///   <item>A NUMBER: two chapters both titled "פרק 8", which is what a manuscript that restarts its
+    ///     numbering inside a part produces.</item>
+    ///   <item>A TITLE: a book whose chapters are named for their POV character has 32 chapters titled
+    ///     "רוני", and this corpus really contains one. Before w9 that question selected 19 chapters and
+    ///     spent the raw-text budget on the first two of them, silently - an answer about chapters the
+    ///     author did not ask about, with no hedge and no question, which is the exact failure the number
+    ///     half of w9 exists to remove.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="Reference">What the author called it, ALREADY author-facing and ready to quote:
+    /// "chapter 8", or a quoted title. Rendered rather than reconstructed downstream so the note cannot
+    /// describe the reference differently from the way it was resolved.</param>
+    /// <param name="CandidateOrders">Every chapter that claims it, ascending. Always two or more: one
+    /// candidate is not an ambiguity, it is an answer.</param>
+    /// <param name="ChapterNumber">The number the author WROTE, when the reference was a number; null when
+    /// it was a title. It rides beside <paramref name="Reference"/> rather than replacing it because the
+    /// two answer different questions and only one of them is language-free (be-c04): this selector has no
+    /// language and never will - it is retrieval, keyed on the BOOK's language - so its "chapter 8" is an
+    /// English literal whatever language the turn is in, and a Hebrew note quoting it raw would drop a
+    /// Latin fragment into Hebrew prose. Handing the renderer the NUMBER lets it say "פרק 8" in a Hebrew
+    /// answer and "chapter 8" in an English one off the same selection. A TITLE needs nothing of the kind:
+    /// it is the book's own data and re-rendering it would be inventing.</param>
+    public sealed record ChapterReferenceAmbiguity(
+        string Reference, IReadOnlyList<int> CandidateOrders, int? ChapterNumber = null);
+
+    /// <summary>
     /// What one question asked for, in book terms. Every list is deduped and in a DETERMINISTIC order
     /// (chapter orders ascending, character names in register order, dimensions in
     /// <see cref="BookReviewService.Dimensions"/> declaration order), so a caller can log it and a test
@@ -212,18 +241,31 @@ public static class BookArtifactSelector
             Array.Empty<int>(), Array.Empty<string>(), Array.Empty<string>(), false, Array.Empty<int>());
 
         /// <summary>
-        /// The numbers the QUESTION wrote that resolved to TWO real chapters, ascending - the 0-based
-        /// <c>Order</c> and the 1-based count the author used. Empty for every question where only one
-        /// candidate existed, which is the common case at the ends of a book.
+        /// The numbers the QUESTION wrote that named MORE THAN ONE real chapter, with the candidates.
+        /// Empty for every question whose number resolved to exactly one chapter, which after w9 is the
+        /// overwhelmingly common case - see <see cref="Select"/> for why.
         ///
-        /// <para>WHY IT IS CARRIED SEPARATELY FROM <see cref="ChapterOrders"/>. Both candidates are already
-        /// in that list, and c1's own watch list asked whether the model merges them into one confident
-        /// claim; g1 answered no, it picks one and never says so. That is not a fabrication and it is not
-        /// fixable by retrieval - retrieval was honest. It is only fixable if the honesty SURVIVES to the
-        /// prompt, and two orders in a list are indistinguishable from a question that named two chapters.
-        /// This field is what tells those two situations apart downstream.</para>
+        /// <para>WHAT IT USED TO MEAN, AND WHY THE MEANING CHANGED (w9). It used to hold every number that
+        /// resolved to two candidates under the OFFSET reading: a bare "chapter 5" grounded orders 4 AND 5,
+        /// because <c>Chapter.Order</c> is 0-based here and authors count from 1, and the selector kept both
+        /// rather than guessing. That ambiguity was manufactured by the selector, not by the author: the
+        /// author reads a 1-based number on every surface in the product (<c>chapterDisplayNumber</c>) and a
+        /// chapter TITLE that usually names its own number, so "chapter 5" was never two chapters to them.
+        /// <see cref="Select"/> now resolves the number deterministically and this field records only
+        /// ambiguity the BOOK really has - the same number naming two chapters, which happens when a
+        /// manuscript restarts its numbering inside a part.</para>
+        ///
+        /// <para>THE CANDIDATES RIDE WITH THE REFERENCE because the note built from this has to ASK, and
+        /// "did you mean chapter 8 or chapter 8" is not a question. The orders let the note name them by
+        /// the one thing that separates them - where they sit in the book.</para>
         /// </summary>
-        public IReadOnlyList<int> AmbiguousChapterNumbers { get; init; } = Array.Empty<int>();
+        public IReadOnlyList<ChapterReferenceAmbiguity> AmbiguousChapterNumbers { get; init; }
+            = Array.Empty<ChapterReferenceAmbiguity>();
+
+        /// <summary>How many chapters the book has, so a note can say what the author's numbers RANGE over
+        /// ("this book has 32 chapters") instead of only that their number missed. Zero when the selection
+        /// ran against no chapters at all.</summary>
+        public int ChapterCount { get; init; }
 
         /// <summary>
         /// Chapter numbers the question NAMED that the book does not have ("chapter 40" on a 10-chapter
@@ -355,40 +397,128 @@ public static class BookArtifactSelector
         var orders = new SortedSet<int>();
         var validOrders = new HashSet<int>(chapters.Select(c => c.Order));
 
-        // (1) Explicit chapter numbers, read off the RAW question (see the class doc).
-        var ambiguous = new SortedSet<int>();
-        var unresolvedNumbers = new SortedSet<int>();
-        foreach (var number in ChapterNumbersIn(question))
+        // Chapters this question IDENTIFIED - by number, by a scene, or by a title only one chapter bears.
+        // Everything in `orders` is grounded; only these are pinned down well enough to spend raw text on,
+        // which is what lets a shared title be subtracted from the escalation set without also stripping a
+        // chapter the same question named properly some other way.
+        var identified = new HashSet<int>();
+        void Identify(int order)
         {
-            // Chapter.Order is 0-BASED throughout this codebase but authors count from 1, so a bare
-            // "chapter 7" is tried as BOTH. Only orders the book actually has are kept, so this cannot
-            // invent a chapter: on a 40-chapter book "chapter 7" resolves to orders 6 and 7 and the
-            // answer is grounded in both, which is honest about the ambiguity rather than guessing.
-            var zeroBased = validOrders.Contains(number - 1);
-            var oneBased = validOrders.Contains(number);
+            orders.Add(order);
+            identified.Add(order);
+        }
 
-            if (zeroBased) orders.Add(number - 1);
-            if (oneBased) orders.Add(number);
+        // (1) Explicit chapter numbers, read off the RAW question (see the class doc).
+        //
+        // ─── THE NUMBER RESOLVES TO ONE CHAPTER, DETERMINISTICALLY (w9) ─────────────────────────
+        //
+        // THE DEFECT THIS REPLACES. A bare "פרק 8" used to ground BOTH order 7 and order 8, because
+        // Chapter.Order is 0-based here and authors count from 1, and the selector kept both rather than
+        // guessing. On the owner's real 32-chapter book that produced: two chapters retrieved for one
+        // question, the ONE 3,500-token raw-text slice split between them, both of their briefs withheld
+        // (raw text replaces the brief), and a hedged answer that named a chapter the author had not asked
+        // about and then asked them which chapter they meant - about a chapter whose title is literally
+        // "פרק 8". Retrieval was honest, but the ambiguity was MANUFACTURED HERE and the author never had
+        // it: every surface in the product shows them a 1-based number (the client's single
+        // chapterDisplayNumber), and their chapters carry titles that name their own number.
+        //
+        // SO THE TITLE THE AUTHOR READS DECIDES, AND ONLY THEN DOES COUNTING. Both rules are total and
+        // neither consults the other's result, so the same (question, book) pair always resolves the same
+        // way - no scoring, no tie-break, nothing a ranking change can move.
+        //
+        //   (a) A CHAPTER WHOSE TITLE NAMES THAT NUMBER IS THAT CHAPTER. "פרק 8" at order 7 is the
+        //       author's chapter 8 no matter where it sits, which is also the only rule that survives a
+        //       book whose numbering does not start at its first chapter - the prologue this corpus really
+        //       has (order 31 in the owner's book), and the single-chapter imports whose one chapter is
+        //       titled "פרק 24" at order 0. The old rule could not resolve that import AT ALL: neither
+        //       order 23 nor order 24 exists, so it asked the author which chapter they meant about a book
+        //       with exactly one.
+        //   (b) OTHERWISE THE AUTHOR IS COUNTING, AND THEY COUNT FROM 1. A book whose titles are prose
+        //       ("האי הנעלם") gives the number nothing to match, so it means the Nth chapter - order N-1,
+        //       the client's chapterDisplayNumber read backwards. The 0-based reading is NOT kept as a
+        //       second candidate, because no surface in the product ever shows an author a 0-based number;
+        //       it is only reachable as a fallback when N-1 is out of range and N is not, which is the
+        //       "chapter 0" edge the tests pin.
+        //
+        // WHAT REMAINS AMBIGUOUS IS AMBIGUOUS IN THE BOOK, NOT IN THE READING: two chapters really titled
+        // "פרק 8". Then both ride and the ambiguity is recorded, so the answer ASKS which one - the one
+        // case where asking is the honest move rather than a substitute for resolving.
+        var ambiguous = new List<ChapterReferenceAmbiguity>();
+        var unresolvedNumbers = new SortedSet<int>();
+        foreach (var number in ChapterNumbersIn(question).Distinct())
+        {
+            var titled = chapters
+                .Where(c => TitleNamesChapterNumber(c.Title, number))
+                .Select(c => c.Order)
+                .Distinct()
+                .OrderBy(o => o)
+                .ToList();
 
-            // BOTH resolved, so the number genuinely could have meant either one, and that is recorded
-            // rather than left implicit in a list of orders (see AmbiguousChapterNumbers).
-            if (zeroBased && oneBased) ambiguous.Add(number);
+            if (titled.Count > 0)
+            {
+                foreach (var order in titled) Identify(order);
+                if (titled.Count > 1)
+                    ambiguous.Add(new ChapterReferenceAmbiguity($"chapter {number}", titled, number));
+                continue;
+            }
+
+            if (validOrders.Contains(number - 1)) Identify(number - 1);
+            else if (validOrders.Contains(number)) Identify(number);
 
             // NEITHER resolved: the author named a chapter this book does not have. Recorded rather than
             // dropped, because an explicit reference that failed is still an explicit reference and must
             // not let the ambient chapter answer in its place (see UnresolvedChapterNumbers).
-            if (!zeroBased && !oneBased) unresolvedNumbers.Add(number);
+            else unresolvedNumbers.Add(number);
         }
 
         // (2) Distinctive title matches, and scene titles resolved to the PARENT chapter.
+        //
+        // A TITLE THAT NAMES MANY CHAPTERS NAMES NONE OF THEM (w9). Grouping by the title STRING is what
+        // separates the two cases, and they must not be confused: two DIFFERENT titles matching one
+        // question ("compare The Arrival and Low Tide") is a two-chapter question and resolves to two
+        // chapters, while ONE title borne by many chapters identifies nothing. A book whose chapters are
+        // named for their POV character is the real instance - 32 chapters titled "רוני" - and it used to
+        // select 19 of them and spend the raw-text slice on whichever two sorted first, with no hedge and
+        // no question. This is the number rule's twin, keyed on a title instead of a number.
+        var byTitle = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
         foreach (var chapter in chapters)
         {
-            if (MatchesTitle(chapter.Title, tokens, questionKeys)) orders.Add(chapter.Order);
+            if (MatchesTitle(chapter.Title, tokens, questionKeys))
+            {
+                var key = chapter.Title!.Trim();
+                if (!byTitle.TryGetValue(key, out var sharing)) byTitle[key] = sharing = new List<int>();
+                sharing.Add(chapter.Order);
+            }
 
             foreach (var sceneTitle in chapter.SceneTitles)
             {
-                if (MatchesTitle(sceneTitle, tokens, questionKeys)) orders.Add(chapter.Order);
+                if (MatchesTitle(sceneTitle, tokens, questionKeys)) Identify(chapter.Order);
             }
+        }
+
+        // Chapters reached ONLY through a title many chapters share. They still ground and rank - their
+        // briefs are the best answer available to a question about "רוני" - but they must not spend the
+        // raw-text budget, on the same terms as the ambient tier-3 rule below: the most generic reference
+        // is the one whose cost is capped at ranking. Held separately and subtracted from the escalation
+        // set AFTER it is built, so a chapter the question ALSO named by number or by a unique title keeps
+        // its escalation.
+        var sharedTitleOnly = new SortedSet<int>();
+        foreach (var (title, sharing) in byTitle)
+        {
+            if (sharing.Count == 1)
+            {
+                Identify(sharing[0]);          // a title only one chapter bears IS an identification
+                continue;
+            }
+
+            sharing.Sort();
+            foreach (var order in sharing)
+            {
+                orders.Add(order);             // grounds and ranks, but is not an identification
+                sharedTitleOnly.Add(order);
+            }
+
+            ambiguous.Add(new ChapterReferenceAmbiguity($"\"{title}\"", sharing));
         }
 
         var characters = ResolveCharacters(register, tokens, questionKeys);
@@ -497,6 +627,16 @@ public static class BookArtifactSelector
         // a wider excerpt window, which the excerpt selector then narrows lexically anyway.
         var escalation = new SortedSet<int>(orders);
 
+        // A SHARED TITLE GROUNDS BUT DOES NOT SPEND (w9), on the same terms as tier 3 below. "רוני" names
+        // 32 chapters, so raw text for two of them is not an answer to the question - it is an answer
+        // about two chapters chosen by sort order. Their briefs still ride and still rank, and the note
+        // asks which one was meant. A chapter the question ALSO identified (by number, by a scene, or by a
+        // title it alone bears) is exempt, which is what `identified` is for.
+        foreach (var order in sharedTitleOnly)
+        {
+            if (!identified.Contains(order)) escalation.Remove(order);
+        }
+
         // TIER 3 GROUNDS BUT DOES NOT SPEND. The bare singular location word alone is the highest-recall
         // and most product-question-prone trigger, so it keeps its place in `orders` (the ambient
         // chapter's brief is preferred over the book-order fallback) and is taken back out of the
@@ -510,8 +650,9 @@ public static class BookArtifactSelector
         return new BookQuestionKeys(
             orders.ToList(), characters, dimensions, hasLocationCue, escalation.ToList())
         {
-            AmbiguousChapterNumbers = ambiguous.ToList(),
+            AmbiguousChapterNumbers = ambiguous,
             UnresolvedChapterNumbers = unresolvedNumbers.ToList(),
+            ChapterCount = chapters.Count,
             AmbientMatch = ambientMatch,
             AmbientChapterOrder = ambientUsed,
             // The escalation set is FINAL by this line (it is built, trimmed for tier 3, and topped up
@@ -600,6 +741,69 @@ public static class BookArtifactSelector
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// True when <paramref name="title"/> CLAIMS chapter number <paramref name="number"/> - "פרק 8",
+    /// "Chapter 8", "פרק 1 - חזרה לנווה־חול", or a title that is nothing but the number.
+    ///
+    /// <para>IT READS THE TITLE WITH <see cref="ChapterNumbersIn"/>, THE SAME SCANNER THAT READS THE
+    /// QUESTION, and that symmetry is the point: the author types the name they see, so whatever counts as
+    /// "names chapter 8" on one side has to count on the other, and one scanner cannot drift from itself.
+    /// It is also why this cannot be done through <see cref="MatchesTitle"/>, which is the reason the
+    /// defect survived: <c>GuideSelector.Tokenize</c> drops single-character tokens, so "פרק 8" tokenizes
+    /// to <c>{פרק}</c> with the 8 gone, and <c>פרק</c> is in <see cref="GenericTitleTokens"/> - the title
+    /// was not merely unmatched, it was correctly refused as generic. The number is the distinctive part
+    /// of a title like this, and it is the part the tokenizer cannot carry.</para>
+    ///
+    /// <para>A BARE NUMERIC TITLE ("8") COUNTS TOO. It is what a manuscript whose headings are just digits
+    /// imports as, and it can only be read as a chapter number. A year used as a title ("1948") is
+    /// technically reachable by the same line, and harmlessly: it can only match a question that asked
+    /// about chapter 1948.</para>
+    /// </summary>
+    internal static bool TitleNamesChapterNumber(string? title, int number)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return false;
+
+        var trimmed = title.Trim();
+        if (int.TryParse(trimmed, out var bare) && bare == number) return true;
+
+        return ChapterNumbersIn(trimmed).Contains(number);
+    }
+
+    /// <summary>
+    /// True when <paramref name="title"/> names a chapter number AT ALL - the same reading as
+    /// <see cref="TitleNamesChapterNumber"/> with the specific number taken out of the question.
+    ///
+    /// <para>IT EXISTS BECAUSE TWO DIFFERENT QUESTIONS WERE BEING ASKED WITH ONE PREDICATE. The selector
+    /// asks "does this title claim chapter N", which needs the number. A RENDERER deciding whether to
+    /// append a chapter's position to its title asks "has the author already numbered this chapter", which
+    /// does not, and answering it with the numbered form silently keys the decision on the position: a
+    /// bare-digit title whose value happened to differ from its own position ("8" at order 8, or the "24"
+    /// of a single-chapter re-import) failed the numbered check and got the position appended -
+    /// <c>המחבר קורא לפרק הזה: 24 (פרק 1)</c>, on the chapter the selector had retrieved BECAUSE the author
+    /// called it 24. Both halves are covered here: a title that is nothing but digits, and a title carrying
+    /// a chapter word with a number near it.</para>
+    ///
+    /// <para>THE BARE BRANCH CARRIES <see cref="TryReadNumberNear"/>'s PLAUSIBILITY CLAMP, WHICH IS WHAT
+    /// MAKES THE SENTENCE ABOVE TRUE (final-r01). Without it the two predicates were not the same reading:
+    /// the numbered form can only ever be handed a value <see cref="ChapterNumbersIn"/> produced, and that
+    /// scanner refuses anything outside 0..9999 as "a number a book could not plausibly have", while a bare
+    /// <c>int.TryParse</c> accepts <c>-5</c>, <c>99999</c> and a date used as a heading (<c>20260815</c>).
+    /// A caller keyed on this predicate must not treat those as "the author numbered this chapter" when the
+    /// selector would never resolve them by title - that asymmetry silently costs the chapter its
+    /// author-facing position in the one line the model is told to copy. An in-range year (<c>1948</c>) is
+    /// still indistinguishable from a chapter number here and is read as one; separating those needs the
+    /// book's chapter count, which this predicate deliberately does not take.</para>
+    /// </summary>
+    internal static bool TitleNamesAnyChapterNumber(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title)) return false;
+
+        var trimmed = title.Trim();
+        if (int.TryParse(trimmed, out var bare) && bare is >= 0 and <= 9999) return true;
+
+        return ChapterNumbersIn(trimmed).Count > 0;
     }
 
     /// <summary>

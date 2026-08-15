@@ -62,9 +62,9 @@ public sealed class BookChatContextReader : IBookChatContextReader
     public const int MaxHistoryEntries = 8;
 
     /// <summary>
-    /// How many chapters may escalate to raw text in one turn. The 3,500-token slice is shared, so a
-    /// question naming eight chapters would otherwise produce eight excerpts of 400 tokens each - each
-    /// too thin to answer from, and all of them labeled as if they were readable. Two is the shape the
+    /// How many chapters may escalate to raw text in one turn. The <see cref="BookChatExcerpts.EscalationBudgetTokens"/>
+    /// slice is shared, so a question naming eight chapters would otherwise produce eight thin excerpts -
+    /// each too thin to answer from, and all of them labeled as if they were readable. Two is the shape the
     /// escalation is for ("what happens between chapters 3 and 4").
     /// </summary>
     public const int MaxEscalatedChapters = 2;
@@ -669,10 +669,30 @@ public sealed class BookChatContextReader : IBookChatContextReader
             ranked.Add((brief, rank));
         }
 
+        // ─── THE BOOK-ORDER FALLBACK, AND THE STATE IT USED TO FIRE IN BY ACCIDENT (w9) ─────────
+        //
+        // The fallback exists for a question that resolved NOTHING chapter-specific ("what happens in my
+        // book"), so it grounds in the opening chapters rather than an arbitrary slice. But it was keyed
+        // on "no SURVIVING brief scored", and those two are not the same predicate in the one case that
+        // matters: a question naming ONE chapter whose raw text rode. That chapter's brief is excluded
+        // above (its full text is already here), so nothing left could score, `anyKeyed` went false, and
+        // the fallback fired - putting the briefs of chapters 1-6 into a prompt about chapter 8.
+        //
+        // MEASURED, NOT REASONED: "בפרק 8 איך הם תקשרו את הבעיה?" on the owner's 32-chapter book carried
+        // chapter-text:7 plus chapter-brief:0,1,2,3,4,5 and reached ~12,478 of 14,080 input tokens. Six
+        // briefs of unrelated chapters at d1's measured ~700-800 tokens each is ~4,500 tokens - more than
+        // the entire escalation slice - spent on chapters the author did not ask about, while the chapter
+        // they DID ask about was cut down to an excerpt to fit. It is the same defect class as the
+        // 0-based/1-based pair: budget spent on a chapter the question never named.
+        //
+        // So the fallback is now suppressed whenever the question reached a chapter AT ALL - resolved or
+        // carried. A character- or dimension-only question is untouched, which is why the guard names
+        // chapters specifically rather than testing `keys.IsEmpty`.
+        var reachedAChapter = keys.ChapterOrders.Count > 0 || carried.Count > 0;
         var anyKeyed = ranked.Any(r => r.Rank > 0);
 
         return ranked
-            .Where(r => !anyKeyed || r.Rank > 0)
+            .Where(r => (!anyKeyed && !reachedAChapter) || r.Rank > 0)
             .OrderByDescending(r => r.Rank)
             .ThenBy(r => r.Brief.Order)
             .Take(MaxChapterBriefs)

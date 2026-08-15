@@ -177,18 +177,19 @@ public static class ProductChatBudget
     /// though <see cref="ProductChatPrompt.ComposeInstruction"/> does not contain it.</param>
     /// <param name="bookBlocks">Retrieved book artifacts, or null/empty when the request carried no
     /// bookId. Empty makes every line below a no-op and the composition byte-identical to phase A's.</param>
-    /// <param name="ambiguousChapterNumbers">
-    /// Numbers the question wrote that resolved to two real chapters
-    /// (<c>BookQuestionKeys.AmbiguousChapterNumbers</c>). Passed HERE rather than turned into a note by
-    /// the caller because the note is only true of the blocks that SURVIVE the trim, and that set is not
-    /// known until this loop settles; it is derived per iteration for the same reason
-    /// <see cref="Composition.SystemMessage"/> is.
-    /// </param>
-    /// <param name="needsChapterClarification">
-    /// <c>BookQuestionKeys.NeedsChapterClarification</c> (d2 section (5)): the question was about a
-    /// chapter, and none resolved and none was escalated. It emits the BOOK section's note, so the model
-    /// can ASK in prose for a client that does not render chapter chips; the RESPONSE flag the client
-    /// branches on is set from the same boolean and never from what the model wrote.
+    /// <param name="questionKeys">
+    /// What the question resolved to (<c>BookArtifactSelector.Select</c>), or null when the request
+    /// carried no bookId. It is the ONE input the BOOK section's note is derived from - the ambiguity the
+    /// selector could not decide, a chapter number the book does not have, the clarify flag (d2 section
+    /// (5)) - and it is passed HERE rather than turned into a note by the caller because the note is only
+    /// true of the blocks that SURVIVE the trim, and that set is not known until this loop settles; it is
+    /// derived per iteration for the same reason <see cref="Composition.SystemMessage"/> is.
+    ///
+    /// <para>PASSED WHOLE RATHER THAN FIELD BY FIELD (w9). The note is a statement ABOUT the selection, so
+    /// assembling it from arguments a call site picked off that selection is what lets one caller emit a
+    /// note the selection does not support; and a third note now needs no new parameter at any layer
+    /// between the selector and the renderer. The RESPONSE flag the client branches on comes from these
+    /// same keys and never from what the model wrote, so the prose and the flag cannot disagree.</para>
     /// </param>
     public static Composition Compose(
         string language,
@@ -198,8 +199,7 @@ public static class ProductChatBudget
         int budgetTokens,
         IReadOnlyList<BookArtifactBlock>? bookBlocks = null,
         string? bookTitle = null,
-        IReadOnlyList<int>? ambiguousChapterNumbers = null,
-        bool needsChapterClarification = false)
+        BookArtifactSelector.BookQuestionKeys? questionKeys = null)
     {
         var keptGuides = guides.ToList();
         var keptHistory = history.ToList();
@@ -217,8 +217,7 @@ public static class ProductChatBudget
             var systemMessage = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
             var instruction = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
-                BookArtifactBlocks.BookSectionNote(
-                    ambiguousChapterNumbers, keptBlocks, needsChapterClarification));
+                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks));
 
             // What the provider actually sends: the system slot, the composed instruction (which
             // restates the rule) and the question appended after it.
@@ -266,8 +265,7 @@ public static class ProductChatBudget
             var finalSystem = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
             var final = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
-                BookArtifactBlocks.BookSectionNote(
-                    ambiguousChapterNumbers, keptBlocks, needsChapterClarification));
+                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks));
             return new Composition(
                 finalSystem, final, keptGuides, keptHistory, droppedTurns, droppedGuideIds,
                 EstimateTokens(finalSystem) + EstimateTokens(final) + EstimateTokens(question),

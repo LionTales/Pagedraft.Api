@@ -137,7 +137,7 @@ and nothing else.
 Two differences are worth knowing rather than discovering:
 
 - **Show reads less text at once.** A Custom run put a whole chapter in front of the model. Show
-  works to a budget and reads up to about 3,500 tokens of manuscript per question, spread across at
+  works to a budget and reads up to about 7,200 tokens of manuscript per question, spread across at
   most two chapters, and switches to excerpts above that. For a question about a passage, point Show
   at the chapter and ask about the passage.
 - **A Custom run left a saved result.** It landed in the History tab and you could go back to it

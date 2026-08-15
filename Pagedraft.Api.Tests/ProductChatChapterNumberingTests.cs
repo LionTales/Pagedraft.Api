@@ -483,30 +483,78 @@ public class ProductChatChapterNumberingTests
     ///   <item>An UNTITLED chapter renders the author's number alone, so there is always something safe to
     ///     say. Title-only naming had nothing here, which is what made it cost a decision.</item>
     ///   <item>A chapter whose own TITLE IS A NUMBER - <c>פרק 28</c> sitting at wire order 0, the commonest
-    ///     real shape in this corpus - renders BOTH, and the two disagree on purpose: the author wrote
-    ///     "chapter 28" on a chapter the product counts as their chapter 1, and hiding either half is a
-    ///     worse answer than showing both.</item>
+    ///     real shape in this corpus - renders the TITLE ALONE (w9). It used to render both, and the
+    ///     disagreement was defended as the point: the author wrote "chapter 28" on a chapter the product
+    ///     counts as their chapter 1, so showing both was said to beat hiding either. w9 settles it the
+    ///     other way, because the title is no longer just what the author RECOGNISES, it is what RESOLVES
+    ///     their question (<c>BookArtifactSelector.TitleNamesChapterNumber</c>): asking about "פרק 28" now
+    ///     retrieves this chapter, so appending "(פרק 1)" would contradict the resolution inside the one
+    ///     string the model is told to copy, and would offer it a second number to name the chapter by -
+    ///     one the author has never used and cannot act on. A chapter titled <c>פרק 8</c> at order 7 made
+    ///     the same fault milder and more obvious: "פרק 8 (פרק 8)".</item>
+    ///   <item>A PROSE title still renders both, because there the two say different things and the
+    ///     position is the number the author would count to: "Low Tide (chapter 7)".</item>
     /// </list>
     ///
-    /// <para>BOTH CASES ARE PINNED IN BOTH LANGUAGES (final-r05). They are the two shapes where the frame
+    /// <para>EVERY CASE IS PINNED IN BOTH LANGUAGES (final-r05). They are the shapes where the frame
     /// carries the most weight: on an untitled chapter the frame plus the number is the ENTIRE line, so an
-    /// English frame there leaves a Hebrew answer nothing at all to copy in its own language; and the
-    /// numeric-title case is the commonest real shape in this corpus, where Hebrew renders
-    /// <c>פרק 28 (פרק 1)</c> - the disagreement is the point, and it is now stated once in each
-    /// language instead of half in each.</para>
+    /// English frame there leaves a Hebrew answer nothing at all to copy in its own language.</para>
     /// </summary>
     [Theory]
     [InlineData("en", null, 0, "the author calls this chapter: chapter 1")]
     [InlineData("en", "", 12, "the author calls this chapter: chapter 13")]
     [InlineData("en", "   ", 3, "the author calls this chapter: chapter 4")]
-    [InlineData("en", "פרק 28", 0, "the author calls this chapter: פרק 28 (chapter 1)")]
-    [InlineData("en", "Chapter 16", 6, "the author calls this chapter: Chapter 16 (chapter 7)")]
+    [InlineData("en", "פרק 28", 0, "the author calls this chapter: פרק 28")]
+    [InlineData("en", "Chapter 16", 6, "the author calls this chapter: Chapter 16")]
+    [InlineData("en", "Low Tide", 6, "the author calls this chapter: Low Tide (chapter 7)")]
     [InlineData("he", null, 0, "המחבר קורא לפרק הזה: פרק 1")]
     [InlineData("he", "", 12, "המחבר קורא לפרק הזה: פרק 13")]
     [InlineData("he", "   ", 3, "המחבר קורא לפרק הזה: פרק 4")]
-    [InlineData("he", "פרק 28", 0, "המחבר קורא לפרק הזה: פרק 28 (פרק 1)")]
-    [InlineData("he", "Chapter 16", 6, "המחבר קורא לפרק הזה: Chapter 16 (פרק 7)")]
+    [InlineData("he", "פרק 28", 0, "המחבר קורא לפרק הזה: פרק 28")]
+    [InlineData("he", "Chapter 16", 6, "המחבר קורא לפרק הזה: Chapter 16")]
+    [InlineData("he", "המנעול השבור", 6, "המחבר קורא לפרק הזה: המנעול השבור (פרק 7)")]
     public void TheAuthorFacingName_HandlesAnUntitledChapter_AndOneWhoseTitleIsItselfANumber(
+        string language, string? title, int order, string expected)
+        => Assert.Equal(expected, BookArtifactBlocks.AuthorFacingChapterName(language, order, title));
+
+    /// <summary>
+    /// A BARE-DIGIT TITLE RENDERS ALONE WHETHER OR NOT ITS VALUE EQUALS ITS POSITION (be-c02). The two
+    /// cells fail independently, so both are pinned: the guard used to ask
+    /// <c>TitleNamesChapterNumber(title, order + 1)</c>, which clears a bare digit only when the digit IS
+    /// the position, and the chapter-word clause beside it reads nothing on a title with no chapter word.
+    /// A bare digit anywhere else fell through both and got the position appended.
+    ///
+    /// <para>THE ROWS ARE MEASURED SHAPES, not invented ones. A manuscript whose headings are just digits
+    /// imports as <c>[פרולוג, "1", "2" ... "8"]</c>, which puts "8" at order 8 and produced
+    /// <c>8 (פרק 9)</c>; a single-chapter re-import of one titled "24" produced <c>24 (פרק 1)</c> - the
+    /// character-for-character string the w9 comment above says the guard exists to delete, on the chapter
+    /// the selector had retrieved BECAUSE the author called it 24.</para>
+    ///
+    /// <para>THE PROSE ROWS ARE THE RESTRAINT HALF: a title carrying no number at all must still get the
+    /// position, so widening the guard cannot be mistaken for dropping it.</para>
+    ///
+    /// <para>AND THE LAST FOUR ROWS ARE THE OTHER EDGE OF THE RESTRAINT (final-r01). The widened guard runs
+    /// through <c>BookArtifactSelector.TitleNamesAnyChapterNumber</c>, whose bare branch carries
+    /// <c>ChapterNumbersIn</c>'s "a number a book could not plausibly have" clamp (0..9999). A negative, a
+    /// five-digit heading or a date used as a chapter title is therefore NOT a chapter number, and must
+    /// keep the position the author counts to - without the clamp <c>int.TryParse</c> accepted all three
+    /// and the chapter silently lost its author-facing number in the one line the model is told to
+    /// copy.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("en", "9", 8, "the author calls this chapter: 9")]
+    [InlineData("en", "8", 8, "the author calls this chapter: 8")]
+    [InlineData("en", "24", 0, "the author calls this chapter: 24")]
+    [InlineData("en", "Low Tide", 6, "the author calls this chapter: Low Tide (chapter 7)")]
+    [InlineData("he", "9", 8, "המחבר קורא לפרק הזה: 9")]
+    [InlineData("he", "8", 8, "המחבר קורא לפרק הזה: 8")]
+    [InlineData("he", "24", 0, "המחבר קורא לפרק הזה: 24")]
+    [InlineData("he", "הגאות הנמוכה", 6, "המחבר קורא לפרק הזה: הגאות הנמוכה (פרק 7)")]
+    [InlineData("en", "20260815", 4, "the author calls this chapter: 20260815 (chapter 5)")]
+    [InlineData("en", "-5", 4, "the author calls this chapter: -5 (chapter 5)")]
+    [InlineData("he", "20260815", 4, "המחבר קורא לפרק הזה: 20260815 (פרק 5)")]
+    [InlineData("he", "99999", 4, "המחבר קורא לפרק הזה: 99999 (פרק 5)")]
+    public void TheAuthorFacingName_RendersABareNumericTitleAlone_EvenWhenItDisagreesWithThePosition(
         string language, string? title, int order, string expected)
         => Assert.Equal(expected, BookArtifactBlocks.AuthorFacingChapterName(language, order, title));
 
@@ -540,11 +588,12 @@ public class ProductChatChapterNumberingTests
     /// The ONE line of the BOOK section the model is instructed to CARRY INTO ITS ANSWER states its
     /// numbers the way the author counts, not the way the wire does.
     ///
-    /// <para>The author writing "chapter 5" grounds orders 4 and 5, which are the author's chapters 5 and
-    /// 6. The note used to name the raw orders ("both chapter 4 and chapter 5 were retrieved"), which,
-    /// beside a grounding clause that now says to give the author's number, would be two emphatic
-    /// instructions that disagree - and the author who wrote "5" would be told their question might have
-    /// meant "4", which is a number they never used.</para>
+    /// <para>WHAT THE NOTE IS ABOUT CHANGED IN w9, AND THIS PROPERTY DID NOT. It used to fire for a bare
+    /// "chapter 5" (the selector kept the 0-based and 1-based readings side by side); that ambiguity was
+    /// manufactured by the selector and is now resolved deterministically, so the note fires only when the
+    /// BOOK really has two chapters named the same number. Either way it names them in the author's
+    /// counting: orders 4 and 5 are their chapters 5 and 6, and the author who wrote "5" is never told
+    /// their question might have meant "4", a number no surface in the product ever showed them.</para>
     /// </summary>
     [Fact]
     public void TheAmbiguityNote_NamesTheAuthorsTwoChapters_NotTheWiresTwoOrders()
@@ -555,13 +604,28 @@ public class ProductChatChapterNumberingTests
             new BookArtifactBlock(BookArtifactKind.ChapterText, new[] { "chapter-text:5" }, "five", 1)
         };
 
-        var note = BookArtifactBlocks.ChapterNumberNote(new[] { 5 }, both);
+        var ambiguity = new[]
+        {
+            new BookArtifactSelector.ChapterReferenceAmbiguity("chapter 5", new[] { 4, 5 }, 5)
+        };
+
+        var note = BookArtifactBlocks.ChapterNumberNote("en", ambiguity, both);
 
         Assert.NotNull(note);
-        Assert.Contains("the author's chapter 5 or their chapter 6", note!, StringComparison.Ordinal);
+        Assert.Contains("(chapters 5 and 6)", note!, StringComparison.Ordinal);
 
         // And it no longer hands the model the raw orders it is being asked not to speak.
         Assert.DoesNotContain("chapter 4", note, StringComparison.Ordinal);
+
+        // THE SAME PROPERTY IN HEBREW (be-c04), where it has a second half: the note is now written in the
+        // answer's language, so it must state the author's numbering AND carry no Latin "chapter N" for a
+        // Hebrew reader to trip over - the exact fragment final-r05/final-r06 removed from the block line.
+        var hebrew = BookArtifactBlocks.ChapterNumberNote("he", ambiguity, both);
+
+        Assert.NotNull(hebrew);
+        Assert.Contains("(פרקים 5 ו-6)", hebrew!, StringComparison.Ordinal);
+        Assert.DoesNotContain("chapter", hebrew, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("פרק 4", hebrew, StringComparison.Ordinal);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════

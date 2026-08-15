@@ -440,6 +440,158 @@ public class ProductChatBookServiceTests
         Assert.Equal(new[] { 0, 1, 2 }, ranked.Select(r => r.Brief.Order));
     }
 
+    // ─── The book-order fallback's NEGATIVE half (w9, be-c03) ───────────────────────────────────
+    //
+    // The test above pins the fallback FIRING. These pin it NOT firing, which is the half that shipped
+    // the w9 defect: the fallback was keyed on "no surviving brief scored", and a question naming ONE
+    // chapter whose raw text rode leaves exactly that state behind - the named chapter's brief is
+    // excluded (its text is already here), so nothing left can score. MEASURED on the owner's 32-chapter
+    // book: "בפרק 8 איך הם תקשרו את הבעיה?" carried chapter-text:7 PLUS chapter-brief:0,1,2,3,4,5 and
+    // reached ~12,478 of 14,080 input tokens, roughly 4,500 tokens of briefs for chapters the author
+    // never named, while the chapter they DID ask about was cut to an excerpt to fit.
+    //
+    // The three reaching-a-chapter cells are separate tests because they fail INDEPENDENTLY: `resolved`
+    // and `carried` are two different sources for `reachedAChapter`, and only one of the three leaves
+    // `anyKeyed` true. A single fixture would pin one disjunct and let the others rot.
+
+    /// <summary>A nine-chapter book, the shape the defect was measured on: enough briefs that a
+    /// book-order fallback visibly drags the opening chapters in.</summary>
+    private static IReadOnlyList<Pagedraft.Api.Models.ChapterBrief> NineBriefs()
+        => Enumerable.Range(0, 9).Select(i => Brief(i)).ToList();
+
+    /// <summary>
+    /// CELL 1, THE MEASURED CASE: a question resolving ONE chapter whose raw text rode. Its brief is
+    /// excluded and no other brief can score, so the result must be EMPTY - the prompt already holds the
+    /// only chapter the question was about. Before the fix this returned chapters 0-5, the six unrelated
+    /// briefs of the measured defect.
+    /// </summary>
+    [Fact]
+    public void AResolvedChapterWhoseTextRode_DragsNoUnrelatedBriefsIn()
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: new[] { 7 }, CharacterNames: Array.Empty<string>(),
+            Dimensions: Array.Empty<string>(), HasLocationCue: true,
+            EscalationChapterOrders: new[] { 7 });
+
+        var ranked = BookChatContextReader.RankChapterBriefs(NineBriefs(), keys, new[] { 7 });
+
+        Assert.Empty(ranked);
+        AssertTheFixtureCouldHaveProducedBriefs();
+    }
+
+    /// <summary>
+    /// THE NON-VACUITY FLOOR FOR THE TWO <c>Assert.Empty</c> CELLS (final-r01). "Nothing rode" is the
+    /// SAME observation as "there was nothing to ride", so those two assertions survive a fixture that
+    /// returns no briefs at all - measured: emptying <see cref="NineBriefs"/> leaves both green while
+    /// every other test in this group goes red. This says the suppression is what emptied the result, by
+    /// showing the identical brief list DOES ride on the one question that reached no chapter.
+    /// </summary>
+    private static void AssertTheFixtureCouldHaveProducedBriefs()
+        => Assert.NotEmpty(BookChatContextReader.RankChapterBriefs(
+            NineBriefs(), BookArtifactSelector.BookQuestionKeys.Empty, Array.Empty<int>()));
+
+    /// <summary>
+    /// CELL 2: the same question when the escalation produced NO text (the g1 F-7 shape - an unreadable
+    /// or empty chapter, or one beyond <c>MaxEscalatedChapters</c>). Chapter 7's own brief is not
+    /// excluded here, so it scores and rides, and the fallback still must not drag the opening chapters
+    /// along with it.
+    ///
+    /// <para>Distinct from <see cref="AChapterThatMeantToEscalateButCarriedNoText_KeepsItsBrief"/> above,
+    /// which pins that the named brief SURVIVES on a three-brief list. This pins that it survives ALONE
+    /// on a list long enough for a fallback to be visible - the assertion the w9 predicate changed.</para>
+    /// </summary>
+    [Fact]
+    public void AResolvedChapterThatCarriedNoText_RidesAloneWithoutTheFallback()
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: new[] { 7 }, CharacterNames: Array.Empty<string>(),
+            Dimensions: Array.Empty<string>(), HasLocationCue: true,
+            EscalationChapterOrders: new[] { 7 });
+
+        var ranked = BookChatContextReader.RankChapterBriefs(
+            NineBriefs(), keys, carriedRawText: Array.Empty<int>());
+
+        Assert.Equal(new[] { 7 }, ranked.Select(r => r.Brief.Order));
+    }
+
+    /// <summary>
+    /// CELL 3, THE ONE A NAIVE READING MISSES: raw text rode for a chapter that never entered the
+    /// RESOLVED set at all - the positional-pair shape ("and in the next one?"), which escalates a
+    /// chapter off the turn's position rather than off a number the question wrote. <c>ChapterOrders</c>
+    /// is empty, so this reads exactly like a no-key question and a guard testing only the resolved set
+    /// would let the fallback fire. The escalation's RESULT is what says a chapter was reached.
+    /// </summary>
+    [Fact]
+    public void AnEscalatedChapterTheKeysNeverResolved_StillSuppressesTheFallback()
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: Array.Empty<int>(), CharacterNames: Array.Empty<string>(),
+            Dimensions: Array.Empty<string>(), HasLocationCue: true,
+            EscalationChapterOrders: new[] { 7 });
+
+        var ranked = BookChatContextReader.RankChapterBriefs(NineBriefs(), keys, new[] { 7 });
+
+        Assert.Empty(ranked);
+        AssertTheFixtureCouldHaveProducedBriefs();
+    }
+
+    /// <summary>
+    /// RESTRAINT, AND THE REASON THE GUARD NAMES CHAPTERS RATHER THAN TESTING <c>keys.IsEmpty</c>: a
+    /// CHARACTER-only question reaches no chapter, so the suppression must not touch it. It ranks by its
+    /// own key when a brief mentions the character, and falls back to book order when none does - a
+    /// question about a character the briefs never name is still a question about the book.
+    ///
+    /// <para>This is the half a mutation pass cannot see: only a rule that ACTS has a statement to
+    /// mutate, and the property here is that the new rule does NOT act.</para>
+    /// </summary>
+    [Fact]
+    public void ACharacterOnlyQuestion_IsUntouchedByTheChapterFallbackSuppression()
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: Array.Empty<int>(), CharacterNames: new[] { "Miriam" },
+            Dimensions: Array.Empty<string>(), HasLocationCue: false,
+            EscalationChapterOrders: Array.Empty<int>());
+
+        // Matched: ranks by its own key, and drops the chapters that key nothing.
+        var briefs = NineBriefs().ToList();
+        briefs[4] = Brief(4, "Miriam");
+        Assert.Equal(
+            new[] { 4 },
+            BookChatContextReader.RankChapterBriefs(briefs, keys, Array.Empty<int>())
+                .Select(r => r.Brief.Order));
+
+        // Unmatched: nothing scores and no chapter was reached, so book order is still the answer.
+        Assert.Equal(
+            new[] { 0, 1, 2, 3, 4, 5 },
+            BookChatContextReader.RankChapterBriefs(NineBriefs(), keys, Array.Empty<int>())
+                .Select(r => r.Brief.Order));
+    }
+
+    /// <summary>
+    /// RESTRAINT, the dimension half: a DIMENSION-only question also reaches no chapter and is also
+    /// untouched, whether or not a brief's markers name the dimension.
+    /// </summary>
+    [Fact]
+    public void ADimensionOnlyQuestion_IsUntouchedByTheChapterFallbackSuppression()
+    {
+        var keys = new BookArtifactSelector.BookQuestionKeys(
+            ChapterOrders: Array.Empty<int>(), CharacterNames: Array.Empty<string>(),
+            Dimensions: new[] { "pacing" }, HasLocationCue: false,
+            EscalationChapterOrders: Array.Empty<int>());
+
+        var briefs = NineBriefs().ToList();
+        briefs[4] = briefs[4] with { ThematicMarkers = new[] { "the pacing drags" } };
+        Assert.Equal(
+            new[] { 4 },
+            BookChatContextReader.RankChapterBriefs(briefs, keys, Array.Empty<int>())
+                .Select(r => r.Brief.Order));
+
+        Assert.Equal(
+            new[] { 0, 1, 2, 3, 4, 5 },
+            BookChatContextReader.RankChapterBriefs(NineBriefs(), keys, Array.Empty<int>())
+                .Select(r => r.Brief.Order));
+    }
+
     /// <summary>The selection is CAPPED, because at d1's measured ~700-800 tokens per brief, six briefs
     /// already exceed the entire input budget and a thirty-brief list would be a loop the trimmer spends
     /// itself discarding.</summary>

@@ -170,14 +170,18 @@ public class ProductChatAmbientWireTests
 
         var asking = ProductChatBudget.Compose(
             "en", guides, Array.Empty<ProductChatTurn>(), "what happens in the chapter?", int.MaxValue,
-            blocks, "Salt and Rope", null, needsChapterClarification: true);
+            blocks, "Salt and Rope",
+            BookArtifactSelector.BookQuestionKeys.Empty with { NeedsChapterClarification = true });
 
         var resolved = ProductChatBudget.Compose(
             "en", guides, Array.Empty<ProductChatTurn>(), "what happens in the chapter?", int.MaxValue,
-            blocks, "Salt and Rope", null, needsChapterClarification: false);
+            blocks, "Salt and Rope",
+            BookArtifactSelector.BookQuestionKeys.Empty with { NeedsChapterClarification = false });
 
-        Assert.Contains(BookArtifactBlocks.NoChapterIdentifiedNote, asking.Instruction, StringComparison.Ordinal);
-        Assert.DoesNotContain(BookArtifactBlocks.NoChapterIdentifiedNote, resolved.Instruction, StringComparison.Ordinal);
+        Assert.Contains(
+            BookArtifactBlocks.NoChapterIdentifiedNote("en"), asking.Instruction, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            BookArtifactBlocks.NoChapterIdentifiedNote("en"), resolved.Instruction, StringComparison.Ordinal);
 
         // VACUITY GUARD: both compositions really did emit a BOOK section, so the absence above is the
         // flag and not a turn that carried no book at all.
@@ -187,7 +191,7 @@ public class ProductChatAmbientWireTests
 
     /// <summary>
     /// THE TWO NOTES SHARE A CHANNEL BECAUSE THEY CANNOT CO-OCCUR, and this pins the disjointness rather
-    /// than trusting it: the ambiguity note needs a number that resolved to TWO chapters, the clarify
+    /// than trusting it: the ambiguity note needs a number that named TWO chapters, the clarify
     /// note needs a selection of NONE, and one count cannot be both 2 and 0. The model is never handed
     /// two notes to arbitrate between, which is the collision shape this prompt has been burned by twice.
     /// </summary>
@@ -200,14 +204,36 @@ public class ProductChatAmbientWireTests
             new BookArtifactBlock(BookArtifactKind.ChapterText, new[] { "chapter-text:5" }, "five", 1)
         };
 
-        var ambiguity = BookArtifactBlocks.BookSectionNote(new[] { 5 }, chapterBlocks, false);
-        var clarify = BookArtifactBlocks.BookSectionNote(Array.Empty<int>(), chapterBlocks, true);
+        // w9: an ambiguity is now a number that names two REAL chapters (two chapters both titled
+        // "chapter 5"), never the manufactured 0-vs-1-based pair the selector used to produce.
+        var ambiguity = BookArtifactBlocks.BookSectionNote(
+            "en",
+            BookArtifactSelector.BookQuestionKeys.Empty with
+            {
+                ChapterOrders = new[] { 4, 5 },
+                AmbiguousChapterNumbers = new[]
+                {
+                    new BookArtifactSelector.ChapterReferenceAmbiguity("chapter 5", new[] { 4, 5 }, 5)
+                }
+            },
+            chapterBlocks);
+
+        var clarify = BookArtifactBlocks.BookSectionNote(
+            "en",
+            BookArtifactSelector.BookQuestionKeys.Empty with { NeedsChapterClarification = true },
+            chapterBlocks);
 
         Assert.NotNull(ambiguity);
-        // be-c02: the note states its numbers in the AUTHOR's counting, not the wire's. See
-        // ProductChatChapterNumberingTests for why this one line differs from the rest of the section.
-        Assert.Contains("the author's chapter 5 or their chapter 6", ambiguity!, StringComparison.Ordinal);
-        Assert.Equal(BookArtifactBlocks.NoChapterIdentifiedNote, clarify);
+        // The note names the candidates by the only thing that separates two identically-named chapters -
+        // where they sit - and it counts the way the author does, not the way the wire does.
+        Assert.Contains("2 chapters of this book are named chapter 5", ambiguity!, StringComparison.Ordinal);
+        Assert.Contains(
+            "the briefs below cover 2 of them (chapters 5 and 6)", ambiguity, StringComparison.Ordinal);
+        Assert.Contains(
+            "answer from those, say which chapters you are describing and that other chapters share the " +
+            "name, and offer to narrow to one",
+            ambiguity, StringComparison.Ordinal);
+        Assert.Equal(BookArtifactBlocks.NoChapterIdentifiedNote("en"), clarify);
 
         // No selection can produce both flags, so the shared channel has no ordering to decide: a
         // resolved-chapter count cannot be 0 and 2 at once.
