@@ -175,11 +175,28 @@ public static class BookArtifactBlocks
         var hebrew = ChatLanguage.IsHebrew(language);
 
         var frame = hebrew ? "המחבר קורא לפרק הזה: " : "the author calls this chapter: ";
-        var authorsNumber = hebrew ? $"פרק {number}" : $"chapter {number}";
+        var authorsNumber = AuthorsChapterLabel(language, number);
 
-        return string.IsNullOrWhiteSpace(title)
-            ? frame + authorsNumber
-            : $"{frame}{title.Trim()} ({authorsNumber})";
+        if (string.IsNullOrWhiteSpace(title)) return frame + authorsNumber;
+
+        // A TITLE THAT ALREADY NAMES A CHAPTER NUMBER IS RENDERED ALONE (w9). This used to append the
+        // position unconditionally, and its own docstring defended the resulting "פרק 24 (פרק 1)" as
+        // showing both halves of a real disagreement. w9 settles that disagreement the other way: the
+        // title is what the author reads, types and is answered by - it is now what RESOLVES their
+        // question (BookArtifactSelector.TitleNamesAnyChapterNumber) - so appending the position
+        // contradicts the resolution in the one string the model is told to copy, and hands it a second
+        // number for a chapter that already has one. "פרק 8 (פרק 8)" was the milder version of the fault.
+        //
+        // THE QUESTION ASKED HERE IS "HAS THE AUTHOR NUMBERED THIS CHAPTER AT ALL", not "does this title
+        // name THIS position": the numbered predicate cleared a bare-digit title only when the digit
+        // equalled order+1, so "24" on a single-chapter re-import still rendered "24 (פרק 1)".
+        //
+        // A PROSE TITLE STILL GETS THE POSITION, because there the two say different things and the
+        // author counts: "האי הנעלם (פרק 5)" is a name plus the number they would use to refer to it.
+        var trimmed = title.Trim();
+        return BookArtifactSelector.TitleNamesAnyChapterNumber(trimmed)
+            ? frame + trimmed
+            : $"{frame}{trimmed} ({authorsNumber})";
     }
 
     /// <summary>
