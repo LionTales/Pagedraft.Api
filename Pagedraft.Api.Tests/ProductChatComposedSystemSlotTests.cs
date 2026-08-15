@@ -84,10 +84,9 @@ public class ProductChatComposedSystemSlotTests
         "reason, that reason is this book's reason. Give its numbers exactly as written. When what the " +
         "question needs is missing or out of date, the answer is that state plus the next step it calls " +
         "for. " +
-        "A note in the BOOK section about what the question could have meant belongs in the answer: " +
-        "where it says a number could have meant two chapters, say which one you answered for and that " +
-        "it could have meant the other; where it says no chapter was identified, ask which chapter they " +
-        "mean before answering about a particular one. " +
+        "A note in the BOOK section about what the question could have meant belongs in the answer: do " +
+        "what the note says, and where it does not say what to do, ask about what remains unclear " +
+        "before answering about a particular chapter. " +
         "End your reply with a line of the form 'Sources: <ref>, <ref>' and nothing else on that line, " +
         "naming what you actually used: a guide by its id alone, and a book artifact by the ref in its " +
         "own header, for example 'Sources: chapter-text:7, status:review'. Refs belong on that line and " +
@@ -124,9 +123,8 @@ public class ProductChatComposedSystemSlotTests
         "פרקים אלה הוא אינו אומר, וכאשר הוא נוקב בסיבה, הסיבה הזו היא הסיבה של הספר הזה. מסור את " +
         "המספרים שלו בדיוק כפי שהם כתובים. כאשר מה שהשאלה צריכה חסר או אינו מעודכן, התשובה היא המצב " +
         "הזה יחד עם הצעד הבא שהוא מחייב. " +
-        "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: כאשר היא אומרת שמספר יכול היה " +
-        "להתכוון לשני פרקים, אמור על איזה פרק ענית ושהוא יכול היה להתכוון לאחר; כאשר היא אומרת שלא " +
-        "זוהה פרק, שאל על איזה פרק מדובר לפני שתענה על פרק מסוים. " +
+        "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: עשה מה שההערה אומרת, וכאשר היא " +
+        "אינה אומרת מה לעשות, שאל על מה שנותר לא ברור לפני שתענה על פרק מסוים. " +
         "סיים את התשובה בשורה בצורה 'מקורות: <מזהה>, <מזהה>' ובלי דבר נוסף באותה שורה, שמציינת את מה " +
         "שבאמת השתמשת בו: מדריך לפי המזהה שלו בלבד, ופריט של הספר לפי המזהה שבכותרת שלו, לדוגמה " +
         "'מקורות: chapter-text:7, status:review'. המזהים שייכים לשורה הזו ולא למשפטים שלך, שבהם ממצא " +
@@ -334,23 +332,37 @@ public class ProductChatComposedSystemSlotTests
     }
 
     /// <summary>
-    /// THE RETRIEVAL'S OWN UNCERTAINTY REACHES THE PROVIDER (f2; c1 watch-list item 2). The selector
-    /// grounds BOTH candidates for a bare "chapter N" because <c>Chapter.Order</c> is 0-based here and
-    /// authors count from 1, and g1 confirmed the model does not merge them into a false claim - it
-    /// answers one and never says it chose. Everything needed to say so existed in the data and stopped
-    /// at the prompt boundary, so this asserts on the string a provider is handed rather than on the
-    /// composer that builds it, for the same reason the tests above do: what the composer produces and
-    /// what the provider receives are two different questions, and F-1 was the second one.
+    /// THE RETRIEVAL'S OWN UNCERTAINTY REACHES THE PROVIDER (f2; c1 watch-list item 2). When one number
+    /// names two real chapters of the book, the selector grounds both and records that it could not
+    /// decide; g1 confirmed the model does not merge them into a false claim - it answers one and never
+    /// says it chose. Everything needed to say so existed in the data and stopped at the prompt boundary,
+    /// so this asserts on the string a provider is handed rather than on the composer that builds it, for
+    /// the same reason the tests above do: what the composer produces and what the provider receives are
+    /// two different questions, and F-1 was the second one.
     /// </summary>
+    /// <remarks>THE EXPECTED NOTE IS PER-QUESTION, NOT PER-FIXTURE (be-c04). The note is written in the
+    /// ANSWER's language, which this test reaches the honest way: the Hebrew row's question is Hebrew, so
+    /// <c>ChatLanguage.Detect</c> inside the service picks Hebrew and the provider is handed a Hebrew note.
+    /// A single English expectation across both rows would have passed only while the note was English.
+    /// </remarks>
     [Theory]
-    [InlineData("What happens in chapter 5?")]
-    [InlineData("מה קורה בפרק 5?")]
-    public async Task WithAnAmbiguousChapterNumber_TheNote_ReachesTheProvidersInstruction(string question)
+    [InlineData("What happens in chapter 5?",
+        "Note: 2 chapters of this book are named chapter 5, and the briefs below cover 2 of them " +
+        "(chapters 5 and 6); answer from those, say which chapters you are describing and that other " +
+        "chapters share the name, and offer to narrow to one.")]
+    [InlineData("מה קורה בפרק 5?",
+        "Note: 2 פרקים בספר הזה נקראים פרק 5, והתקצירים שלמטה מכסים 2 מהם (פרקים 5 ו-6); ענה מתוכם, " +
+        "אמור על אילו פרקים אתה מדבר ושיש בספר פרקים נוספים באותו שם, והצע לצמצם לפרק אחד.")]
+    public async Task WithAnAmbiguousChapterNumber_TheNote_ReachesTheProvidersInstruction(
+        string question, string expectedNote)
     {
         var keys = new BookArtifactSelector.BookQuestionKeys(
             new[] { 4, 5 }, Array.Empty<string>(), Array.Empty<string>(), true, new[] { 4, 5 })
         {
-            AmbiguousChapterNumbers = new[] { 5 }
+            AmbiguousChapterNumbers = new[]
+            {
+                new BookArtifactSelector.ChapterReferenceAmbiguity("chapter 5", new[] { 4, 5 }, 5)
+            }
         };
 
         var blocks = new[]
@@ -366,9 +378,7 @@ public class ProductChatComposedSystemSlotTests
         await service.AnswerAsync(
             new ProductChatRequest(question, BookId: Guid.NewGuid()), CancellationToken.None);
 
-        Assert.Contains(
-            "Note: the question says chapter 5, which could be the author's chapter 5 or their chapter 6",
-            provider.Captured!.Instruction, StringComparison.Ordinal);
+        Assert.Contains(expectedNote, provider.Captured!.Instruction, StringComparison.Ordinal);
 
         // VACUITY GUARD: the same turn with NO recorded ambiguity carries no note, so an unambiguous
         // chapter question is unchanged and does not acquire a hedge.

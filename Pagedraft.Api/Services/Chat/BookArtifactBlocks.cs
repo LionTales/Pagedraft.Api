@@ -61,10 +61,18 @@ public static class BookArtifactBlocks
     /// edit falsified: <see cref="ChapterNumberNote"/> speaks the AUTHOR's numbering, deliberately, because
     /// it is the one line of the BOOK section the grounding rule instructs the model to carry into its
     /// answer (see that method's own docstring for the argument). So on an ambiguous-number turn the
-    /// section really does carry both conventions - <c>[CHAPTER 4]</c>/<c>[CHAPTER 5]</c> beside "the
-    /// author's chapter 5 or their chapter 6" - and that is intended, not a leak. It is worth knowing
-    /// while class (a) is open: <c>g4</c>'s only explicit-number question, the one shape that fires this
-    /// note, disagreed with its own chips 2 of 2.</para>
+    /// section can still carry both conventions - two internal labels naming the wire orders that survived
+    /// trim, e.g. <c>[CHAPTER 1]</c>/<c>[CHAPTER 3]</c> for two chapters that both claim "chapter 8",
+    /// beside the note's own "chapter 2 and chapter 4" in the author's counting - and that is intended,
+    /// not a leak. The pair is no longer necessarily adjacent (w9): before w9 this was always the
+    /// manufactured order N-1/N offset for ONE number; the ambiguity is now real, so the two candidate
+    /// orders can sit anywhere in the book. A THIRD STRING RIDES ON THAT TURN AND IT IS THE ONE TO WATCH
+    /// (final-r01): <see cref="AuthorFacingChapterName"/> renders a numbered title ALONE, so two chapters
+    /// both titled "פרק 8" carry the SAME author-facing name line, and the note's positions are then the
+    /// only thing in the whole section that separates them - which is what the note is for, and why its
+    /// wording is not free to drop them. It is worth knowing that <c>g4</c>'s only explicit-number
+    /// question - the one shape that fired this note - disagreed with its own chips 2 of 2, but that
+    /// measurement is against the OLD offset rule; no gate has re-run this class since w9.</para>
     /// </summary>
     internal const string WholeChapterLabelFormat = "[CHAPTER {0}, whole chapter]";
 
@@ -79,6 +87,19 @@ public static class BookArtifactBlocks
     /// by <c>ProductChatChapterNumberingTests.TheWireRefAndTheAuthorsNumber_AgreeAcrossTheStack</c>.
     /// </summary>
     internal static int AuthorsChapterNumber(int order) => order + 1;
+
+    /// <summary>
+    /// THE AUTHOR-FACING WAY TO SAY "chapter N", IN THE ANSWER'S LANGUAGE. One renderer, shared by
+    /// <see cref="AuthorFacingChapterName"/> and by the ambiguity note, because both put this fragment
+    /// into a sentence the author reads and a second copy is how the two drift apart.
+    ///
+    /// <para><paramref name="number"/> is ALREADY the author's number - <see cref="AuthorsChapterNumber"/>
+    /// for a wire order, or the number the author themselves wrote in the question. This method does no
+    /// arithmetic, deliberately: the two callers reach the author's number by different routes and a
+    /// silent +1 here would double-count one of them.</para>
+    /// </summary>
+    internal static string AuthorsChapterLabel(string language, int number)
+        => ChatLanguage.IsHebrew(language) ? $"פרק {number}" : $"chapter {number}";
 
     /// <summary>
     /// THE FINISHED, AUTHOR-FACING NAME OF ONE CHAPTER, RENDERED SO THE MODEL CAN COPY IT (final-r02, the
@@ -179,12 +200,14 @@ public static class BookArtifactBlocks
     // ─── The chapter-numbering note (phase B, f2, c1 watch-list item 2) ─────────────────────────
 
     /// <summary>
-    /// The one thing retrieval KNEW and the prompt used to discard: a bare "chapter 5" grounds BOTH order
-    /// 4 and order 5, because <c>Chapter.Order</c> is 0-based here and authors count from 1, and the
-    /// selector keeps both rather than guessing (<see cref="BookArtifactSelector"/>). g1 confirmed the
-    /// model does NOT merge the two into one false claim: it answers one of them and never says it chose.
-    /// The honesty was in the data and was thrown away at the prompt boundary, so this puts it back into
-    /// the BOOK section where the grounding rule can act on it.
+    /// The one thing retrieval KNEW and the prompt used to discard: before w9, a bare "chapter 5" grounded
+    /// BOTH order 4 and order 5, because <c>Chapter.Order</c> is 0-based here and authors count from 1,
+    /// and the selector kept both rather than guessing (<see cref="BookArtifactSelector"/>). g1 confirmed
+    /// the model does NOT merge the two into one false claim: it answers one of them and never says it
+    /// chose - the silent, unhedged answer w9 exists to remove. w9 replaced the manufactured pair with
+    /// deterministic resolution, so this note now fires only for ambiguity the BOOK really has - the same
+    /// number or title naming more than one chapter, <see cref="BookArtifactSelector.ChapterReferenceAmbiguity"/> -
+    /// and it still puts that honesty back into the BOOK section where the grounding rule can act on it.
     ///
     /// <para>EMITTED ONLY WHEN BOTH CANDIDATES ACTUALLY RODE. The note is computed from the blocks that
     /// SURVIVED the trim, not from the selector's intent, for the same reason the acceptable citation set
@@ -193,11 +216,19 @@ public static class BookArtifactBlocks
     /// artifact is not ambiguous in anything the model can see, so it produces nothing and the ordinary
     /// chapter answer never acquires a hedge.</para>
     ///
-    /// <para>English, like every other line of the BOOK section. The rule that governs what the model DOES
-    /// with the note is in both languages, in <c>ProductChatPrompt.BookGroundingEn</c>/<c>He</c>.</para>
+    /// <para>IT IS WRITTEN IN THE ANSWER'S LANGUAGE, NOT IN ENGLISH (be-c04). This paragraph used to read
+    /// "English, like every other line of the BOOK section", which stopped being true the moment the
+    /// grounding clause started putting a note's content into the author's answer; see
+    /// <see cref="BookSectionNote"/> for the whole argument and for what is measured and what is not. The
+    /// rule that governs what the model DOES with the note is in both languages too, in
+    /// <c>ProductChatPrompt.BookGroundingEn</c>/<c>He</c>.</para>
     ///
-    /// <para>THIS IS THE ONE LINE OF THE BOOK SECTION WHOSE NUMBERS ARE THE AUTHOR'S, AND THE REASON IS
-    /// THAT IT IS THE ONE LINE WRITTEN TO BE SPOKEN (be-c02, review finding #1). Everything else in the
+    /// <para>ITS NUMBERS ARE THE AUTHOR'S, AND THE REASON IS THAT IT IS WRITTEN TO BE SPOKEN (be-c02,
+    /// review finding #1). This used to claim to be the ONE line of the section with that property, which
+    /// is no longer true and had two falsifiers by the time final-r01 read it:
+    /// <see cref="AuthorFacingChapterName"/> has rendered the author's number on every chapter-scoped block
+    /// since final-r02, and <see cref="OutOfRangeChapterNote"/> now states the author's number and the
+    /// book's 1-based range. What survives is the REASON, which is what the paragraph is for. Everything else in the
     /// section is machine-facing and keeps the wire's 0-based orders, with the prompt carrying a single
     /// translation rule; this note is different because the grounding rule explicitly instructs the model
     /// to CARRY IT INTO THE ANSWER ("a note in the BOOK section about what the question could have meant
@@ -205,17 +236,27 @@ public static class BookArtifactBlocks
     /// chapter 5 were retrieved" in raw orders, with an inline re-teaching of the 0-vs-1 offset. Handing
     /// the model raw orders in the one string it is told to repeat, while the grounding clause tells it to
     /// give the author's number, is two emphatic instructions that disagree - the collision shape this
-    /// prompt has already been burned by twice (g3's fourth prohibition, F-1's two rules). So the note now
-    /// states the ambiguity in the author's own numbering (their chapter N or their chapter N+1, since
-    /// orders N-1 and N are what rode) and drops the offset explanation, which the widened clause in
-    /// <c>ProductChatPrompt</c> now owns alone. It is also SHORTER, which the Hebrew budget needed.</para>
+    /// prompt has already been burned by twice (g3's fourth prohibition, F-1's two rules). So the note
+    /// states the ambiguity in the author's own numbering instead - up to <see cref="MaxNamedAmbiguityCandidates"/>
+    /// candidate positions joined with a single final "and" and an overflow tail for the rest (be-f04) -
+    /// and drops the offset explanation, which the widened clause in <c>ProductChatPrompt</c> now owns
+    /// alone. It is also SHORTER per candidate than the old two-number sentence, which the Hebrew budget
+    /// needed.</para>
     /// </summary>
-    /// <param name="ambiguousChapterNumbers">Numbers the question wrote that resolved to two real
-    /// chapters, from <c>BookQuestionKeys.AmbiguousChapterNumbers</c>.</param>
+    /// <param name="language">The ANSWER's language (<c>ChatLanguage.Detect</c>), never the book's; see
+    /// <see cref="BookSectionNote"/>. Required rather than defaulted, for the reason
+    /// <see cref="AuthorFacingChapterName"/> gives: a defaulted "en" lets the next caller ship the
+    /// untranslated frame silently.</param>
+    /// <param name="ambiguousChapterNumbers">Numbers the question wrote that name more than one chapter of
+    /// this book, with their candidates, from <c>BookQuestionKeys.AmbiguousChapterNumbers</c>.</param>
     /// <param name="blocks">The blocks that survived composition.</param>
     public static string? ChapterNumberNote(
-        IReadOnlyList<int>? ambiguousChapterNumbers, IReadOnlyList<BookArtifactBlock>? blocks)
+        string language,
+        IReadOnlyList<BookArtifactSelector.ChapterReferenceAmbiguity>? ambiguousChapterNumbers,
+        IReadOnlyList<BookArtifactBlock>? blocks)
     {
+        var hebrew = ChatLanguage.IsHebrew(language);
+
         if (ambiguousChapterNumbers == null || ambiguousChapterNumbers.Count == 0) return null;
         if (blocks == null || blocks.Count == 0) return null;
 
@@ -225,45 +266,239 @@ public static class BookArtifactBlocks
             if (TryChapterOrderOf(reference, out var order)) carried.Add(order);
         }
 
-        var parts = ambiguousChapterNumbers
-            .Where(n => carried.Contains(n - 1) && carried.Contains(n))
-            .OrderBy(n => n)
-            .Select(n =>
-                $"the question says chapter {n}, which could be the author's chapter {n} or their " +
-                $"chapter {n + 1}; both were retrieved and which one was meant is not known")
-            .ToList();
+        var parts = new List<string>();
+        foreach (var ambiguity in ambiguousChapterNumbers.OrderBy(a => a.Reference, StringComparer.Ordinal))
+        {
+            // Only the candidates that really rode, and only while at least two of them did: one surviving
+            // candidate is not an ambiguity the model can see, so it must not acquire a hedge.
+            var rode = ambiguity.CandidateOrders.Where(carried.Contains).OrderBy(o => o).ToList();
+            if (rode.Count < 2) continue;
+
+            // THE POSITION IS WHAT SEPARATES THEM, because their names do not: these chapters are
+            // ambiguous precisely because they are called the same thing. So the note hands the model the
+            // one distinguishing fact, in the author's own counting, and tells it to ask.
+            //
+            // AND THE LIST IS CAPPED, because a book whose chapters are named for their POV character has
+            // 32 of them under one name: an unbounded list would spend the note's whole budget teaching
+            // the model a sequence it cannot use, on a turn whose whole point is to ask a short question.
+            var shown = rode.Take(MaxNamedAmbiguityCandidates).Select(o => AuthorsChapterNumber(o).ToString()).ToList();
+            var positions = JoinWithFinalAnd(language, shown);
+            var overflow = rode.Count - MaxNamedAmbiguityCandidates;
+            // Comma before "and" here, unlike the list's own final "and", is what keeps the tail from
+            // reading as one more list item: "1, 2, 3, 4 and 5 and 3 more" lets "5 and 3" be misparsed as
+            // a pair (measured during review, an 8-way shared-title collision).
+            //
+            // AND THE TAIL AGREES WITH ITS OWN NUMBER. It used to read ", and N others" / ", ועוד N אחרים",
+            // which is wrong at N == 1 in both languages - and 1 is the value a REAL collision produces,
+            // measured live on the owner's manuscript: six chapters share one title, the cap shows five, so
+            // the tail rendered "and 1 others" / "ועוד 1 אחרים". Hebrew also wants the NOUN after a bare
+            // numeral ("ועוד 3 פרקים"), because a bare "אחרים" leaves the numeral with nothing to count.
+            var tail = overflow <= 0
+                ? string.Empty
+                : hebrew
+                    ? (overflow == 1 ? ", ועוד פרק אחד" : $", ועוד {overflow} פרקים")
+                    : $", and {overflow} more";
+
+            // THE REFERENCE IS RE-RENDERED FOR A NUMBER AND LEFT ALONE FOR A TITLE (be-c04). The selector
+            // records a number ambiguity as the English literal "chapter 5" whatever language the turn is
+            // in, so quoting it raw here would put a Latin fragment in the middle of a Hebrew sentence -
+            // the very defect final-r05 removed from AuthorFacingChapterName and final-r06 measured shut
+            // (21% to 0%). A TITLE is data: it is already in the book's own language and re-rendering it
+            // would be inventing, so it rides exactly as the selector resolved it.
+            var reference = ambiguity.ChapterNumber is int number
+                ? AuthorsChapterLabel(language, number)
+                : ambiguity.Reference;
+
+            // THE HEBREW ASK USES THE INANIMATE INTERROGATIVE AND THE IMPERSONAL VERB. It used to end
+            // "ולכן שאל את המחבר למי מהם הוא מתכוון", and the tell that this was a slip and not a choice is
+            // eight words earlier in the SAME sentence, which already says "לאיזה מהם התכוונו": מי asks
+            // about a person and these are chapters, and "הוא מתכוון" genders the author masculine where
+            // the impersonal "התכוונו" does not. OutOfRangeChapterNote's ask is impersonal for the same
+            // reason. The English arm was already right and is untouched.
+            // IT ASKS THE MODEL TO ANSWER AND DISCLOSE, NOT TO ASK INSTEAD OF ANSWERING (w9 gate cell A).
+            //
+            // MEASURED, NOT REASONED. The note used to end "ask the author which of them they mean" and
+            // said nothing else to do. On the owner's real 64-chapter manuscript - 19 chapters titled
+            // "רוני" - that measured 0 of 5: every run answered confidently about five or six chapters and
+            // not one asked. The out-of-range note's ask, by contrast, measured 5 of 5 on the same gate.
+            //
+            // THE DIFFERENCE IS WHETHER THE MODEL HAS MATERIAL. Out-of-range resolves nothing, so asking
+            // is the only move available. Here nineteen chapters resolved and six briefs rode, and the
+            // BOOK section's own standing instruction is to answer from those briefs - so a bare "ask"
+            // is a second instruction competing with a prompt full of content, and the content wins. That
+            // is the collision shape this prompt has three recorded instances of, and the recorded remedy
+            // is to SCOPE the demand that has no honest referent rather than to out-shout it: telling the
+            // model not to use six briefs it can see is exactly such a demand.
+            //
+            // SO THE NOTE NOW GIVES THE ANSWER ITS HONEST FRAME instead of forbidding it. The defect the
+            // author actually felt was never "it answered" - it was that the answer read as complete while
+            // thirteen more chapters carried the same name and nothing said so. Stating the TOTAL is what
+            // closes that, and it is a fact only this note has: the briefs cannot show it, because the
+            // ones that did not ride are precisely what is missing from the prompt.
+            var total = ambiguity.CandidateOrders.Count;
+
+            parts.Add(hebrew
+                ? $"{total} פרקים בספר הזה נקראים {reference}, והתקצירים שלמטה מכסים {rode.Count} מהם " +
+                  $"(פרקים {positions}{tail}); ענה מתוכם, אמור על אילו פרקים אתה מדבר ושיש בספר פרקים " +
+                  "נוספים באותו שם, והצע לצמצם לפרק אחד"
+                : $"{total} chapters of this book are named {reference}, and the briefs below cover " +
+                  $"{rode.Count} of them (chapters {positions}{tail}); answer from those, say which " +
+                  "chapters you are describing and that other chapters share the name, and offer to " +
+                  "narrow to one");
+        }
 
         return parts.Count == 0 ? null : string.Join("; ", parts) + ".";
     }
 
-    /// <summary>
-    /// The note the BOOK section carries when the question was about a chapter and NO chapter resolved
-    /// (chatbot phase B, d2 section (5)). English, like every other line of that section: none of it is
-    /// user-facing, and the RULE governing what the model does with a note lives in both languages in
-    /// <c>ProductChatPrompt</c>'s grounding string.
-    /// </summary>
-    internal const string NoChapterIdentifiedNote =
-        "the question is about a chapter and no chapter was identified: none was named and none is open.";
+    /// <summary>An ordinary list join ("5 and 6", "5, 6 and 7"; he: "5 ו-6", "5, 6 ו-7"), not the flat
+    /// " and "-chain that let "1 and 2 and 3 and 4 and 5 and 3 more" read as five coordinate items with no
+    /// visible end. Two items stay exactly "a and b" - the two-candidate case that four other test classes
+    /// assert byte-for-byte - and three or more get commas with a single final conjunction.</summary>
+    private static string JoinWithFinalAnd(string language, IReadOnlyList<string> items)
+    {
+        // "ו-" and not " ו " : Hebrew prefixes the conjunction to the word, and before a NUMERAL the maqaf
+        // is what keeps "ו6" from being read as one token.
+        var and = ChatLanguage.IsHebrew(language) ? " ו-" : " and ";
+        if (items.Count <= 2) return string.Join(and, items);
+        return string.Join(", ", items.Take(items.Count - 1)) + and + items[^1];
+    }
+
+    /// <summary>How many candidate chapters an ambiguity note names before it summarises the rest. Five is
+    /// enough for every numbering collision a real manuscript produces and short enough that the 32-way
+    /// shared-title case stays a sentence.</summary>
+    private const int MaxNamedAmbiguityCandidates = 5;
 
     /// <summary>
-    /// The ONE note line the BOOK section carries, whichever of the two notes applies.
+    /// The note the BOOK section carries when the question was about a chapter and NO chapter resolved
+    /// (chatbot phase B, d2 section (5)). The RULE governing what the model does with a note lives in both
+    /// languages in <c>ProductChatPrompt</c>'s grounding string.
+    ///
+    /// <para>IT WAS A CONST AND IT SAID "English, like every other line of that section: none of it is
+    /// user-facing" (be-c04). BOTH halves of that were false. The section had already stopped being wholly
+    /// English at <see cref="AuthorFacingChapterName"/>, and the grounding clause puts a note's content in
+    /// the author's answer, so the note is user-facing by contract - see <see cref="BookSectionNote"/> for
+    /// the argument, the measurement behind it and the part that is still unmeasured. This note is the one
+    /// of the three that carries no book data at all, so nothing about it forced the change; it is
+    /// localized because it shares the channel and a channel with two language policies is how two adjacent
+    /// layers ship opposite rules on one construct.</para>
+    /// </summary>
+    internal static string NoChapterIdentifiedNote(string language)
+        => ChatLanguage.IsHebrew(language)
+            ? "השאלה נוגעת לפרק ולא זוהה אף פרק: לא צוין פרק ואין פרק פתוח."
+            : "the question is about a chapter and no chapter was identified: none was named and none is open.";
+
+    /// <summary>
+    /// The clarify note for the one state where the author DID name a chapter and the book does not have
+    /// it ("פרק 40" on a 32-chapter book). Distinguished from <see cref="NoChapterIdentifiedNote"/>
+    /// because the two are different failures and the flat one reads as a falsehood here: the author named
+    /// a chapter perfectly clearly, so "none was named" would be the prompt contradicting the question,
+    /// which is the shape that makes a model argue with its own author. Saying which number missed and
+    /// what the book's numbers RANGE over is also what lets the ask be specific ("did you mean chapter
+    /// 31?") instead of "which chapter do you mean?" about a number the author just typed.
+    /// </summary>
+    /// <param name="language">The ANSWER's language; see <see cref="BookSectionNote"/>.</param>
+    /// <param name="chapterCount">The book's chapter count. Assumed &gt; 1: the only production caller
+    /// is <see cref="BookSectionNote"/>, gated on <c>NeedsChapterClarification</c>, which
+    /// <see cref="BookArtifactSelector.NeedsClarification"/> never sets unless <c>chapterCount &gt; 1</c>.
+    /// A test that constructs <c>BookQuestionKeys</c> directly with a lower count is out of contract, not
+    /// a state this method renders for.</param>
+    internal static string OutOfRangeChapterNote(
+        string language, IReadOnlyList<int> unresolvedNumbers, int chapterCount)
+    {
+        var hebrew = ChatLanguage.IsHebrew(language);
+
+        // THE SAME JOIN AS THE AMBIGUITY NOTE'S (final-r01). This used to be a flat " and "-chain, which is
+        // the shape be-f04 removed from ChapterNumberNote five lines above for reading as a broken list -
+        // and a question naming three missed chapters ("in chapter 40, in chapter 41 and in chapter 42",
+        // three chapter WORDS, so three numbers) reaches it: "chapters 40 and 41 and 42". Two numbers render
+        // byte-identically either way, which is the case the existing pins assert.
+        var named = JoinWithFinalAnd(
+            language, unresolvedNumbers.OrderBy(n => n).Select(n => n.ToString()).ToList());
+
+        // AND THE NOUN AGREES WITH THE LIST. The joined string is one or many numbers, so a fixed singular
+        // shipped "את פרק 40 ו-41" / "chapter 40 and 41" - a singular noun over a plural list. Branch on the
+        // COUNT and not on the joined text: the list is already flattened by here and re-reading it for a
+        // separator would be deriving what the caller already knows. Hebrew agrees its relative clause too
+        // ("שאינם קיימים"), which is the same disagreement one word later; English's "which this book does
+        // not have" is number-neutral and needs nothing.
+        var many = unresolvedNumbers.Count > 1;
+
+        return hebrew
+            ? $"השאלה מציינת את {(many ? "פרקים" : "פרק")} {named}, " +
+              $"{(many ? "שאינם קיימים" : "שאינו קיים")} בספר הזה (פרקי הספר הזה ממוספרים מ-1 עד " +
+              $"{chapterCount}); אמור זאת ושאל לאיזה פרק התכוונו."
+            : $"the question names {(many ? "chapters" : "chapter")} {named}, which this book does not " +
+              $"have (this book's chapters are numbered 1 to {chapterCount}); say so and ask which " +
+              "chapter was meant.";
+    }
+
+    /// <summary>
+    /// The ONE note line the BOOK section carries, whichever of the notes applies.
     ///
     /// <para>THEY SHARE A CHANNEL BECAUSE THEY ARE PROVABLY DISJOINT, not because a collision was judged
-    /// unlikely. The ambiguity note fires only when <c>AmbiguousChapterNumbers</c> is non-empty, and both
-    /// candidates it names are already resolved into <c>ChapterOrders</c> (see that field's own doc), so
+    /// unlikely. The ambiguity note fires only when <c>AmbiguousChapterNumbers</c> is non-empty, and every
+    /// candidate it names is already resolved into <c>ChapterOrders</c> (see that field's own doc), so
     /// firing means <c>ChapterOrders.Count</c> is never 0. <c>NeedsChapterClarification</c> instead
     /// requires <c>ChapterOrders.Count == 0</c>. The two fields' own preconditions cannot both hold, so
     /// there is no ordering to decide and no "both fired" state to render - and the model is never handed
     /// two notes to arbitrate between, which is the shape of collision this prompt has already been burned
-    /// by twice.</para>
+    /// by twice. The two CLARIFY notes are disjoint from each other by their own condition
+    /// (<c>UnresolvedChapterNumbers</c> empty or not) and are the same note in two wordings, not two
+    /// notes.</para>
+    ///
+    /// <para>IT TAKES THE SELECTION RATHER THAN FIELDS PICKED OFF IT (w9), which is what keeps a note that
+    /// is ABOUT what the question resolved to from being assembled out of arguments a call site chose. It
+    /// also means adding a note needs no new parameter at any layer between here and the selector.</para>
+    ///
+    /// <para>EVERY NOTE ON THIS CHANNEL IS WRITTEN IN THE ANSWER'S LANGUAGE (be-c04), AND THAT IS THE
+    /// SECOND EXCEPTION TO "the BOOK section is machine-facing" - <see cref="AuthorFacingChapterName"/> is
+    /// the first. THE REASON IS THE GROUNDING CLAUSE, WHICH SAYS "a note in the BOOK section about what the
+    /// question could have meant belongs in the answer: do what the note says". A note is not COPIED the
+    /// way that line is - its instruction half is addressed to the model and would be nonsense repeated at
+    /// the author ("ask the author which of them they mean") - but its FACT half (which chapters share the
+    /// name, which number the book does not have) has to reach the author, so the model relays it, and
+    /// relaying an English sentence into a Hebrew answer is a TRANSLATION. Translation is a derivation, and
+    /// the standing result of this whole series is that the model copies what is rendered and gets what it
+    /// is asked to derive wrong.</para>
+    ///
+    /// <para>WHAT IS MEASURED AND WHAT IS NOT, STATED PLAINLY. NO GATE HAS MEASURED THE LEAK RATE FOR THESE
+    /// THREE STRINGS. What is measured is the sibling case and one bystander: <c>final-r05</c> localized
+    /// <see cref="AuthorFacingChapterName"/> and <c>final-r06</c> measured Latin "chapter N" inside Hebrew
+    /// prose falling from 7 of 33 (21%) to 0 of 48 (0%), Fisher p about 0.0015 - the clearest result in the
+    /// series - with the Hebrew frame then surfacing verbatim in the answers; and <c>final-r06</c> also
+    /// found answers echoing "almost phrase for phrase" the grounding clause that is conditioned on a note,
+    /// on 15 runs where no note was composed at all. So prose on this exact topic demonstrably reaches the
+    /// author. Both are evidence about the class, NOT a measurement of these strings, and the leak they
+    /// predict here is partial by construction: the frame words are English, the quoted TITLE is already
+    /// the book's own, and the numbers are language-neutral.</para>
+    ///
+    /// <para>AND IT IS THE ANSWER'S LANGUAGE, NOT THE BOOK'S, for exactly the reason
+    /// <see cref="AuthorFacingChapterName"/> gives at length: <c>BaselineLanguageResolver.Normalize(
+    /// book.Language)</c> is a RETRIEVAL key that resolves blank to Hebrew, so keying on it would put a
+    /// Hebrew note into an English answer on the cross-language turn the <c>g1</c> F-2 fix exists to serve.
+    /// The value arrives from <c>ProductChatBudget.Compose</c>, which already holds
+    /// <c>ChatLanguage.Detect(question, request.Language)</c> - the same value that picks the grounding
+    /// clause this note is governed by, which is what keeps an instruction and its referent in one
+    /// language.</para>
     /// </summary>
+    /// <param name="language">The ANSWER's language (<c>ChatLanguage.Detect</c>), first for the same
+    /// reason it is first on the three chapter-scoped producers.</param>
     public static string? BookSectionNote(
-        IReadOnlyList<int>? ambiguousChapterNumbers,
-        IReadOnlyList<BookArtifactBlock>? blocks,
-        bool needsChapterClarification)
-        => needsChapterClarification
-            ? NoChapterIdentifiedNote
-            : ChapterNumberNote(ambiguousChapterNumbers, blocks);
+        string language,
+        BookArtifactSelector.BookQuestionKeys? keys,
+        IReadOnlyList<BookArtifactBlock>? blocks)
+    {
+        if (keys == null) return null;
+
+        if (keys.NeedsChapterClarification)
+        {
+            return keys.UnresolvedChapterNumbers.Count > 0
+                ? OutOfRangeChapterNote(language, keys.UnresolvedChapterNumbers, keys.ChapterCount)
+                : NoChapterIdentifiedNote(language);
+        }
+
+        return ChapterNumberNote(language, keys.AmbiguousChapterNumbers, blocks);
+    }
 
     /// <summary>The chapter order a chapter-scoped ref names, for the three chapter-keyed vocabularies.
     /// False for <c>register</c>, <c>status:review</c>, a finding guid and anything else.</summary>

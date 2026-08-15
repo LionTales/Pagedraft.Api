@@ -65,20 +65,44 @@ public class ProductChatBookSelectionTests
     // ─── Chapter references ─────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// A bare chapter number is AMBIGUOUS in this codebase and the selector says so by selecting both
-    /// readings: <c>Chapter.Order</c> is 0-based throughout, authors count from 1, and guessing which
-    /// the author meant would be a silent 50% error rate on the single most common book question.
+    /// A bare chapter number selects ONE chapter (w9). It used to select both readings - order 2 and
+    /// order 3 for "chapter 3" - on the grounds that <c>Chapter.Order</c> is 0-based, authors count from
+    /// 1, and guessing would be a silent 50% error rate. The premise was wrong: the author is not
+    /// guessable-between, they count from 1 on every surface the product shows them
+    /// (<c>chapterDisplayNumber</c>), so the pair was a 100% rate of retrieving one chapter they did not
+    /// ask about - which then halved the raw-text budget and withheld both chapters' briefs.
+    ///
+    /// <para>No title in this fixture names chapter 3, so this is the COUNTING half of the rule. The title
+    /// half is pinned below.</para>
     /// </summary>
     [Theory]
     [InlineData("What happens in chapter 3?")]
     [InlineData("מה קורה בפרק 3?")]
     [InlineData("Summarise ch. 3 for me")]
-    public void AnExplicitChapterNumber_SelectsBothReadingsOfIt(string question)
+    public void AnExplicitChapterNumber_SelectsTheOneChapterTheAuthorCounted(string question)
     {
         var keys = Select(question);
 
-        Assert.Equal(new[] { 2, 3 }, keys.ChapterOrders);
+        Assert.Equal(new[] { 2 }, keys.ChapterOrders);
         Assert.True(keys.HasLocationCue);
+    }
+
+    /// <summary>
+    /// AND A TITLE THAT NAMES THE NUMBER OUTRANKS THE COUNTING (w9). This fixture is built so the two
+    /// rules disagree: the chapter titled "Chapter 5" sits at order 4 and the one titled "פרק 2" sits at
+    /// order 1, so counting would answer "chapter 5" with order 4 by luck and "chapter 2" with order 1 by
+    /// luck - here they agree. What cannot agree by luck is that the title is CONSULTED FIRST, which the
+    /// prologue-offset case in <c>ProductChatBookScopingTests</c> pins where the two really diverge.
+    /// </summary>
+    [Theory]
+    [InlineData("What happens in Chapter 5?", 4)]
+    [InlineData("מה קורה בפרק 2?", 1)]
+    public void ANumberedTitle_IsWhatTheNumberResolvesTo(string question, int expectedOrder)
+    {
+        var keys = Select(question);
+
+        Assert.Equal(new[] { expectedOrder }, keys.ChapterOrders);
+        Assert.Empty(keys.AmbiguousChapterNumbers);
     }
 
     /// <summary>
@@ -135,10 +159,12 @@ public class ProductChatBookSelectionTests
 
         Assert.Empty(keys.ChapterOrders);
 
-        // VACUITY GUARD: those two chapters ARE reachable, by number, so the emptiness above is the
-        // distinctiveness rule and not an unreachable fixture.
-        Assert.Contains(4, Select("what is in chapter 4").ChapterOrders);
-        Assert.Contains(1, Select("what is in chapter 1").ChapterOrders);
+        // VACUITY GUARD: those two chapters ARE reachable, by the number their own title names, so the
+        // emptiness above is the distinctiveness rule and not an unreachable fixture. (w9 made this guard
+        // stronger than it was: it used to reach them through the 0-based/1-based pair, which touched them
+        // only as the second candidate of a number that meant a different chapter.)
+        Assert.Contains(4, Select("what is in chapter 5").ChapterOrders);
+        Assert.Contains(1, Select("what is in פרק 2").ChapterOrders);
     }
 
     /// <summary>
@@ -252,11 +278,15 @@ public class ProductChatBookSelectionTests
 
     // ─── Escalation: the seam that licenses raw-text answers ────────────────────────────────────
 
-    /// <summary>A question NAMING a chapter earns that chapter's raw text.</summary>
+    /// <summary>
+    /// A question NAMING a chapter earns THAT chapter's raw text - one chapter, so the whole escalation
+    /// slice goes to it (w9). It used to earn two, and the shared 3,500-token slice was split between
+    /// them, which is how a named chapter arrived as a thin excerpt with its brief withheld.
+    /// </summary>
     [Fact]
     public void AChapterNamingQuestion_Escalates()
     {
-        Assert.Equal(new[] { 2, 3 }, Select("What exactly does Miriam say in chapter 3?").EscalationChapterOrders);
+        Assert.Equal(new[] { 2 }, Select("What exactly does Miriam say in chapter 3?").EscalationChapterOrders);
     }
 
     /// <summary>

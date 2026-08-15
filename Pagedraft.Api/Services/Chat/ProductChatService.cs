@@ -192,7 +192,7 @@ public class ProductChatService
         // guides and artifacts are what the citation is computed against.
         var composed = ProductChatBudget.Compose(
             language, selected, history, question, InputTokenBudget(), book.Blocks, book.BookTitle,
-            book.Keys.AmbiguousChapterNumbers, book.Keys.NeedsChapterClarification);
+            book.Keys);
         var instruction = composed.Instruction;
         selected = composed.Guides;
         LogTrim(composed, history.Count);

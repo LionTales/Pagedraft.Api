@@ -540,11 +540,12 @@ public class ProductChatChapterNumberingTests
     /// The ONE line of the BOOK section the model is instructed to CARRY INTO ITS ANSWER states its
     /// numbers the way the author counts, not the way the wire does.
     ///
-    /// <para>The author writing "chapter 5" grounds orders 4 and 5, which are the author's chapters 5 and
-    /// 6. The note used to name the raw orders ("both chapter 4 and chapter 5 were retrieved"), which,
-    /// beside a grounding clause that now says to give the author's number, would be two emphatic
-    /// instructions that disagree - and the author who wrote "5" would be told their question might have
-    /// meant "4", which is a number they never used.</para>
+    /// <para>WHAT THE NOTE IS ABOUT CHANGED IN w9, AND THIS PROPERTY DID NOT. It used to fire for a bare
+    /// "chapter 5" (the selector kept the 0-based and 1-based readings side by side); that ambiguity was
+    /// manufactured by the selector and is now resolved deterministically, so the note fires only when the
+    /// BOOK really has two chapters named the same number. Either way it names them in the author's
+    /// counting: orders 4 and 5 are their chapters 5 and 6, and the author who wrote "5" is never told
+    /// their question might have meant "4", a number no surface in the product ever showed them.</para>
     /// </summary>
     [Fact]
     public void TheAmbiguityNote_NamesTheAuthorsTwoChapters_NotTheWiresTwoOrders()
@@ -555,13 +556,28 @@ public class ProductChatChapterNumberingTests
             new BookArtifactBlock(BookArtifactKind.ChapterText, new[] { "chapter-text:5" }, "five", 1)
         };
 
-        var note = BookArtifactBlocks.ChapterNumberNote(new[] { 5 }, both);
+        var ambiguity = new[]
+        {
+            new BookArtifactSelector.ChapterReferenceAmbiguity("chapter 5", new[] { 4, 5 }, 5)
+        };
+
+        var note = BookArtifactBlocks.ChapterNumberNote("en", ambiguity, both);
 
         Assert.NotNull(note);
-        Assert.Contains("the author's chapter 5 or their chapter 6", note!, StringComparison.Ordinal);
+        Assert.Contains("(chapters 5 and 6)", note!, StringComparison.Ordinal);
 
         // And it no longer hands the model the raw orders it is being asked not to speak.
         Assert.DoesNotContain("chapter 4", note, StringComparison.Ordinal);
+
+        // THE SAME PROPERTY IN HEBREW (be-c04), where it has a second half: the note is now written in the
+        // answer's language, so it must state the author's numbering AND carry no Latin "chapter N" for a
+        // Hebrew reader to trip over - the exact fragment final-r05/final-r06 removed from the block line.
+        var hebrew = BookArtifactBlocks.ChapterNumberNote("he", ambiguity, both);
+
+        Assert.NotNull(hebrew);
+        Assert.Contains("(פרקים 5 ו-6)", hebrew!, StringComparison.Ordinal);
+        Assert.DoesNotContain("chapter", hebrew, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("פרק 4", hebrew, StringComparison.Ordinal);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════
