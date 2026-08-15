@@ -247,7 +247,7 @@ public partial class ProductChatBookFortyChapterFixtureTests
     private static string BuildLongChapterText()
     {
         var sb = new StringBuilder();
-        // Sized to comfortably exceed the 3,500-token escalation slice ALONE (d1 measured a real max
+        // Sized to comfortably exceed the 7,200-token escalation slice ALONE (d1 measured a real max
         // chapter at ~14,006 tokens; this targets the same order of magnitude so the excerpt path is
         // exercised, not merely approached).
         while (ProductChatBudget.EstimateTokens(sb.ToString()) < 14_000)

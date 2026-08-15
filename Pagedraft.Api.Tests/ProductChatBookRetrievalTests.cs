@@ -530,8 +530,20 @@ public class ProductChatBookRetrievalTests
     [Fact]
     public async Task AnAmbientChapterTooLargeToRideWhole_ExcerptsAndSaysSo()
     {
-        var longChapter = string.Join(
-            " ", Enumerable.Repeat("מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.", 200));
+        // SIZED OFF THE BUDGET CONSTANT, NOT OFF A LITERAL REPEAT COUNT (w9). It used to be a flat 200
+        // repetitions, which was "too large" only against the escalation slice of the day: raising that
+        // slice from 3,500 to 7,200 made this fixture ride WHOLE and the test failed while asserting
+        // nothing was wrong with the code. Deriving the length from the constant keeps "too large to ride
+        // whole" true by construction, whatever the slice becomes.
+        var sentence = "מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.";
+        var repeats = 1;
+        while (ProductChatBudget.EstimateTokens(string.Join(" ", Enumerable.Repeat(sentence, repeats)))
+               <= BookChatExcerpts.EscalationBudgetTokens)
+        {
+            repeats *= 2;
+        }
+
+        var longChapter = string.Join(" ", Enumerable.Repeat(sentence, repeats));
 
         using var provider = BuildProvider();
         var bookId = Seed(

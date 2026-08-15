@@ -170,8 +170,9 @@ public partial class ProductChatBookFortyChapterFixtureTests
 
     /// <summary>
     /// SHAPE 3: a question escalating a WHOLE chapter. "chapter 40" resolves ONLY to order 39 (order 40
-    /// does not exist, so the usual 0-based/1-based dual match collapses to one), and chapter 39's raw
-    /// text is short enough to fit the whole 3,500-token escalation slice.
+    /// does not exist; w9 resolves a bare number to the one chapter the author counted to, not a
+    /// manufactured order-pair), and chapter 39's raw text is short enough to fit the whole 7,200-token
+    /// escalation slice.
     /// </summary>
     [Fact]
     public void Shape3_EscalatesAWholeChapter_AndTheEscalatedTextSurvivesTrimming()
@@ -207,7 +208,7 @@ public partial class ProductChatBookFortyChapterFixtureTests
     /// <summary>
     /// SHAPE 4: a question escalating an OVER-BUDGET chapter. "chapter 0" resolves ONLY to order 0 (order
     /// -1 does not exist), and chapter 0's raw text (~14,000 tokens, matching d1's measured real max of
-    /// ~14,006) alone exceeds the whole 3,500-token escalation slice, so it must degrade to a labeled
+    /// ~14,006) alone exceeds the whole 7,200-token escalation slice, so it must degrade to a labeled
     /// excerpt rather than ride along whole.
     /// </summary>
     [Fact]
@@ -375,7 +376,7 @@ public partial class ProductChatBookFortyChapterFixtureTests
     /// THE PRICE OF MAKING THE AUTHOR'S OWN SUMMARY REACHABLE (g1 F-7), measured rather than argued.
     /// An escalated chapter's structured brief is still withheld; what is added is the author's own flat
     /// summary as a block of its own, and this is the WORST case for it - the over-budget escalation from
-    /// shape 4, which already spends the whole 3,500-token escalation slice, run WITH phase A's full
+    /// shape 4, which already spends the whole 7,200-token escalation slice, run WITH phase A's full
     /// 8-turn Hebrew history on top of it.
     ///
     /// <para>The measurement matters because "we cannot afford to carry both" would have been the obvious
@@ -497,6 +498,35 @@ public partial class ProductChatBookFortyChapterFixtureTests
                 "findings first, then the analysis history, then a structured chapter brief - because " +
                 "everything above them either is the manuscript itself (the escalated text, the author's " +
                 "own summary) or is what turns a name into a person (the register)."));
+    }
+
+    /// <summary>
+    /// be-f05: PIN THE CEILING, DO NOT RE-MEASURE IT. <see cref="BookChatExcerpts.EscalationBudgetTokens"/>
+    /// is bounded above only by prose: the docblock says 8,000 was measured RED against
+    /// <see cref="TheAuthorSummaryOfAnEscalatedChapter_CostsLittle_AndDropsNothing"/> above (the trimmer
+    /// reached past findings and history and dropped the register, BookArtifactKind 4, the first tier that
+    /// test says must not drop), but nothing enforced that a smaller raise - say 7,500 - could not drift
+    /// past it silently, because that fixture test only runs the constant AS IT STANDS. This is a cheap
+    /// constant guard, not a re-derivation: it does not recompose the 40-chapter fixture (that measurement
+    /// is expensive and the fixture above already owns it), it just pins the number so a raise is a
+    /// deliberate two-file edit - this constant AND a re-run of the fixture test above - rather than a
+    /// one-character one.
+    /// </summary>
+    [Fact]
+    public void EscalationBudgetTokens_DoesNotDriftAboveTheMeasuredCeiling()
+    {
+        Assert.True(
+            BookChatExcerpts.EscalationBudgetTokens <= 7_200,
+            $"EscalationBudgetTokens is {BookChatExcerpts.EscalationBudgetTokens}, above the measured " +
+            "ceiling of 7,200. This constant was measured, not chosen: raising it to 8,000 was tried " +
+            $"during review and went RED on " +
+            $"{nameof(TheAuthorSummaryOfAnEscalatedChapter_CostsLittle_AndDropsNothing)} above, because on " +
+            "the deliberately saturated 40-chapter case the trimmer reached past the findings and the " +
+            "history tiers and dropped the REGISTER (BookArtifactKind 4) - the first tier that test's " +
+            "positive assertions say must not drop. Raising this constant is not a one-character edit: " +
+            $"re-run {nameof(TheAuthorSummaryOfAnEscalatedChapter_CostsLittle_AndDropsNothing)} at the new " +
+            "value and re-read its assertions (Assert.Contains(BookArtifactRefs.Register, carried) and the " +
+            "DroppedBookRefs allow-list) before moving this pin. Do not just edit this number.");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════
