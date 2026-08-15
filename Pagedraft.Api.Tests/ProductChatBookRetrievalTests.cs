@@ -385,8 +385,9 @@ public class ProductChatBookRetrievalTests
             chapterTextForLastChapter: "מרים פתחה את היומן והבינה שכתב היד אינו של אביה כלל.",
             authorEditedSummaryForLastChapter: authorSummary);
 
-        // "פרק 8" resolves ONLY to order 7 on an 8-chapter book (order 8 does not exist), so the usual
-        // 0-based/1-based dual match collapses to one chapter and these assertions name a single target.
+        // "פרק 8" resolves ONLY to order 7 on an 8-chapter book (order 8 does not exist; w9 resolves a
+        // bare number to the one chapter the author counted to, not the manufactured 0-based/1-based
+        // pair), so these assertions name a single target.
         var context = await ReadAsync(provider, bookId, HebrewQuestionAboutChapter, answerLanguage: "he");
         var refs = context.References;
 
@@ -495,7 +496,16 @@ public class ProductChatBookRetrievalTests
 
         // VACUITY GUARD: the stale number names a REAL chapter of this book, so it could have been used -
         // the id winning is a decision, not the only option that would have resolved.
-        Assert.Contains(BookArtifactRefs.ChapterBrief(2), context.References);
+        //
+        // ASSERTED BY RESOLVING THAT NUMBER ON ITS OWN (w9). It used to be asserted as "chapter 2's brief
+        // is in the prompt", which stopped being true for a better reason than this test is about: a
+        // question that reaches a chapter no longer drags the briefs of chapters it never named
+        // (BookChatContextReader.RankChapterBriefs). Sending the same stale order with NO id proves the
+        // same thing more directly - order 2 really is resolvable on this book - and it cannot be
+        // falsified by an unrelated change to which briefs ride.
+        var orderAlone = await ReadAsync(
+            provider, bookId, HebrewDeicticQuestion, "he", new AmbientChapterContext(null, ChapterOrder: 2));
+        Assert.Equal(new[] { 2 }, orderAlone.Keys.ChapterOrders);
     }
 
     /// <summary>
