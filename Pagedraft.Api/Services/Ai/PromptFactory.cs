@@ -60,11 +60,22 @@ public partial class PromptFactory
     private const string HebrewBookSystem =
         "אתה מומחה ספרותי המנתח ספרים שלמים. אתה מסוגל לזהות ז'אנרים, דמויות, מבנה עלילתי, ולספק תובנות מעמיקות על יצירה ספרותית. השב תמיד בעברית בלבד.";
 
-    // Neutral assistant system for free-form Custom prompts and QA (AiTaskType.GenericChat) plus Translation.
+    // Neutral assistant system for AiTaskType.GenericChat plus Translation.
     // These tasks must NOT reuse HebrewSystemBase: that is a PROOFREADER system ("correct errors, return only
     // the corrected text") and it sabotages a free-form question - the model proofreads the chapter instead of
     // answering, returning a near-empty fragment. A general literary-assistant framing lets the user's
     // instruction drive the response.
+    //
+    // WHO RECEIVES THIS SYSTEM (re-inventoried 2026-08-15, c2-genericchat-adjudication - this comment used to
+    // say "free-form Custom prompts and QA", naming exactly the two callers Wave 3's w7 stripped of their UI,
+    // which made a live rung read as dead): the suggestion Why? button
+    // (UnifiedAnalysisService.ExplainSuggestionAsync, TaskType=GenericChat, live client caller, the reason the
+    // rung is kept), plus AnalysisType.Custom and AnalysisType.QA, which are still served but API-reachable
+    // only since w7. Pinned by Pagedraft.Api.Tests/GenericChatCallerSetTests.
+    //
+    // The explain path sends this system with GetExplainSuggestionPrompt as its instruction, so a change here
+    // moves the Why? answers too - not only Custom/QA. Both strings are byte-pinned by
+    // PromptFactoryByteIdentityPinTests.
     private const string HebrewAssistantSystem =
         "אתה עוזר ספרותי. בצע את ההנחיה שהמשתמש נותן לגבי הטקסט הנתון - ענה על שאלות, סכם או נתח לפי הבקשה, בהתבסס על תוכן הטקסט. השב תמיד בעברית בלבד.";
 
