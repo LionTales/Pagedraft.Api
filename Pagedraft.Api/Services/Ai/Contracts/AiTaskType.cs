@@ -8,6 +8,33 @@ public enum AiTaskType
     LinguisticAnalysis,
     Summarization,
     Translation,
+
+    /// <summary>
+    /// Free-form chapter-scoped work on the user's OWN text. CALLER SET, re-inventoried 2026-08-15
+    /// (c2-genericchat-adjudication), because every written record of this rung named only the two callers
+    /// Wave 3's <c>w7</c> stripped of their UI, which makes a live rung read as a dead one:
+    /// <list type="number">
+    ///   <item><description><c>UnifiedAnalysisService.ExplainSuggestionAsync</c> - the suggestion <b>Why?</b>
+    ///     button. Builds its <see cref="AiRequest"/> with this task type directly, still has a live client
+    ///     caller, was named in none of the old breadcrumbs, and is untouched by <c>w7</c>. It is the ONLY
+    ///     GenericChat consumer with a user-visible surface today, and the reason this rung is KEPT.</description></item>
+    ///   <item><description><see cref="AnalysisType.Custom"/> - mapped by <c>AnalysisTaskMapping</c>. The API
+    ///     still accepts a <c>customPrompt</c> / <c>"Custom"</c> type; <c>w7</c> removed the client surface
+    ///     only, so this is API-reachable only.</description></item>
+    ///   <item><description><see cref="AnalysisType.QA"/> - <c>POST /api/books/{bookId}/ask</c>, still served;
+    ///     <c>w7</c> removed the dashboard ask card, so this too is API-reachable only.</description></item>
+    /// </list>
+    /// <see cref="Translation"/> shares this task's prompt arm in <c>PromptFactory.GetPrompt</c> but has no
+    /// live producer: its only construction site is <c>AiAnalysisService.TemplateTypeToTaskType</c>, and that
+    /// service is registered in DI and injected nowhere (<c>UnifiedAnalysisService</c> superseded it).
+    ///
+    /// All three live surfaces are pinned by <c>Pagedraft.Api.Tests/GenericChatCallerSetTests</c>, so a
+    /// retirement pass has to turn them red rather than conclude from a stale comment that nothing calls this.
+    /// RETIREMENT WOULD BE A BEHAVIOR CHANGE and needs its own decision, not a cleanup batch.
+    ///
+    /// Tuned by <c>Ai:ProviderSettings:Ollama_GenericChat</c> (NumCtx 16384). Do NOT widen that window
+    /// without a measurement plan - chatbot phase B's standing caveat binds this rung too.
+    /// </summary>
     GenericChat,
 
     /// <summary>
@@ -58,8 +85,8 @@ public enum AiTaskType
     /// 16384 - d1's whole-file retrieval token math is against that 16384 window, so do not lower it).
     ///
     /// DELIBERATELY NOT GenericChat, even though that value exists and would "work". GenericChat is a
-    /// live route today (AnalysisType.QA and AnalysisType.Custom, both chapter-scoped questions about
-    /// the user's OWN text, plus Translation), it has its own tuned rung, and its system message
+    /// live route today (see <see cref="GenericChat"/> for the caller set, re-inventoried after Wave 3's
+    /// w7), it has its own tuned rung, and its system message
     /// (PromptFactory's HebrewAssistantSystem/EnglishAssistantSystem) carries no grounding, citation
     /// or refusal semantics at all. Sharing the value would either bolt this feature's grounding
     /// contract onto chapter QA and Translation, or force a branch on some other signal inside
