@@ -12,21 +12,23 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > (`src/pagedraft-client`) as siblings. A reader of only this repo will not have that path on disk;
 > ask the owner for the plan file directly.
 >
-> **Wave 3 is SHIPPED as of 2026-08-13.** Twelve of the thirteen decisions shipped; Q12 split and its
-> second half did not.
+> **Wave 3 is SHIPPED as of 2026-08-13. Q12's second half closed 2026-08-15, so all thirteen decisions
+> are now SHIPPED.** Q12 split into two parts when Wave 3 itself closed (b shipped in `w3`, a did not);
+> a shipped separately as `small-fixes-batch-2026-08-14`'s `f1-q12-scope-statement`, one release later.
 >
-> **THREE THINGS ARE STILL OPEN, not one.** This headline used to say "the one thing still open across
+> **TWO THINGS ARE STILL OPEN, not three.** This headline used to say "the one thing still open across
 > the whole wave is a human reading, not code", which its own table below contradicted on the same
-> screen. Corrected 2026-08-14. What is actually open:
+> screen. Corrected 2026-08-14; Q12's code half closed 2026-08-15 and is no longer one of them. What is
+> actually open:
 >
-> 1. **Q12's scope-statement half is NOT SHIPPED, and it is code.** `editor-page.component.ts`'s
->    `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of scene selection,
->    so the exact contradiction Q12 was written to resolve is still reproducible today. See the Q12 row.
-> 2. **The Q10 sub-decision is undecided.** Whether the first-run overlay eventually defers to the
+> 1. **The Q10 sub-decision is undecided.** Whether the first-run overlay eventually defers to the
 >    chatbot, embeds it, or stays static is open; the static overlay is what ships. See the Q10 row.
-> 3. **The Hebrew native-speaker sweep**, which is the human reading: the guides corpus, the strings the
->    `w7` removals added, and three export failure strings reworded 2026-08-14. Tracked at
->    `HEBREW_NATIVE_REVIEW.md` (see the pointer at the foot of this block).
+> 2. **The Hebrew native-speaker sweep**, which is the human reading: the guides corpus, the strings the
+>    `w7` removals added, three export failure strings reworded 2026-08-14, and now two new DRAFT strings
+>    in Q12's getter: `סצנה נוכחית` / "This scene" (the Q12 close, 2026-08-15) and `לא נבחרה יחידה` /
+>    "No unit selected" (a follow-up fix for the getter's third, previously-unhandled scope state,
+>    2026-08-16). Tracked at `HEBREW_NATIVE_REVIEW.md` (see the pointer at the foot of this block; both
+>    strings are its group 7).
 >
 > | Q | Decision | Status as of 2026-08-13 |
 > |---|---|---|
@@ -41,7 +43,7 @@ Prepared 2026-08-02 for the design session. Audience: a designer who will not op
 > | Q9 | **C - rename the Summarize pass AND state on the surface** what it does and does not feed | **SHIPPED (w6).** As "Chapter recap" / "תמצית פרק", with the relationship statement on the run tab and on the book-briefs row. **The Hebrew is CLEARED, not draft:** the owner read it on 2026-08-11 and the load-bearing check passed, `תמצית` reading as distinct from `תקציר` (`תקצירי ספר`) to a native ear. Shipped on `client-wave3-orientation` / `api-wave3-orientation` |
 > | Q10 | **D - self-explaining build rows as the permanent mechanism + a first-run overlay** pointing at them | **SHIPPED (w2 + w6).** The rows explain themselves, state their prerequisite and offer the next action; the first-run overlay renders from the served `workflow-overview` guide, dismisses permanently per book and re-opens from a named affordance, all re-verified live 2026-08-13. **ONE SUB-DECISION STAYS OPEN as of 2026-08-13:** the chatbot can now tutor from this book's real build status, so whether the overlay eventually DEFERS to it, EMBEDS it, or stays static is undecided - see the update under Q10 below. The static overlay is what ships today |
 > | Q11 | **A - the tier control stays at the point of use**; the two passes where it vanishes get a disabled-with-reason state instead of absence | SHIPPED (w5) |
-> | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine | **SPLIT.** The running-state half SHIPPED (w3, moved into the spine). The scope-statement half is **NOT SHIPPED**: `editor-page.component.ts`'s `reviewScopeLabel` getter still reads "This chapter" / "פרק נוכחי" regardless of whether a scene is selected, while the adjacent `reviewContextMeta` getter correctly distinguishes "scene" / "chapter" - the exact contradiction this question was meant to resolve is still reproducible. Found during the f1 docs pass; not tracked by any prior w1-w8 todo |
+> | Q12 | One scene-aware scope statement replaces the label+subtitle pair; book-level running state moves into the spine | **SHIPPED.** The running-state half shipped in `w3` (moved into the spine). The scope-statement half shipped 2026-08-15 via `small-fixes-batch-2026-08-14`'s `f1-q12-scope-statement`: `editor-page.component.ts`'s `reviewScopeLabel` + `reviewContextMeta` getters, which disagreed with each other (the pill read "This chapter" / "פרק נוכחי" regardless of scene selection while the adjacent meta line correctly said "scene"), are retired in favour of one `reviewScopeStatement` getter that names the scene when one is selected and the chapter otherwise - the surface can no longer contradict itself. **A follow-up on 2026-08-16 (`small-fixes-batch-fixes-2026-08-16`'s `c01`) closed the getter's THIRD edit-mode state**, which the first fix left asserting a chapter: with no chapter resolved (an empty book, or a `selectedChapterId` matching nothing) the pill fell through to `פרק נוכחי` beside its own sibling label reading `בחר פרק`. Both getters now read one shared `resolvedScopeChapter`. **TWO** new Hebrew strings are DRAFT, both tracked at `HEBREW_NATIVE_REVIEW.md` group 7: `סצנה נוכחית` / "This scene" and `לא נבחרה יחידה` / "No unit selected" |
 > | Q13 | **A - first-run orientation is driven from the served guides** (`stage`/`id` frontmatter); the serving path is built by chatbot phase A.2, so this rides an existing dependency | **SHIPPED (w6)**, consuming the serving path chatbot phase A.2 built. All ten stage-to-guide links were re-verified landing on the right guide, in the right language, 2026-08-13. **A SECOND content source now exists (2026-08-12)**: the chatbot answers the same orientation questions from THIS book's real status rather than from generic guide prose - see the update under Q10 below. **A constraint this decision created and that the w8 gate then had to enforce:** the guides are a retrieval index as well as content, so a stage renamed in the app cannot simply be renamed in the guide headings - see the note under the deliberately-did-not-do list below |
 >
 > **What Wave 3 deliberately did not do:** no book-level rollup for stage 4 (Q2-A declined it, not
@@ -833,6 +835,12 @@ an answer too: explain the absence, or show a disabled state with a reason.
 - **Where book-level "running" state is shown when the book dashboard is not on screen.** Today it is
   a dot on two unrelated controls. Options: keep it on chrome, move it into the new spine, or defer
   entirely to the activity list. Depends on Q1.
+
+**Update, 2026-08-15: both halves are SHIPPED.** The running-state half landed in `w3` back in Wave 3
+itself. The scope-statement half took the third option listed above - one scope statement replacing
+both the pill and the subtitle - and shipped separately as `small-fixes-batch-2026-08-14`'s
+`f1-q12-scope-statement`, after Wave 3 had already reported shipped without it. See the Q12 row above
+for the exact getter and the new DRAFT Hebrew it introduced.
 
 ### Q13. How does first-run orientation reach the guides?
 
