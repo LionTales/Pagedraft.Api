@@ -102,19 +102,29 @@ public class ProductChatService
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly IBookChatContextReader _bookContext;
     private readonly ILogger<ProductChatService> _logger;
+    private readonly ProductChatGroundingCapture? _capture;
 
+    /// <param name="capture">
+    /// Show C1's per-request grounding scratchpad, OPTIONAL and defaulted to null. Optional because this
+    /// service is constructed directly by the composed-prompt pin tests, which must keep passing with zero
+    /// edits: a required parameter would have forced an edit to the very files that prove the prompt did
+    /// not move. Null means "nobody is recording this turn", which is the correct behaviour for a test and
+    /// for any future caller outside a request scope. It NEVER affects what is composed or answered.
+    /// </param>
     public ProductChatService(
         GuidesCorpusReader guides,
         IAiRouter router,
         IOptions<AiOptions> aiOptions,
         IBookChatContextReader bookContext,
-        ILogger<ProductChatService> logger)
+        ILogger<ProductChatService> logger,
+        ProductChatGroundingCapture? capture = null)
     {
         _guides = guides;
         _router = router;
         _aiOptions = aiOptions;
         _bookContext = bookContext;
         _logger = logger;
+        _capture = capture;
     }
 
     /// <summary>
@@ -389,6 +399,17 @@ public class ProductChatService
             string.Join(", ", composed.BookBlocks.SelectMany(b => b.References)),
             response.Provider, response.Model, question.Length, composed.History.Count, receivedTurns,
             instruction.Length, composed.EstimatedTokens, composed.BudgetTokens);
+
+        // SHOW C1'S GROUNDING SNAPSHOT IS TAKEN HERE, FROM THE SAME VALUES THE LINE ABOVE FORMATS, so the
+        // stored snapshot and the log can never independently drift from one event. It is a capture, not a
+        // second derivation: nothing below reads it, and a null capture (every direct-construction test)
+        // makes this a no-op.
+        _capture?.CaptureCitation(
+            language, guideIds, Ids(selected), artifactRefs,
+            composed.BookBlocks.SelectMany(b => b.References),
+            response.Provider, response.Model,
+            composed.History.Count, receivedTurns, instruction.Length,
+            composed.EstimatedTokens, composed.BudgetTokens);
 
         return new ProductChatResponseDto(
             answer, guideIds, language, IsGrounded: true, FaultReason: null,
