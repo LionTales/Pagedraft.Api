@@ -75,14 +75,22 @@ public sealed class BookChatContextReader : IBookChatContextReader
     private readonly StyleBaselineService _styleBaseline;
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly ILogger<BookChatContextReader> _logger;
+    private readonly ProductChatGroundingCapture? _capture;
 
+    /// <param name="capture">
+    /// Show C1's per-request grounding scratchpad, OPTIONAL and defaulted to null for the same reason it is
+    /// optional on <see cref="ProductChatService"/>: tests construct this reader directly, and a required
+    /// parameter would have made a persistence feature edit the files that pin the prompt. Null means
+    /// nobody is recording this turn. It never affects what is retrieved.
+    /// </param>
     public BookChatContextReader(
         AppDbContext db,
         BookSummaryService summaries,
         BookReviewService review,
         StyleBaselineService styleBaseline,
         IOptions<AiOptions> aiOptions,
-        ILogger<BookChatContextReader> logger)
+        ILogger<BookChatContextReader> logger,
+        ProductChatGroundingCapture? capture = null)
     {
         _db = db;
         _summaries = summaries;
@@ -90,6 +98,7 @@ public sealed class BookChatContextReader : IBookChatContextReader
         _styleBaseline = styleBaseline;
         _aiOptions = aiOptions;
         _logger = logger;
+        _capture = capture;
     }
 
     public async Task<BookChatContext> ReadAsync(
@@ -286,6 +295,15 @@ public sealed class BookChatContextReader : IBookChatContextReader
             keys.NeedsChapterClarification,
             string.Join(", ", whole), string.Join(", ", excerpted),
             blocks.Count, string.Join(", ", faults));
+
+        // SHOW C1'S GROUNDING SNAPSHOT TAKES ITS RETRIEVAL HALF HERE, from the same values the line above
+        // formats, so the stored snapshot and the log cannot independently drift from one event. A null
+        // capture (every direct-construction test, and any caller outside a request scope) makes it a
+        // no-op; nothing below reads it.
+        _capture?.CaptureRetrieval(
+            bookId, lang, language, keys.ChapterOrders, keys.CharacterNames.Count, keys.Dimensions,
+            ambientOrder, keys.AmbientMatch.ToString(), keys.AmbientChapterOrder,
+            keys.NeedsChapterClarification, whole, excerpted, blocks.Count, faults);
 
         return new BookChatContext(book.Title, blocks, keys, faults, whole, excerpted);
     }

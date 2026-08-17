@@ -26,6 +26,8 @@ public class AppDbContext : DbContext
     public DbSet<BookSummaryBaseline> BookSummaryBaselines => Set<BookSummaryBaseline>();
     public DbSet<BookFinding> BookFindings => Set<BookFinding>();
     public DbSet<BookReviewCoverage> BookReviewCoverages => Set<BookReviewCoverage>();
+    public DbSet<Conversation> Conversations => Set<Conversation>();
+    public DbSet<ConversationMessage> ConversationMessages => Set<ConversationMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -311,6 +313,43 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.BookId, x.Language }).IsUnique();
         });
 
+        modelBuilder.Entity<Conversation>(e =>
+        {
+            e.HasKey(x => x.Id);
+            // Identity's string key width, so the day the Pagewise-style JWT + Google login lands this
+            // column already fits ApplicationUser.Id rather than needing a widening migration over an
+            // author's whole notebook. Non-unique index: one user has many conversations.
+            e.Property(x => x.UserId).HasMaxLength(450);
+            e.HasIndex(x => x.UserId);
+            e.Property(x => x.Title).HasMaxLength(200).IsRequired();
+            // Cascade is safe here for the same reason it is on BookAiTaskTier (see :53-56): Book is this
+            // table's ONLY relationship, so there is no second cascade path for SQL Server to object to.
+            // BookId is NULLABLE because a conversation held outside any book is app-level product Q&A.
+            e.HasOne(x => x.Book).WithMany().HasForeignKey(x => x.BookId).OnDelete(DeleteBehavior.Cascade);
+            // The list is "newest first, optionally one book", which is exactly this index.
+            e.HasIndex(x => new { x.BookId, x.UpdatedAt });
+        });
+
+        modelBuilder.Entity<ConversationMessage>(e =>
+        {
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Role).HasMaxLength(20).IsRequired();
+            e.Property(x => x.Text).IsRequired();
+            e.Property(x => x.Failed).HasDefaultValue(false);
+            // nvarchar(max) + IsRequired(false), following this schema's standing precedent for a blob
+            // nothing queries inside (ChunkSummary.StructuredJson, BookBible.*Json, BookFinding.EvidenceJson,
+            // AnalysisRunLog.ChunkDetailsJson). A child table is the correct move the day something filters
+            // on a field inside the snapshot; nothing in C1/C2/C3 as scoped does.
+            e.Property(x => x.GroundingJson).HasColumnType("nvarchar(max)").IsRequired(false);
+            // Cascade: Conversation is this table's ONLY relationship, so deleting a conversation takes its
+            // turns with it without creating a second cascade path.
+            e.HasOne(x => x.Conversation).WithMany().HasForeignKey(x => x.ConversationId)
+                .OnDelete(DeleteBehavior.Cascade);
+            // The transcript read, in its render order. Unique because Sequence is the ordinal within the
+            // conversation: two turns claiming the same slot is the shape a lost increment would take.
+            e.HasIndex(x => new { x.ConversationId, x.Sequence }).IsUnique();
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -432,6 +471,32 @@ public class AppDbContext : DbContext
             {
                 if (entry.State == EntityState.Added) brc.CreatedAt = brc.UpdatedAt = DateTimeOffset.UtcNow;
                 else if (entry.State == EntityState.Modified) brc.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is Conversation conv)
+            {
+                // Mutable: UpdatedAt is what the history list orders by, so appending a turn or renaming
+                // must move the row. The dual-write marks this row Modified in the SAME save that inserts
+                // the message, so the ordering can never lag the content.
+                //
+                // ON ADD, A SUPPLIED STAMP WINS, the same exception ChunkSummary already carries (be-c01):
+                // every production writer leaves these unset and gets the persist time, and a caller that
+                // deliberately states when a conversation happened (a fixture reconstructing a history,
+                // a future import) is not silently overwritten.
+                if (entry.State == EntityState.Added)
+                {
+                    if (conv.CreatedAt == default) conv.CreatedAt = DateTimeOffset.UtcNow;
+                    if (conv.UpdatedAt == default) conv.UpdatedAt = DateTimeOffset.UtcNow;
+                }
+                else if (entry.State == EntityState.Modified) conv.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is ConversationMessage cm)
+            {
+                // Added-only, matching AnalysisRunLog / DocumentVersion / SuggestionOutcomeRecord: a turn is
+                // a record of something that happened and is never rewritten. Its ORDER lives in Sequence,
+                // not here - two turns of one exchange can share this timestamp to the tick, which is
+                // exactly why the transcript is read in Sequence order.
+                if (entry.State == EntityState.Added && cm.CreatedAt == default)
+                    cm.CreatedAt = DateTimeOffset.UtcNow;
             }
         }
         return base.SaveChangesAsync(cancellationToken);
