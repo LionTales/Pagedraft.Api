@@ -6,6 +6,7 @@ using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Analysis;
 using Pagedraft.Api.Services.Chat;
+using Pagedraft.Api.Services.Feedback;
 using Pagedraft.Api.Services.LanguageEngine;
 using Pagedraft.Api.Services.LanguageEngine.Contracts;
 using Pagedraft.Api.Services.LanguageEngine.Detect;
@@ -141,6 +142,18 @@ builder.Services.AddScoped<ProductChatGroundingCapture>();
 // ProductChatController around the single existing AnswerAsync call, never from inside the service, whose
 // six return branches would otherwise each need to remember to persist.
 builder.Services.AddScoped<ChatConversationStore>();
+
+// ─── Feedback infrastructure (Show C2) ────────────────────────────────────────────────────────────
+// Both Scoped, because both read and write through the scoped AppDbContext - the same shape as
+// ChatConversationStore above. Nothing here touches a prompt, a model or the GPU: feedback writes rows
+// and joins them. The evidence composer is its own registration rather than a private helper on the
+// service so the manuscript-bearing join has one owner and one place to review.
+builder.Services.AddScoped<FeedbackEvidenceComposer>();
+builder.Services.AddScoped<FeedbackService>();
+// The triage flag. Base appsettings.json ships true (Development inherits it) and
+// appsettings.Production.json overrides it to false until the login lands - see FeedbackOptions.
+builder.Services.Configure<FeedbackOptions>(
+    builder.Configuration.GetSection(FeedbackOptions.SectionName));
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
