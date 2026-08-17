@@ -77,7 +77,11 @@ public class ProductChatController : ControllerBase
     /// <c>CancellationToken.None</c> inside <see cref="ChatConversationStore.CompleteExchangeAsync"/>,
     /// because by then the answer already exists and its user turn is already committed - and a
     /// local-GPU answer takes tens of seconds, so a client that walked away during it is ordinary rather
-    /// than exotic. Cancellation is therefore absorbed by exactly one of the two writes.</para>
+    /// than exotic. Cancellation is therefore absorbed by exactly one of the two writes. The window
+    /// BETWEEN them - cancelled mid-answer, user turn committed, no answer ever coming - is closed by
+    /// <see cref="ChatConversationStore.AbandonExchangeAsync"/>: the committed question is flagged
+    /// failed so storage records the exchange the way it actually ended, and the cancellation still
+    /// propagates.</para>
     /// </summary>
     [HttpPost]
     public async Task<ActionResult<ProductChatResponseDto>> Ask(
@@ -92,7 +96,22 @@ public class ProductChatController : ControllerBase
         // transcript that no answer is ever coming for.
         var pending = await _conversations.BeginExchangeAsync(req, ct);
 
-        var answer = await _chat.AnswerAsync(req, ct);
+        ProductChatResponseDto answer;
+        try
+        {
+            answer = await _chat.AnswerAsync(req, ct);
+        }
+        catch
+        {
+            // The answer will never arrive - the author cancelled mid-GPU-call (the ordinary abandonment,
+            // AnswerAsync rethrows it) or the service died unexpectedly - but the user turn IS already
+            // committed. Left alone it would sit in storage as a question still waiting for an answer;
+            // flagged, it hydrates as the failed exchange it actually was, with the failure UI under the
+            // author's question, exactly as a live session renders the same event. The exception then
+            // continues out unchanged: this write records the death, it must not mask it.
+            await _conversations.AbandonExchangeAsync(pending);
+            throw;
+        }
 
         // ct is passed but deliberately NOT honoured by the write (see CompleteExchangeAsync). The answer
         // now exists and the user turn is committed, so cancelling would destroy work rather than save it.

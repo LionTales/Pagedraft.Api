@@ -891,6 +891,36 @@ public class ProductChatServiceTests : IDisposable
         Assert.Equal(ProductChatFaults.ModelUnavailable, dto.FaultReason);
     }
 
+    /// <summary>
+    /// The window BETWEEN the dual-write's halves: the user turn is committed, the author cancels
+    /// mid-GPU-call, and <c>AnswerAsync</c> rethrows the cancellation. The endpoint must flag the
+    /// committed question failed - otherwise it sits in storage indistinguishable from one still being
+    /// answered - and must still let the cancellation out rather than swallowing it into a 200.
+    /// </summary>
+    [Fact]
+    public async Task ACancelledAnswer_FlagsTheCommittedQuestion_AndStillCancels()
+    {
+        using var cts = new CancellationTokenSource();
+        var router = new Mock<IAiRouter>();
+        // The cancellation arrives DURING the model call, after BeginExchangeAsync committed the user
+        // turn - which is what makes this the between-the-writes window rather than either write's own.
+        router.Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+              .Returns<AiRequest, CancellationToken>((_, _) =>
+              {
+                  cts.Cancel();
+                  return Task.FromException<AiResponse>(new OperationCanceledException(cts.Token));
+              });
+        var controller = new ProductChatController(Service(router, out _), ConversationStore());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => controller.Ask(new ProductChatRequest("How do I export my book to Word?"), cts.Token));
+
+        var stored = _conversationDbContext!.ConversationMessages.ToList();
+        var question = Assert.Single(stored);
+        Assert.Equal("How do I export my book to Word?", question.Text);
+        Assert.True(question.Failed);
+    }
+
     [Fact]
     public async Task AGroundedAnswer_Is200_WithIsGroundedTrue_AndANonEmptyCitation()
     {

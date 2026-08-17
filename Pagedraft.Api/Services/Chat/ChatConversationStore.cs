@@ -282,7 +282,62 @@ public sealed class ChatConversationStore
                 "{IsGrounded}, fault: {FaultReason}). The author still gets the answer, but the stored " +
                 "conversation now ends on an unanswered question and C2 has no message to hang feedback on.",
                 pending.ConversationId, response.IsGrounded, response.FaultReason);
-            return new CompletedChatExchange(response, ChatPersistenceFaults.AssistantTurnWriteFailed);
+            // THE THREADING IDS THAT EXIST STILL GO BACK. The conversation and the user turn were
+            // committed by BeginExchangeAsync and this failure did not un-commit them, so returning
+            // null ids here would tell the client the whole exchange has no home - and its NEXT question
+            // would then start a duplicate conversation while this one sits ending on an unanswered
+            // question. Only AssistantMessageId stays null, which is the id that truthfully does not
+            // exist. The vanished-conversation branch above keeps ALL ids null, because there the rows
+            // are cascade-deleted and a returned id would have the client thread a dead conversation.
+            return new CompletedChatExchange(
+                response with
+                {
+                    ConversationId = pending.ConversationId,
+                    UserMessageId = pending.UserMessageId
+                },
+                ChatPersistenceFaults.AssistantTurnWriteFailed);
+        }
+    }
+
+    /// <summary>
+    /// Marks the already-committed user turn of an exchange FAILED when its answer will never arrive -
+    /// the request was cancelled or died between <see cref="BeginExchangeAsync"/> and
+    /// <see cref="CompleteExchangeAsync"/>, which on local-GPU timings (tens of seconds per answer) is
+    /// the ordinary abandonment window, not an exotic one.
+    ///
+    /// <para>Without this, the committed question would sit in storage as an ordinary un-answered turn,
+    /// indistinguishable from one still being answered. Flagged, it hydrates the way a live session
+    /// renders the same event: the author's question with the failure UI beneath it. The window rule is
+    /// unchanged either way - a flagged question is still replayed as a user turn unless a later retry
+    /// superseded it, exactly like every other failed exchange.</para>
+    ///
+    /// <para>Runs entirely on <see cref="CancellationToken.None"/> for the same reason
+    /// <see cref="CompleteExchangeAsync"/> does: the request token is cancelled by construction on this
+    /// path, and this write is the record of that fact. Never throws - the request is already dying with
+    /// its own exception, and this method must not replace it with a persistence one. A user turn that
+    /// cannot be found is a conversation deleted mid-request: nothing to flag, cascade already took it.</para>
+    /// </summary>
+    public async Task AbandonExchangeAsync(PendingChatExchange pending)
+    {
+        if (!pending.Persisted) return;
+
+        try
+        {
+            var userTurn = await _db.ConversationMessages
+                .FirstOrDefaultAsync(m => m.Id == pending.UserMessageId!.Value, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (userTurn == null) return;
+
+            userTurn.Failed = true;
+            await _db.SaveChangesAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Show could not flag the abandoned question of conversation {ConversationId} as failed. " +
+                "The stored conversation will show it as an ordinary unanswered turn. The request this " +
+                "belonged to is already failing with its own exception; this one is only logged.",
+                pending.ConversationId);
         }
     }
 

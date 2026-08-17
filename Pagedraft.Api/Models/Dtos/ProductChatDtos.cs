@@ -156,18 +156,22 @@ public record ProductChatTurnDto(string? Role, string? Content);
 /// one implicitly created for it. The client adopts an id it did not send, which is how a first question
 /// starts threading.
 ///
-/// <para>NULL MEANS THE EXCHANGE WAS NOT STORED, which happens only when the persistence write itself
-/// faulted. It is a null rather than an error because an answer the author can read beats a 500 over
-/// bookkeeping; the fault is logged at Error server-side, never swallowed.</para>
+/// <para>NULL MEANS NOT EVEN THE QUESTION WAS STORED - the user-turn write faulted, or the conversation
+/// was deleted out from under the request. When only the ASSISTANT write faulted, this id and
+/// <c>UserMessageId</c> still return (those rows exist and the next question should thread them, not
+/// start a duplicate conversation) while <c>AssistantMessageId</c> alone is null. It is a null rather
+/// than an error because an answer the author can read beats a 500 over bookkeeping; the fault is
+/// logged at Error server-side, never swallowed.</para>
 /// </param>
 /// <param name="UserMessageId">
-/// Show C1. The stored id of the question turn, null when the exchange was not stored. C2 attaches
+/// Show C1. The stored id of the question turn, null exactly when <c>ConversationId</c> is. C2 attaches
 /// feedback to these ids, which is why they are minted in the same write as the turns themselves.
 /// </param>
 /// <param name="AssistantMessageId">
-/// Show C1. The stored id of the answer turn, null when the exchange was not stored. Present on FAIL-SAFE
-/// answers too: a failed exchange is persisted flagged rather than dropped, because a thumbs-down on a
-/// failure is signal and not noise.
+/// Show C1. The stored id of the answer turn, null when the ANSWER was not stored - which can happen
+/// while the question's own ids still return (see <c>ConversationId</c>). Present on FAIL-SAFE answers
+/// too: a failed exchange is persisted flagged rather than dropped, because a thumbs-down on a failure
+/// is signal and not noise.
 /// </param>
 public record ProductChatResponseDto(
     string Answer,

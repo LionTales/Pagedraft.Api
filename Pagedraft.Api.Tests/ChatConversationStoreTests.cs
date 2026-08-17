@@ -389,10 +389,78 @@ public class ChatConversationStoreTests
         Assert.Equal("An answer.", completed.Response.Answer);
         Assert.Equal(ChatPersistenceFaults.AssistantTurnWriteFailed, completed.Fault);
         Assert.Null(completed.Response.AssistantMessageId);
+        // THE IDS THAT EXIST STILL GO BACK: the conversation and the user turn were committed by
+        // BeginExchangeAsync and this failure did not un-commit them. A null conversationId here would
+        // have the client start a DUPLICATE conversation with its next question, stranding this one.
+        // Only the assistant id - the row that truthfully does not exist - is null.
+        Assert.Equal(pending.ConversationId, completed.Response.ConversationId);
+        Assert.Equal(pending.UserMessageId, completed.Response.UserMessageId);
         Assert.Contains(logs.Entries, e =>
             e.Level == LogLevel.Error &&
             e.Exception != null &&
             e.Message.Contains("could not persist the ASSISTANT turn"));
+    }
+
+    // ─── Abandonment: the window BETWEEN the two writes ─────────────────────────────────────────────
+
+    /// <summary>
+    /// The author cancels (or the service dies) AFTER the user turn committed and BEFORE any answer
+    /// exists - on local-GPU timings the widest window in the request. The committed question must not
+    /// sit in storage indistinguishable from one still being answered: flagged, it hydrates as the
+    /// failed exchange it was, with the failure UI under the author's question, and the window rule
+    /// treats it like every other failed question (replayed unless a later retry superseded it).
+    /// </summary>
+    [Fact]
+    public async Task AbandonedAnswer_FlagsTheCommittedQuestion_AsFailed()
+    {
+        await using var db = NewDb();
+        var store = NewStore(db, out _, out var logs);
+
+        var pending = await store.BeginExchangeAsync(
+            new ProductChatRequest("How do I export a book?", Language: "en"), CancellationToken.None);
+        Assert.True(pending.Persisted);
+
+        await store.AbandonExchangeAsync(pending);
+
+        var message = Assert.Single(db.ConversationMessages.ToList());
+        Assert.Equal(ChatMessageRoles.User, message.Role);
+        Assert.True(message.Failed);
+        // No second row was invented for the answer that never came, and the count still matches.
+        var conversation = Assert.Single(db.Conversations.ToList());
+        Assert.Equal(1, conversation.MessageCount);
+        Assert.DoesNotContain(logs.Entries, e => e.Level == LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task Abandon_AfterAFailedBegin_IsANoOp()
+    {
+        await using var db = NewDb();
+        var store = NewStore(db, out _, out _);
+
+        // The user turn never landed, so there is nothing to flag and nothing to throw about.
+        await store.AbandonExchangeAsync(PendingChatExchange.Failed(ChatPersistenceFaults.UserTurnWriteFailed));
+
+        Assert.Empty(db.ConversationMessages.ToList());
+    }
+
+    [Fact]
+    public async Task Abandon_WhenTheConversationWasDeletedMidRequest_IsANoOp_AndNeverThrows()
+    {
+        await using var db = NewDb();
+        var store = NewStore(db, out _, out var logs);
+
+        var pending = await store.BeginExchangeAsync(
+            new ProductChatRequest("A question", Language: "en"), CancellationToken.None);
+        db.ConversationMessages.RemoveRange(db.ConversationMessages);
+        db.Conversations.RemoveRange(db.Conversations);
+        await db.SaveChangesAsync();
+
+        // The cascade already took the rows; the request is dying with its own exception and this must
+        // not replace it with a persistence one.
+        await store.AbandonExchangeAsync(pending);
+
+        Assert.Empty(db.ConversationMessages.ToList());
+        Assert.DoesNotContain(logs.Entries, e => e.Level == LogLevel.Error);
     }
 
     // ─── Cancellation: absorbed by exactly one of the two writes ────────────────────────────────────
