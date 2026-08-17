@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Pagedraft.Api.Data;
@@ -202,26 +201,20 @@ public class ConversationsController : ControllerBase
     /// is what the author came for, and one unreadable diagnostic must not cost them the conversation. It
     /// IS logged, because a snapshot that stopped parsing is a schema drift C3 will trip over later.
     ///
-    /// <para>Catches <see cref="Exception"/>, not just <see cref="JsonException"/>: <c>Deserialize</c> can
-    /// also throw <see cref="NotSupportedException"/> on a blob whose shape it cannot bind. This is a
-    /// diagnostic blob on a read path, so there is no fault worth propagating either way.</para>
+    /// <para>The parse itself lives in <see cref="ConversationGroundingSnapshot"/>, extracted when Show
+    /// C2's triage evidence became its second reader: one place holds the writer's serializer options and
+    /// the catch-everything posture, and it hands the exception BACK rather than swallowing it, so this
+    /// method still logs the fault with the id that makes it findable.</para>
     /// </summary>
     private ConversationGroundingDto? DeserializeGrounding(Guid messageId, string? json)
     {
-        if (string.IsNullOrWhiteSpace(json)) return null;
+        if (ConversationGroundingSnapshot.TryRead(json, out var snapshot, out var error)) return snapshot;
 
-        try
-        {
-            return JsonSerializer.Deserialize<ConversationGroundingDto>(json, ChatConversationStore.SnapshotJson);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "The grounding snapshot stored on conversation message {MessageId} did not parse ({Chars} " +
-                "chars). The message is returned WITHOUT its snapshot rather than failing the transcript " +
-                "read, but C3's automated re-check has nothing to work from for this answer.",
-                messageId, json.Length);
-            return null;
-        }
+        _logger.LogError(error,
+            "The grounding snapshot stored on conversation message {MessageId} did not parse ({Chars} " +
+            "chars). The message is returned WITHOUT its snapshot rather than failing the transcript " +
+            "read, but C3's automated re-check has nothing to work from for this answer.",
+            messageId, json!.Length);
+        return null;
     }
 }
