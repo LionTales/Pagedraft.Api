@@ -28,6 +28,7 @@ public class AppDbContext : DbContext
     public DbSet<BookReviewCoverage> BookReviewCoverages => Set<BookReviewCoverage>();
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<ConversationMessage> ConversationMessages => Set<ConversationMessage>();
+    public DbSet<FeedbackItem> FeedbackItems => Set<FeedbackItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -350,6 +351,44 @@ public class AppDbContext : DbContext
             e.HasIndex(x => new { x.ConversationId, x.Sequence }).IsUnique();
         });
 
+        modelBuilder.Entity<FeedbackItem>(e =>
+        {
+            e.HasKey(x => x.Id);
+            // Open string vocabularies, validated at the APPLICATION layer against FeedbackAreas /
+            // FeedbackTargetTypes - deliberately no CHECK constraint and no enum conversion, so mount #2
+            // (a proofread suggestion card) is a constant plus a review, never an ALTER TABLE.
+            e.Property(x => x.Area).HasMaxLength(50).IsRequired();
+            e.Property(x => x.TargetType).HasMaxLength(50).IsRequired();
+            e.Property(x => x.Verdict).HasMaxLength(10).IsRequired();
+            e.Property(x => x.Status).HasMaxLength(20).IsRequired();
+            e.Property(x => x.Text).HasMaxLength(2000);
+            e.Property(x => x.InstallationId).HasMaxLength(100);
+            // Identity's string-key width, the same forward-compatibility move Conversation.UserId makes
+            // (see :319-323): the column already fits ApplicationUser.Id the day the login lands.
+            e.Property(x => x.UserId).HasMaxLength(450);
+            e.HasIndex(x => x.UserId);
+            // nvarchar(max) for a blob nothing queries inside, following ConversationMessage.GroundingJson.
+            // The list's bookId filter resolves through the evidence JOIN rather than through this blob,
+            // precisely so that stays true.
+            e.Property(x => x.ContextJson).HasColumnType("nvarchar(max)").IsRequired(false);
+
+            // NO FOREIGN KEY ON TargetId, and no navigation. A FK would bind this polymorphic table to one
+            // target table forever AND would cascade-delete the very rows d1 section (3) decided to KEEP
+            // when a conversation goes; referential honesty is enforced by validating the id on write
+            // (400 targetNotFound) and by stamping TargetDeletedAt on delete.
+
+            // THE ONE-VOTE LOOKUP, and it is deliberately NOT unique. The key is a coalesce
+            // (UserId ?? InstallationId), which no index over these columns can express: a unique index on
+            // the raw tuple would enforce one vote per (user, DEVICE) instead of per user, i.e. a different
+            // rule that happens to coincide only while UserId is null. Uniqueness therefore lives in
+            // FeedbackService.FindExistingVoteAsync; see its class doc for the residual race and why it is
+            // acceptable on a single-author app with no auth.
+            e.HasIndex(x => new { x.Area, x.TargetType, x.TargetId });
+            // C3's consumption predicate is Status=New + Verdict=down, and the triage list's default order
+            // is newest first - which is exactly this index.
+            e.HasIndex(x => new { x.Status, x.CreatedAt });
+        });
+
         modelBuilder.Entity<AnalysisRunLog>(e =>
         {
             e.HasKey(x => x.Id);
@@ -497,6 +536,26 @@ public class AppDbContext : DbContext
                 // exactly why the transcript is read in Sequence order.
                 if (entry.State == EntityState.Added && cm.CreatedAt == default)
                     cm.CreatedAt = DateTimeOffset.UtcNow;
+            }
+            else if (entry.Entity is FeedbackItem fi)
+            {
+                // ADDED-ONLY, and the absence of a Modified arm is the design rather than an omission. A
+                // feedback row IS mutable (a re-vote rewrites Verdict/Text/Context), but neither timestamp
+                // here describes that: CreatedAt is when the reader first voted on this target, and
+                // StatusChangedAt belongs to the TRIAGE writer alone (FeedbackService.ChangeStatusAsync
+                // sets it explicitly, and only on a real move). Stamping either on Modified would let a
+                // re-vote silently claim a triage event that never happened.
+                //
+                // A SUPPLIED STAMP WINS ON ADD, the same exception ChunkSummary (be-c01) and Conversation
+                // already carry: every production writer leaves these unset and gets the persist time, and
+                // a fixture reconstructing a history is not overwritten.
+                if (entry.State == EntityState.Added)
+                {
+                    if (fi.CreatedAt == default) fi.CreatedAt = DateTimeOffset.UtcNow;
+                    // Equals CreatedAt at insert, per d1's field table - not a second UtcNow read, which
+                    // could differ by a tick and make a brand-new row look already-triaged.
+                    if (fi.StatusChangedAt == default) fi.StatusChangedAt = fi.CreatedAt;
+                }
             }
         }
         return base.SaveChangesAsync(cancellationToken);
