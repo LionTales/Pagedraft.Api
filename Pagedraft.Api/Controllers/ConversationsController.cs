@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Pagedraft.Api.Data;
+using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
 using Pagedraft.Api.Services.Chat;
+using Pagedraft.Api.Services.Feedback;
 
 namespace Pagedraft.Api.Controllers;
 
@@ -171,6 +173,14 @@ public class ConversationsController : ControllerBase
     /// <para>The message rows are removed EXPLICITLY before the conversation even though the FK cascades,
     /// matching how every other book-scoped table is deleted in this codebase: the cascade is the database
     /// keeping its promise, not the reason the rows go.</para>
+    ///
+    /// <para>SHOW C2 ADDED ONE THING HERE AND ONLY ONE: the feedback rows pointing at these messages are
+    /// KEPT and TOMBSTONED (d1 section (3)) - the signal outlives the transcript, because C3 still wants to
+    /// know a down-vote existed even when the conversation that produced it is gone. The stamp lands in the
+    /// SAME <c>SaveChangesAsync</c> as the removal, deliberately: a second save could commit the delete and
+    /// then fail, leaving feedback rows silently pointing at nothing with no record that anything happened.
+    /// It is why the id set is taken from the already-materialised <c>messages</c> list rather than
+    /// re-queried after the rows are gone.</para>
     /// </summary>
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
@@ -179,9 +189,26 @@ public class ConversationsController : ControllerBase
         if (c == null) return NotFound(new { error = "conversationNotFound" });
 
         var messages = await _db.ConversationMessages.Where(m => m.ConversationId == id).ToListAsync(ct);
+
+        var tombstoned = await FeedbackTombstone.StampAsync(
+            _db,
+            FeedbackTargetTypes.ConversationMessage,
+            messages.Select(m => m.Id).ToList(),
+            DateTimeOffset.UtcNow,
+            ct);
+
         _db.ConversationMessages.RemoveRange(messages);
         _db.Conversations.Remove(c);
         await _db.SaveChangesAsync(ct);
+
+        if (tombstoned > 0)
+        {
+            _logger.LogInformation(
+                "Conversation {ConversationId} was deleted with {MessageCount} turns; {TombstonedCount} " +
+                "feedback row(s) pointing at those turns were KEPT and tombstoned. Their triage detail now " +
+                "renders the stored vote-time context instead of the transcript.",
+                id, messages.Count, tombstoned);
+        }
 
         return NoContent();
     }

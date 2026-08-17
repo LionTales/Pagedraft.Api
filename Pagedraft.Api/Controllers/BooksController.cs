@@ -10,6 +10,7 @@ using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Analysis;
+using Pagedraft.Api.Services.Feedback;
 
 namespace Pagedraft.Api.Controllers;
 
@@ -1381,6 +1382,66 @@ public class BooksController : ControllerBase
         var documentVersions = await _db.DocumentVersions.Where(dv => dv.BookId == bookId).ToListAsync(ct);
         if (documentVersions.Count > 0)
             _db.DocumentVersions.RemoveRange(documentVersions);
+
+        // Show C1's conversations and their turns, and with them Show C2's tombstone. Both FKs cascade
+        // (Conversation.BookId and ConversationMessage.ConversationId - AppDbContext :329 / :347, and the
+        // AddShowConversationHistory migration's own ON DELETE CASCADE on both), so these rows would go
+        // even if this block did not exist. They are enumerated anyway for the reason every other table
+        // above is, plus one that is theirs alone: the FEEDBACK rows pointing at these turns have to be
+        // STAMPED before their target disappears, and a database cascade offers no server-side step to
+        // stamp from. Deleting a book is the second arrival path of "a target that disappears is
+        // tombstoned"; ConversationsController.Delete is the first.
+        //
+        // Only KEYS are read, never the message rows themselves. ConversationMessage.Text is the full
+        // untruncated turn and GroundingJson is a whole grounding snapshot, both nvarchar(max), so
+        // materialising a busy book's chat history just to delete it would be paid in memory for nothing:
+        // the stamp needs ids, and EF deletes by key. The FOREIGN key is projected alongside the primary
+        // one on purpose - it is what tells EF's save pipeline that a turn depends on its conversation and
+        // a conversation on its book, so the three DELETEs are ordered child-first. Without it the message
+        // DELETE could be emitted after the conversation's, by which time SQL Server's own ON DELETE
+        // CASCADE has already removed the row and the statement would affect zero rows, which EF reports as
+        // a concurrency failure. A keyed stub carrying its FK is, to the save pipeline, indistinguishable
+        // from a loaded row - which is the same ordering ConversationsController.Delete already depends on
+        // one level down, where it removes a conversation and its turns in a single save.
+        var conversationIds = await _db.Conversations
+            .Where(c => c.BookId == bookId)
+            .Select(c => c.Id)
+            .ToListAsync(ct);
+
+        if (conversationIds.Count > 0)
+        {
+            var messageKeys = await _db.ConversationMessages
+                .Where(m => conversationIds.Contains(m.ConversationId))
+                .Select(m => new { m.Id, m.ConversationId })
+                .ToListAsync(ct);
+
+            var messageIds = messageKeys.Select(m => m.Id).ToList();
+
+            // Marks without saving, so the stamp commits or fails WITH the delete below - a second save
+            // could commit the removal and then fail, leaving feedback rows silently pointing at nothing
+            // and no record that anything happened. Reused rather than re-queried here: one place owns
+            // "already stamped rows keep their original date" and "the target type is part of the match".
+            var tombstoned = await FeedbackTombstone.StampAsync(
+                _db, FeedbackTargetTypes.ConversationMessage, messageIds, DateTimeOffset.UtcNow, ct);
+
+            if (messageIds.Count > 0)
+            {
+                _db.ConversationMessages.RemoveRange(
+                    messageKeys.Select(m => new ConversationMessage { Id = m.Id, ConversationId = m.ConversationId }));
+            }
+            _db.Conversations.RemoveRange(
+                conversationIds.Select(id => new Conversation { Id = id, BookId = bookId }));
+
+            if (tombstoned > 0)
+            {
+                _logger.LogInformation(
+                    "Book {BookId} was deleted with {ConversationCount} conversation(s) and {MessageCount} " +
+                    "turn(s); {TombstonedCount} feedback row(s) pointing at those turns were KEPT and " +
+                    "tombstoned. Their triage detail now renders the stored vote-time context instead of " +
+                    "the transcript.",
+                    bookId, conversationIds.Count, messageIds.Count, tombstoned);
+            }
+        }
 
         _db.Books.Remove(book);
         await _db.SaveChangesAsync(ct);
