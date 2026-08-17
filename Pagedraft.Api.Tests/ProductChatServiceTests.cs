@@ -6,9 +6,12 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Pagedraft.Api.Controllers;
+using Pagedraft.Api.Data;
 using Pagedraft.Api.Models.Dtos;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
@@ -33,11 +36,21 @@ namespace Pagedraft.Api.Tests;
 /// fourth that is easy to forget: that it LOGGED why, because a catch that keeps the endpoint
 /// non-throwing and says nothing ships its failures invisibly.</para>
 /// </summary>
-public class ProductChatServiceTests
+public class ProductChatServiceTests : IDisposable
 {
     // ─── Fixtures ───────────────────────────────────────────────────────────────────────────────
 
     private const string Answer = "Export produces a DOCX file from what is saved in your chapters.";
+
+    /// <summary>
+    /// The in-memory <see cref="AppDbContext"/> behind <see cref="ConversationStore"/>, tracked so
+    /// <see cref="Dispose"/> can release it. xUnit gives each test method its own instance of this
+    /// class, so at most one context is ever created per instance, and the null check covers every
+    /// test that never calls <see cref="ConversationStore"/> at all.
+    /// </summary>
+    private AppDbContext? _conversationDbContext;
+
+    public void Dispose() => _conversationDbContext?.Dispose();
 
     private static ProductChatService Service(
         Mock<IAiRouter> router, out CapturingLogger<ProductChatService> logger, string? guidesDirectory)
@@ -852,7 +865,7 @@ public class ProductChatServiceTests
     public async Task ABlankQuestion_IsA400_AndNeverReachesTheModel()
     {
         var captured = new List<AiRequest>();
-        var controller = new ProductChatController(Service(AnsweringRouter(captured), out _));
+        var controller = new ProductChatController(Service(AnsweringRouter(captured), out _), ConversationStore());
 
         var action = await controller.Ask(new ProductChatRequest("   "), CancellationToken.None);
 
@@ -868,7 +881,7 @@ public class ProductChatServiceTests
     [Fact]
     public async Task AFailSafe_IsReturnedAs200_WithIsGroundedFalse()
     {
-        var controller = new ProductChatController(Service(ThrowingRouter(), out _));
+        var controller = new ProductChatController(Service(ThrowingRouter(), out _), ConversationStore());
 
         var action = await controller.Ask(new ProductChatRequest("How do I export?"), CancellationToken.None);
 
@@ -881,7 +894,8 @@ public class ProductChatServiceTests
     [Fact]
     public async Task AGroundedAnswer_Is200_WithIsGroundedTrue_AndANonEmptyCitation()
     {
-        var controller = new ProductChatController(Service(AnsweringRouter(new List<AiRequest>()), out _));
+        var controller = new ProductChatController(
+            Service(AnsweringRouter(new List<AiRequest>()), out _), ConversationStore());
 
         var action = await controller.Ask(new ProductChatRequest("How do I export my book to Word?"), CancellationToken.None);
 
@@ -905,6 +919,27 @@ public class ProductChatServiceTests
 
     private static ProductChatService Service(Mock<IAiRouter> router, out CapturingLogger<ProductChatService> logger)
         => Service(router, out logger, guidesDirectory: null);
+
+    /// <summary>
+    /// The Show C1 dual-write the endpoint now wraps its single <c>AnswerAsync</c> call in, over a throwaway
+    /// in-memory database. It is a COLLABORATOR here, not the subject: these cases pin the endpoint's status
+    /// codes and grounding contract, which persistence must leave exactly as they were. What persistence
+    /// itself does is pinned in <c>ChatConversationStoreTests</c>.
+    ///
+    /// <para>The backing <see cref="AppDbContext"/> is tracked in <see cref="_conversationDbContext"/> and
+    /// released by <see cref="Dispose"/>; instance (not static) so each test's context is scoped to that
+    /// test's own instance of this class.</para>
+    /// </summary>
+    private ChatConversationStore ConversationStore()
+    {
+        _conversationDbContext = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options);
+        return new ChatConversationStore(
+            _conversationDbContext,
+            new ProductChatGroundingCapture(),
+            NullLogger<ChatConversationStore>.Instance);
+    }
 
     private static string MissingDirectory()
         => Path.Combine(Path.GetTempPath(), "pagedraft-guides-absent-" + Guid.NewGuid().ToString("N"));
