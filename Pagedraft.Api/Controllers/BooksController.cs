@@ -1408,6 +1408,17 @@ public class BooksController : ControllerBase
             .Select(c => c.Id)
             .ToListAsync(ct);
 
+        // COUNTED HERE, REPORTED AFTER THE SAVE. The log at the bottom of this method asserts a DURABLE
+        // outcome - that feedback rows "were KEPT and tombstoned" - and that sentence is only true once
+        // SaveChangesAsync has committed it. Emitted inside the block below it would stay in the record
+        // even when the save meant to make it true rolled back, which is the same class of lie as a
+        // fail-safe that swallows its fault: the log becomes evidence for something that did not happen.
+        // ConversationsController.Delete has always reported this event after its own save; these three
+        // counters are what let the second path follow the same rule instead of nearly matching it.
+        var tombstonedFeedback = 0;
+        var deletedConversations = 0;
+        var deletedTurns = 0;
+
         if (conversationIds.Count > 0)
         {
             var messageKeys = await _db.ConversationMessages
@@ -1421,7 +1432,7 @@ public class BooksController : ControllerBase
             // could commit the removal and then fail, leaving feedback rows silently pointing at nothing
             // and no record that anything happened. Reused rather than re-queried here: one place owns
             // "already stamped rows keep their original date" and "the target type is part of the match".
-            var tombstoned = await FeedbackTombstone.StampAsync(
+            tombstonedFeedback = await FeedbackTombstone.StampAsync(
                 _db, FeedbackTargetTypes.ConversationMessage, messageIds, DateTimeOffset.UtcNow, ct);
 
             if (messageIds.Count > 0)
@@ -1432,19 +1443,26 @@ public class BooksController : ControllerBase
             _db.Conversations.RemoveRange(
                 conversationIds.Select(id => new Conversation { Id = id, BookId = bookId }));
 
-            if (tombstoned > 0)
-            {
-                _logger.LogInformation(
-                    "Book {BookId} was deleted with {ConversationCount} conversation(s) and {MessageCount} " +
-                    "turn(s); {TombstonedCount} feedback row(s) pointing at those turns were KEPT and " +
-                    "tombstoned. Their triage detail now renders the stored vote-time context instead of " +
-                    "the transcript.",
-                    bookId, conversationIds.Count, messageIds.Count, tombstoned);
-            }
+            deletedConversations = conversationIds.Count;
+            deletedTurns = messageIds.Count;
         }
 
         _db.Books.Remove(book);
         await _db.SaveChangesAsync(ct);
+
+        // PAST THE SAVE, so the sentence is true when it is written. A throw from SaveChangesAsync above
+        // propagates and this never runs, which is the whole point: no log line survives a rolled-back
+        // delete.
+        if (tombstonedFeedback > 0)
+        {
+            _logger.LogInformation(
+                "Book {BookId} was deleted with {ConversationCount} conversation(s) and {MessageCount} " +
+                "turn(s); {TombstonedCount} feedback row(s) pointing at those turns were KEPT and " +
+                "tombstoned. Their triage detail now renders the stored vote-time context instead of " +
+                "the transcript.",
+                bookId, deletedConversations, deletedTurns, tombstonedFeedback);
+        }
+
         return NoContent();
     }
 

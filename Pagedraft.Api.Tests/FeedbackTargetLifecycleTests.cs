@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Pagedraft.Api.Controllers;
 using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
@@ -387,6 +388,114 @@ public class FeedbackTargetLifecycleTests
         Assert.Equal(
             FeedbackErrors.TargetNotFound,
             await VoteRejectedAsync(controller, VoteFor(answer, installationId: "b")));
+    }
+
+    // ─── The tombstone LOG reports a committed outcome, not an intended one ─────────────────────────
+
+    /// <summary>
+    /// BOTH POLES OF ONE INVARIANT, in this test and the next: the book-delete log line claims feedback rows
+    /// "were KEPT and tombstoned", which is a statement about what is IN THE DATABASE, so it may only be
+    /// written once <c>SaveChangesAsync</c> has committed it.
+    ///
+    /// <para>This pole is the ordinary one: a delete that succeeds says so. Alone it is worthless as a pin -
+    /// it passed before the fix too, because a log emitted early is still emitted. It earns its place only
+    /// beside the failure pole below, which is the one that discriminates.</para>
+    /// </summary>
+    [Fact]
+    public async Task DeletingABook_ReportsTheTombstoneCount_WhenTheSaveCommits()
+    {
+        var store = $"book-delete-log-ok-{Guid.NewGuid()}";
+        Guid book;
+
+        await using (var seed = NewDb(store))
+        {
+            book = SeedBook(seed);
+            var conversation = SeedConversation(seed, "About this book", book);
+            SeedFeedback(seed, SeedExchange(seed, conversation, askBookId: book), FeedbackVerdicts.Down);
+            await seed.SaveChangesAsync();
+        }
+
+        var log = new RecordingLogger();
+        await using (var deleting = NewDb(store))
+        {
+            Assert.IsType<NoContentResult>(
+                await NewBooksController(deleting, log).Delete(book, CancellationToken.None));
+        }
+
+        Assert.Contains(log.Messages, m => m.Contains("KEPT and") && m.Contains("tombstoned"));
+    }
+
+    /// <summary>
+    /// THE POLE THAT DISCRIMINATES, and the defect Bugbot found on `Pagedraft.Api#63`: the log used to be
+    /// emitted from inside the conversation block, BEFORE the method's single
+    /// <c>SaveChangesAsync</c>. A save that then threw rolled the whole delete back and left a log line
+    /// asserting a durable outcome that never happened - the same class of lie as a fail-safe that swallows
+    /// its own fault, because the record becomes evidence for something the database never did.
+    ///
+    /// <para>Reverting the fix (moving the log back above the save) fails THIS test and passes the one
+    /// above, which is what makes the pair a pin rather than a pair of green checkmarks.
+    /// <c>ConversationsController.Delete</c> always logged after its own save; this is the second path
+    /// being held to the rule instead of nearly matching it.</para>
+    /// </summary>
+    [Fact]
+    public async Task ABookDeleteThatFailsToSave_ClaimsNothingAboutTombstones()
+    {
+        var store = $"book-delete-log-fail-{Guid.NewGuid()}";
+        Guid book;
+
+        await using (var seed = NewDb(store))
+        {
+            book = SeedBook(seed);
+            var conversation = SeedConversation(seed, "About this book", book);
+            SeedFeedback(seed, SeedExchange(seed, conversation, askBookId: book), FeedbackVerdicts.Down);
+            await seed.SaveChangesAsync();
+        }
+
+        var log = new RecordingLogger();
+        await using var failing = new SaveFailingDb(InMemoryOptions(store));
+
+        await Assert.ThrowsAsync<DbUpdateException>(
+            () => NewBooksController(failing, log).Delete(book, CancellationToken.None));
+
+        // NON-VACUITY: the run really did reach the tombstone work - it stamped rows in the change tracker
+        // and only the COMMIT failed - so an empty log here is the fix holding, not a test that never got
+        // near the code under test.
+        Assert.True(failing.SaveWasAttempted);
+        Assert.DoesNotContain(log.Messages, m => m.Contains("tombstoned"));
+    }
+
+    private static DbContextOptions<AppDbContext> InMemoryOptions(string store) =>
+        new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(store).Options;
+
+    /// <summary>An <see cref="AppDbContext"/> whose commit always fails, so the rollback branch is reachable.</summary>
+    private sealed class SaveFailingDb : AppDbContext
+    {
+        internal bool SaveWasAttempted { get; private set; }
+
+        internal SaveFailingDb(DbContextOptions<AppDbContext> options) : base(options) { }
+
+        public override Task<int> SaveChangesAsync(CancellationToken ct = default)
+        {
+            SaveWasAttempted = true;
+            throw new DbUpdateException("The commit failed after the tombstone was staged.");
+        }
+    }
+
+    /// <summary>Keeps every formatted message so a test can assert one was NOT written.</summary>
+    private sealed class RecordingLogger : Microsoft.Extensions.Logging.ILogger<BooksController>
+    {
+        internal readonly System.Collections.Generic.List<string> Messages = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Messages.Add(formatter(state, exception));
     }
 
     /// <summary>The triage detail for one row, asserting the response shape on the way.</summary>

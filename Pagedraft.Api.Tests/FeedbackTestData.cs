@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Pagedraft.Api.Controllers;
@@ -83,7 +84,8 @@ internal static class FeedbackTestData
     /// no AI service, no scope factory and no application lifetime, so a mock of each would assert nothing
     /// and only obscure that.
     /// </summary>
-    internal static BooksController NewBooksController(AppDbContext db)
+    internal static BooksController NewBooksController(
+        AppDbContext db, ILogger<BooksController>? logger = null)
         => new(
             db,
             bookIntelligence: null!,
@@ -96,7 +98,7 @@ internal static class FeedbackTestData
             profileBuilds: null!,
             scopeFactory: null!,
             appLifetime: null!,
-            logger: NullLogger<BooksController>.Instance);
+            logger: logger ?? NullLogger<BooksController>.Instance);
 
     // ─── Seeds ──────────────────────────────────────────────────────────────────────────────────────
 
