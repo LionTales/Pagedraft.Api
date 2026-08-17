@@ -131,6 +131,16 @@ builder.Services.AddScoped<ProductChatService>();
 // tests can pin the prompt without a database - the selection, excerpting, rendering and budgeting it
 // feeds are all pure and pinned on their own.
 builder.Services.AddScoped<IBookChatContextReader, BookChatContextReader>();
+// Show C1. The per-request scratchpad the grounding snapshot is assembled in. SCOPED IS THE WHOLE POINT:
+// the retrieval half is captured inside BookChatContextReader and the citation half inside
+// ProductChatService, and the controller reads the composed line after AnswerAsync returns - which only
+// works if all three see the same instance, i.e. one per request. A singleton would let two concurrent
+// questions overwrite each other's snapshot.
+builder.Services.AddScoped<ProductChatGroundingCapture>();
+// Show C1's dual-write. Scoped, because it writes through the scoped AppDbContext. It is called from
+// ProductChatController around the single existing AnswerAsync call, never from inside the service, whose
+// six return branches would otherwise each need to remember to persist.
+builder.Services.AddScoped<ChatConversationStore>();
 
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".

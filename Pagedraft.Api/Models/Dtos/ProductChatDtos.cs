@@ -59,13 +59,28 @@ namespace Pagedraft.Api.Models.Dtos;
 /// fallback for the case the id does not resolve (an older client, or a chapter deleted since the editor
 /// loaded the book). Explicitly null when no chapter is open.
 /// </param>
+/// <param name="ConversationId">
+/// The persisted conversation this question continues, or null to start one (Show C1). Absent = the
+/// server creates a conversation and returns its id on the response, so the client threads from the
+/// second question onward; there is deliberately no separate "create conversation" endpoint.
+///
+/// <para>IT IS A THREADING KEY AND NOTHING ELSE. The server does NOT read the stored transcript to
+/// compose a prompt: the CLIENT remains the sender of the history window, exactly as chatbot phase B
+/// shipped it, and this field only says where to WRITE. That is what keeps C1 a persistence feature
+/// rather than a change to the seven-gate prompt path, and it is pinned by
+/// <c>ProductChatConversationHydrationPinTests</c>.</para>
+///
+/// <para>An id that does not resolve is not an error: a new conversation is started and its id returned.
+/// Refusing the question over a stale id would cost the author an answer for bookkeeping.</para>
+/// </param>
 public record ProductChatRequest(
     string? Question,
     IReadOnlyList<ProductChatTurnDto>? History = null,
     string? Language = null,
     Guid? BookId = null,
     Guid? AmbientChapterId = null,
-    int? AmbientChapterOrder = null);
+    int? AmbientChapterOrder = null,
+    Guid? ConversationId = null);
 
 /// <summary>
 /// One prior turn. JSON (camelCase): role, content.
@@ -136,6 +151,24 @@ public record ProductChatTurnDto(string? Role, string? Content);
 /// escalated makes it false BY CONSTRUCTION rather than by the model's compliance. ALWAYS false when the
 /// request carried no <c>bookId</c>, and on every fail-safe.</para>
 /// </param>
+/// <param name="ConversationId">
+/// Show C1. The persisted conversation this exchange was written to - the one the request named, or the
+/// one implicitly created for it. The client adopts an id it did not send, which is how a first question
+/// starts threading.
+///
+/// <para>NULL MEANS THE EXCHANGE WAS NOT STORED, which happens only when the persistence write itself
+/// faulted. It is a null rather than an error because an answer the author can read beats a 500 over
+/// bookkeeping; the fault is logged at Error server-side, never swallowed.</para>
+/// </param>
+/// <param name="UserMessageId">
+/// Show C1. The stored id of the question turn, null when the exchange was not stored. C2 attaches
+/// feedback to these ids, which is why they are minted in the same write as the turns themselves.
+/// </param>
+/// <param name="AssistantMessageId">
+/// Show C1. The stored id of the answer turn, null when the exchange was not stored. Present on FAIL-SAFE
+/// answers too: a failed exchange is persisted flagged rather than dropped, because a thumbs-down on a
+/// failure is signal and not noise.
+/// </param>
 public record ProductChatResponseDto(
     string Answer,
     IReadOnlyList<string> GuideIds,
@@ -144,4 +177,7 @@ public record ProductChatResponseDto(
     string? FaultReason,
     IReadOnlyList<string>? ArtifactRefs = null,
     string? BookFaultReason = null,
-    bool NeedsChapterClarification = false);
+    bool NeedsChapterClarification = false,
+    Guid? ConversationId = null,
+    Guid? UserMessageId = null,
+    Guid? AssistantMessageId = null);
