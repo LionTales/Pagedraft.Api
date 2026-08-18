@@ -426,7 +426,22 @@ public class ProductChatService
             ? Array.Empty<string>()
             : composed.AcceptableReferences;
 
-        var (answer, references) = ProductChatCitations.Extract(response.Content.Trim(), acceptable);
+        // WHAT A PRODUCT REFUSAL CITES, DECIDED HERE RATHER THAN LEFT TO THE PARSER'S FALLBACK (g3c). The
+        // General route above is the same decision one step earlier: it licenses nothing because it uses
+        // nothing. The PRODUCT route cannot be decided in advance that way - most of its turns really are
+        // answered out of the guides - but it is the one route whose own grounding block ends by telling the
+        // model to say it does not have the answer and stop, so a reply that names no guide is an ORDINARY
+        // outcome here and not a parse failure. g3c measured the fallback publishing four guide chips under
+        // exactly those refusals: narrowed citations 32/36 to 20/36, the 4-id full selection 4 to 16.
+        //
+        // Book and Union keep the fallback deliberately. On Book the chips are how an author checks an answer
+        // against their own manuscript, and Union is the status quo every misroute lands on.
+        var onMiss = route == ChatRoute.Product
+            ? ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed
+            : ProductChatCitations.MissPolicy.FallBackToTheCarriedSet;
+
+        var (answer, references) = ProductChatCitations.Extract(
+            response.Content.Trim(), acceptable, onMiss);
 
         var guideIds = references.Where(r => !BookArtifactRefs.LooksLikeArtifactRef(r)).ToList();
         var artifactRefs = references.Where(BookArtifactRefs.LooksLikeArtifactRef).ToList();

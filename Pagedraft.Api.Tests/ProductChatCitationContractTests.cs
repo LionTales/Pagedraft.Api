@@ -484,6 +484,70 @@ public class ProductChatCitationContractTests
     }
 
     /// <summary>
+    /// AND UNDER g3c's MISS POLICY THE SAME ANSWER CITES NOTHING, which is the whole of the rule stated as
+    /// one fact: the references are what the reply NAMED, and a reply that named nothing has none. The
+    /// fixtures are the ones above deliberately - identical inputs, opposite outcomes, one argument apart -
+    /// so the pair reads as the policy switch it is and not as two behaviours that drifted.
+    ///
+    /// <para>WHY IT EXISTS. Once the product route learned to refuse, "no citation line" stopped being a
+    /// parse miss and became the normal shape of a refusal, and the fallback rendered the whole selection as
+    /// chips beneath sentences saying the answer was not there: g3c measured narrowed citations on that
+    /// route at 20/36 against 32/36 the run before, with the 4-id full selection up from 4 to 16. Which
+    /// routes turn it on is <c>ProductChatService</c>'s decision and is pinned in
+    /// <c>ProductChatRoutedAnswerTests</c>; this fact pins only what the policy DOES.</para>
+    ///
+    /// <para>THE PROSE MUST STILL SURVIVE UNTOUCHED, which is the half that could silently break: nothing
+    /// about citing less licenses deleting a sentence.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export runs from the book menu and produces a DOCX.")]
+    [InlineData("Export runs from the book menu.\nIt produces a DOCX.\n")]
+    [InlineData("הייצוא מופעל מתפריט הספר ומפיק קובץ DOCX.")]
+    [InlineData("הייצוא מופעל מתפריט הספר.\nהוא מפיק קובץ DOCX.\n")]
+    public void AnAnswerWithNoCitationLine_CitesNothing_UnderTheCiteNothingPolicy(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(
+            answer, Carried, ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+
+        Assert.Equal(answer, prose);
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: the policy narrows a MISS and nothing else. An answer that names a carried guide
+        // still cites it under the very same policy, so the emptiness above is the miss and not a switch
+        // that turns citations off.
+        var (_, named) = ProductChatCitations.Extract(
+            answer + "\nGuides: export", Carried,
+            ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+        Assert.Equal(new[] { "export" }, named);
+    }
+
+    /// <summary>
+    /// EVERY WAY OF NAMING NOTHING AGREES UNDER THE POLICY, which is the property the single <c>missResult</c>
+    /// local in <c>Extract</c> exists to guarantee. Five shapes reach five different returns - an empty
+    /// answer, no line at all, a line naming only refs this turn never carried, a label with no id after it,
+    /// and a stranded line whose tokens all miss - and a policy applied at four of five sites would be a
+    /// rule that holds until the fifth shape arrives.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("Export runs from the book menu.")]
+    [InlineData("Export runs from the book menu.\nGuides: chapter-brief:5")]
+    [InlineData("Export runs from the book menu.\nGuides: ,")]
+    [InlineData("Guides: nothing-selected\nExport runs from the book menu.")]
+    public void EveryShapeThatNamesNothing_CitesNothing_UnderTheCiteNothingPolicy(string answer)
+    {
+        var (_, refs) = ProductChatCitations.Extract(
+            answer, Carried, ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: every one of these shapes returns the carried set under the DEFAULT policy, so the
+        // list above is five real paths through Extract and not five inputs that were empty anyway.
+        var (_, fallback) = ProductChatCitations.Extract(answer, Carried);
+        Assert.Equal(Carried, fallback);
+    }
+
+    /// <summary>
     /// AND WITH NOTHING LICENSED, IT CITES NOTHING - which is the state <c>ProductChatService</c> puts the
     /// General route in on purpose. The fallback returns the acceptable set, so handing the parser the
     /// surviving guides there would decorate every general answer with chips for guides it never used;

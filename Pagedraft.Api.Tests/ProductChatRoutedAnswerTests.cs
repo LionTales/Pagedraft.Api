@@ -217,6 +217,11 @@ public class ProductChatRoutedAnswerTests
     /// acceptable set when it finds no citation line, and this route asks for no citation line, so a
     /// service that handed it the surviving guides would put chips for four guides under an answer written
     /// out of Show's own knowledge.
+    ///
+    /// <para>THE ROUTE STILL LICENSES NOTHING AT THE SERVICE, AND THAT IS NOT MADE REDUNDANT BY g3c's MISS
+    /// POLICY. The policy turns the fallback off for <see cref="ChatRoute.Product"/> only; this route's empty
+    /// ACCEPTABLE SET is upstream of the parser and stops a general answer from citing even when it does
+    /// name a guide id, which the policy would not.</para>
     /// </summary>
     [Theory]
     [InlineData("How do I write better dialogue?")]
@@ -238,12 +243,20 @@ public class ProductChatRoutedAnswerTests
         Assert.True(result.IsGrounded);
         Assert.Empty(result.GuideIds);
 
-        // VACUITY GUARD: the very same answer text on a NON-general route does cite, so the emptiness
-        // above is this route's licensing and not an answer shape that never cites anything.
+        // VACUITY GUARD: a CITING answer on a NON-general route does cite, so the emptiness above is this
+        // route's licensing and not a harness that can never return a reference.
+        //
+        // THE CONTROL NAMES A GUIDE SINCE g3c, AND THE OLD ONE WOULD NOW PASS FOR THE WRONG REASON. It used
+        // to send the same bare "An answer." to the product route and lean on the parser's no-line fallback
+        // to produce chips. That fallback is exactly what g3c turned off on this route
+        // (ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed), so a no-line control now returns
+        // empty on BOTH routes and the guard would be asserting nothing. The control therefore cites
+        // explicitly, which is the stronger control anyway: it separates "this route licenses no citation"
+        // from "this route's answer named none".
         var productCaptured = new List<AiRequest>();
         var product = ProductChatBudgetTests.Service(
-            AnsweringRouter(productCaptured), out _, guidesDirectory: null, aiOptions: null,
-            routingEnabled: true);
+            AnsweringRouter(productCaptured, "An answer.\nGuides: export"), out _,
+            guidesDirectory: null, aiOptions: null, routingEnabled: true);
         var productResult = await product.AnswerAsync(
             new ProductChatRequest("How do I export my book to DOCX?"), CancellationToken.None);
         Assert.NotEmpty(productResult.GuideIds);
@@ -294,6 +307,83 @@ public class ProductChatRoutedAnswerTests
             ProductChatPrompt.GuidesMarker, productRequest.Instruction, StringComparison.Ordinal);
         Assert.True(
             productRequest.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1 > 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── g3c: WHAT A PRODUCT REPLY THAT NAMED NOTHING CITES ─────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A PRODUCT ANSWER THAT NAMES NO GUIDE CITES NO GUIDE (g3c), which is a decision and no longer the
+    /// parser's fallback. g3c measured the fallback publishing the whole selection under bare refusals: the
+    /// product route's grounding block ends by telling the model to say it does not have the answer and
+    /// stop, most of those refusals carry no citation line, and the chips came out as four documents
+    /// rendered underneath "I do not have that information". Narrowed citations on that route fell 32/36 to
+    /// 20/36 and the 4-id full selection went 4 to 16.
+    ///
+    /// <para>THE ANSWER TEXT HERE IS A REFUSAL AND THE ASSERTION DOES NOT DEPEND ON THAT, which is the
+    /// point: the rule is keyed on the ROUTE and on whether a reference was named, never on classifying the
+    /// prose as a refusal. Any product answer with no citation line lands here.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("How do I export my book to DOCX?", "I do not have that information.")]
+    [InlineData("איך מייצאים את הספר ל-DOCX?", "אין לי את המידע הזה.")]
+    public async Task AProductAnswerNamingNoGuide_CitesNothing(string question, string answer)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured, answer), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        var result = await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
+            request.SystemMessageOverride);
+
+        Assert.True(result.IsGrounded);
+        Assert.Empty(result.GuideIds);
+
+        // VACUITY GUARD, and it is the one this test needs most: the SAME question on the SAME harness
+        // does cite when the model names a guide, so the emptiness above is the miss policy and not a
+        // selection that was empty to begin with.
+        var citing = new List<AiRequest>();
+        var svc2 = ProductChatBudgetTests.Service(
+            AnsweringRouter(citing, answer + "\nGuides: export"), out _, guidesDirectory: null,
+            aiOptions: null, routingEnabled: true);
+        var cited = await svc2.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+        Assert.NotEmpty(cited.GuideIds);
+    }
+
+    /// <summary>
+    /// THE BOOK ROUTE KEEPS THE FALLBACK, and this is the half of g3c's decision that says the rule is
+    /// scoped rather than global. On a book-scoped turn the chips are how an author checks an answer against
+    /// their own manuscript, so an answer that used the artifacts and merely forgot its line still shows
+    /// where it came from. Same harness, same missing citation line, opposite result.
+    /// </summary>
+    [Fact]
+    public async Task ABookAnswerNamingNoRef_StillFallsBackToWhatItWasGiven()
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured, "Tamar leaves at dawn."), out _, guidesDirectory: null,
+            aiOptions: null,
+            bookContext: BookReader(
+                Block(BookArtifactKind.Status, "status:summary"),
+                Block(BookArtifactKind.ChapterBrief, "chapter-brief:7", "Tamar leaves at dawn.")),
+            routingEnabled: true);
+
+        var result = await svc.AnswerAsync(
+            new ProductChatRequest("What happens in chapter 8?", BookId: Guid.NewGuid()),
+            CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Book, bookAware: true),
+            request.SystemMessageOverride);
+
+        Assert.Contains("chapter-brief:7", result.ArtifactRefs ?? Array.Empty<string>());
     }
 
     /// <summary>

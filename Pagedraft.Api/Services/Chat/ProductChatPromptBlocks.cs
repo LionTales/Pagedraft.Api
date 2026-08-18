@@ -205,6 +205,31 @@ internal static class ProductChatPromptBlocks
     /// or behavior that is not written there, never assemble one out of partly relevant parts, and never turn
     /// a gap into a claim that PageDraft lacks the thing. That last one is the rule holding the coming-soon
     /// class at 0 of 102, and it is kept as an explicit prohibition rather than softened.</para>
+    ///
+    /// <para>THE ENGLISH EXEMPLAR WAS ONE WORD SHORT OF A SENTENCE, AND THAT IS THE WHOLE OF g3c's ENGLISH
+    /// RESIDUAL. The third run split the two languages apart for the first time: Hebrew source-narration on
+    /// the product-uncovered cell went 8/8, 7/8, 2/8 while English stayed 8/8 across all three, unmoved by a
+    /// re-wording (g3) and by taking the source noun out of the envelope (g3b) alike. Read side by side, the
+    /// two blocks are the SAME instruction sentence for sentence - place-grounding, the gap constraint before
+    /// the refusal, the refusal quoted as a finished first-person sentence, "and stop" - and they differ in
+    /// EXACTLY ONE thing: the Hebrew exemplar <c>אין לי את המידע הזה.</c> is a complete, topic-free sentence
+    /// and the English one, "I do not have that.", is not. English "that" needs its noun, so a model copying
+    /// the exemplar cannot stop where the exemplar stops; it must supply the missing head, and 8 of 8 answers
+    /// supplied the SAME one - every English refusal in g3c opens "I do not have that information about X",
+    /// which is the exemplar plus the word the exemplar left out. Having started writing past the quote it
+    /// kept going, into the source adjunct the round was called for ("in what was provided", "from what was
+    /// written there", "in these guides") and, in six records, into an enumeration of what the corpus DOES
+    /// cover. Hebrew, handed a sentence it could copy whole, emitted it verbatim and stopped in 5 of 8.</para>
+    ///
+    /// <para>SO THE FIX IS TO FINISH THE SENTENCE, AND IT IS DELIBERATELY THE ONLY THING THIS ROUND CHANGES
+    /// HERE. "I do not have that information." is the literal English of the Hebrew twin, so the two blocks
+    /// are now the same instruction in both languages down to the exemplar, and the gate reads as a
+    /// single-variable test of the completeness claim rather than of a fourth re-framing. No prohibition is
+    /// added against the adjunct or against the enumeration: this file records a stacked prohibition making a
+    /// class measurably worse four times, and both masses are downstream of the same missing word - a reply
+    /// too short to be a reply gets padded, and the padding is what narrates. The prediction is Hebrew's own
+    /// number, not zero: Hebrew still extended the complete exemplar with a topic and a source in 2 of 8, so
+    /// giving English the same shape should buy English the same 2 of 8 and no better.</para>
     /// </summary>
     internal const string ProductGroundingScopedEn =
         "What you say about PageDraft comes only from what is written below, never from outside " +
@@ -213,7 +238,7 @@ internal static class ProductChatPromptBlocks
         "A gap in what you were given is never a fact about the product, so never say that PageDraft " +
         "lacks a thing or does not support it. " +
         "Where the answer is not there, say so briefly in your own voice and stop, in the sense of: " +
-        "'I do not have that.' ";
+        "'I do not have that information.' ";
 
     /// <summary>
     /// THE BOOK ROUTE'S PRODUCT RULE, IN ONE SENTENCE (g2). A book-scoped turn still has to be unable to
@@ -224,10 +249,41 @@ internal static class ProductChatPromptBlocks
     ///
     /// <para>The tokens this frees are the point: they are paid to the book artifacts, alongside g2's drop
     /// from two guides to one on this route.</para>
+    ///
+    /// <para>g3b LEFT THIS SENTENCE POINTING AT A SECTION THAT NO LONGER EXISTS, AND g3c IS THE ONLY RUN THE
+    /// BOOK ROUTE HAS LOST A RECORD IN. The envelope change renamed the product corpus from <c>[GUIDES]</c>
+    /// to <c>[PAGEDRAFT]</c> and dropped the class word from every document header, and it was reasoned about
+    /// entirely on the PRODUCT route - see <see cref="ProductChatPrompt.GuidesMarker"/>, whose own note says
+    /// the Book route's instructions "still say the guides below and now point at a section marked with the
+    /// product's name, which is if anything a plainer referent". It is not plainer; it is dangling. After the
+    /// rename, nothing this route composes below the instruction carries the word "guide" at all, so "the
+    /// guides below" names no section in the data, and <see cref="BookGroundingHeadEn"/>'s back-reference
+    /// ("the rule above about the guides") resolves onto a rule whose own referent has gone missing.</para>
+    ///
+    /// <para>THIS IS THE ONLY CHANGE g3c MADE THAT REACHES THE BOOK ROUTE AT ALL, which is what makes it the
+    /// suspect for the one D-cell record that flipped: <c>D|he|2</c> ("מה המהלך הרגשי של תמר בפרק 8?"), answered
+    /// correctly in g3 and g3b out of the same <c>chapter-text:7</c>, came back in g3c refusing on the ground
+    /// that the chapter "מוצג כחלק ממבנה הרחבה של הספר ולא כתוכן מלא בנפרד" - a claim about how the envelope
+    /// presented it, from a model reasoning about the shape of what it was handed. Every other candidate was
+    /// ruled out by reading: the routed book rule and the hedge are byte-unchanged since g2, the artifact
+    /// blocks and their whole-chapter labels were not touched, and <see cref="ProductChatBudget.Compose"/> is
+    /// a DROP loop, so a system message that got SHORTER can only drop less and cannot downgrade a whole
+    /// chapter to an excerpt.</para>
+    ///
+    /// <para>THE FIX POINTS THE SENTENCE AT THE SECTION THAT IS ACTUALLY THERE AND KEEPS THE CLASS WORD, which
+    /// is what makes it cost nothing anywhere else. "the guides in the PageDraft section below" resolves
+    /// against the marker by the only word the marker carries, and leaving "guides" in place keeps
+    /// <see cref="BookGroundingHeadEn"/> - which <see cref="ChatRoute.Union"/> also composes - byte-unchanged
+    /// and its back-reference valid on both arms. The marker is named by its WORD and never quoted as the
+    /// bracketed literal, for the reason recorded twice in this file: quoting an internal token in order to
+    /// instruct about it teaches the token. This does not re-open the narration question, because the Book
+    /// route has narrated 0 of 28 in all three runs; it is the product route that elects a source noun, and
+    /// nothing here reaches it. ONE RECORD IS ONE RECORD: this is a read defect worth fixing on its own terms,
+    /// and whether it is what moved D|he|2 is a hypothesis gate 4 tests, not a finding.</para>
     /// </summary>
     internal const string BookProductRuleEn =
-        "What you say about PageDraft itself comes only from the guides below, never from outside " +
-        "knowledge about the product. ";
+        "What you say about PageDraft itself comes only from the guides in the PageDraft section below, " +
+        "never from outside knowledge about the product. ";
 
     /// <summary>
     /// THE GENERAL ROUTE (g2): a writing or literature question that is about neither the product nor the
@@ -377,9 +433,10 @@ internal static class ProductChatPromptBlocks
         "חוסר במה שניתן לך אינו עובדה על המוצר, ולכן לעולם אל תאמר ש-PageDraft חסר דבר או אינו תומך בו. " +
         "כאשר התשובה אינה שם, אמור זאת בקצרה בקולך שלך ועצור, במשמעות הזו: 'אין לי את המידע הזה.' ";
 
-    /// <summary>The Hebrew twin of <see cref="BookProductRuleEn"/>. DRAFT Hebrew.</summary>
+    /// <summary>The Hebrew twin of <see cref="BookProductRuleEn"/>, pointed at the same section by the same
+    /// word. DRAFT Hebrew (recorded in <c>src/docs/HEBREW_NATIVE_REVIEW.md</c>): the owner reads it.</summary>
     internal const string BookProductRuleHe =
-        "מה שאתה אומר על PageDraft עצמו מגיע רק מהמדריכים שלמטה ולא מידע חיצוני על המוצר. ";
+        "מה שאתה אומר על PageDraft עצמו מגיע רק מהמדריכים שבמקטע PageDraft שלמטה ולא מידע חיצוני על המוצר. ";
 
     /// <summary>The Hebrew twin of <see cref="GeneralGroundingEn"/>. DRAFT Hebrew.</summary>
     internal const string GeneralGroundingHe =
