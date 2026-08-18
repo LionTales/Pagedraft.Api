@@ -49,10 +49,10 @@ public class ProductChatBookPromptTests
         "lacks the thing or does not support it. And do not describe what the guides say about a topic " +
         "they do not address, not even to report what they mention about it. " +
         "If the question is about the content or state of the user's own book (its characters, its " +
-        "plot, what a specific chapter says, what a review found), say that you can only see a book " +
-        "while it is open, and ask them to open it and ask you again. Do not attempt an answer from the " +
-        "guides in that case. " +
-        "End your reply with a line of the form 'Guides: <id>, <id>' naming the guide ids you used, " +
+        "plot, what a specific chapter says, what a review found), answer in the first person to this " +
+        "effect: 'I can only see a book while it is open. Open the book you are asking about and ask me " +
+        "again, and I will look at it.' Do not answer it from what is written below in that case. " +
+        "End your reply with a line of the form 'Guides: <id>, <id>' naming the ids you used, " +
         "and nothing else on that line. " +
         "Answer in English, because the question is in English, even where a guide you used is in " +
         "another language.";
@@ -69,8 +69,8 @@ public class ProductChatBookPromptTests
         "המדריכים אומרים על נושא שאינם עוסקים בו, גם לא כדי לציין מה מוזכר בהם לגביו. " +
         "אם השאלה נוגעת לתוכן או למצב של הספר הספציפי של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק " +
         "מסוים, מה סקירה מצאה), ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח. פתחו את " +
-        "הספר שעליו אתם שואלים ושאלו אותי שוב, ואסתכל בו.' אל תנסה לענות מתוך המדריכים במקרה כזה. " +
-        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את מזהי המדריכים שהשתמשת בהם, " +
+        "הספר שעליו אתם שואלים ושאלו אותי שוב, ואסתכל בו.' אל תנסה לענות ממה שכתוב למטה במקרה כזה. " +
+        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את המזהים שהשתמשת בהם, " +
         "ובלי דבר נוסף באותה שורה. " +
         "השב בעברית, כי השאלה נשאלה בעברית, גם אם מדריך שהשתמשת בו כתוב בשפה אחרת.";
 
@@ -192,7 +192,7 @@ public class ProductChatBookPromptTests
     /// prompt is simultaneously carrying.
     /// </summary>
     [Theory]
-    [InlineData("en", "say that you can only see a book while it is open")]
+    [InlineData("en", "answer in the first person to this effect: 'I can only see a book while it is open.")]
     [InlineData("he", "ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח.")]
     public void WithABook_ThePhaseARefusal_IsNotAlsoPresent(string language, string refusalFragment)
     {

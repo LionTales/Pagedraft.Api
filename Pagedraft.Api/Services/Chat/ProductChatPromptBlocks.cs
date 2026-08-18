@@ -170,19 +170,50 @@ internal static class ProductChatPromptBlocks
     /// the rules g4's PASS is a measurement of and g3's own 0-fabrication result on the uncovered cell
     /// rests on, so they are carried across in force.</para>
     ///
-    /// <para>NOTE WHAT THIS CANNOT REACH. The user message still opens with a <c>[GUIDES]</c> marker and
-    /// each document still carries a <c>=== GUIDE id=... ===</c> header, so the noun is in the model's
-    /// context whatever this block says. The claim being tested is narrower and is the one g3 pointed at:
-    /// that it is the INSTRUCTIONS naming the source, not the data carrying it, that make the answer talk
-    /// about the source.</para>
+    /// <para>THE CLAIM THIS BLOCK WAS BUILT ON WAS MEASURED AND IT IS REFUTED (g3b). The paragraph that
+    /// stood here said the block could not reach the <c>[GUIDES]</c> marker or the <c>=== GUIDE id=... ===</c>
+    /// headers, and framed that as a narrower TESTED CLAIM: that the instructions naming the source, and not
+    /// the data carrying it, are what make the answer talk about the source. The second run says otherwise.
+    /// Narration on product questions moved 33/102 to 32/102, the product-uncovered cell held at 15 of 16,
+    /// and the answers simply narrated with whatever noun was left: the Hebrew came back saying
+    /// <c>המדריכים</c>, which this rewritten block does not contain, and the English came back saying "the
+    /// material provided", which is this block's OWN grounding phrase read back (13 hits across the run).
+    /// Deleting a noun from the instructions does not remove the noun; it elects the next one. The envelope
+    /// is fixed in <see cref="ProductChatPrompt.GuidesMarker"/>, where the measurement is written up.</para>
+    ///
+    /// <para>SO THE GROUNDING IS NOW A PLACE AND NOT A SUBSTANCE. "The material below" is gone in favour of
+    /// "what is written below" and "there". That is the construction the GENERAL route already uses
+    /// ("Nothing about PageDraft is in front of you on this turn"), and the general route narrated 0 of 16.
+    /// A place cannot be reported as failing you; a substance can.</para>
+    ///
+    /// <para>AND THE GAP SENTENCE IS RE-SHAPED SO IT IS NOT RECITABLE (g3b, 2 of 102 to 4 of 102). Three
+    /// answers ended by reciting this block's second sentence at the reader, verbatim and complete: "That is
+    /// a complete answer on its own, and it is never a claim that PageDraft lacks the thing or does not
+    /// support it." It was phrased as a statement ABOUT WHAT AN ANSWER IS and placed immediately AFTER the
+    /// refusal it describes, so a model that had just written the refusal continued straight along the
+    /// instruction's own sequence into the commentary about it. Two things change and neither is a new rule.
+    /// (1) ORDER: the constraint now comes BEFORE the refusal, so there is nothing left after the refusal to
+    /// continue into. (2) SHAPE: the refusal is given as the finished first-person sentence in quotes, which
+    /// is the construction <see cref="BookRefusalHe"/> already records as the thing that stopped an echo
+    /// ("a sentence to say, not an order to follow"). That pattern is self-healing in a way the old wording
+    /// was not - if the model DOES read it back verbatim, what the reader gets is the honest refusal itself
+    /// rather than a note about what a refusal is. "That is a complete answer on its own" is deleted
+    /// outright: its job was to stop padding, and "and stop" does that without describing anything.</para>
+    ///
+    /// <para>THE ANTI-FABRICATION CONTENT IS CARRIED ACROSS UNCHANGED IN FORCE, because g4's PASS and g3b's
+    /// own 0 fabrications on the uncovered cell are measurements of it: never state a setting, button, screen
+    /// or behavior that is not written there, never assemble one out of partly relevant parts, and never turn
+    /// a gap into a claim that PageDraft lacks the thing. That last one is the rule holding the coming-soon
+    /// class at 0 of 102, and it is kept as an explicit prohibition rather than softened.</para>
     /// </summary>
     internal const string ProductGroundingScopedEn =
-        "What you say about PageDraft comes only from the material below, never from outside knowledge: " +
-        "do not state a setting, button, screen or behavior that is not written there, and do not " +
-        "assemble one out of parts that are only partly relevant. " +
-        "Where the answer is not there, tell the reader plainly that you do not have it and leave it at " +
-        "that; that is a complete answer on its own, and it is never a claim that PageDraft lacks the " +
-        "thing or does not support it. ";
+        "What you say about PageDraft comes only from what is written below, never from outside " +
+        "knowledge: do not state a setting, button, screen or behavior that is not written there, and " +
+        "do not assemble one out of parts that are only partly relevant. " +
+        "A gap in what you were given is never a fact about the product, so never say that PageDraft " +
+        "lacks a thing or does not support it. " +
+        "Where the answer is not there, say so briefly in your own voice and stop, in the sense of: " +
+        "'I do not have that.' ";
 
     /// <summary>
     /// THE BOOK ROUTE'S PRODUCT RULE, IN ONE SENTENCE (g2). A book-scoped turn still has to be unable to
@@ -262,12 +293,23 @@ internal static class ProductChatPromptBlocks
     /// intercepts it before any model call whenever it can see it; this block governs only the turns that
     /// predicate does not recognise (g3: a book question whose guide top score cleared the strong-match
     /// bar). Two paths, one sentence.</para>
+    ///
+    /// <para>g3b GAVE IT THE HEBREW TWIN'S SHAPE, WHICH IS THE SHAPE THAT WAS ALREADY KNOWN TO WORK. Two
+    /// changes. (1) The refusal is now the finished first-person sentence in quotes, word for word
+    /// <c>ProductChatService.OpenTheBookEn</c>, exactly as <see cref="BookRefusalHe"/> has quoted
+    /// <c>OpenTheBookHe</c> since g3. The English half had been left as an imperative ("say that you can only
+    /// see a book while it is open, and ask them to open it and ask you again"), which is the construction
+    /// that docstring records the model reading back verbatim - and the two halves of one rule disagreeing
+    /// about their own construction is drift, not a decision. (2) "Do not attempt an answer from the guides
+    /// in that case" named the source in an instruction, which is this round's whole subject; it now points
+    /// at the place instead. Union composes this block, and this is the second time g3 has changed Union
+    /// deliberately, for the same reason as the first: a sentence that is wrong is not a baseline.</para>
     /// </summary>
     internal const string BookRefusalEn =
         "If the question is about the content or state of the user's own book (its characters, its " +
-        "plot, what a specific chapter says, what a review found), say that you can only see a book " +
-        "while it is open, and ask them to open it and ask you again. Do not attempt an answer from the " +
-        "guides in that case. ";
+        "plot, what a specific chapter says, what a review found), answer in the first person to this " +
+        "effect: 'I can only see a book while it is open. Open the book you are asking about and ask me " +
+        "again, and I will look at it.' Do not answer it from what is written below in that case. ";
 
     // PHASE B'S f2 SPLIT THE TAIL ONE FURTHER, AND CHANGED NO CHARACTER OF PHASE A'S HALF. The tail is
     // now CitationLine + Language, and the book-aware assembly swaps the citation sentence for one that
@@ -278,8 +320,22 @@ internal static class ProductChatPromptBlocks
     // what 80-85% empty artifactRefs looks like from the outside. There is now exactly ONE sentence about
     // the citation line in any composed message.
 
+    /// <summary>
+    /// THE LABEL IS KEPT AND THE DESCRIPTION AROUND IT IS NOT (g3b). This sentence used to say "naming the
+    /// guide ids you used", and it is the ONE thing the product route composes that the general route does
+    /// not, apart from the documents themselves - which makes it a carrier of the source noun on exactly the
+    /// route that narrates. The word is dropped from the description, where it does nothing: on this route
+    /// the only things carrying an id are the documents below, so "the ids you used" has one referent.
+    ///
+    /// <para>THE QUOTED LABEL 'Guides:' DOES NOT MOVE, and that is a deliberate limit on this change rather
+    /// than an oversight. It is the one part of the citation mechanism g1 measured working (91.7%), this
+    /// file's own note says it is not being bet on, and it is STRUCTURE rather than prose - the gate's
+    /// detector strips the citation line before counting narration, so the label cannot contribute to the
+    /// number this change is trying to move. Swapping it for the 'Sources:' the book-aware twin uses would
+    /// bet a working mechanism for nothing measurable.</para>
+    /// </summary>
     internal const string CitationLineEn =
-        "End your reply with a line of the form 'Guides: <id>, <id>' naming the guide ids you used, " +
+        "End your reply with a line of the form 'Guides: <id>, <id>' naming the ids you used, " +
         "and nothing else on that line. ";
 
     internal const string LanguageEn =
@@ -306,14 +362,20 @@ internal static class ProductChatPromptBlocks
     /// <see cref="GroundingEnHead"/>.</summary>
     internal const string GroundingHeHead = PersonaHe + ProductGroundingHe;
 
-    /// <summary>The Hebrew twin of <see cref="ProductGroundingScopedEn"/>, re-framed the same way and
-    /// carrying no occurrence of <c>מדריכים</c>. DRAFT Hebrew (recorded in
-    /// <c>src/docs/HEBREW_NATIVE_REVIEW.md</c>): the owner reads it.</summary>
+    /// <summary>The Hebrew twin of <see cref="ProductGroundingScopedEn"/>, re-framed the same way: the
+    /// grounding is a place (<c>ממה שכתוב למטה</c>) rather than a substance, the gap constraint comes BEFORE
+    /// the refusal it governs, and the refusal is the finished first-person sentence in quotes. It carries no
+    /// occurrence of <c>מדריכים</c> and, since g3b, none of <c>החומר</c> either - that was the noun the
+    /// Hebrew answers read back as <c>החומר שבידי</c>. DRAFT Hebrew (recorded in
+    /// <c>src/docs/HEBREW_NATIVE_REVIEW.md</c>): the owner reads it.
+    ///
+    /// <para>The quoted sentence deliberately avoids the bare <c>אין לי מידע</c>, which is what six of g3b's
+    /// Hebrew answers produced and what the gate's own detector counts as narration.</para></summary>
     internal const string ProductGroundingScopedHe =
-        "מה שאתה אומר על PageDraft מגיע רק מהחומר שלמטה ולעולם לא מידע חיצוני: אל תציין הגדרה, כפתור, " +
+        "מה שאתה אומר על PageDraft מגיע רק ממה שכתוב למטה ולעולם לא מידע חיצוני: אל תציין הגדרה, כפתור, " +
         "מסך או התנהגות שאינם כתובים שם, ואל תרכיב כזו מתוך חלקים שרק חלקית רלוונטיים. " +
-        "כאשר התשובה אינה שם, אמור לקורא במפורש שאין לך אותה והשאר זאת כך; זו תשובה שלמה בפני עצמה, " +
-        "ולעולם אינה קביעה ש-PageDraft חסר את הדבר או אינו תומך בו. ";
+        "חוסר במה שניתן לך אינו עובדה על המוצר, ולכן לעולם אל תאמר ש-PageDraft חסר דבר או אינו תומך בו. " +
+        "כאשר התשובה אינה שם, אמור זאת בקצרה בקולך שלך ועצור, במשמעות הזו: 'אין לי את המידע הזה.' ";
 
     /// <summary>The Hebrew twin of <see cref="BookProductRuleEn"/>. DRAFT Hebrew.</summary>
     internal const string BookProductRuleHe =
@@ -337,14 +399,23 @@ internal static class ProductChatPromptBlocks
     /// model does read it back verbatim, what the author sees is the same answer the deterministic path
     /// would have given them. DRAFT Hebrew. See <see cref="BookRefusalEn"/> for why the old one is
     /// gone.</para>
+    ///
+    /// <para>g3b CHANGED ONE CLAUSE AND NOT THE CONSTRUCTION. The closing sentence said
+    /// <c>אל תנסה לענות מתוך המדריכים במקרה כזה</c>, naming the source in an instruction, which is the same
+    /// defect g3b fixed in <see cref="BookRefusalEn"/>; it now points at the place. The quoted first-person
+    /// sentence, which is the part that stopped the echo, is untouched to the byte.</para>
     /// </summary>
     internal const string BookRefusalHe =
         "אם השאלה נוגעת לתוכן או למצב של הספר הספציפי של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק " +
         "מסוים, מה סקירה מצאה), ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח. פתחו את " +
-        "הספר שעליו אתם שואלים ושאלו אותי שוב, ואסתכל בו.' אל תנסה לענות מתוך המדריכים במקרה כזה. ";
+        "הספר שעליו אתם שואלים ושאלו אותי שוב, ואסתכל בו.' אל תנסה לענות ממה שכתוב למטה במקרה כזה. ";
 
+    /// <summary>The Hebrew twin of <see cref="CitationLineEn"/>. The description no longer says
+    /// <c>מזהי המדריכים</c>; the quoted label keeps its <c>מדריכים:</c> for the reason recorded there, so
+    /// this is the one occurrence of the noun the Hebrew product message still carries, and it sits inside a
+    /// quoted line the detector strips. DRAFT Hebrew.</summary>
     internal const string CitationLineHe =
-        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את מזהי המדריכים שהשתמשת בהם, " +
+        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את המזהים שהשתמשת בהם, " +
         "ובלי דבר נוסף באותה שורה. ";
 
     internal const string LanguageHe =

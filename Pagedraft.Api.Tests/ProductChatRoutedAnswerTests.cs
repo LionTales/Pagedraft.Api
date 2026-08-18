@@ -277,7 +277,7 @@ public class ProductChatRoutedAnswerTests
         var request = Assert.Single(captured);
         Assert.Equal(
             ProductChatService.GeneralRouteGuideCount,
-            request.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1);
+            request.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1);
         Assert.DoesNotContain(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
 
         // VACUITY GUARD: the same harness DOES send guides under a marker on a product question, so the
@@ -293,7 +293,7 @@ public class ProductChatRoutedAnswerTests
         Assert.Contains(
             ProductChatPrompt.GuidesMarker, productRequest.Instruction, StringComparison.Ordinal);
         Assert.True(
-            productRequest.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1 > 0);
+            productRequest.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1 > 0);
     }
 
     /// <summary>
@@ -371,7 +371,7 @@ public class ProductChatRoutedAnswerTests
             CancellationToken.None);
 
         var request = Assert.Single(captured);
-        var guideHeaders = request.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1;
+        var guideHeaders = request.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1;
 
         Assert.Equal(ProductChatService.BookRouteGuideCount, guideHeaders);
 
@@ -389,7 +389,7 @@ public class ProductChatRoutedAnswerTests
         var unionRequest = Assert.Single(unionCaptured);
         Assert.Equal(
             ProductChatService.BookAwareGuideCount,
-            unionRequest.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1);
+            unionRequest.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1);
     }
 
     /// <summary>

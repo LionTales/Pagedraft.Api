@@ -12,11 +12,16 @@ namespace Pagedraft.Api.Services.Chat;
 ///
 /// <para>FAIL-SAFE, in the direction that cannot mislead. A citation is accepted only when the line
 /// parses AND names at least one id that was genuinely in this turn's selection. Anything else (no
-/// line, a hallucinated id, a line naming nothing) falls back to the full selected set and leaves the
-/// answer text untouched, so a parsing miss degrades to "here is what this answer was grounded in"
-/// rather than to a WRONG citation or a silently truncated answer. A model can never widen its
-/// citation to a guide it was not given, because the accepted set is always intersected with the
-/// selection.</para>
+/// line, a hallucinated id, a line naming nothing) falls back to the full selected set, so a parsing
+/// miss degrades to "here is what this answer was grounded in" rather than to a WRONG citation or a
+/// silently truncated answer. A model can never widen its citation to a guide it was not given,
+/// because the accepted set is always intersected with the selection.</para>
+///
+/// <para>THE REFS FALL BACK; THE PROSE IS NOT ALWAYS LEFT ALONE, AND THAT SENTENCE USED TO CLAIM IT WAS.
+/// Three narrow strips remove a REFUSED line from the answer, and every one of them fires only on the
+/// whole-line shape, where position has already proved the line is a citation: a line naming a ref that
+/// was never carried, a citation stranded mid-answer, and (g3b) a line that names nothing at all. Each
+/// is described at its own site. The refs returned are the honest full set in all three cases.</para>
 ///
 /// <para>TWO ACCEPTED SHAPES, WITH DELIBERATELY DIFFERENT STRICTNESS (g1 finding F1). The prompt asks
 /// for the label on a line of its own, and 3 of g1's 72 measured answers put it at the END OF A PROSE
@@ -170,6 +175,30 @@ public static class ProductChatCitations
             {
                 var stripped = string.Join("\n", lines.Take(last)).TrimEnd();
                 return (stripped.Length == 0 ? answer : stripped, selectedIds);
+            }
+
+            // AN EMPTY WHOLE-LINE CITATION IS SCAFFOLDING WITH NOTHING IN IT, AND IT REACHED THE READER
+            // (g3b, 0 of 102 to 2 of 102). Two answers rendered a literal "Guides: ," under the prose while
+            // the response carried three perfectly good guide ids: the model wrote the label and the
+            // separator and no id between them. Tokenize returns an EMPTY list there rather than a null one,
+            // so `cited != null` was true, the intersection was empty, and no token existed for the
+            // fabrication strip above to look at - the line fell through to the untouched-answer return and
+            // was published verbatim.
+            //
+            // Stripping it is safe under this class's own asymmetry (never delete something that could be a
+            // sentence), and it needs no new judgement call to see that: POSITION already proved this line is
+            // a citation, and an empty token list means the tail holds no word at all. Tokenize Clean()s each
+            // token and drops the empties, so "Guides:", "Guides: ," and "Guides: ***" all land here while
+            // "Guides: none of them cover this" does not - that tokenizes to real words, keeps its non-empty
+            // list, and is still left exactly where it was. This is the never-empty contract the rest of the
+            // chat layer already carries, floored on "holds no letter or digit" rather than on whitespace.
+            //
+            // The refs returned are the honest full set, exactly as on every other miss: what stops reaching
+            // the reader is only the empty line.
+            if (wholeLine && cited.Count == 0)
+            {
+                var withoutEmpty = string.Join("\n", lines.Take(last)).TrimEnd();
+                return (withoutEmpty.Length == 0 ? answer : withoutEmpty, selectedIds);
             }
 
             return (answer, selectedIds);

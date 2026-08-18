@@ -49,8 +49,8 @@ public class ProductChatCitationContractTests
     /// string comparison, so it survives a rewording of either sentence.
     /// </summary>
     [Theory]
-    [InlineData("en", "naming the guide ids you used", "naming what you actually used")]
-    [InlineData("he", "שמציינת את מזהי המדריכים שהשתמשת בהם", "שמציינת את מה שבאמת השתמשת בו")]
+    [InlineData("en", "naming the ids you used", "naming what you actually used")]
+    [InlineData("he", "שמציינת את המזהים שהשתמשת בהם", "שמציינת את מה שבאמת השתמשת בו")]
     public void TheBookAwareMessage_CarriesExactlyOneCitationSentence(
         string language, string phaseASentence, string bookAwareSentence)
     {
@@ -306,6 +306,69 @@ public class ProductChatCitationContractTests
     [InlineData("טקסט.\nמדריכים: אין מדריך שמכסה את זה")]
     public void AWholeLineCitation_NamingSomethingThatIsNotARefShape_IsStillLeftAlone(string answer)
     {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
+    /// <summary>
+    /// g3b: A CITATION LINE WITH NOTHING IN IT REACHED THE READER (0 of 102 to 2 of 102). Two English
+    /// answers rendered a literal <c>Guides: ,</c> under the prose while the response carried three
+    /// perfectly good guide ids - the model wrote the label and the separator and no id between them.
+    ///
+    /// <para>WHY NO EXISTING TEST CAUGHT IT, WHICH IS THE INTERESTING PART. <c>Tokenize</c> returns an
+    /// EMPTY list for that tail rather than a null one, so the parser's "did anything parse" check passed,
+    /// the intersection with the selection came back empty, and the fabrication strip above found no token
+    /// to judge - every branch behaved exactly as designed and the line fell through to the leave-the-answer
+    /// alone return. The gap was between two guards, not inside either.</para>
+    ///
+    /// <para>The refs still degrade to the honest full set, exactly as on every other miss. The Hebrew case
+    /// is pinned beside the English one because the label is a different string in each and a fix keyed on
+    /// one of them would look complete.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export writes a DOCX.\n\nGuides: ,", "Export writes a DOCX.")]
+    [InlineData("Export writes a DOCX.\n\nGuides:", "Export writes a DOCX.")]
+    [InlineData("Export writes a DOCX.\n\n**Guides:** ,", "Export writes a DOCX.")]
+    [InlineData("הייצוא מפיק DOCX.\n\nמדריכים: ,", "הייצוא מפיק DOCX.")]
+    [InlineData("הייצוא מפיק DOCX.\n\nמקורות:", "הייצוא מפיק DOCX.")]
+    public void AWholeLineCitation_NamingNothingAtAll_IsNotPublished(string answer, string expectedProse)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(expectedProse, prose);
+        Assert.Equal(Carried, refs);   // the honest fallback, unchanged
+    }
+
+    /// <summary>
+    /// AND THE STRIP STILL CANNOT REACH A SENTENCE. The line above is removed because its tail holds no
+    /// word at all; the moment it holds one, the pre-existing leave-it-alone behaviour applies and is
+    /// pinned in <see cref="AWholeLineCitation_NamingSomethingThatIsNotARefShape_IsStillLeftAlone"/>.
+    /// Asserted here as its own case anyway, on the shape closest to the empty one, because the whole risk
+    /// of this fix is a floor that creeps from "no word" up to "no id".
+    /// </summary>
+    [Fact]
+    public void AWholeLineCitation_NamingOneOrdinaryWord_IsStillLeftAlone()
+    {
+        const string answer = "Export writes a DOCX.\n\nGuides: none";
+
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
+    /// <summary>
+    /// An answer that is ONLY an empty citation line keeps its text. The strip's every sibling carries this
+    /// floor and this one is no different: returning an empty answer to the reader is worse than returning
+    /// scaffolding, so a strip that would empty the answer does not run.
+    /// </summary>
+    [Fact]
+    public void AnAnswerThatIsNothingButAnEmptyCitationLine_IsLeftAlone()
+    {
+        const string answer = "Guides: ,";
+
         var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
 
         Assert.Equal(answer, prose);

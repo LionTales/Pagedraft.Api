@@ -364,7 +364,7 @@ public class ProductChatBudgetTests
 
         // Every selected guide is still in the prompt, by id AND by its real text.
         Assert.Equal(4, guides.Count);
-        Assert.All(guides, g => Assert.Contains($"=== GUIDE id={g.Id} lang={g.Lang} ===", instruction, StringComparison.Ordinal));
+        Assert.All(guides, g => Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}{g.Id} lang={g.Lang} ===", instruction, StringComparison.Ordinal));
         Assert.Contains(ProductChatPrompt.SystemMessage("he"), instruction, StringComparison.Ordinal);
 
         // The history is gone, whole. Asserted over the non-empty population that was sent.

@@ -233,24 +233,25 @@ public class ProductChatRoutePartitionTests
     private const string ProductRouteEn =
         "You are Show, the PageDraft product assistant. You write in the first person, warmly and " +
         "briefly, and you open each reply from what was actually asked. " +
-        "What you say about PageDraft comes only from the material below, never from outside knowledge: " +
-        "do not state a setting, button, screen or behavior that is not written there, and do not " +
-        "assemble one out of parts that are only partly relevant. " +
-        "Where the answer is not there, tell the reader plainly that you do not have it and leave it at " +
-        "that; that is a complete answer on its own, and it is never a claim that PageDraft lacks the " +
-        "thing or does not support it. " +
-        "End your reply with a line of the form 'Guides: <id>, <id>' naming the guide ids you used, " +
+        "What you say about PageDraft comes only from what is written below, never from outside " +
+        "knowledge: do not state a setting, button, screen or behavior that is not written there, and " +
+        "do not assemble one out of parts that are only partly relevant. " +
+        "A gap in what you were given is never a fact about the product, so never say that PageDraft " +
+        "lacks a thing or does not support it. " +
+        "Where the answer is not there, say so briefly in your own voice and stop, in the sense of: " +
+        "'I do not have that.' " +
+        "End your reply with a line of the form 'Guides: <id>, <id>' naming the ids you used, " +
         "and nothing else on that line. " +
         "Answer in English, because the question is in English, even where a guide you used is in " +
         "another language.";
 
     private const string ProductRouteHe =
         "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת. " +
-        "מה שאתה אומר על PageDraft מגיע רק מהחומר שלמטה ולעולם לא מידע חיצוני: אל תציין הגדרה, כפתור, " +
+        "מה שאתה אומר על PageDraft מגיע רק ממה שכתוב למטה ולעולם לא מידע חיצוני: אל תציין הגדרה, כפתור, " +
         "מסך או התנהגות שאינם כתובים שם, ואל תרכיב כזו מתוך חלקים שרק חלקית רלוונטיים. " +
-        "כאשר התשובה אינה שם, אמור לקורא במפורש שאין לך אותה והשאר זאת כך; זו תשובה שלמה בפני עצמה, " +
-        "ולעולם אינה קביעה ש-PageDraft חסר את הדבר או אינו תומך בו. " +
-        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את מזהי המדריכים שהשתמשת בהם, " +
+        "חוסר במה שניתן לך אינו עובדה על המוצר, ולכן לעולם אל תאמר ש-PageDraft חסר דבר או אינו תומך בו. " +
+        "כאשר התשובה אינה שם, אמור זאת בקצרה בקולך שלך ועצור, במשמעות הזו: 'אין לי את המידע הזה.' " +
+        "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את המזהים שהשתמשת בהם, " +
         "ובלי דבר נוסף באותה שורה. " +
         "השב בעברית, כי השאלה נשאלה בעברית, גם אם מדריך שהשתמשת בו כתוב בשפה אחרת.";
 
@@ -421,7 +422,7 @@ public class ProductChatRoutePartitionTests
     /// the fallback is the same fallback either way, which is why this fact did not need re-deciding.)
     /// </summary>
     [Theory]
-    [InlineData("en", "say that you can only see a book while it is open")]
+    [InlineData("en", "answer in the first person to this effect: 'I can only see a book while it is open.")]
     [InlineData("he", "ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח.")]
     public void Book_WithNothingSurviving_FallsBackToProduct_AndNotToTheFalseRefusal(
         string language, string refusalFragment)
@@ -476,8 +477,14 @@ public class ProductChatRoutePartitionTests
     /// sentences while one clause forbade describing where you looked; g3 measured the answers narrating
     /// 16 of 16 on the product-uncovered cell in both languages. A prohibition stacked on a frame that
     /// keeps teaching the noun is the shape this prompt has recorded failing four times, so the noun is
-    /// gone from the instruction rather than banned in it: the grounding is "the material below", and
-    /// then "there".
+    /// gone from the instruction rather than banned in it.
+    ///
+    /// <para>THE GROUNDING IS NOW A PLACE AND NOT A SUBSTANCE (g3b). g3's block said "the material below",
+    /// and the second run measured the model narrating with THAT noun instead: "the material provided",
+    /// "החומר שבידי", 13 hits. Deleting one noun elects the next, so there is now no noun to elect - the
+    /// grounding is "what is written below", and then "there". The re-frame is checked here by the third
+    /// assertion, which is the whole reason a fragment test is worth having: it fails if a future edit
+    /// re-introduces a substance for the answer to report on.</para>
     ///
     /// <para>VACUITY GUARD: Union's grounding block DOES name the guides, repeatedly, so the absence here
     /// is this block's shape and not a word that appears in no composed message.</para>
@@ -507,9 +514,17 @@ public class ProductChatRoutePartitionTests
                                "do not state a setting, button, screen or behavior that is not written there",
             grounding, System.StringComparison.Ordinal);
         Assert.Contains(
-            language == "he" ? "ולעולם אינה קביעה ש-PageDraft חסר את הדבר או אינו תומך בו" :
-                               "never a claim that PageDraft lacks the thing or does not support it",
+            language == "he" ? "לעולם אל תאמר ש-PageDraft חסר דבר או אינו תומך בו" :
+                               "never say that PageDraft lacks a thing or does not support it",
             grounding, System.StringComparison.Ordinal);
+
+        // AND NO SUBSTANCE NOUN CAME BACK IN ITS PLACE (g3b). "The material" is the noun g3's own fix
+        // introduced and the run then measured being read back at the reader, so it is banned here by name
+        // alongside the source noun above. This is the assertion that makes the re-frame a property rather
+        // than a wording preference.
+        Assert.DoesNotContain(
+            language == "he" ? "החומר" : "the material",
+            grounding, System.StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

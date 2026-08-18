@@ -69,7 +69,7 @@ public class ProductChatBookServiceTests
         var request = Assert.Single(captured);
         Assert.DoesNotContain(ProductChatPrompt.BookMarker, request.Instruction);
         Assert.Contains(
-            "say that you can only see a book while it is open", request.Instruction,
+            "'I can only see a book while it is open.", request.Instruction,
             StringComparison.Ordinal);
     }
 
@@ -89,7 +89,7 @@ public class ProductChatBookServiceTests
         var request = Assert.Single(captured);
         Assert.NotNull(request.Instruction);
         var guideHeaders = request.Instruction
-            .Split("=== GUIDE id=", StringSplitOptions.None).Length - 1;
+            .Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1;
 
         Assert.Equal(GuideSelector.DefaultCount, guideHeaders);
     }
@@ -150,7 +150,7 @@ public class ProductChatBookServiceTests
         var request = Assert.Single(captured);
         Assert.NotNull(request.Instruction);
         var guideHeaders = request.Instruction
-            .Split("=== GUIDE id=", StringSplitOptions.None).Length - 1;
+            .Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1;
 
         Assert.Equal(ProductChatService.BookAwareGuideCount, guideHeaders);
         Assert.True(guideHeaders >= ProductChatBudget.MinGuides,

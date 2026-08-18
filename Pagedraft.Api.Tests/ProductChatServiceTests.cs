@@ -166,7 +166,7 @@ public class ProductChatServiceTests : IDisposable
         // (2) The coverage refusal and (3) the book-specific refusal, worded distinctly (d1 item 5).
         Assert.Contains("If the guides do not address the question", instruction, StringComparison.Ordinal);
         Assert.Contains(
-            "say that you can only see a book while it is open", instruction, StringComparison.Ordinal);
+            "'I can only see a book while it is open.", instruction, StringComparison.Ordinal);
         // (2b) THE g2/g3 HALT RULES, by their own words rather than by "some refusal rule is present":
         // a refusal may name another topic the guides DO cover WHEN one is relevant, may fall back to
         // a bare refusal when none is, and may never characterize what they say about what they do not
@@ -179,7 +179,7 @@ public class ProductChatServiceTests : IDisposable
             instruction, StringComparison.Ordinal);
         Assert.Contains("not as a fact about the product", instruction, StringComparison.Ordinal);
         // (4) The selected guide's real text, and its citable id.
-        Assert.Contains("=== GUIDE id=export lang=en ===", instruction, StringComparison.Ordinal);
+        Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}export lang=en ===", instruction, StringComparison.Ordinal);
         Assert.Contains("Export produces a DOCX file", instruction, StringComparison.Ordinal);
         // A section heading from deep inside the guide, so this asserts the WHOLE file travels rather
         // than only its opening. be-c06 renamed it (from "Save before you export", which blamed the
@@ -243,9 +243,13 @@ public class ProductChatServiceTests : IDisposable
             "GroundingHe no longer tells the model to name a covered topic on a refusal.");
 
         // d1 item 5's two refusal reasons stay DISTINCTLY worded. Both runs confirmed this held. g3
-        // rewrote WHAT the book refusal says (its old sentence had gone false and was reaching users);
-        // that the two reasons are still worded distinctly is the property, and it is unchanged.
-        Assert.Contains("say that you can only see a book while it is open", en, StringComparison.Ordinal);
+        // rewrote WHAT the book refusal says (its old sentence had gone false and was reaching users)
+        // and g3b rewrote HOW the English half says it - it is now the finished first-person sentence in
+        // quotes, which is the construction the Hebrew half has used since g3 and which that block's
+        // docstring records as the thing that stopped the model echoing an imperative. The English
+        // fragment below therefore moved from "say that you can only see..." to the quoted sentence; the
+        // property being asserted, that the two reasons are still worded distinctly, is unchanged.
+        Assert.Contains("'I can only see a book while it is open.", en, StringComparison.Ordinal);
         Assert.Contains("אני יכול לראות ספר רק כשהוא פתוח", he, StringComparison.Ordinal);
     }
 
@@ -464,7 +468,7 @@ public class ProductChatServiceTests : IDisposable
 
         Assert.Equal("he", result.Language);
         var instruction = Assert.Single(captured).Instruction!;
-        Assert.Contains("=== GUIDE id=export lang=he ===", instruction, StringComparison.Ordinal);
+        Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}export lang=he ===", instruction, StringComparison.Ordinal);
         Assert.DoesNotContain("lang=en", instruction, StringComparison.Ordinal);
         Assert.Contains("ענה אך ורק מתוך תוכן המדריכים", instruction, StringComparison.Ordinal);
     }

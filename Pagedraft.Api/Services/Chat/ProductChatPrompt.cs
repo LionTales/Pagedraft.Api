@@ -42,8 +42,57 @@ public static class ProductChatPrompt
 {
     // ─── Section markers. ASCII and language-independent so a test can assert on them ────────────
 
-    internal const string GuidesMarker = "[GUIDES]";
+    /// <summary>
+    /// THE PRODUCT-CORPUS SECTION MARKER, AND SINCE g3b IT NAMES THE SUBJECT RATHER THAN THE SOURCE.
+    ///
+    /// <para>WHAT IT USED TO BE AND WHY THAT IS GONE. This read <c>[GUIDES]</c>, and each document below
+    /// it carried a <c>=== GUIDE id=... ===</c> header. g3's fix deleted the source noun from the PRODUCT
+    /// route's instructions (<see cref="ProductChatPromptBlocks.ProductGroundingScopedEn"/>) on the tested
+    /// claim, written into that block's own docstring, that "it is the INSTRUCTIONS naming the source, not
+    /// the data carrying it, that make the answer talk about the source". g3b MEASURED that claim and it is
+    /// REFUTED: narration on product questions went 33/102 to 32/102, the product-uncovered cell stayed at
+    /// 15 of 16, and the Hebrew answers narrate with <c>המדריכים</c>, a word that appears nowhere in the
+    /// rewritten Hebrew block. Deleting the noun from the instructions only moved the narration onto
+    /// whatever noun was left: the new grounding said "the material below" and the answers came back saying
+    /// "the material provided" and "החומר שבידי" (13 hits across the run).</para>
+    ///
+    /// <para>WHY THE DATA IS WHERE THE NOUN COMES FROM, MEASURED RATHER THAN ARGUED. The GENERAL route
+    /// composes the SAME closing language sentence as the product route, "even where a guide you used is in
+    /// another language", and it narrated 0 of 16 in g3b. It differs from the product route in exactly two
+    /// things that carry a source noun: it is handed no guide documents at all
+    /// (<c>ProductChatService.GeneralRouteGuideCount</c> is 0, so no marker and no headers ride) and it
+    /// composes no citation sentence. The product route, carrying both, narrated in 26 of its records. A
+    /// noun that survives in the instructions of a route that never narrates is not the carrier; the
+    /// envelope the other route adds is. That comparison is why <see cref="ProductChatPromptBlocks.LanguageEn"/>
+    /// is deliberately NOT touched by this change.</para>
+    ///
+    /// <para>SO THE FRAME NAMES THE SUBJECT, WHICH IS NOT A THING TO NARRATE ABOUT. "PageDraft" is what the
+    /// answer is already about, so repeating it back is the answer's topic and not a report on where the
+    /// assistant looked; there is no document class here for a model to say it could not find something in.
+    /// It stays ASCII and language-independent for the same reason it always was: the tests assert on it and
+    /// it must read the same to a Hebrew turn and an English one.</para>
+    ///
+    /// <para>THE BOOK SECTION IS DELIBERATELY UNTOUCHED. <see cref="BookMarker"/> and the
+    /// <c>=== ARTIFACT ref=... ===</c> headers under it kept the book cell at 0 narration in BOTH g3 runs,
+    /// and this codebase's rule for that is not to touch what is working. The Book route's own instructions
+    /// still say "the guides below" and now point at a section marked with the product's name, which is if
+    /// anything a plainer referent than the one they had.</para>
+    /// </summary>
+    internal const string GuidesMarker = "[PAGEDRAFT]";
     internal const string BookMarker = "[BOOK]";
+
+    /// <summary>
+    /// The per-document header, carrying the <c>id</c> the citation line is built out of and NO document
+    /// class. It was <c>"=== GUIDE id="</c>; see <see cref="GuidesMarker"/> for the measurement.
+    ///
+    /// <para>THE ID IS THE LOAD-BEARING HALF AND IT DID NOT MOVE. <see cref="ProductChatCitations"/> never
+    /// reads this prompt: it parses the ids out of the MODEL'S OWN closing line and intersects them with the
+    /// selection the service passed it, so the only way an id reaches the reader's citation chips is by the
+    /// model copying it from here. Dropping the word GUIDE costs the model nothing it cites with; dropping
+    /// <c>id=</c> would silently degrade every chip to the fall-back "here is everything this turn was
+    /// given". <c>ProductChatCitationEnvelopeTests</c> pins the round trip end to end.</para>
+    /// </summary>
+    internal const string GuideHeaderPrefix = "=== id=";
 
     /// <summary>
     /// THE BOOK'S OWN TITLE, SAID TO BE THE BOOK'S (be-c03, review finding #7). It used to render as a
@@ -269,7 +318,7 @@ public static class ProductChatPrompt
             sb.Append(GuidesMarker).Append('\n');
             foreach (var guide in guides)
             {
-                sb.Append("=== GUIDE id=").Append(guide.Id)
+                sb.Append(GuideHeaderPrefix).Append(guide.Id)
                   .Append(" lang=").Append(guide.Lang)
                   .Append(" ===\n")
                   .Append(guide.Body)
