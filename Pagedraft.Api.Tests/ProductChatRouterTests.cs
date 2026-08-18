@@ -373,6 +373,103 @@ public class ProductChatRouterTests
         Assert.False(signals.StrongGuideMatch);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── g2: THE ONE SHAPE THAT IS ANSWERED IN CODE ─────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A PLACE INSIDE A MANUSCRIPT, WITH NO MANUSCRIPT OPEN. Nothing that could answer this is in scope,
+    /// so <c>ProductChatService</c> answers it from a fixed string and never calls the model. Both
+    /// languages, and both a numbered chapter and a scene, because the location lexicon carries both
+    /// families.
+    /// </summary>
+    [Theory]
+    [InlineData("What happens in chapter 3?")]
+    [InlineData("מה קורה בפרק 3?")]
+    [InlineData("Which scene does he leave in?")]
+    [InlineData("באיזו סצנה הוא עוזב?")]
+    public void ALocationQuestionWithNoBookOpen_IsAnsweredInCode(string question)
+        => Assert.True(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: false));
+
+    /// <summary>
+    /// WITH A BOOK OPEN IT IS NOT, which is the whole condition: the path exists for the state where
+    /// nothing can be read, and with a bookId there is something to read.
+    /// </summary>
+    [Theory]
+    [InlineData("What happens in chapter 3?")]
+    [InlineData("מה קורה בפרק 3?")]
+    public void TheSameQuestionWithABookOpen_IsNotAnsweredInCode(string question)
+        => Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: true));
+
+    /// <summary>
+    /// THE NARROWING THAT KEEPS A CRAFT QUESTION OUT, and it is the reason this predicate reads
+    /// <c>BookLocationWords</c> rather than the full book lexicon. The six review DIMENSIONS are in
+    /// <c>BookContentWords</c> because they drive retrieval, and they are craft words at the same time -
+    /// "how do I improve the pacing?" is a book-content hit and a general question about writing at once.
+    /// Answered in code it would meet a real question with an instruction to open a book.
+    /// </summary>
+    [Theory]
+    [InlineData("How do I improve the pacing of a novel?")]
+    [InlineData("איך משפרים את הקצב של רומן?")]
+    [InlineData("How much plot does a short story need?")]
+    [InlineData("כמה עלילה צריך סיפור קצר?")]
+    public void ADimensionQuestionWithNoLocation_IsNotAnsweredInCode(string question)
+        => Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: false));
+
+    /// <summary>
+    /// EVERY OTHER FAMILY VETOES, on the same conjunction discipline the routes use: a product word, a
+    /// strong guide top score, or a craft word means the question is at least partly about something the
+    /// model CAN answer, and mixed is never answered deterministically.
+    /// </summary>
+    [Fact]
+    public void AnyOtherSignal_VetoesTheDeterministicAnswer()
+    {
+        // A product word beside the location.
+        Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(
+            "How do I export a single chapter?", hasBookId: false));
+        Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(
+            "איך מייצאים פרק בודד?", hasBookId: false));
+
+        // A craft word beside it.
+        Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(
+            "How long should a chapter of a novel be?", hasBookId: false));
+
+        // A strong guide top score alone, on a question the lexicons would otherwise have caught.
+        Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(
+            "What happens in chapter 3?", hasBookId: false,
+            guideTopScore: ProductChatRouter.StrongGuideTopScore));
+
+        // VACUITY GUARD: the same question just below the threshold IS caught, so the vetoes above are
+        // the signals and not a predicate that never fires.
+        Assert.True(ProductChatRouter.AsksAboutABookThatIsNotOpen(
+            "What happens in chapter 3?", hasBookId: false,
+            guideTopScore: ProductChatRouter.StrongGuideTopScore - 0.1));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ABlankQuestion_IsNeverAnsweredInCode(string? question)
+        => Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: false));
+
+    /// <summary>
+    /// AND IT IS LANGUAGE-INDEPENDENT LIKE THE ROUTER, swept over the whole table rather than over the
+    /// handful of rows above: whatever the predicate answers for a row's Hebrew, it answers for its
+    /// English. The lexicons are bilingual by construction and the predicate reads the raw question, so
+    /// this is a property and not a coincidence of the rows chosen.
+    /// </summary>
+    [Fact]
+    public void TheDeterministicShape_IsReadTheSameInBothLanguages()
+    {
+        foreach (var row in Table)
+        {
+            Assert.Equal(
+                ProductChatRouter.AsksAboutABookThatIsNotOpen(row.Hebrew, hasBookId: false),
+                ProductChatRouter.AsksAboutABookThatIsNotOpen(row.English, hasBookId: false));
+        }
+    }
+
     /// <summary>Same inputs, same route, every time. The property that makes the table above worth
     /// anything.</summary>
     [Fact]

@@ -226,6 +226,44 @@ public static class ProductChatRouter
         return Resolve(signals, hasBookId);
     }
 
+    /// <summary>
+    /// THE ONE SHAPE g2 ANSWERS IN CODE: the author is asking about a place inside a manuscript and no
+    /// book is open, so nothing that could answer them is in scope. It is deliberately NOT a route -
+    /// there is no prompt to compose, because there is no model call: <c>ProductChatService</c> returns a
+    /// fixed localized sentence. "Show never claims the book feature is coming" has to be a property of
+    /// the code path, exactly as the fail-safes' "never from priors" is; a prompt sentence would make it a
+    /// property of the model's compliance, and the sentence it replaces was measured being read back
+    /// verbatim 6 of 6 runs.
+    ///
+    /// <para>KEYED ON <see cref="BookArtifactSelector.BookLocationWords"/>, NOT ON THE FULL BOOK LEXICON,
+    /// and that narrowing is load-bearing. <see cref="BookArtifactSelector.BookContentWords"/> also
+    /// carries the six review DIMENSIONS, so "how do I improve the pacing?" asked with no book open is a
+    /// book-content hit and a general craft question at the same time; answering it with "open a book
+    /// first" would take a real question and give the author nothing. A LOCATION - a chapter, a scene - is
+    /// what cannot be discussed without a manuscript.</para>
+    ///
+    /// <para>THE OTHER FAMILIES ALL VETO, on the same conjunction discipline
+    /// <see cref="Resolve(RouteSignals, bool)"/> uses: a product signal (a lexicon hit or a strong guide
+    /// top score) means the guides may well answer it, and a craft signal means the question is at least
+    /// partly about writing in general. Mixed is never answered deterministically; it falls through to the
+    /// router and, in practice, to Union.</para>
+    ///
+    /// <para>KNOWN RESIDUAL, STATED SO IT IS NOT DISCOVERED LIVE: a product HOW-TO that names a chapter
+    /// without using a product word ("how do I add a chapter?") is caught here unless the guide corpus
+    /// scores at or above <see cref="StrongGuideTopScore"/> for it - and that threshold ships
+    /// UNCALIBRATED. It is one of the cells g3 measures.</para>
+    /// </summary>
+    public static bool AsksAboutABookThatIsNotOpen(
+        string? question, bool hasBookId, double guideTopScore = 0.0)
+    {
+        if (hasBookId || string.IsNullOrWhiteSpace(question)) return false;
+
+        var signals = Analyze(question, guideTopScore);
+        if (signals.ProductSurface || signals.StrongGuideMatch || signals.WritingCraft) return false;
+
+        return BookArtifactSelector.ContainsAnyWord(question, BookArtifactSelector.BookLocationWords);
+    }
+
     /// <summary>The rules, over already-read signals. Split out so a test can drive a signal
     /// combination directly instead of reverse-engineering a question that produces it.</summary>
     public static ChatRoute Resolve(RouteSignals signals, bool hasBookId)

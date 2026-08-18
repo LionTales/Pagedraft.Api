@@ -10,7 +10,14 @@ namespace Pagedraft.Api.Services.Chat;
 /// routing seam takes it past the workspace's ~700-line soft ceiling. The line the split is made on is
 /// the one that makes it safe to make at all: g1 adds identity tests that pin all four composed
 /// messages against literals typed by hand, so a move that changed a character fails the suite instead
-/// of shipping. The ~370 facts under <c>--filter ~ProductChat</c> are the fence.</para>
+/// of shipping. The facts under <c>--filter ~ProductChat</c> are the fence, and g1 MEASURED them at 700
+/// pre-existing (the plan's "~370" is stale).</para>
+///
+/// <para>g2 THEN ADDED THE ROUTED BLOCKS BESIDE THE UNION ONES RATHER THAN EDITING THEM, and that is the
+/// organising rule of this file now. <see cref="ChatRoute.Union"/> is the fallback every misroute lands
+/// on and is DEFINED to be byte-identical to what g4 and g5 measured, so a block Union composes may not
+/// move; a route that needs different words gets a NEW block and, where only one sentence differs, a
+/// compile-time split so the twenty sentences around it are shared rather than re-typed.</para>
 ///
 /// <para>EXACTLY ONE THING CHANGED IN THE TEXT, AND IT CHANGED NO CHARACTER OF IT.
 /// <see cref="GroundingEnHead"/> and <see cref="GroundingHeHead"/> are now the COMPILE-TIME
@@ -105,9 +112,108 @@ internal static class ProductChatPromptBlocks
     internal const string GroundingEnHead = PersonaEn + ProductGroundingEn;
 
     /// <summary>
-    /// THE BOOK-SPECIFIC REFUSAL. Now FALSE as a statement about the product (Show reads the book since
-    /// phase B), and g2 owns deleting it; it survives here because g1 changes no behavior and the
-    /// book-less composed message is what phase A's gate verdict measured.
+    /// THE PRODUCT ROUTE'S GROUNDING (g2): <see cref="ProductGroundingEn"/> WITH THE SOURCE-NARRATION
+    /// TAKEN OUT, and it exists as a second block rather than as an edit to that one because
+    /// <see cref="ChatRoute.Union"/> must stay byte-identical to what g4 and g5 measured. Union is the
+    /// fallback for every question the router cannot classify, and the whole routing layer rests on a
+    /// misroute being able to return only the status quo; editing the shared block in place would have
+    /// moved the status quo.
+    ///
+    /// <para>WHAT WAS DELETED, AND WHY EACH DELETION IS THE BUG. The owner's report is that Show narrates
+    /// where he can and cannot find things, and two sentences of the shared block INSTRUCT exactly that.
+    /// "If the guides do not address the question, say so plainly" tells him to tell the reader about the
+    /// guides; "State it as a gap in the guides, not as a fact about the product" MANDATES the meta-frame,
+    /// and it is the reason he talks about his sources instead of about the world. Both are gone here.
+    /// The conditional pivot that rode with the first ("if another topic they DO cover is genuinely
+    /// relevant, name it and its guide id") goes with it, because naming a guide id in prose is the same
+    /// narration wearing a citation's clothes and the citation line already carries that fact.</para>
+    ///
+    /// <para>WHAT WAS KEPT, AND WHY DROPPING IT WOULD HAVE BEEN A DIFFERENT CHANGE THAN THE ONE ASKED FOR.
+    /// "Answer ONLY from the guide content provided below", "never state a setting, button, screen or
+    /// behavior that the provided guides do not state", "do not assemble a guess out of partially relevant
+    /// material" and "do not describe what the guides say about a topic they do not address" are
+    /// ANTI-FABRICATION rules, not narration, and g4's PASS (0 fabricated product behaviors in 48 adjacent
+    /// runs) is a measurement of them. g3's acceptance says refusal appropriateness must not regress, so
+    /// they are carried across verbatim.</para>
+    ///
+    /// <para>THE ONE REPLACEMENT SENTENCE DOES TWO JOBS AND ADDS NO THIRD RULE. It admits a gap without
+    /// describing the source ("without describing where you looked"), and it keeps the ban the deleted
+    /// meta-frame was carrying - g2's Hebrew `d4` asserted "PageDraft does not support exporting EPUB",
+    /// which the guides never say, and that prohibition had nowhere else to live. Two sentences out, one
+    /// in: this file has three recorded instances of being made measurably WORSE by stacking a rule, so
+    /// the sentence count does not grow.</para>
+    ///
+    /// <para>UNMEASURED. Every number quoted above was measured on the wording this block DELETES. g3 is
+    /// the gate; nothing here may be described as working until it runs.</para>
+    /// </summary>
+    internal const string ProductGroundingScopedEn =
+        "Answer ONLY from the guide content provided below. " +
+        "Do not use outside knowledge about PageDraft, and never state a setting, button, screen or " +
+        "behavior that the provided guides do not state. " +
+        "Where you do not have the answer, say plainly that you do not have it, without describing " +
+        "where you looked, and never turn that into a claim that PageDraft lacks the thing or does not " +
+        "support it. " +
+        "Do not assemble a guess out of partially relevant material. " +
+        "And do not describe what the guides say about a topic they do not address, not even to report " +
+        "what they mention about it. ";
+
+    /// <summary>
+    /// THE BOOK ROUTE'S PRODUCT RULE, IN ONE SENTENCE (g2). A book-scoped turn still has to be unable to
+    /// invent a screen, but the five sentences of <see cref="ProductGroundingEn"/> are written for a turn
+    /// whose ANSWER comes from the guides, and on this route the answer comes from the BOOK section. The
+    /// clause of <see cref="BookGroundingRoutedEn"/> that says "the rule above about the guides governs
+    /// questions about PageDraft itself" needs a rule above it to point at, and this is it.
+    ///
+    /// <para>The tokens this frees are the point: they are paid to the book artifacts, alongside g2's drop
+    /// from two guides to one on this route.</para>
+    /// </summary>
+    internal const string BookProductRuleEn =
+        "What you say about PageDraft itself comes only from the guides below, never from outside " +
+        "knowledge about the product. ";
+
+    /// <summary>
+    /// THE GENERAL ROUTE (g2): a writing or literature question that is about neither the product nor the
+    /// author's own manuscript. It is the route the owner's complaint is sharpest on - asked a craft
+    /// question, Show reported which of his sources failed to cover it instead of answering.
+    ///
+    /// <para>POSITIVE, NOT PROHIBITIVE, AND THAT IS THE WHOLE DESIGN. The narration was CAUSED by an
+    /// instruction to narrate, so the fix is to replace the instruction rather than to add a rule against
+    /// its output; this prompt has three recorded instances of a stacked prohibition making a class worse.
+    /// Two sentences: answer from what you know, and say something about PageDraft only where a guide says
+    /// it.</para>
+    ///
+    /// <para>NO CITATION LINE RIDES ON THIS ROUTE, deliberately: an answer out of Show's own knowledge has
+    /// no guide to name, and asking for a "Guides:" line under it would manufacture exactly the false
+    /// sourcing this route exists to stop. <c>ProductChatService</c> therefore also hands the citation
+    /// parser an EMPTY acceptable set here, so its no-line fallback (which returns the whole selection)
+    /// cannot decorate a general answer with chips it never used. <c>ProductChatCitations</c> tolerates an
+    /// answer with no citation line by contract, pinned in <c>ProductChatCitationContractTests</c>.</para>
+    /// </summary>
+    internal const string GeneralGroundingEn =
+        "This question is about writing rather than about PageDraft, so answer it from your own " +
+        "knowledge of the craft, directly and in your own words. " +
+        "Say something about PageDraft only where the guides below say it, and do not tell the reader " +
+        "which of your sources covered their question. ";
+
+    /// <summary>
+    /// THE BOOK-SPECIFIC REFUSAL, AND IT IS FALSE: Show has read the book since phase B, so "answering
+    /// questions about a specific book is not available yet and is coming" describes a product that no
+    /// longer exists.
+    ///
+    /// <para>g2 TOOK IT OFF EVERY ROUTE IT COMPOSES AND COULD NOT TAKE IT OUT OF THE FILE, and the
+    /// difference matters enough to state. <see cref="ChatRoute.Product"/>, <see cref="ChatRoute.Book"/>
+    /// and <see cref="ChatRoute.General"/> no longer compose it; the shape it used to govern - a question
+    /// about a book with no bookId on the request - is now answered DETERMINISTICALLY in
+    /// <c>ProductChatService</c>, in code, with no model call, which is the only way "Show never claims
+    /// the feature is coming" can be a property rather than a hope about the model's compliance.</para>
+    ///
+    /// <para>IT STILL SHIPS ON <see cref="ChatRoute.Union"/>, because Union is DEFINED to be
+    /// byte-identical to what g4 and g5 measured and that identity is the safety property the entire
+    /// routing layer rests on. So a book-less turn the router cannot classify, whose question the
+    /// deterministic path did not recognise either, can still be told the false sentence. That is a KNOWN,
+    /// ACCEPTED residual and not an oversight: removing it would mean editing the fallback every misroute
+    /// lands on, which is exactly the string that must not move until g3 has measured the routes that
+    /// replaced it.</para>
     /// </summary>
     internal const string BookRefusalEn =
         "If the question is about the content or state of the user's own book (its characters, its " +
@@ -151,6 +257,29 @@ internal static class ProductChatPromptBlocks
     /// <summary>Phase A's Hebrew head, REASSEMBLED AT COMPILE TIME. See
     /// <see cref="GroundingEnHead"/>.</summary>
     internal const string GroundingHeHead = PersonaHe + ProductGroundingHe;
+
+    /// <summary>The Hebrew twin of <see cref="ProductGroundingScopedEn"/>, carrying the same deletions and
+    /// the same one replacement sentence. DRAFT Hebrew (recorded in
+    /// <c>src/docs/HEBREW_NATIVE_REVIEW.md</c>): the owner reads it.</summary>
+    internal const string ProductGroundingScopedHe =
+        "ענה אך ורק מתוך תוכן המדריכים שמופיע למטה. " +
+        "אל תשתמש בידע חיצוני על PageDraft, ולעולם אל תציין הגדרה, כפתור, מסך או התנהגות שאינם כתובים " +
+        "במדריכים שניתנו. " +
+        "כאשר אין לך את התשובה, אמור זאת במפורש בלי לתאר היכן חיפשת, ולעולם אל תהפוך זאת לקביעה " +
+        "ש-PageDraft אינו תומך בכך. " +
+        "אל תרכיב ניחוש מתוך חומר שרק חלקית רלוונטי. " +
+        "ואל תתאר מה המדריכים אומרים על נושא שאינם עוסקים בו, גם לא כדי לציין מה מוזכר בהם לגביו. ";
+
+    /// <summary>The Hebrew twin of <see cref="BookProductRuleEn"/>. DRAFT Hebrew.</summary>
+    internal const string BookProductRuleHe =
+        "מה שאתה אומר על PageDraft עצמו מגיע רק מהמדריכים שלמטה ולא מידע חיצוני על המוצר. ";
+
+    /// <summary>The Hebrew twin of <see cref="GeneralGroundingEn"/>. DRAFT Hebrew.</summary>
+    internal const string GeneralGroundingHe =
+        "השאלה הזו עוסקת בכתיבה ולא ב-PageDraft, ולכן ענה עליה מתוך הידע שלך על מלאכת הכתיבה, ישירות " +
+        "ובמילים שלך. " +
+        "אמור משהו על PageDraft רק במקום שהמדריכים שלמטה אומרים זאת, ואל תספר לקורא איזה מקור כיסה את " +
+        "שאלתו. ";
 
     /// <summary>
     /// THE HEBREW BOOK-SPECIFIC REFUSAL IS A SENTENCE TO SAY, NOT AN ORDER TO FOLLOW. Phrased as an
@@ -211,7 +340,11 @@ internal static class ProductChatPromptBlocks
     //
     // Its clauses map one-to-one onto d1: (1) answer from the book artifacts, and who you are answering;
     // (2) the briefs are SUMMARIES, so a gap is a gap in the briefs and never a fact about the book -
-    // the phrase the plan names as carrying the whole risk; (3) the whole-chapter vs excerpt label
+    // the phrase the plan names as carrying the whole risk. READ THE NOTE ON BookGroundingRoutedEn BEFORE
+    // TREATING (2) AS THE CURRENT RULE: g2 REWROTE that clause for the Book route, because "say that the
+    // briefs do not mention it" is the source-narration the owner reported, and the routed twin hedges
+    // from Show's own vantage instead. The sentence below is unchanged ONLY because Union must stay
+    // byte-identical to what g4 and g5 measured; (3) the whole-chapter vs excerpt label
     // decides which of the two shapes applies, which is why the label exists at all; (4) what the status
     // artifact licenses, and the answer when the briefs are behind, because a refusal there is a worse
     // answer than the truth; (5) the retrieval's own recorded ambiguity.
@@ -383,7 +516,25 @@ internal static class ProductChatPromptBlocks
     // behavioural half is UNMEASURED - no GPU gate has been run against this wording in either language,
     // so the class this clause was rewritten for is NOT closed. Do not read the green suite as a verdict.
 
-    internal const string BookGroundingEn =
+    // ─── THE BRIEFS FENCE IS ITS OWN BLOCK SINCE g2, AND THE SPLIT CHANGED NO CHARACTER ─────────
+    //
+    // Same technique, and the same reason, as g1's persona/product-grounding split one screen up: the
+    // routed Book message needs to swap EXACTLY ONE sentence of this rule, and the alternative to a seam
+    // is a second copy of twenty sentences that carry measured verdicts. Head + Fence + Tail is a const
+    // expression, so the compiler guarantees BookGroundingEn is the string it always was, and
+    // ProductChatRoutePartitionTests pins it against a hand-typed literal anyway.
+    //
+    // WHY THE FENCE HAD TO MOVE AT ALL, AND WHY IT COULD NOT SIMPLY BE DELETED (g2, plan item 8d). The
+    // sentence tells the model to say "the briefs do not mention it", which is the owner's reported
+    // defect stated as an instruction: Show describing his sources to the author instead of answering
+    // about the world. But it is also the ONLY thing standing between a 6-brief sample and "X does not
+    // happen in your book", which is a false claim about a manuscript the author would act on. So it is
+    // REPLACED rather than removed: the hedge is taken from Show's own vantage ("you cannot see it from
+    // what is in front of you"), it offers the next step that actually resolves the question (look at the
+    // chapter itself), and the ban on asserting absence survives verbatim in force if not in wording.
+    // The word "briefs" is gone, and with it the meta-frame; the fence is not.
+
+    internal const string BookGroundingHeadEn =
         "If the question is about the content or state of the user's own book (its characters, its " +
         "plot, what a specific chapter says, what a review found), answer it from the BOOK section " +
         "below and from nothing else; the rule above about the guides governs questions about " +
@@ -392,9 +543,22 @@ internal static class ProductChatPromptBlocks
         "You are writing to the AUTHOR of this book; the names in these artifacts are " +
         "the people in it. " +
         "Every book artifact carries a ref in its header, and what you say about the book is what those " +
-        "artifacts say. The chapter briefs are SUMMARIES of the chapters, so where they do not cover " +
+        "artifacts say. ";
+
+    /// <summary>UNION'S fence, byte-unchanged since phase B. The narration the owner reported.</summary>
+    internal const string BookBriefsFenceEn =
+        "The chapter briefs are SUMMARIES of the chapters, so where they do not cover " +
         "something, say that the briefs do not mention it; whether it happens in the book is something " +
-        "they cannot tell you. " +
+        "they cannot tell you. ";
+
+    /// <summary>THE BOOK ROUTE'S fence (g2): the same prohibition, hedged from Show's own vantage and
+    /// carrying the offer that resolves the question, with no sentence about what his sources are.</summary>
+    internal const string BookBriefsHedgeEn =
+        "Where what you have does not cover something, say that you cannot see it from what is in " +
+        "front of you and offer to look at the chapter itself; never say that it does not happen in " +
+        "the book. ";
+
+    internal const string BookGroundingTailEn =
         "A chapter given to you as 'whole chapter' is that chapter's complete text, so for that one " +
         "chapter you can say what it does and does not contain. A chapter given to you as 'EXCERPT' is " +
         "part of it, so there say what the parts you could read do and do not mention. Each of those " +
@@ -411,16 +575,36 @@ internal static class ProductChatPromptBlocks
         "what the note says, and where it does not say what to do, ask about what remains unclear " +
         "before answering about a particular chapter. ";
 
-    internal const string BookGroundingHe =
+    /// <summary>Phase B's book rule, REASSEMBLED AT COMPILE TIME. Byte-identical to the single literal it
+    /// used to be, by construction rather than by care. <see cref="ChatRoute.Union"/> composes this.</summary>
+    internal const string BookGroundingEn = BookGroundingHeadEn + BookBriefsFenceEn + BookGroundingTailEn;
+
+    /// <summary>The <see cref="ChatRoute.Book"/> rule: the same twenty sentences with the fence swapped
+    /// for the hedge. Exactly one sentence differs from <see cref="BookGroundingEn"/>, by
+    /// construction.</summary>
+    internal const string BookGroundingRoutedEn = BookGroundingHeadEn + BookBriefsHedgeEn + BookGroundingTailEn;
+
+    internal const string BookGroundingHeadHe =
         "אם השאלה נוגעת לתוכן או למצב של הספר של המשתמש (הדמויות שבו, העלילה, מה כתוב בפרק מסוים, מה " +
         "סקירה מצאה), ענה עליה מתוך מקטע הספר שמופיע למטה ומשום מקור אחר; הכלל שלמעלה לגבי המדריכים " +
         "חל על שאלות על PageDraft עצמו. מדריך עדיין יכול לעזור להסביר איך המוצר עובד, אך הוא אינו " +
         "מחליף את מה שפריטי הספר עצמם אומרים. " +
         "אתה כותב אל המחבר של הספר הזה; השמות שבפריטים האלה הם הדמויות " +
         "שבו. " +
-        "לכל פריט של הספר יש מזהה בכותרת שלו, ומה שאתה אומר על הספר הוא מה שהפריטים האלה אומרים. " +
+        "לכל פריט של הספר יש מזהה בכותרת שלו, ומה שאתה אומר על הספר הוא מה שהפריטים האלה אומרים. ";
+
+    /// <summary>Union's Hebrew fence, byte-unchanged. See <see cref="BookBriefsFenceEn"/>.</summary>
+    internal const string BookBriefsFenceHe =
         "תקצירי הפרקים הם סיכומים של הפרקים, ולכן כאשר הם אינם מכסים משהו, אמור שהתקצירים אינם מזכירים " +
-        "זאת; האם זה קורה בספר הוא דבר שהם אינם יכולים לומר לך. " +
+        "זאת; האם זה קורה בספר הוא דבר שהם אינם יכולים לומר לך. ";
+
+    /// <summary>The Book route's Hebrew hedge (g2). DRAFT Hebrew. See
+    /// <see cref="BookBriefsHedgeEn"/>.</summary>
+    internal const string BookBriefsHedgeHe =
+        "כאשר מה שיש לפניך אינו מכסה משהו, אמור שאינך רואה זאת ממה שלפניך והצע להסתכל בפרק עצמו; " +
+        "לעולם אל תאמר שזה אינו קורה בספר. ";
+
+    internal const string BookGroundingTailHe =
         "פרק שניתן לך כ'whole chapter' הוא הטקסט המלא של אותו פרק, ולכן לגבי אותו פרק בלבד תוכל לומר " +
         "מה יש בו ומה אין בו. פרק שניתן לך כ'EXCERPT' הוא חלק ממנו, ולכן שם אמור מה החלקים שהצלחת " +
         "לקרוא מזכירים ומה אינם מזכירים. כל אחד מהם חל על הפרק שלו ולא על פרק אחר. התוויות בסוגריים " +
@@ -433,4 +617,12 @@ internal static class ProductChatPromptBlocks
         "הזה יחד עם הצעד הבא שהוא מחייב. " +
         "הערה במקטע הספר על מה שהשאלה יכלה להתכוון אליו שייכת לתשובה: עשה מה שההערה אומרת, וכאשר היא " +
         "אינה אומרת מה לעשות, שאל על מה שנותר לא ברור לפני שתענה על פרק מסוים. ";
+
+    /// <summary>Phase B's Hebrew book rule, REASSEMBLED AT COMPILE TIME. See
+    /// <see cref="BookGroundingEn"/>.</summary>
+    internal const string BookGroundingHe = BookGroundingHeadHe + BookBriefsFenceHe + BookGroundingTailHe;
+
+    /// <summary>The <see cref="ChatRoute.Book"/> Hebrew rule. See
+    /// <see cref="BookGroundingRoutedEn"/>.</summary>
+    internal const string BookGroundingRoutedHe = BookGroundingHeadHe + BookBriefsHedgeHe + BookGroundingTailHe;
 }

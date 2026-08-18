@@ -391,6 +391,74 @@ public class ProductChatCitationContractTests
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── 7. AN ANSWER WITH NO CITATION LINE AT ALL (g2, the General route) ──────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// AN ANSWER THAT NEVER CITES ANYTHING SURVIVES INTACT. g2's General route asks for NO citation line -
+    /// an answer out of Show's own knowledge has no guide to name - so what was a rare parse miss becomes
+    /// the normal shape of a whole route's traffic, and the parser's behaviour on it stops being an edge
+    /// case. Two properties, and they are different facts: the PROSE comes back untouched (the parser must
+    /// not decide that the last sentence of an uncited answer was scaffolding), and the refs fall back to
+    /// the full carried set, which is the deliberate fail-safe direction - "here is what this answer was
+    /// grounded in" rather than a wrong citation.
+    ///
+    /// <para>Both languages, and the multi-line case, because the parser reads the LAST non-blank line and
+    /// a one-line fixture would not exercise that walk.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export runs from the book menu and produces a DOCX.")]
+    [InlineData("Export runs from the book menu.\nIt produces a DOCX.\n")]
+    [InlineData("הייצוא מופעל מתפריט הספר ומפיק קובץ DOCX.")]
+    [InlineData("הייצוא מופעל מתפריט הספר.\nהוא מפיק קובץ DOCX.\n")]
+    public void AnAnswerWithNoCitationLine_KeepsItsProse_AndFallsBackToTheCarriedSet(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
+    /// <summary>
+    /// AND WITH NOTHING LICENSED, IT CITES NOTHING - which is the state <c>ProductChatService</c> puts the
+    /// General route in on purpose. The fallback returns the acceptable set, so handing the parser the
+    /// surviving guides there would decorate every general answer with chips for guides it never used;
+    /// handing it an empty set makes "this answer cites nothing" the outcome rather than a hope about what
+    /// the model wrote. The prose still has to survive, which is the half that could silently break.
+    /// </summary>
+    [Theory]
+    [InlineData("Dialogue reads faster when the beats carry the blocking.")]
+    [InlineData("דיאלוג נקרא מהר יותר כשהפעולות נושאות את התנועה.")]
+    public void WithNoAcceptableReferences_TheAnswerCitesNothing_AndKeepsItsProse(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Array.Empty<string>());
+
+        Assert.Equal(answer, prose);
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: the same call WITH a carried set does return something, so the emptiness above is
+        // the licensing and not a parser that returns nothing for every input.
+        var (_, carriedRefs) = ProductChatCitations.Extract(answer, Carried);
+        Assert.NotEmpty(carriedRefs);
+    }
+
+    /// <summary>
+    /// A MODEL THAT WRITES A CITATION LINE ANYWAY, ON A TURN THAT LICENSES NONE, CANNOT MANUFACTURE ONE.
+    /// This is the safety property of the file's section 6 applied to g2's empty-set case, and it is the
+    /// direction that matters: the General route's whole point is that Show stops attributing an answer to
+    /// a source, so a habitual "Guides: faq" must not become a chip.
+    /// </summary>
+    [Fact]
+    public void WithNoAcceptableReferences_AHabitualCitationLine_NamesNothing()
+    {
+        var (_, refs) = ProductChatCitations.Extract(
+            "Dialogue reads faster when the beats carry the blocking.\nGuides: faq",
+            Array.Empty<string>());
+
+        Assert.Empty(refs);
+    }
+
     // ─── Fixtures ───────────────────────────────────────────────────────────────────────────────
 
     private static int Occurrences(string haystack, string needle)

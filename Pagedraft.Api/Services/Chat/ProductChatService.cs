@@ -35,6 +35,12 @@ namespace Pagedraft.Api.Services.Chat;
 /// <see cref="ProductChatPunctuation"/>). It runs AFTER the citation parse, and it LOGS its count,
 /// because a silent rewrite of model output is the other way this layer could ship a failure
 /// invisibly.</para>
+///
+/// <para>SIZE WAIVER (g2): this file is ~708 lines, a little over the workspace's ~700-line soft
+/// ceiling, and is deliberately not split here. The +96 g2 added is the routed read/guide/citation
+/// decisions and their reasons, all of which belong on the one method that owns a turn's flow; the
+/// natural split - lifting the fail-safes into their own type - would move code that g3 is about to
+/// measure, days before the gate that measures it. Split it after g3, not before.</para>
 /// </summary>
 public class ProductChatService
 {
@@ -89,6 +95,39 @@ public class ProductChatService
     /// no live measurement stands behind this number, only the token arithmetic.</para>
     /// </summary>
     public const int BookAwareGuideCount = 2;
+
+    /// <summary>
+    /// How many guides ride along on <see cref="ChatRoute.Book"/> (g2). The route means the answer comes
+    /// out of the BOOK section, so the guides are there only for the one sentence that still points at
+    /// them ("what you say about PageDraft itself comes only from the guides below"); one is enough to
+    /// keep that sentence honest, and it is <see cref="ProductChatBudget.MinGuides"/>, so the composition
+    /// never has to trim below what it was handed. The tokens go to book artifacts, which is the half of
+    /// the answer this route is actually built from.
+    ///
+    /// <para>APPLIED BY TRIMMING THE SCORED SELECTION, not by selecting again: the selection has to happen
+    /// BEFORE the route, because the router thresholds the top score the ranking already computed. The
+    /// scored list is best-first, so taking its head is exactly what selecting one would have
+    /// returned.</para>
+    /// </summary>
+    public const int BookRouteGuideCount = 1;
+
+    // ─── The deterministic answer for a book question with no book open (g2, plan item 8d) ──────
+    //
+    // IT IS CODE, NOT A PROMPT SENTENCE, and that is the whole of the decision. The sentence it replaces
+    // told the model to say that answering about a specific book "is not available yet and is coming",
+    // which stopped being true in phase B and which the model was measured reading back verbatim (6 of 6
+    // runs of that question shape in g2, including the imperative). A fixed string cannot go stale
+    // against the model's compliance, costs no round trip, and can be read by the author in the language
+    // they asked in.
+    //
+    // NO EM-DASH: these strings are rendered to the user.
+
+    private const string OpenTheBookHe =
+        "אני יכול לראות ספר רק כשהוא פתוח. פתחו את הספר שעליו אתם שואלים ושאלו אותי שוב, ואסתכל בו.";
+
+    private const string OpenTheBookEn =
+        "I can only see a book while it is open. Open the book you are asking about and ask me again, " +
+        "and I will look at it.";
 
     private const string BookUnreachableHe =
         "אינני מצליח לראות כרגע את הספר שלכם, ולכן לא אענה עליו מתוך ניחוש. נסו שוב בעוד רגע.";
@@ -191,16 +230,57 @@ public class ProductChatService
         // to Union, which ProductChatPrompt defines to be byte-identical to what shipped before routing
         // existed, so an unconfigured deployment composes exactly the message g4 and g5 measured.
         var routingEnabled = _productChatOptions?.Value.RoutingEnabled ?? false;
+        var guideTopScore = GuideSelector.TopScore(scored);
         var resolvedRoute = ProductChatRouter.Resolve(
-            question, request.BookId.HasValue, language, GuideSelector.TopScore(scored));
+            question, request.BookId.HasValue, language, guideTopScore);
         var route = routingEnabled ? resolvedRoute : ChatRoute.Union;
+
+        // ─── A BOOK QUESTION WITH NO BOOK OPEN IS ANSWERED HERE, IN CODE (g2) ────────────────────
+        //
+        // No model call, no prompt, no route: there is nothing to compose an answer FROM, so the honest
+        // answer is a fixed one and it is returned before the model is ever reached. This is the same
+        // shape as the fail-safes below - "never from priors" and "never claim the feature is coming"
+        // both have to be properties of the code path rather than of the model's compliance - and it is
+        // what let g2 delete the false coming-soon refusal from every composed route.
+        if (routingEnabled
+            && ProductChatRouter.AsksAboutABookThatIsNotOpen(question, request.BookId.HasValue, guideTopScore))
+        {
+            _logger.LogInformation(
+                "Product chat answered DETERMINISTICALLY in {Language}: the question names a place inside a " +
+                "manuscript and the request carried no bookId, so there is nothing to ground an answer in " +
+                "and no model was called. Question {QuestionChars} chars, guide top score {GuideTopScore}. " +
+                "The route the router would have resolved was {ResolvedRoute}.",
+                language, question.Length, guideTopScore, resolvedRoute);
+
+            // IsGrounded is TRUE and FaultReason is NULL because this is an ANSWER, not a failure. The
+            // client renders a fail-safe with its own per-reason copy and deliberately discards the
+            // server's prose (product-chat.component.ts, acceptResponse), so shipping this sentence as a
+            // fault would replace it with "I cannot reach the guides right now" - the opposite of honest.
+            return new ProductChatResponseDto(
+                ChatLanguage.IsHebrew(language) ? OpenTheBookHe : OpenTheBookEn,
+                Array.Empty<string>(), language, IsGrounded: true, FaultReason: null,
+                ArtifactRefs: Array.Empty<string>(), BookFaultReason: null);
+        }
+
+        // THE BOOK ROUTE PAYS THE GUIDES FOR THE ARTIFACTS. Trimmed from the SCORED selection rather than
+        // re-selected: the selection had to run first so the router could threshold its top score.
+        if (route == ChatRoute.Book && selected.Count > BookRouteGuideCount)
+        {
+            selected = selected.Take(BookRouteGuideCount).ToList();
+        }
 
         // ─── The BOOK half (phase B). Absent bookId = no read, no blocks, no prompt change ───────
         //
         // It runs in its OWN try beside the guides half, and a failure here NEVER takes the guides half
         // down: one broken status lookup must not silence an otherwise-fine guide-grounded answer.
+        //
+        // THE ROUTE CAN ALSO SUPPRESS THE READ (g2). Product and General compose a book-LESS message by
+        // definition, so retrieving artifacts for them would render a BOOK section into the prompt with no
+        // rule above it governing what may be said from it - grounding with no contract, which is the
+        // shape of every collision this prompt has recorded. Skipping the read is the same decision taken
+        // one step earlier, and it costs a database round trip less.
         var book = BookChatContext.None;
-        if (request.BookId.HasValue)
+        if (request.BookId.HasValue && RouteReadsTheBook(route))
         {
             // The ambient open chapter travels with the read and NOWHERE else: it is a retrieval input,
             // not a second book scope. With both fields null this is byte-identical to the pre-ambient
@@ -244,7 +324,7 @@ public class ProductChatService
             "byte-identically to the pre-routing prompt, so a route resolved but not applied changed " +
             "nothing about this answer.",
             resolvedRoute, route, routingEnabled, language, request.BookId.HasValue,
-            GuideSelector.TopScore(scored), ProductChatRouter.StrongGuideTopScore);
+            guideTopScore, ProductChatRouter.StrongGuideTopScore);
 
         AiResponse response;
         try
@@ -293,8 +373,20 @@ public class ProductChatService
 
         // Citations are computed against what SURVIVED composition, guides and book artifacts alike, so a
         // trim can never leave a citation pointing at grounding that was dropped.
-        var (answer, references) = ProductChatCitations.Extract(
-            response.Content.Trim(), composed.AcceptableReferences);
+        //
+        // THE GENERAL ROUTE LICENSES NOTHING, AND THE REASON IS THE PARSER'S FALLBACK (g2). Its prompt
+        // asks for no citation line, because an answer out of Show's own knowledge has no guide to name -
+        // and ProductChatCitations, by an explicit fail-safe decision, returns the FULL acceptable set
+        // when it finds no line. Handing it the surviving guides here would therefore decorate every
+        // general answer with chips for guides the answer never used, which is the false sourcing this
+        // route exists to remove, arriving through the belt instead of through the prompt. An empty set
+        // also keeps the parser's one safety property intact in the strongest form: a citation can only
+        // ever NARROW what the turn carried, and here the turn licenses none.
+        var acceptable = route == ChatRoute.General
+            ? Array.Empty<string>()
+            : composed.AcceptableReferences;
+
+        var (answer, references) = ProductChatCitations.Extract(response.Content.Trim(), acceptable);
 
         var guideIds = references.Where(r => !BookArtifactRefs.LooksLikeArtifactRef(r)).ToList();
         var artifactRefs = references.Where(BookArtifactRefs.LooksLikeArtifactRef).ToList();
@@ -461,6 +553,16 @@ public class ProductChatService
             // turn without a second condition to keep in step.
             NeedsChapterClarification: book.Keys.NeedsChapterClarification);
     }
+
+    /// <summary>
+    /// WHETHER THIS ROUTE HAS A RULE TO GOVERN BOOK ARTIFACTS WITH (g2). Only
+    /// <see cref="ChatRoute.Book"/> and <see cref="ChatRoute.Union"/> compose a message that says what may
+    /// be asserted from the BOOK section; the other two compose a book-less one, so retrieving artifacts
+    /// for them would put grounding in the prompt with no contract above it. Written as a predicate rather
+    /// than inlined so the read and the composition read the same rule off one line.
+    /// </summary>
+    private static bool RouteReadsTheBook(ChatRoute route)
+        => route is ChatRoute.Book or ChatRoute.Union;
 
     /// <summary>
     /// Retrieves the book half. Never throws for a broken SOURCE - the reader records typed faults for

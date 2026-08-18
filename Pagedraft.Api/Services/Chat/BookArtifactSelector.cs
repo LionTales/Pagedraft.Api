@@ -185,6 +185,32 @@ public static class BookArtifactSelector
     };
 
     /// <summary>
+    /// THE MANUSCRIPT-LOCATION HALF of <see cref="BookContentWords"/>, exposed separately for g2. It names
+    /// a PLACE inside a book - a chapter, a scene - and nothing else, so a question carrying one of these
+    /// is asking about the contents of some particular manuscript rather than about a craft topic.
+    ///
+    /// <para>WHY THE HALVES ARE SEPARATE, WHICH IS A g2 FINDING AND NOT TIDINESS.
+    /// <see cref="BookContentWords"/> also unions the six review DIMENSIONS ("pacing", "plot", "קצב"),
+    /// and those are craft words as much as book words: "how do I improve the pacing?" carries a
+    /// book-content token while being a general question about writing. That is harmless for ROUTING,
+    /// where a dimension question with a book open is exactly the Book route and a dimension question
+    /// without one falls to Union. It is NOT harmless for g2's deterministic "open the book first so I
+    /// can see it", which answers WITHOUT a model call: keyed on the full lexicon it would meet a craft
+    /// question with an instruction to open a book, and the author would have no way to get the answer
+    /// they asked for. Keyed on the locations alone, "what happens in chapter 3?" with no book open is
+    /// caught and "how do I improve the pacing?" is not.</para>
+    ///
+    /// <para>The PLURAL exclusion that <see cref="AmbientLocationWords"/> applies is deliberately NOT
+    /// applied here. It exists because narrowing "כמה פרקים יש בספר" to the one OPEN chapter answers the
+    /// wrong question; this list is read only when NO book is open, where "כמה פרקים יש בספר שלי" is a
+    /// question about a manuscript nothing can see and the honest answer is the same one.</para>
+    /// </summary>
+    internal static readonly IReadOnlyList<string> BookLocationWords = ChapterWords
+        .Concat(SceneWords)
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>
     /// THE BOOK-CONTENT LEXICON, AS ONE LIST, FOR <see cref="ProductChatRouter"/> (g1). DERIVED from the
     /// vocabularies above rather than re-typed, for the same reason
     /// <see cref="AmbientLocationWords"/> is derived: a word added to the location or dimension
@@ -193,7 +219,9 @@ public static class BookArtifactSelector
     /// and this drift is invisible from either side.
     ///
     /// <para>THE THREE FAMILIES IT UNIONS, and why each one belongs: <see cref="ChapterWords"/> and
-    /// <see cref="SceneWords"/> are LOCATIONS in the manuscript, and <see cref="DimensionVocabulary"/>'s
+    /// <see cref="SceneWords"/> are LOCATIONS in the manuscript (taken through
+    /// <see cref="BookLocationWords"/>, which is that half named, so g2 can read it alone), and
+    /// <see cref="DimensionVocabulary"/>'s
     /// surfaces are what the author calls the things a review found in it. Deliberately NOT included:
     /// <see cref="PositionalWords"/>, because "first"/"end"/"סוף" read as a place inside anything at all
     /// and would route half the product questions in the corpus to Book; and
@@ -204,8 +232,7 @@ public static class BookArtifactSelector
     /// manuscript's characters carries none of these tokens, because the cast is in the register and the
     /// register needs a database. The router documents that blind spot and pins it.</para>
     /// </summary>
-    internal static readonly IReadOnlyList<string> BookContentWords = ChapterWords
-        .Concat(SceneWords)
+    internal static readonly IReadOnlyList<string> BookContentWords = BookLocationWords
         .Concat(DimensionVocabulary.SelectMany(d => d.Surfaces))
         .Distinct(StringComparer.Ordinal)
         .ToArray();

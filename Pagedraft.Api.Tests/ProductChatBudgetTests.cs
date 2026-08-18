@@ -56,12 +56,21 @@ public class ProductChatBudgetTests
         }
     };
 
+    /// <param name="routingEnabled">
+    /// WHETHER THIS SERVICE APPLIES THE ROUTER'S ANSWER (g2). DEFAULT FALSE, which is not the shipped
+    /// config value: <c>appsettings.json</c> ships <c>true</c> since g2, and this parameter deliberately
+    /// does NOT follow it. Every byte-identity pin in this suite is written against the Union prompt, and
+    /// a helper that quietly switched them all to a routed one would turn a fence into a moving target.
+    /// A test that wants the routed behaviour passes <c>true</c> here, so which prompt a test measures is
+    /// readable at its own call site rather than in this file.
+    /// </param>
     internal static ProductChatService Service(
         Mock<IAiRouter> router,
         out CapturingLogger<ProductChatService> logger,
         string? guidesDirectory,
         AiOptions? aiOptions,
-        IBookChatContextReader? bookContext = null)
+        IBookChatContextReader? bookContext = null,
+        bool routingEnabled = false)
     {
         logger = new CapturingLogger<ProductChatService>();
         var reader = new GuidesCorpusReader(
@@ -73,7 +82,10 @@ public class ProductChatBudgetTests
             // ever reaches it, so a request that silently gained a book context would fail loudly here
             // rather than quietly changing what a phase-A test measures.
             bookContext ?? new ThrowingBookChatContextReader(),
-            logger);
+            logger,
+            capture: null,
+            productChatOptions: Microsoft.Extensions.Options.Options.Create(
+                new ProductChatOptions { RoutingEnabled = routingEnabled }));
     }
 
     /// <summary>The book reader a book-less turn must never reach.</summary>

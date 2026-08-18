@@ -97,7 +97,9 @@ public static class ProductChatPrompt
     /// prompt in the situation A never measured.</para>
     ///
     /// <para>THIS OVERLOAD IS <see cref="ChatRoute.Union"/>, and it is kept rather than migrated because
-    /// it is what ~370 facts and three production call sites already ask for. g1 generalized the
+    /// it is what the suite's byte-literal pins and three production call sites already ask for (the
+    /// ProductChat slice was MEASURED at 700 pre-existing facts in g1; the plan's "~370" is stale and is
+    /// corrected here so the next reader does not re-derive it). g1 generalized the
     /// <paramref name="bookAware"/> BOOL to a route without deleting the bool: the routing layer ships
     /// behind <c>ProductChat:RoutingEnabled</c> defaulting to false, so Union is the only route any
     /// deployment can reach, and Union is defined to be exactly this.</para>
@@ -111,48 +113,88 @@ public static class ProductChatPrompt
     /// govern, which is a fact about what SURVIVED the budget trim and not about the question (see
     /// <c>ProductChatBudget.Composition.SystemMessage</c>).
     ///
-    /// <para>WHAT g1 DID AND DID NOT DO HERE. It built the SEAM and changed no behavior. Every arm below
-    /// composes one of the two messages that already shipped:</para>
+    /// <para>WHAT EACH ARM COMPOSES (g1 built the seam and changed nothing; g2 filled it in):</para>
     /// <list type="bullet">
     ///   <item><see cref="ChatRoute.Union"/> is the status quo predicate, byte for byte: book-aware when
     ///     book blocks survived, phase A's book refusal when they did not. THIS IS THE SAFETY PROPERTY of
     ///     the whole routing layer - a misroute can only ever return what today returns - and
     ///     <c>ProductChatRoutePartitionTests</c> pins it against hand-typed literals in both
-    ///     languages.</item>
-    ///   <item><see cref="ChatRoute.Book"/> composes today's book-aware message, and only when a book
-    ///     section actually survived. A book grounding rule with no BOOK section below it is a rule about
-    ///     nothing, so the route defers to <paramref name="bookAware"/> there rather than asserting over
-    ///     it.</item>
-    ///   <item><see cref="ChatRoute.Product"/> and <see cref="ChatRoute.General"/> compose today's
-    ///     book-less message. They are PLACEHOLDERS with a deliberate shape: g2 replaces exactly these two
-    ///     arms, and until it does, flipping the flag on by accident cannot introduce a sentence that has
-    ///     never been measured. It can still change WHICH measured message a turn gets, which is why the
-    ///     flag defaults to false and g3 is the gate.</item>
+    ///     languages. It is the ONLY arm that still carries the now-false "not available yet and is
+    ///     coming" sentence, for that reason and no other.</item>
+    ///   <item><see cref="ChatRoute.Product"/> keeps the guides-only contract with the SOURCE-NARRATION
+    ///     removed (<c>ProductGroundingScoped</c>) and carries no book sentence at all: the deterministic
+    ///     path in <c>ProductChatService</c> owns the one shape the old refusal governed.</item>
+    ///   <item><see cref="ChatRoute.Book"/> composes a ONE-SENTENCE product rule plus the book rule with
+    ///     its briefs fence hedged (<c>BookGroundingRouted</c>), and only when a book section actually
+    ///     survived. A book grounding rule with no BOOK section below it is a rule about nothing, so with
+    ///     nothing surviving the route falls back to the PRODUCT arm rather than to Union's - falling back
+    ///     to Union there would reintroduce the false refusal on a turn that genuinely carried a
+    ///     bookId, which is g1's own F-1 collision in a new costume.</item>
+    ///   <item><see cref="ChatRoute.General"/> keeps only the persona, adds the general block, and ends
+    ///     with the language rule. NO CITATION SENTENCE: an answer from Show's own knowledge has no guide
+    ///     to name.</item>
     /// </list>
+    ///
+    /// <para>THE WORDING IS STATED TWICE PER LANGUAGE AND THAT IS HANDLED BY CONSTRUCTION, not by care:
+    /// <see cref="ComposeInstruction"/> restates the head of the user message by CALLING this method, so
+    /// one edit here moves both surfaces and they cannot drift.</para>
     /// </summary>
     public static string SystemMessage(string language, ChatRoute route, bool bookAware)
     {
         var hebrew = ChatLanguage.IsHebrew(language);
-
-        // Book grounding rides exactly when the route asks for it AND a BOOK section survived. Union asks
-        // for it on the bookAware predicate alone, which is phase B's shipped behaviour.
-        var groundBook = route switch
-        {
-            ChatRoute.Book => bookAware,
-            ChatRoute.Union => bookAware,
-            _ => false,
-        };
-
-        var head = hebrew ? ProductChatPromptBlocks.GroundingHeHead : ProductChatPromptBlocks.GroundingEnHead;
-        var middle = groundBook
-            ? (hebrew ? ProductChatPromptBlocks.BookGroundingHe : ProductChatPromptBlocks.BookGroundingEn)
-            : (hebrew ? ProductChatPromptBlocks.BookRefusalHe : ProductChatPromptBlocks.BookRefusalEn);
-        var citation = groundBook
-            ? (hebrew ? ProductChatPromptBlocks.CitationLineBookAwareHe : ProductChatPromptBlocks.CitationLineBookAwareEn)
-            : (hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn);
         var languageRule = hebrew ? ProductChatPromptBlocks.LanguageHe : ProductChatPromptBlocks.LanguageEn;
 
-        return head + middle + citation + languageRule;
+        // ─── UNION: THE STATUS QUO, BYTE FOR BYTE ────────────────────────────────────────────────
+        if (route == ChatRoute.Union)
+        {
+            var unionHead = hebrew
+                ? ProductChatPromptBlocks.GroundingHeHead
+                : ProductChatPromptBlocks.GroundingEnHead;
+            var unionMiddle = bookAware
+                ? (hebrew ? ProductChatPromptBlocks.BookGroundingHe : ProductChatPromptBlocks.BookGroundingEn)
+                : (hebrew ? ProductChatPromptBlocks.BookRefusalHe : ProductChatPromptBlocks.BookRefusalEn);
+            var unionCitation = bookAware
+                ? (hebrew ? ProductChatPromptBlocks.CitationLineBookAwareHe : ProductChatPromptBlocks.CitationLineBookAwareEn)
+                : (hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn);
+
+            return unionHead + unionMiddle + unionCitation + languageRule;
+        }
+
+        var persona = hebrew ? ProductChatPromptBlocks.PersonaHe : ProductChatPromptBlocks.PersonaEn;
+
+        // ─── GENERAL: Show's own knowledge, and nothing about where an answer came from ──────────
+        if (route == ChatRoute.General)
+        {
+            var general = hebrew
+                ? ProductChatPromptBlocks.GeneralGroundingHe
+                : ProductChatPromptBlocks.GeneralGroundingEn;
+
+            return persona + general + languageRule;
+        }
+
+        // ─── BOOK, when a BOOK section actually survived the trim ────────────────────────────────
+        if (route == ChatRoute.Book && bookAware)
+        {
+            var productRule = hebrew
+                ? ProductChatPromptBlocks.BookProductRuleHe
+                : ProductChatPromptBlocks.BookProductRuleEn;
+            var bookRule = hebrew
+                ? ProductChatPromptBlocks.BookGroundingRoutedHe
+                : ProductChatPromptBlocks.BookGroundingRoutedEn;
+            var bookCitation = hebrew
+                ? ProductChatPromptBlocks.CitationLineBookAwareHe
+                : ProductChatPromptBlocks.CitationLineBookAwareEn;
+
+            return persona + productRule + bookRule + bookCitation + languageRule;
+        }
+
+        // ─── PRODUCT, and BOOK with nothing left to ground a book rule on ────────────────────────
+        var productGrounding = hebrew
+            ? ProductChatPromptBlocks.ProductGroundingScopedHe
+            : ProductChatPromptBlocks.ProductGroundingScopedEn;
+        var citation = hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn;
+
+        return persona + productGrounding + citation + languageRule;
     }
 
     /// <summary>
