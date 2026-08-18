@@ -14,9 +14,16 @@ namespace Pagedraft.Api.Tests;
 /// "supposed to" is not a property. This file makes it one.</para>
 ///
 /// <para>g2 THEN WROTE THE THREE ROUTES, and the fence around Union matters MORE rather than less for it:
-/// Union is where every question the router cannot classify lands, so the routing layer's safety property
-/// is exactly "Union did not move". The literals for the three new arms sit in their own section below
-/// and follow the same rule as the ones above.</para>
+/// Union is where every question the router cannot classify lands. The literals for the three new arms
+/// sit in their own section below and follow the same rule as the ones above.</para>
+///
+/// <para>g3 MOVED UNION ONCE, IN ONE SENTENCE, AND THE FENCE IS WHY THAT IS A FACT RATHER THAN A HOPE.
+/// The routing layer's safety property USED to be stated as "Union did not move", and the sentence that
+/// made that worth having - the book refusal - told the author that answering about a specific book "is
+/// not available yet and is coming", which had been false since phase B and which g3 measured reaching a
+/// real user on 5 of 102 turns. A false sentence is not a safety property. The literals below were
+/// re-typed BY HAND out of <c>ProductChatPromptBlocks</c> in the same commit as the change, and every
+/// other sentence in every Union cell is byte-unchanged.</para>
 ///
 /// <para>WRITTEN AGAINST LITERALS TYPED BY HAND, NEVER AGAINST THE COMPOSER'S OWN OUTPUT. That rule is
 /// stated in <c>ProductChatComposedSystemSlotTests</c> and <c>ProductChatBookPromptTests</c> and it is
@@ -125,9 +132,10 @@ public class ProductChatRoutePartitionTests
     // ─── Union is the status quo, in both languages and both book states ────────────────────────
 
     /// <summary>
-    /// THE CENTRAL FACT OF g1. <see cref="ChatRoute.Union"/> composes exactly what shipped, so a
-    /// misroute in g2 can only ever return the status quo. All four cells are pinned, because the
-    /// bookAware predicate is what Union still branches on and half a pin is not a fence.
+    /// THE CENTRAL FACT OF g1, CARRIED FORWARD. <see cref="ChatRoute.Union"/> composes exactly what
+    /// shipped, one deliberately-changed sentence aside (see the class doc), so a misroute can only ever
+    /// return the status quo. All four cells are pinned, because the bookAware predicate is what Union
+    /// still branches on and half a pin is not a fence.
     /// </summary>
     [Fact]
     public void Union_ComposesTodaysMessage_ByteForByte_InBothLanguagesAndBothBookStates()
@@ -225,15 +233,12 @@ public class ProductChatRoutePartitionTests
     private const string ProductRouteEn =
         "You are Show, the PageDraft product assistant. You write in the first person, warmly and " +
         "briefly, and you open each reply from what was actually asked. " +
-        "Answer ONLY from the guide content provided below. " +
-        "Do not use outside knowledge about PageDraft, and never state a setting, button, screen or " +
-        "behavior that the provided guides do not state. " +
-        "Where you do not have the answer, say plainly that you do not have it, without describing " +
-        "where you looked, and never turn that into a claim that PageDraft lacks the thing or does not " +
-        "support it. " +
-        "Do not assemble a guess out of partially relevant material. " +
-        "And do not describe what the guides say about a topic they do not address, not even to report " +
-        "what they mention about it. " +
+        "What you say about PageDraft comes only from the material below, never from outside knowledge: " +
+        "do not state a setting, button, screen or behavior that is not written there, and do not " +
+        "assemble one out of parts that are only partly relevant. " +
+        "Where the answer is not there, tell the reader plainly that you do not have it and leave it at " +
+        "that; that is a complete answer on its own, and it is never a claim that PageDraft lacks the " +
+        "thing or does not support it. " +
         "End your reply with a line of the form 'Guides: <id>, <id>' naming the guide ids you used, " +
         "and nothing else on that line. " +
         "Answer in English, because the question is in English, even where a guide you used is in " +
@@ -241,13 +246,10 @@ public class ProductChatRoutePartitionTests
 
     private const string ProductRouteHe =
         "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת. " +
-        "ענה אך ורק מתוך תוכן המדריכים שמופיע למטה. " +
-        "אל תשתמש בידע חיצוני על PageDraft, ולעולם אל תציין הגדרה, כפתור, מסך או התנהגות שאינם כתובים " +
-        "במדריכים שניתנו. " +
-        "כאשר אין לך את התשובה, אמור זאת במפורש בלי לתאר היכן חיפשת, ולעולם אל תהפוך זאת לקביעה " +
-        "ש-PageDraft אינו תומך בכך. " +
-        "אל תרכיב ניחוש מתוך חומר שרק חלקית רלוונטי. " +
-        "ואל תתאר מה המדריכים אומרים על נושא שאינם עוסקים בו, גם לא כדי לציין מה מוזכר בהם לגביו. " +
+        "מה שאתה אומר על PageDraft מגיע רק מהחומר שלמטה ולעולם לא מידע חיצוני: אל תציין הגדרה, כפתור, " +
+        "מסך או התנהגות שאינם כתובים שם, ואל תרכיב כזו מתוך חלקים שרק חלקית רלוונטיים. " +
+        "כאשר התשובה אינה שם, אמור לקורא במפורש שאין לך אותה והשאר זאת כך; זו תשובה שלמה בפני עצמה, " +
+        "ולעולם אינה קביעה ש-PageDraft חסר את הדבר או אינו תומך בו. " +
         "סיים את התשובה בשורה בצורה 'מדריכים: <מזהה>, <מזהה>' שמציינת את מזהי המדריכים שהשתמשת בהם, " +
         "ובלי דבר נוסף באותה שורה. " +
         "השב בעברית, כי השאלה נשאלה בעברית, גם אם מדריך שהשתמשת בו כתוב בשפה אחרת.";
@@ -257,8 +259,8 @@ public class ProductChatRoutePartitionTests
         "briefly, and you open each reply from what was actually asked. " +
         "This question is about writing rather than about PageDraft, so answer it from your own " +
         "knowledge of the craft, directly and in your own words. " +
-        "Say something about PageDraft only where the guides below say it, and do not tell the reader " +
-        "which of your sources covered their question. " +
+        "Nothing about PageDraft is in front of you on this turn, so if they want to know what it does " +
+        "here as well, say you can answer that as its own question. " +
         "Answer in English, because the question is in English, even where a guide you used is in " +
         "another language.";
 
@@ -266,8 +268,8 @@ public class ProductChatRoutePartitionTests
         "אתה שואו, העוזר של PageDraft. אתה כותב בגוף ראשון, בחום ובקצרה, ופותח כל תשובה ממה שנשאלת. " +
         "השאלה הזו עוסקת בכתיבה ולא ב-PageDraft, ולכן ענה עליה מתוך הידע שלך על מלאכת הכתיבה, ישירות " +
         "ובמילים שלך. " +
-        "אמור משהו על PageDraft רק במקום שהמדריכים שלמטה אומרים זאת, ואל תספר לקורא איזה מקור כיסה את " +
-        "שאלתו. " +
+        "שום דבר על PageDraft אינו מונח לפניך בתור הזה, ולכן אם רוצים לדעת גם מה הוא עושה בעניין, אמור " +
+        "שתוכל לענות על כך כשאלה נפרדת. " +
         "השב בעברית, כי השאלה נשאלה בעברית, גם אם מדריך שהשתמשת בו כתוב בשפה אחרת.";
 
     internal const string BookRouteEn =
@@ -412,14 +414,15 @@ public class ProductChatRoutePartitionTests
     /// <summary>
     /// WITH NO BOOK SECTION LEFT, THE BOOK ROUTE FALLS BACK TO THE PRODUCT MESSAGE AND NOT TO UNION'S.
     /// A book grounding rule with no BOOK section beneath it is a rule about nothing (g1's reason for
-    /// deferring at all), but Union's book-LESS arm carries the now-false "not available yet and is
-    /// coming" sentence, and this state is reached only on a turn that DID carry a bookId. Falling back
-    /// there would tell the author the feature is coming while they have the book open, which is g1's own
-    /// F-1 collision in a new costume.
+    /// deferring at all), but Union's book-LESS arm carries a refusal built for a turn with NO book, and
+    /// this state is reached only on a turn that DID carry a bookId. Falling back there would tell an
+    /// author with the book open to open the book, which is g1's own F-1 collision in a new costume.
+    /// (Until g3 the sentence it would have told them was the FALSE "not available yet and is coming";
+    /// the fallback is the same fallback either way, which is why this fact did not need re-deciding.)
     /// </summary>
     [Theory]
-    [InlineData("en", "is not available yet and is coming")]
-    [InlineData("he", "מענה על שאלות לגבי ספר מסוים עדיין אינו")]
+    [InlineData("en", "say that you can only see a book while it is open")]
+    [InlineData("he", "ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח.")]
     public void Book_WithNothingSurviving_FallsBackToProduct_AndNotToTheFalseRefusal(
         string language, string refusalFragment)
     {
@@ -433,6 +436,99 @@ public class ProductChatRoutePartitionTests
         Assert.Contains(
             refusalFragment, ProductChatPrompt.SystemMessage(language, ChatRoute.Union, bookAware: false),
             System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// THE FALSE SENTENCE IS GONE FROM EVERY ROUTE, IN EVERY LANGUAGE, IN EITHER BOOK STATE (g3, item 6).
+    /// "Answering questions about a specific book is not available yet and is coming" stopped being true
+    /// when phase B taught Show to read the book, and g3 measured Union shipping it to a real user on 5 of
+    /// 102 turns, two of them plain product questions that had merely missed the product lexicon. It was
+    /// DELETED rather than gated behind a flag, so that there are not two versions of the truth in the
+    /// file, and this is the fact that says so.
+    ///
+    /// <para>THERE IS NO VACUITY GUARD ON THIS ONE AND THERE MUST NOT BE. Every other absence in this file
+    /// is paired with a reachability check, because an absent fragment that appears nowhere proves
+    /// nothing. Here "appears nowhere" IS the property: the whole point is that no composed message and no
+    /// code path can say it any more, so a guard proving it is still reachable would be proving the
+    /// defect.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("en", "not available yet")]
+    [InlineData("en", "is coming")]
+    [InlineData("he", "עדיין אינו זמין")]
+    [InlineData("he", "והיכולת בדרך")]
+    public void NoRouteAtAll_ClaimsTheBookFeatureIsComing(string language, string fragment)
+    {
+        foreach (var route in System.Enum.GetValues<ChatRoute>())
+        {
+            foreach (var bookAware in new[] { false, true })
+            {
+                Assert.DoesNotContain(
+                    fragment, ProductChatPrompt.SystemMessage(language, route, bookAware),
+                    System.StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>
+    /// THE PRODUCT ROUTE'S GROUNDING NAMES NO SOURCE, and this is the g3 fix that decided the gate. g2's
+    /// block deleted the two narrating sentences and then said "guide" or "they" FIVE times over five
+    /// sentences while one clause forbade describing where you looked; g3 measured the answers narrating
+    /// 16 of 16 on the product-uncovered cell in both languages. A prohibition stacked on a frame that
+    /// keeps teaching the noun is the shape this prompt has recorded failing four times, so the noun is
+    /// gone from the instruction rather than banned in it: the grounding is "the material below", and
+    /// then "there".
+    ///
+    /// <para>VACUITY GUARD: Union's grounding block DOES name the guides, repeatedly, so the absence here
+    /// is this block's shape and not a word that appears in no composed message.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("en", "guide", "Answer ONLY from the guide content provided below")]
+    [InlineData("he", "מדריכים", "ענה אך ורק מתוך תוכן המדריכים")]
+    public void TheProductRoutesGrounding_NamesNoSource(
+        string language, string sourceNoun, string unionSourceSentence)
+    {
+        var grounding = language == "he"
+            ? ProductChatPromptBlocks.ProductGroundingScopedHe
+            : ProductChatPromptBlocks.ProductGroundingScopedEn;
+
+        Assert.DoesNotContain(sourceNoun, grounding, System.StringComparison.OrdinalIgnoreCase);
+
+        var union = language == "he"
+            ? ProductChatPromptBlocks.ProductGroundingHe
+            : ProductChatPromptBlocks.ProductGroundingEn;
+        Assert.Contains(unionSourceSentence, union, System.StringComparison.Ordinal);
+
+        // AND THE ANTI-FABRICATION HALF SURVIVED THE RE-FRAME. g3's 0-fabrication result on the
+        // product-uncovered cell (16 of 16 refused, none inventing a behaviour) rests on these two, and
+        // "the narration is gone" is not worth buying with the class they protect.
+        Assert.Contains(
+            language == "he" ? "אל תציין הגדרה, כפתור, מסך או התנהגות שאינם כתובים שם" :
+                               "do not state a setting, button, screen or behavior that is not written there",
+            grounding, System.StringComparison.Ordinal);
+        Assert.Contains(
+            language == "he" ? "ולעולם אינה קביעה ש-PageDraft חסר את הדבר או אינו תומך בו" :
+                               "never a claim that PageDraft lacks the thing or does not support it",
+            grounding, System.StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// AND THE GENERAL ROUTE POINTS AT NO GUIDES EITHER, because since g3 there are none under it.
+    /// <c>ProductChatService.GeneralRouteGuideCount</c> is 0, so g2's "say something about PageDraft only
+    /// where the guides below say it" would have pointed at an empty place; g3 measured 3 of 8 Hebrew
+    /// craft turns inventing a PageDraft behaviour while those guides were still being sent.
+    /// </summary>
+    [Theory]
+    [InlineData("en", "guides below")]
+    [InlineData("he", "שהמדריכים שלמטה")]
+    public void TheGeneralRoutesGrounding_PointsAtNoGuides(string language, string fragment)
+    {
+        var general = language == "he"
+            ? ProductChatPromptBlocks.GeneralGroundingHe
+            : ProductChatPromptBlocks.GeneralGroundingEn;
+
+        Assert.DoesNotContain(fragment, general, System.StringComparison.Ordinal);
+        Assert.Equal(0, ProductChatService.GeneralRouteGuideCount);
     }
 
     /// <summary>

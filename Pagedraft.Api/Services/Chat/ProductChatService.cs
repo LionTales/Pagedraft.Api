@@ -111,6 +111,27 @@ public class ProductChatService
     /// </summary>
     public const int BookRouteGuideCount = 1;
 
+    /// <summary>
+    /// How many guides ride along on <see cref="ChatRoute.General"/> (g3). NONE, and the zero is the fix.
+    ///
+    /// <para>g2 gave this route a prompt that said to mention PageDraft "only where the guides below say
+    /// it" while still sending phase A's four guides, so a craft turn carried four documents of product
+    /// prose the answer was told not to use. g3 measured 8 Hebrew craft turns and 3 invented a PageDraft
+    /// behaviour outright - Chapter recap detecting repeated dialogue, the Linguistic pass warning about
+    /// emotional depth, PageDraft warning you when you change narrative person, which no guide mentions at
+    /// all. A model improvises around what is in front of it; the answer was to stop putting it there.
+    /// The route is REACHED only when the router saw a craft signal, no product signal, no book signal and
+    /// no open book, so there is no question shape here a guide was going to answer.</para>
+    ///
+    /// <para>IT IS BELOW <see cref="ProductChatBudget.MinGuides"/> ON PURPOSE, AND THAT IS SAFE ONLY
+    /// BECAUSE OF WHERE IT IS APPLIED. MinGuides is the budget TRIMMER's floor: "an answer that lost its
+    /// last guide to a token overrun is not an answer this feature is willing to give". This is not a trim
+    /// - it is the route deciding what grounding the turn has at all, one step before composition, exactly
+    /// as <see cref="BookRouteGuideCount"/> is. The trimmer never sees a selection it can cut below its own
+    /// floor.</para>
+    /// </summary>
+    public const int GeneralRouteGuideCount = 0;
+
     // ─── The deterministic answer for a book question with no book open (g2, plan item 8d) ──────
     //
     // IT IS CODE, NOT A PROMPT SENTENCE, and that is the whole of the decision. The sentence it replaces
@@ -119,6 +140,11 @@ public class ProductChatService
     // runs of that question shape in g2, including the imperative). A fixed string cannot go stale
     // against the model's compliance, costs no round trip, and can be read by the author in the language
     // they asked in.
+    //
+    // SINCE g3 THIS IS ALSO THE SENTENCE THE PROMPT ASKS FOR ON THE ONE ROUTE THAT STILL CARRIES A BOOK
+    // REFUSAL (ProductChatPromptBlocks.BookRefusalHe quotes OpenTheBookHe word for word). The two paths
+    // must not tell the author two different stories about the same product, so a change to either of
+    // these strings is a change to that block as well.
     //
     // NO EM-DASH: these strings are rendered to the user.
 
@@ -227,8 +253,13 @@ public class ProductChatService
         // Resolving is a pure string scan, so it is done on every turn even while the flag is off: a
         // route nobody can see is a route nobody can calibrate, and g3 needs the resolved route beside
         // the answer it is scoring. What the flag gates is USE. With it off the composed prompt is forced
-        // to Union, which ProductChatPrompt defines to be byte-identical to what shipped before routing
-        // existed, so an unconfigured deployment composes exactly the message g4 and g5 measured.
+        // to Union, so an unconfigured deployment takes no routing decision at all.
+        //
+        // g3 NOTE: Union is no longer byte-identical to the pre-routing message. Exactly one sentence of
+        // its book-refusal arm moved, because that sentence had been false since phase B and g3 measured
+        // it reaching real users (ProductChatPromptBlocks.BookRefusalEn). Turning the flag off is still the
+        // rollback for every ROUTING decision; it is not a rollback to a prompt that says the book feature
+        // is coming, and nothing should re-introduce one.
         var routingEnabled = _productChatOptions?.Value.RoutingEnabled ?? false;
         var guideTopScore = GuideSelector.TopScore(scored);
         var resolvedRoute = ProductChatRouter.Resolve(
@@ -262,11 +293,21 @@ public class ProductChatService
                 ArtifactRefs: Array.Empty<string>(), BookFaultReason: null);
         }
 
-        // THE BOOK ROUTE PAYS THE GUIDES FOR THE ARTIFACTS. Trimmed from the SCORED selection rather than
+        // THE ROUTE DECIDES HOW MANY GUIDES THE TURN HAS. Trimmed from the SCORED selection rather than
         // re-selected: the selection had to run first so the router could threshold its top score.
-        if (route == ChatRoute.Book && selected.Count > BookRouteGuideCount)
+        // The Book route pays the guides for the artifacts; the General route pays them for nothing at
+        // all, because a craft answer that was handed product prose is a craft answer that invents product
+        // behaviour (g3: 3 of 8 Hebrew turns). See BookRouteGuideCount and GeneralRouteGuideCount.
+        var routeGuideCount = route switch
         {
-            selected = selected.Take(BookRouteGuideCount).ToList();
+            ChatRoute.Book => BookRouteGuideCount,
+            ChatRoute.General => GeneralRouteGuideCount,
+            _ => selected.Count,
+        };
+
+        if (selected.Count > routeGuideCount)
+        {
+            selected = selected.Take(routeGuideCount).ToList();
         }
 
         // ─── The BOOK half (phase B). Absent bookId = no read, no blocks, no prompt change ───────
@@ -320,9 +361,8 @@ public class ProductChatService
         _logger.LogInformation(
             "Product chat ROUTED this turn to {ResolvedRoute} (applied: {AppliedRoute}; routing enabled: " +
             "{RoutingEnabled}). Language {Language}, bookId present: {HasBookId}, guide top score " +
-            "{GuideTopScore} against a strong-match threshold of {StrongGuideTopScore}. Union composes " +
-            "byte-identically to the pre-routing prompt, so a route resolved but not applied changed " +
-            "nothing about this answer.",
+            "{GuideTopScore} against a strong-match threshold of {StrongGuideTopScore}. A route resolved " +
+            "but not applied changed nothing about this answer: the turn composed Union either way.",
             resolvedRoute, route, routingEnabled, language, request.BookId.HasValue,
             guideTopScore, ProductChatRouter.StrongGuideTopScore);
 
@@ -340,7 +380,7 @@ public class ProductChatService
                 // string, taken from the composition rather than recomputed here (g1 F-1). PromptFactory
                 // sees only the task type, so left to itself it always returned the BOOK-LESS message, and
                 // a book-scoped turn then told the model both "answer from the BOOK section below" and
-                // "say that answering about a specific book is not available yet". Two emphatic rules that
+                // "say that you can only see a book while it is open". Two emphatic rules that
                 // collide are resolved by the model rather than by the author; exactly one rule reaches it
                 // now, because exactly one string exists. With no surviving book block that string is
                 // byte-identical to PromptFactory's, so phase A's gate verdict is untouched BY

@@ -178,6 +178,39 @@ public class ProductChatRouterTests
             "Hello, how are you?",
             HasBookId: false,
             Expected: ChatRoute.Union),
+
+        // ─── g3: THE PRODUCT HOW-TO, WHICH USED TO BE ANSWERED "OPEN A BOOK FIRST" ──────────────
+
+        new Row(
+            "product-howto-add-a-chapter-no-book",
+            "איך מוסיפים פרק חדש?",
+            "How do I add a chapter?",
+            HasBookId: false,
+            // g1 named this residual; g3 measured it failing 4 of 6. A structure verb applied to a
+            // LOCATION means the app's chapter list, not a chapter's contents, so the location the verb
+            // named is withdrawn and what is left is a product question.
+            Expected: ChatRoute.Product),
+
+        new Row(
+            "product-howto-delete-a-chapter-with-a-book-open",
+            "איך מוחקים פרק?",
+            "How do I delete a chapter?",
+            HasBookId: true,
+            // A book being open does not turn a product how-to into a question about the manuscript, for
+            // the same reason product-export-epub-with-a-book-open stays Product.
+            Expected: ChatRoute.Product),
+
+        new Row(
+            "structure-verb-with-no-location-is-not-a-how-to",
+            "איך יוצרים דמות משכנעת?",
+            "How do I create a convincing character?",
+            HasBookId: false,
+            // "create"/"יוצרים" alone is NOT a product signal. Without the conjunction this row would
+            // route Product and the answer would be a refusal, which is the g3 defect this whole round
+            // exists to remove. (Hebrew "דמות" is a review DIMENSION surface, so the Hebrew half also
+            // carries a book-content hit with no book open, which is Union; the English half carries
+            // "character" for the same reason. Either way it is not Product, which is the point.)
+            Expected: ChatRoute.Union),
     };
 
     public static TheoryData<string, string> Cases()
@@ -452,6 +485,127 @@ public class ProductChatRouterTests
     [InlineData("   ")]
     public void ABlankQuestion_IsNeverAnsweredInCode(string? question)
         => Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: false));
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── g3: THE PRODUCT HOW-TO VETO, AND THE CALIBRATED THRESHOLD ──────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A PRODUCT HOW-TO IS NEVER MET WITH "OPEN A BOOK FIRST". g3's residual cell asked six of these and
+    /// four were answered "open the book you are asking about" - a non-answer, because the question is
+    /// not about any particular manuscript. Both languages, and all four measured shapes.
+    /// </summary>
+    [Theory]
+    [InlineData("How do I add a chapter?")]
+    [InlineData("How do I delete a chapter?")]
+    [InlineData("איך מוסיפים פרק חדש?")]
+    [InlineData("איך מוחקים פרק?")]
+    public void AProductHowTo_IsNeverAnsweredInCode(string question)
+    {
+        Assert.True(ProductChatRouter.Analyze(question).ProductHowTo);
+        Assert.False(ProductChatRouter.AsksAboutABookThatIsNotOpen(question, hasBookId: false));
+    }
+
+    /// <summary>
+    /// THE CONJUNCTION IS BOTH HALVES, AND EACH HALF ALONE MUST NOT FIRE. A structure verb with no
+    /// location is an ordinary craft question ("how do I create a convincing villain?"), and a location
+    /// with no structure verb is the very shape the deterministic path exists for. Getting either wrong
+    /// trades one non-answer for another.
+    /// </summary>
+    [Theory]
+    [InlineData("How do I create a convincing villain?", false)]
+    [InlineData("איך יוצרים נבל משכנע?", false)]
+    [InlineData("What happens in chapter 3?", false)]
+    [InlineData("מה קורה בפרק 3?", false)]
+    [InlineData("How do I split a chapter?", true)]
+    [InlineData("איך מפצלים פרק?", true)]
+    public void TheHowToSignal_NeedsAStructureVerbAndALocation(string question, bool expected)
+        => Assert.Equal(expected, ProductChatRouter.Analyze(question).ProductHowTo);
+
+    /// <summary>
+    /// AND IT WITHDRAWS THE LOCATION IT NAMED, which is what puts those turns on
+    /// <see cref="ChatRoute.Product"/> instead of on Union. Without this the veto alone would leave a
+    /// product how-to mixed (a book word AND a product signal), and mixed is Union, where it is answered
+    /// from the guides only by luck.
+    /// </summary>
+    [Theory]
+    [InlineData("How do I add a chapter?")]
+    [InlineData("איך מוסיפים פרק חדש?")]
+    public void AProductHowTo_RoutesProduct_WithOrWithoutABookOpen(string question)
+    {
+        Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(question, hasBookId: false, "en"));
+        Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(question, hasBookId: true, "en"));
+
+        // VACUITY GUARD: the same location word WITHOUT the structure verb still reads as the book,
+        // so the withdrawal above is the verb's doing and not a book signal that never fires.
+        Assert.Equal(
+            ChatRoute.Book,
+            ProductChatRouter.Resolve(
+                question.Contains("chapter") ? "What happens in chapter 3?" : "מה קורה בפרק 3?",
+                hasBookId: true, "en"));
+    }
+
+    /// <summary>
+    /// THE THRESHOLD IS 7.0 AND THAT NUMBER IS A MEASUREMENT. It shipped at 6.0, which was a description
+    /// of the scoring (two exact heading matches at weight 3.0) and of no question at all. g3 ran 102 real
+    /// turns: four of the eight English craft questions scored EXACTLY 6.0 off the guides' incidental
+    /// vocabulary, routed Product, and were all four refused as product questions the corpus does not
+    /// cover. Nothing in the run scored between 6.0 and 7.0, so this is the smallest move that fixes all
+    /// four, and it is pinned as a number because the next person to read
+    /// <see cref="ProductChatRouter.StrongGuideTopScore"/> as "roughly two heading matches" would round it
+    /// back down.
+    /// </summary>
+    [Fact]
+    public void TheStrongGuideThreshold_IsWhatG3Calibrated()
+    {
+        Assert.Equal(7.0, ProductChatRouter.StrongGuideTopScore);
+
+        const string craft = "When is a metaphor doing too much work?";
+        Assert.Equal(ChatRoute.General, ProductChatRouter.Resolve(craft, hasBookId: false, "en", 6.0));
+        Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(craft, hasBookId: false, "en", 7.0));
+    }
+
+    /// <summary>
+    /// THE HEBREW PRODUCT LEXICON CARRIES THE CLITIC-PREFIXED SURFACES. Whole-word matching is exact, so
+    /// <c>מסך</c> does not match inside <c>במסך</c>; g3 measured two plain product questions falling to
+    /// Union for exactly that reason and being answered with a refusal. Both of the measured questions are
+    /// here verbatim, plus the four other clitics, so a later narrowing of the generator fails here rather
+    /// than in a live run.
+    /// </summary>
+    [Theory]
+    [InlineData("איפה במסך רואים את סטטוס העריכה?")]
+    [InlineData("איך מתחילים ספר חדש במערכת?")]
+    [InlineData("מה יש בהגדרות?")]
+    [InlineData("איך מגיעים למסך הראשי?")]
+    [InlineData("מה נעלם מהתפריט?")]
+    [InlineData("איזו לשונית זו שמסך העריכה נפתח בה?")]
+    public void ThePrefixedHebrewProductSurfaces_AreInTheLexicon(string question)
+    {
+        Assert.True(
+            ProductChatRouter.Analyze(question).ProductSurface,
+            $"no product-surface word matched: {question}");
+
+        Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(question, hasBookId: false, "he"));
+    }
+
+    /// <summary>
+    /// AND THE TWO CELLS OF THAT CROSS PRODUCT THAT ARE ORDINARY HEBREW ARE EXCLUDED BY HAND.
+    /// <c>בחשבון</c> is the idiom "לקחת בחשבון" (to take into account), which turns up in ordinary craft
+    /// prose, and <c>מחשבון</c> is the noun "calculator". A generated lexicon that swept either would
+    /// route a craft question Product, which is the class this round is closing.
+    ///
+    /// <para>VACUITY GUARD: the unprefixed <c>חשבון</c> and the surviving <c>לחשבון</c> DO match, so the
+    /// two absences are the exclusion list and not a noun that was dropped altogether.</para>
+    /// </summary>
+    [Fact]
+    public void TheCollidingHebrewSurfaces_AreExcluded()
+    {
+        Assert.False(ProductChatRouter.Analyze("כדאי לקחת בחשבון את קצב הסצנה").ProductSurface);
+        Assert.False(ProductChatRouter.Analyze("מחשבון פשוט").ProductSurface);
+
+        Assert.True(ProductChatRouter.Analyze("איך מוחקים חשבון?").ProductSurface);
+        Assert.True(ProductChatRouter.Analyze("איך נכנסים לחשבון שלי?").ProductSurface);
+    }
 
     /// <summary>
     /// AND IT IS LANGUAGE-INDEPENDENT LIKE THE ROUTER, swept over the whole table rather than over the

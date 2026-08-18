@@ -289,9 +289,9 @@ public class ProductChatComposedSystemSlotTests
     /// in the user message.
     /// </summary>
     [Theory]
-    [InlineData("What happens to Miriam in chapter 4?", "is not available yet and is coming",
+    [InlineData("What happens to Miriam in chapter 4?", "say that you can only see a book while it is open",
                 "answer it from the BOOK section below")]
-    [InlineData("מה קורה למרים בפרק 4?", "מענה על שאלות לגבי ספר מסוים עדיין אינו",
+    [InlineData("מה קורה למרים בפרק 4?", "ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח.",
                 "ענה עליה מתוך מקטע הספר שמופיע למטה")]
     public async Task WithABookId_TheRefusalAndTheGroundingRule_AreNeverBothInThePayload(
         string question, string refusalFragment, string groundingFragment)

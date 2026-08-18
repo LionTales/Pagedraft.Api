@@ -529,9 +529,18 @@ public class PromptFactoryByteIdentityPinTests
         "GetPrompt/LinguisticAnalysis/he/instruction\t168\t14CEF296C3A3061F1E8CAC7E06A95189FB32B1A32B77890127BE3C015EAD5EE5",
         "GetPrompt/LinguisticAnalysis/en/system\t240\t362705C2BBAFBEE517BAA0B6CE2D59F853554278F7FBE8DBDBA0398E79F0A7A0",
         "GetPrompt/LinguisticAnalysis/en/instruction\t196\tF071C7B2350EBBA3EDAD63F144240D08B3A3BEDED7E10B422922A537B70891FE",
-        "GetPrompt/ProductChat/he/system\t1082\t6831FA13A9130A1C39B3EEF366857747E5BA3CA03FF39104B43E4F9F96C64432",
+        // RE-STAMPED BY g3, DELIBERATELY, AND THESE TWO ROWS ONLY. ProductChat's system surface is
+        // ProductChatPrompt's Union book-less message, whose book refusal told the author that answering
+        // about a specific book "is not available yet and is coming" - false since phase B taught Show to
+        // read the book, and measured reaching a real user on 5 of 102 turns in g3's live run. It now says
+        // what ProductChatService's deterministic path says: "I can only see a book while it is open".
+        // he 1082 -> 1061 chars, en 1429 -> 1368. The manifest was diffed row by row against the previous
+        // stamp and NOTHING ELSE MOVED (2 of 225 rows), which is what says the edit stayed inside the one
+        // block it was aimed at. The prose pins for the same change were re-typed by hand out of
+        // ProductChatPromptBlocks; a SHA cannot be, so this row is a re-measurement and is recorded as one.
+        "GetPrompt/ProductChat/he/system\t1061\t892673C2A4EFB555E3173E6EAD6C17859FF99E745254EE93EE998BEF4BC43E3D",
         "GetPrompt/ProductChat/he/instruction\t0\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
-        "GetPrompt/ProductChat/en/system\t1429\tAF9251B0291228E5CA4425FC1B18B8FFF247DA9A08030E995C7AC62E60181F00",
+        "GetPrompt/ProductChat/en/system\t1368\t629B14C29B5912AAF81AA7F9BB29BF9DBE469B987B6F5F34F8C64E8065A5AE14",
         "GetPrompt/ProductChat/en/instruction\t0\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
         "GetPrompt/Proofread/he/system\t168\t45130835902EA3187BB088C036AF02725ABE98FAA889E32E7849CB2B85E1DF1E",
         "GetPrompt/Proofread/he/instruction\t707\t52202EF23CCE0DDF7DC86CBB9A79FA7BC9669C5935D3A1A271B736A027297A8A",

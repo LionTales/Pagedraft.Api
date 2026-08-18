@@ -68,7 +68,9 @@ public class ProductChatBookServiceTests
 
         var request = Assert.Single(captured);
         Assert.DoesNotContain(ProductChatPrompt.BookMarker, request.Instruction);
-        Assert.Contains("is not available yet and is coming", request.Instruction, StringComparison.Ordinal);
+        Assert.Contains(
+            "say that you can only see a book while it is open", request.Instruction,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -123,7 +125,8 @@ public class ProductChatBookServiceTests
 
         // The book-aware rule replaced the phase-A refusal, and A's product half is still there.
         Assert.Contains("answer it from the BOOK section below", instruction, StringComparison.Ordinal);
-        Assert.DoesNotContain("is not available yet and is coming", instruction, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "say that you can only see a book while it is open", instruction, StringComparison.Ordinal);
         Assert.Contains("a bare refusal is the whole answer", instruction, StringComparison.Ordinal);
     }
 

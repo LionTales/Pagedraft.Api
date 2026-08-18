@@ -92,17 +92,15 @@ public static class ProductChatPrompt
     /// than keeping a second copy, so the grounding wording has one owner.
     ///
     /// <para>With <paramref name="bookAware"/> false (the default, and every request that carries no
-    /// bookId) this is BYTE-IDENTICAL to what phase A shipped. That is not an accident of construction:
-    /// A's gate verdict is a measurement of these exact sentences, so B is only allowed to change the
-    /// prompt in the situation A never measured.</para>
+    /// bookId) this was byte-identical to what phase A shipped until g3, which replaced the one sentence
+    /// of the book refusal that had gone false (see <c>ProductChatPromptBlocks.BookRefusalEn</c>).
+    /// Everything A's gate verdict was a measurement of is otherwise untouched.</para>
     ///
     /// <para>THIS OVERLOAD IS <see cref="ChatRoute.Union"/>, and it is kept rather than migrated because
     /// it is what the suite's byte-literal pins and three production call sites already ask for (the
     /// ProductChat slice was MEASURED at 700 pre-existing facts in g1; the plan's "~370" is stale and is
     /// corrected here so the next reader does not re-derive it). g1 generalized the
-    /// <paramref name="bookAware"/> BOOL to a route without deleting the bool: the routing layer ships
-    /// behind <c>ProductChat:RoutingEnabled</c> defaulting to false, so Union is the only route any
-    /// deployment can reach, and Union is defined to be exactly this.</para>
+    /// <paramref name="bookAware"/> BOOL to a route without deleting the bool.</para>
     /// </summary>
     public static string SystemMessage(string language, bool bookAware = false)
         => SystemMessage(language, ChatRoute.Union, bookAware);
@@ -115,12 +113,14 @@ public static class ProductChatPrompt
     ///
     /// <para>WHAT EACH ARM COMPOSES (g1 built the seam and changed nothing; g2 filled it in):</para>
     /// <list type="bullet">
-    ///   <item><see cref="ChatRoute.Union"/> is the status quo predicate, byte for byte: book-aware when
-    ///     book blocks survived, phase A's book refusal when they did not. THIS IS THE SAFETY PROPERTY of
-    ///     the whole routing layer - a misroute can only ever return what today returns - and
-    ///     <c>ProductChatRoutePartitionTests</c> pins it against hand-typed literals in both
-    ///     languages. It is the ONLY arm that still carries the now-false "not available yet and is
-    ///     coming" sentence, for that reason and no other.</item>
+    ///   <item><see cref="ChatRoute.Union"/> is the fallback every misroute lands on: book-aware when book
+    ///     blocks survived, the book refusal when they did not. It was byte-identical to the pre-routing
+    ///     message until g3, which replaced ONE sentence of the book-refusal arm - the false "not available
+    ///     yet and is coming" - with the same "I can only see a book while it is open" the deterministic
+    ///     path answers with; see <c>ProductChatPromptBlocks.BookRefusalEn</c> for the measurement behind
+    ///     that. Everything else it composes is unchanged, and
+    ///     <c>ProductChatRoutePartitionTests</c> pins all four cells against hand-typed literals in both
+    ///     languages.</item>
     ///   <item><see cref="ChatRoute.Product"/> keeps the guides-only contract with the SOURCE-NARRATION
     ///     removed (<c>ProductGroundingScoped</c>) and carries no book sentence at all: the deterministic
     ///     path in <c>ProductChatService</c> owns the one shape the old refusal governed.</item>
@@ -144,7 +144,7 @@ public static class ProductChatPrompt
         var hebrew = ChatLanguage.IsHebrew(language);
         var languageRule = hebrew ? ProductChatPromptBlocks.LanguageHe : ProductChatPromptBlocks.LanguageEn;
 
-        // ─── UNION: THE STATUS QUO, BYTE FOR BYTE ────────────────────────────────────────────────
+        // ─── UNION: THE STATUS QUO, MINUS ONE SENTENCE THAT HAD GONE FALSE (g3) ──────────────────
         if (route == ChatRoute.Union)
         {
             var unionHead = hebrew
@@ -259,14 +259,22 @@ public static class ProductChatPrompt
 
         sb.Append(SystemMessage(language, route, bookAware: bookBlocks.Count > 0)).Append("\n\n");
 
-        sb.Append(GuidesMarker).Append('\n');
-        foreach (var guide in guides)
+        // THE MARKER RIDES ONLY WHEN THERE IS SOMETHING UNDER IT (g3). Until the General route stopped
+        // carrying guides this was unreachable - the service fail-safes before composing when the selector
+        // returns nothing - so no existing composition moves. An empty section is worse than no section:
+        // it is a labelled place where the answer's grounding is supposed to be, and this round's whole
+        // subject is a model that talks about where it looked.
+        if (guides.Count > 0)
         {
-            sb.Append("=== GUIDE id=").Append(guide.Id)
-              .Append(" lang=").Append(guide.Lang)
-              .Append(" ===\n")
-              .Append(guide.Body)
-              .Append("\n\n");
+            sb.Append(GuidesMarker).Append('\n');
+            foreach (var guide in guides)
+            {
+                sb.Append("=== GUIDE id=").Append(guide.Id)
+                  .Append(" lang=").Append(guide.Lang)
+                  .Append(" ===\n")
+                  .Append(guide.Body)
+                  .Append("\n\n");
+            }
         }
 
         if (bookBlocks.Count > 0)

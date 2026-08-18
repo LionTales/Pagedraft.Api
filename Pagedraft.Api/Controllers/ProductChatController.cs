@@ -15,8 +15,9 @@ namespace Pagedraft.Api.Controllers;
 /// <c>/books/{id}/chat</c> route would make the book mandatory and force a second route for the case
 /// the client actually starts in.</para>
 ///
-/// <para>PHASE B, IN ONE LINE: <c>bookId</c> absent is phase A byte-for-byte, including its
-/// "answering questions about a specific book is not available yet" refusal; <c>bookId</c> present
+/// <para>PHASE B, IN ONE LINE: <c>bookId</c> absent is phase A, whose book question is met with "I can
+/// only see a book while it is open" (g3 replaced the false "not available yet and is coming" that
+/// sentence used to be, in code and in the prompt alike); <c>bookId</c> present
 /// lets the assistant answer from THAT book's artifacts (briefs, findings, register, statuses, and
 /// question-escalated raw chapter text), cited by artifact. There is no cross-book retrieval of any
 /// kind: the field is a single value from the client's current book, never a list and never inferred

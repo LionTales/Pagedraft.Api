@@ -250,6 +250,81 @@ public class ProductChatRoutedAnswerTests
     }
 
     /// <summary>
+    /// THE GENERAL ROUTE CARRIES NO GUIDES AT ALL (g3), and the assertion is on the composed instruction
+    /// rather than on the count constant, because the constant is only a promise until composition keeps
+    /// it. g2 shipped a prompt saying to mention PageDraft "only where the guides below say it" while
+    /// still sending phase A's four guides, and g3 measured 3 of 8 Hebrew craft turns inventing a
+    /// PageDraft behaviour out of that material - Chapter recap detecting repeated dialogue, the
+    /// Linguistic pass warning about emotional depth, PageDraft warning you when you change narrative
+    /// person, none of which any guide states.
+    ///
+    /// <para>THE SECTION MARKER GOES WITH THEM. An empty <c>[GUIDES]</c> header is a labelled place where
+    /// the grounding is supposed to be, in front of a model this whole round is stopping from talking
+    /// about where it looked.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("How do I write better dialogue?")]
+    [InlineData("איך כותבים דיאלוג טוב יותר?")]
+    public async Task AGeneralCraftQuestion_IsSentNoGuidesAtAll(string question)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(
+            ProductChatService.GeneralRouteGuideCount,
+            request.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
+
+        // VACUITY GUARD: the same harness DOES send guides under a marker on a product question, so the
+        // emptiness above is this route's decision and not a fixture with no corpus behind it.
+        var productCaptured = new List<AiRequest>();
+        var product = ProductChatBudgetTests.Service(
+            AnsweringRouter(productCaptured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+        await product.AnswerAsync(
+            new ProductChatRequest("How do I export my book to DOCX?"), CancellationToken.None);
+
+        var productRequest = Assert.Single(productCaptured);
+        Assert.Contains(
+            ProductChatPrompt.GuidesMarker, productRequest.Instruction, StringComparison.Ordinal);
+        Assert.True(
+            productRequest.Instruction!.Split("=== GUIDE id=", StringSplitOptions.None).Length - 1 > 0);
+    }
+
+    /// <summary>
+    /// A PRODUCT HOW-TO NAMING A CHAPTER IS ANSWERED, NOT DEFLECTED (g3). g1 named this residual and g3
+    /// measured it failing 4 of 6: "How do I add a chapter?" was met with "open the book you are asking
+    /// about", which is a non-answer to a question about the app's chapter list. The model IS called now,
+    /// and the message it gets is the product one.
+    /// </summary>
+    [Theory]
+    [InlineData("How do I add a chapter?")]
+    [InlineData("How do I delete a chapter?")]
+    [InlineData("איך מוסיפים פרק חדש?")]
+    [InlineData("איך מוחקים פרק?")]
+    public async Task AProductHowTo_ReachesTheModel_OnTheProductMessage(string question)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        var result = await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
+            request.SystemMessageOverride);
+        Assert.DoesNotContain("only see a book while it is open", result.Answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("לראות ספר רק כשהוא פתוח", result.Answer, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// A BOOK QUESTION WITH A BOOK OPEN COMPOSES THE HEDGED BOOK MESSAGE, and the book artifacts are in
     /// the prompt under it.
     /// </summary>
