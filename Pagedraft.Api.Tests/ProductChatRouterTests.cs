@@ -686,11 +686,23 @@ public class ProductChatRouterTests
     /// vocabulary the withheld turns invented). The full record is on
     /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>.
     ///
-    /// <para>THREE SURFACES HAVE TO AGREE ON OFF AND ALL THREE ARE ASSERTED HERE, because each one alone
-    /// leaves the lever running somewhere: the CONST is what the predicate defaults to, the CLASS DEFAULT is
-    /// what <c>appsettings.Production.json</c> binds (it carries no <c>ProductChat</c> section at all), and
-    /// the SHIPPED KEY is what the owner's machine runs. A rollback that moved only the JSON would have left
-    /// production withholding.</para>
+    /// <para>THREE SURFACES HAVE TO AGREE ON OFF AND ALL THREE ARE ASSERTED HERE, because each one is what a
+    /// DIFFERENT caller reads. The CONST is what the predicate falls back to when a caller passes no floor.
+    /// The CLASS DEFAULT covers a host that loads no <c>appsettings.json</c> at all, which is a test that news
+    /// up the options object or a bare <c>ConfigurationBuilder</c>. The SHIPPED KEY is what every environment
+    /// that loads <c>appsettings.json</c> binds, PRODUCTION INCLUDED: <c>Program.cs</c> builds the host with a
+    /// plain <c>WebApplication.CreateBuilder(args)</c> and adds no configuration source, so
+    /// <c>appsettings.json</c> layers FIRST everywhere and <c>appsettings.{Environment}.json</c> overrides
+    /// only the keys it repeats. <c>appsettings.Production.json</c> repeats no <c>ProductChat</c> key, so
+    /// production reads the shipped 0 and the class default is unreachable there. A rollback therefore has to
+    /// move the JSON, because that file IS production's value.</para>
+    ///
+    /// <para>SO WHY PIN ALL THREE WHEN THEY ALREADY AGREE. Because the pin is against DRIFT, and the sibling
+    /// flag shows what drift costs: <see cref="ProductChatOptions.RoutingEnabled"/> has class default
+    /// <c>false</c> and shipped key <c>true</c>, so a reader who believes production binds class defaults
+    /// would "roll back" by flipping a default that is already off and leave routing ON in production. For
+    /// the floor the two surfaces happen to match, so there is no behavioural gap today, and this test is
+    /// what keeps it that way.</para>
     ///
     /// <para>THE SWEEP IS OVER THE PREDICATE'S WHOLE INPUT SPACE, not over a sample: every route, both
     /// languages, and every score the corpus can produce. "Withholds on no turn" is the claim, so a single

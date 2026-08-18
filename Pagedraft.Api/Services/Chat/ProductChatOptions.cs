@@ -46,10 +46,26 @@ public class ProductChatOptions
     /// same posture <see cref="RoutingEnabled"/> records for the routing layer as a whole: it was config so
     /// the lever could be turned off without a deploy, and that is exactly what happened.</para>
     ///
-    /// <para>THE CLASS DEFAULT IS THE SHIPPED VALUE AND BOTH ARE OFF, WHICH MATTERS BEYOND TIDINESS:
-    /// <c>appsettings.Production.json</c> carries no <c>ProductChat</c> section at all, so production binds
-    /// THIS default. A rollback that moved only <c>appsettings.json</c> would have left the lever running in
-    /// production. <c>ProductChatRouterTests.TheShippedFloor_WithholdsOnNoTurn</c> pins the pair.</para>
+    /// <para>THE CLASS DEFAULT AND THE SHIPPED KEY ARE BOTH 0, AND IT IS THE SHIPPED KEY THAT BINDS IN EVERY
+    /// ENVIRONMENT THIS APP RUNS IN. <c>Program.cs</c> builds the host with a plain
+    /// <c>WebApplication.CreateBuilder(args)</c> and adds no configuration source of its own, so the default
+    /// layering applies everywhere: <c>appsettings.json</c> FIRST, then <c>appsettings.{Environment}.json</c>
+    /// on top of it, then environment variables, then the command line.
+    /// <c>appsettings.Production.json</c> carries no <c>ProductChat</c> section, so nothing overrides the base
+    /// file there and production binds <c>appsettings.json</c>'s 0. This class default is not what production
+    /// reads; it is unreachable in any environment that loads <c>appsettings.json</c> at all. Moving
+    /// <c>appsettings.json</c> is therefore exactly what DOES roll production back, and changing this default
+    /// alone would not touch it.</para>
+    ///
+    /// <para>WHAT THIS DEFAULT IS ACTUALLY FOR: a host that loads no <c>appsettings.json</c>, which is a test
+    /// that news up this options object, a bare <c>ConfigurationBuilder</c>, or a container built without the
+    /// file. It is the floor for those callers, not for production. Both surfaces read 0 today so there is no
+    /// behavioural difference between them either way, and the reason to keep them pinned together is the
+    /// sibling flag: on <see cref="RoutingEnabled"/> the two DIVERGE (class default <c>false</c>, shipped key
+    /// <c>true</c>), so a reader who believes production binds class defaults would "roll back" by flipping a
+    /// default that is already <c>false</c> and leave <c>appsettings.json</c> shipping routing ON to
+    /// production. <c>ProductChatRouterTests.TheShippedFloor_WithholdsOnNoTurn</c> pins the pair, and the pin
+    /// is still worth having: it is what stops the floor from drifting into a divergence nobody chose.</para>
     /// </summary>
     public double EnglishProductDocumentsFloor { get; set; }
         = ProductChatRouter.EnglishProductDocumentsFloor;
