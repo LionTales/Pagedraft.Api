@@ -511,4 +511,238 @@ public class ProductChatRoutedAnswerTests
             ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
             request.SystemMessageOverride);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── g3d / gate 4: AN ENGLISH PRODUCT TURN UNDER THE FLOOR IS HANDED NOTHING ────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // THESE RUN AGAINST THE REAL GUIDES CORPUS (guidesDirectory: null), which is what makes them a test of
+    // the lever rather than of a fixture: the scores the floor compares against are the corpus's own, the
+    // same ones the four gate runs recorded, so a corpus edit that lifted an uncovered question above the
+    // floor fails here instead of in a live run.
+
+    /// <summary>
+    /// AN ENGLISH PRODUCT QUESTION THE CORPUS DOES NOT COVER IS SENT NO DOCUMENTS AT ALL (g3d/gate 4), and
+    /// the assertion is on the composed prompt rather than on the constant, for the reason the general
+    /// route's twin above records: a count is a promise until composition keeps it.
+    ///
+    /// <para>THE THREE QUESTIONS ARE REAL RECORDS. They are <c>C|en|2</c>, <c>C|en|6</c> and <c>C|en|7</c>
+    /// from gate 4's run, which scored 0 against the corpus and narrated their source anyway. Pinning the
+    /// questions verbatim rather than a synthetic low scorer is what ties this test to the measurement.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("How much does the monthly subscription cost?")]
+    [InlineData("Is there a dark mode in the settings?")]
+    [InlineData("How do I permanently delete my account?")]
+    public async Task AnEnglishProductQuestionUnderTheFloor_IsSentNoDocumentsAtAll(string question)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(ChatLanguage.English, request.Language);
+
+        // No documents, and no labelled place where documents would have been. The marker matters on its
+        // own: an empty section is a named hole in front of a model this whole round is stopping from
+        // talking about where it looked.
+        Assert.DoesNotContain(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
+        Assert.Equal(
+            0,
+            request.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1);
+
+        // VACUITY GUARD, AND IT IS THE ONE THIS TEST NEEDS MOST: the same harness and the same corpus DO
+        // send documents for an English product question the guides cover, so the emptiness above is the
+        // floor and not a corpus that could not be read.
+        var coveredCaptured = new List<AiRequest>();
+        var covered = ProductChatBudgetTests.Service(
+            AnsweringRouter(coveredCaptured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+        await covered.AnswerAsync(
+            new ProductChatRequest("How do I import my manuscript into PageDraft?"),   // B|en|0, score 7
+            CancellationToken.None);
+
+        var coveredRequest = Assert.Single(coveredCaptured);
+        Assert.Contains(
+            ProductChatPrompt.GuidesMarker, coveredRequest.Instruction, StringComparison.Ordinal);
+        Assert.True(
+            coveredRequest.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1 > 0);
+    }
+
+    /// <summary>
+    /// AND THE MESSAGE IT GETS INSTEAD IS STILL THE ANTI-FABRICATION ONE. This is the assertion the whole
+    /// lever hangs on: the model has nothing in front of it, which is exactly the configuration where an
+    /// invented product behaviour would appear, so the rules that hold the C cell at 16/16 appropriate
+    /// refusals with 0 fabrications must all still reach it. Gate 4's lever is the General route's treatment
+    /// of the DOCUMENTS and never of the CONTRACT - <c>GeneralGrounding</c> licenses an answer from Show's
+    /// own knowledge, which on a product question is the definition of the failure being guarded against.
+    ///
+    /// <para>THE LITERALS ARE TYPED BY HAND, NEVER PASTED FROM THE COMPOSER, which is this suite's standing
+    /// rule for a pin: a literal lifted from the code under test asserts that the code equals itself.</para>
+    /// </summary>
+    [Fact]
+    public async Task AWithheldProductTurn_StillCarriesEveryAntiFabricationRule()
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        await svc.AnswerAsync(
+            new ProductChatRequest("How much does the monthly subscription cost?"), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        var system = request.SystemMessageOverride!;
+
+        // The three rules g4's PASS is a measurement of, and the finished refusal to say instead.
+        Assert.Contains(
+            "do not state a setting, button, screen or behavior that is not written there",
+            system, StringComparison.Ordinal);
+        Assert.Contains(
+            "do not assemble one out of parts that are only partly relevant",
+            system, StringComparison.Ordinal);
+        Assert.Contains(
+            "never say that PageDraft lacks a thing or does not support it",
+            system, StringComparison.Ordinal);
+        Assert.Contains("'I do not have that information.'", system, StringComparison.Ordinal);
+
+        // AND NOT THE GENERAL ROUTE'S LICENCE. If this ever appears here, a product question has been given
+        // permission to be answered out of the model's own head.
+        Assert.DoesNotContain("from your own knowledge of the craft", system, StringComparison.Ordinal);
+
+        // THE CITATION SENTENCE IS GONE, because there are no ids to name and asking for one of none is an
+        // invitation to invent one. This is the second half of the General route's treatment.
+        Assert.DoesNotContain("End your reply with a line", system, StringComparison.Ordinal);
+        Assert.DoesNotContain("Guides: <id>", system, StringComparison.Ordinal);
+
+        // The language rule still closes the message, so dropping the citation sentence did not truncate
+        // the tail with it.
+        Assert.Contains("Answer in English, because the question is in English", system, StringComparison.Ordinal);
+
+        // THE HEAD OF THE USER MESSAGE IS THE SAME STRING, which is the F-1 property: exactly one rule
+        // reaches the model because exactly one string exists.
+        Assert.StartsWith(system, request.Instruction, StringComparison.Ordinal);
+
+        // VACUITY GUARD: a COVERED English product turn on the same harness still gets the citation
+        // sentence, so its absence above is the withholding and not a block that stopped composing.
+        var coveredCaptured = new List<AiRequest>();
+        var covered = ProductChatBudgetTests.Service(
+            AnsweringRouter(coveredCaptured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+        await covered.AnswerAsync(
+            new ProductChatRequest("How do I import my manuscript into PageDraft?"), CancellationToken.None);
+
+        Assert.Contains(
+            "End your reply with a line",
+            Assert.Single(coveredCaptured).SystemMessageOverride, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// HEBREW KEEPS ITS DOCUMENTS AT THE SAME SCORE, driven end to end rather than through the predicate,
+    /// because this is the half a later "fix" of the asymmetry would break. <c>B|he|2</c> scored 3 against
+    /// this corpus and answered correctly in all four gate runs; under an English-style floor it would have
+    /// been handed nothing and refused.
+    /// </summary>
+    [Theory]
+    [InlineData("איך מייבאים כתב יד לתוכנה?")]      // B|he|0
+    [InlineData("מה עושה כפתור ההגהה?")]             // B|he|2
+    public async Task AHebrewProductQuestion_KeepsItsDocuments(string question)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);
+
+        await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(ChatLanguage.Hebrew, request.Language);
+        Assert.Contains(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
+        Assert.True(
+            request.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1 > 0);
+
+        // And the Hebrew citation sentence still rides, since there are ids to name.
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
+            request.SystemMessageOverride);
+    }
+
+    /// <summary>
+    /// A WITHHELD TURN CITES NOTHING, EVEN IF THE MODEL WRITES A CITATION LINE ANYWAY. It licenses the same
+    /// empty acceptable set the General route has passed since g2 - the same decision, not a third policy -
+    /// so the parser's no-line fallback cannot decorate a refusal with chips for documents the turn never
+    /// carried.
+    ///
+    /// <para>THE MODEL HERE NAMES A REAL GUIDE ID, WHICH IS THE HARD CASE: <c>export</c> exists in the
+    /// corpus and would have been perfectly citable on a covered turn. It is a fabrication on THIS turn
+    /// because this turn was handed no documents, and the empty acceptable set is what makes that a
+    /// property of the composition rather than of the model's restraint.</para>
+    ///
+    /// <para>THE LINE ITSELF IS STILL LEFT IN THE PROSE, and that is a decision on the record rather than an
+    /// oversight - see <c>ProductChatCitationContractTests</c>'s known-residual pin and the reasoning beside
+    /// the strip in <c>ProductChatCitations</c>. The chips are the half that had to be closed here.</para>
+    /// </summary>
+    [Fact]
+    public async Task AWithheldProductTurn_CitesNothingEvenWhenTheModelNamesAGuide()
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured, "I do not have that information.\nGuides: export"), out _,
+            guidesDirectory: null, aiOptions: null, routingEnabled: true);
+
+        var result = await svc.AnswerAsync(
+            new ProductChatRequest("Is there a dark mode in the settings?"), CancellationToken.None);
+
+        Assert.True(result.IsGrounded);
+        Assert.Empty(result.GuideIds);
+        Assert.Empty(result.ArtifactRefs ?? Array.Empty<string>());
+
+        // VACUITY GUARD: the same answer, the same id, on a COVERED English product question does cite, so
+        // the emptiness above is the withheld turn's licence and not a harness that can never return a chip.
+        var citing = new List<AiRequest>();
+        var covered = ProductChatBudgetTests.Service(
+            AnsweringRouter(citing, "You can export it.\nGuides: export"), out _,
+            guidesDirectory: null, aiOptions: null, routingEnabled: true);
+        var cited = await covered.AnswerAsync(
+            new ProductChatRequest("How do I export my book to a file?"), CancellationToken.None);
+        Assert.NotEmpty(cited.GuideIds);
+    }
+
+    /// <summary>
+    /// THE CONFIG VALUE IS THE KILL SWITCH AND IT REACHES THE COMPOSITION. Setting the floor to 0 restores
+    /// the pre-lever behaviour for the very question the lever was built for, without a code change - the
+    /// same rollback posture <c>ProductChat:RoutingEnabled</c> carries for the routing layer as a whole. A
+    /// threshold nobody can turn off is a threshold the next gate cannot argue with.
+    /// </summary>
+    [Fact]
+    public async Task TheDocumentsFloor_CanBeTurnedOffInConfig()
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true, englishProductDocumentsFloor: 0.0);
+
+        await svc.AnswerAsync(
+            new ProductChatRequest("Is there a dark mode in the settings?"), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Contains(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
+            request.SystemMessageOverride);
+
+        // VACUITY GUARD: the SAME question on the SAME harness at the shipped floor is withheld, so the
+        // documents above are the config value and not a question that never qualified.
+        var shipped = new List<AiRequest>();
+        var withheld = ProductChatBudgetTests.Service(
+            AnsweringRouter(shipped), out _, guidesDirectory: null, aiOptions: null, routingEnabled: true);
+        await withheld.AnswerAsync(
+            new ProductChatRequest("Is there a dark mode in the settings?"), CancellationToken.None);
+        Assert.DoesNotContain(
+            ProductChatPrompt.GuidesMarker,
+            Assert.Single(shipped).Instruction, StringComparison.Ordinal);
+    }
 }

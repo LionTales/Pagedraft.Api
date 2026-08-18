@@ -586,6 +586,50 @@ public class ProductChatCitationContractTests
         Assert.Empty(refs);
     }
 
+    /// <summary>
+    /// AND THE LINE ITSELF IS STILL PUBLISHED, WHICH IS A KNOWN AND DELIBERATELY UNCLOSED RESIDUAL
+    /// (g3d/gate 4). Naming nothing is only half of it: a habitual "Guides: export" written on a turn that
+    /// carried nothing correctly yields no chip, and is still left in the prose, because
+    /// <c>LooksFabricated</c> tests the TOKEN's shape and <c>export</c> has an ordinary word's shape.
+    ///
+    /// <para>THIS IS PINNED AS THE CURRENT TRUTH RATHER THAN FIXED, and the reasoning is in
+    /// <c>ProductChatCitations</c> beside the strip. Widening the strip to "the carried set was empty" was
+    /// tried and backed out: it also deletes "Guides: none of them cover this", an ordinary sentence the
+    /// strip's own comment promises to leave alone, and this workspace has already paid once for a strip
+    /// that generalized past its measured leaks. There is no measured instance of the leak - a withheld
+    /// turn is not asked for a citation line at all - and the live gate's detector strips any line opening
+    /// with a citation label before it counts narration, so it cannot distort the number either. The test
+    /// exists so that when a run DOES measure one, this is a decision on the record and not an oversight.</para>
+    /// </summary>
+    [Fact]
+    public void WithNoAcceptableReferences_AHabitualCitationLine_IsStillPublished_KnownResidual()
+    {
+        const string prose = "I do not have that information.";
+        var (answer, refs) = ProductChatCitations.Extract(
+            prose + "\nGuides: export", Array.Empty<string>());
+
+        // The half that IS closed: nothing is cited.
+        Assert.Empty(refs);
+
+        // The half that is not: the line is still there. Asserted so the day it changes, it changes here.
+        Assert.Contains("Guides: export", answer, StringComparison.Ordinal);
+
+        // VACUITY GUARD: a turn that DID carry the guide accepts the line, takes it OUT of the prose and
+        // returns the chip, so the publication above is the empty carried set and not a parser that never
+        // strips anything.
+        var (carriedProse, carriedRefs) = ProductChatCitations.Extract(
+            prose + "\nGuides: export", Carried);
+        Assert.Equal(prose, carriedProse);
+        Assert.Contains("export", carriedRefs);
+
+        // AND THE SHAPE RULE STILL FIRES ON AN EMPTY SET: a token that cannot be prose in either language
+        // is stripped even here, so the residual above is scoped to word-shaped ids and is not "the strip
+        // is dead whenever the set is empty".
+        var (strippedProse, _) = ProductChatCitations.Extract(
+            prose + "\nGuides: chapter-brief:5", Array.Empty<string>());
+        Assert.Equal(prose, strippedProse);
+    }
+
     // ─── Fixtures ───────────────────────────────────────────────────────────────────────────────
 
     private static int Occurrences(string haystack, string needle)

@@ -222,7 +222,8 @@ public static class ProductChatBudget
             // is the BOOK-AWARE one exactly when book artifacts survive, so this same string is what the
             // estimate measures, what ComposeInstruction restates at the head of the user message, and
             // what the caller puts in the request's system slot. See Composition.SystemMessage.
-            var systemMessage = ProductChatPrompt.SystemMessage(language, route, keptBlocks.Count > 0);
+            var systemMessage = ProductChatPrompt.SystemMessage(
+                language, route, keptBlocks.Count > 0, keptGuides.Count > 0);
             var instruction = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
                 BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks), route);
@@ -270,7 +271,8 @@ public static class ProductChatBudget
 
             // Unreachable: nothingLeftToGiveUp above covers exactly this state. Stated rather than
             // assumed so a future tier added to BookArtifactKind cannot spin this loop forever.
-            var finalSystem = ProductChatPrompt.SystemMessage(language, route, keptBlocks.Count > 0);
+            var finalSystem = ProductChatPrompt.SystemMessage(
+                language, route, keptBlocks.Count > 0, keptGuides.Count > 0);
             var final = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
                 BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks), route);

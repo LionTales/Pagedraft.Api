@@ -64,13 +64,21 @@ public class ProductChatBudgetTests
     /// A test that wants the routed behaviour passes <c>true</c> here, so which prompt a test measures is
     /// readable at its own call site rather than in this file.
     /// </param>
+    /// <param name="englishProductDocumentsFloor">
+    /// The English product documents floor (g3d/gate 4). DEFAULT NULL MEANS THE SHIPPED VALUE, which is the
+    /// opposite convention to <paramref name="routingEnabled"/> above and is safe for the reason
+    /// <c>ProductChatOptions.EnglishProductDocumentsFloor</c> records: the floor is only ever consulted on an
+    /// APPLIED Product route, so a test that leaves <paramref name="routingEnabled"/> false composes Union
+    /// and cannot see this number at all. Tests that want the kill switch pass 0.
+    /// </param>
     internal static ProductChatService Service(
         Mock<IAiRouter> router,
         out CapturingLogger<ProductChatService> logger,
         string? guidesDirectory,
         AiOptions? aiOptions,
         IBookChatContextReader? bookContext = null,
-        bool routingEnabled = false)
+        bool routingEnabled = false,
+        double? englishProductDocumentsFloor = null)
     {
         logger = new CapturingLogger<ProductChatService>();
         var reader = new GuidesCorpusReader(
@@ -85,7 +93,13 @@ public class ProductChatBudgetTests
             logger,
             capture: null,
             productChatOptions: Microsoft.Extensions.Options.Options.Create(
-                new ProductChatOptions { RoutingEnabled = routingEnabled }));
+                new ProductChatOptions
+                {
+                    RoutingEnabled = routingEnabled,
+                    EnglishProductDocumentsFloor =
+                        englishProductDocumentsFloor
+                        ?? ProductChatRouter.EnglishProductDocumentsFloor,
+                }));
     }
 
     /// <summary>The book reader a book-less turn must never reach.</summary>

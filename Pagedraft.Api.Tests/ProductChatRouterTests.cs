@@ -638,4 +638,178 @@ public class ProductChatRouterTests
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── g3d / gate 4: THE ENGLISH PRODUCT DOCUMENTS FLOOR ──────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// THE FLOOR IS 4.0 AND THE BOUNDARY IS PINNED AT 3 AND AT 4, the way
+    /// <see cref="ProductChatRouter.StrongGuideTopScore"/> is, because the whole lever rests on that one
+    /// digit. It is fitted to g3d's own scores and to nothing else: re-derived from that run's 102 records,
+    /// the English product route's UNCOVERED cell scores {0,0,0,0,3,3,3,3} and its COVERED cell scores
+    /// {3,3,4,6,7,7,7,9}. 4.0 is therefore the ONLY cut that takes the whole uncovered cell while leaving
+    /// every covered turn that answered; 3.0 would take none of the uncovered cell at all, and 5.0 would
+    /// start eating covered turns that answer well (<c>B|en|3</c> scored exactly 4).
+    ///
+    /// <para>UNLIKE THE THRESHOLD ABOVE IT, THIS NUMBER HAS NOT BEEN MEASURED IN PLACE. It is fitted to one
+    /// question set at n=8 per cell and the run that judges it has not been taken; see
+    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/> for the two numbers that would say it is
+    /// wrong. This test pins WHAT WAS SHIPPED so a later change is deliberate, not that the value is right.</para>
+    /// </summary>
+    [Fact]
+    public void TheEnglishDocumentsFloor_IsTheCutGate4TookFromItsOwnScores()
+    {
+        Assert.Equal(4.0, ProductChatRouter.EnglishProductDocumentsFloor);
+
+        // THE BOUNDARY, BOTH SIDES. 3 is the top of the uncovered cell and 4 is the bottom of the covered
+        // one, so this is the exact pair the cut was chosen to separate.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 4.0));
+
+        // The ends of the measured range, so a future off-by-one at either edge fails here.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 9.0));
+    }
+
+    /// <summary>
+    /// AND THE EXACT RECORDS THE CUT MOVES, BY THEIR REAL QUESTIONS AND THEIR REAL g3d SCORES. The whole
+    /// uncovered cell goes, and it takes exactly two covered turns with it - <c>B|en|4</c> and
+    /// <c>B|en|7</c> - both of which had already answered with a refusal in all four runs, so the cut loses
+    /// no answer that was working. <c>B|en|3</c> sits one point above the cut and stays, which is the
+    /// tightest thing this table says: the floor is one point away from taking a covered turn that answers.
+    /// </summary>
+    [Theory]
+    // C|en, the cell this round exists for: all eight move.
+    [InlineData("How do I change my account password?", 3.0, true)]
+    [InlineData("Is there a mobile app for PageDraft?", 3.0, true)]
+    [InlineData("How much does the monthly subscription cost?", 0.0, true)]
+    [InlineData("How do I invite a co-editor to my account so they can leave comments?", 3.0, true)]
+    [InlineData("What is the keyboard shortcut for inserting a comment?", 0.0, true)]
+    [InlineData("Can I share my screen with a publisher through the app?", 3.0, true)]
+    [InlineData("Is there a dark mode in the settings?", 0.0, true)]
+    [InlineData("How do I permanently delete my account?", 0.0, true)]
+    // B|en, the covered cell: only the two that already refused move.
+    [InlineData("What settings can I change in the app?", 3.0, true)]
+    [InlineData("How do I open the editor and start working?", 3.0, true)]
+    [InlineData("Where on the screen do I see the review status?", 4.0, false)]
+    [InlineData("How do I import my manuscript into PageDraft?", 7.0, false)]
+    [InlineData("What does the proofread pass do?", 6.0, false)]
+    [InlineData("What is the difference between the editing passes the app offers?", 9.0, false)]
+    // R|en, the residual how-tos: both scored 4 and neither moves.
+    [InlineData("How do I add a chapter?", 4.0, false)]
+    [InlineData("How do I delete a chapter?", 4.0, false)]
+    public void TheDocumentsFloor_MovesExactlyTheRecordsGate4Named(
+        string question, double guideTopScore, bool withheld)
+    {
+        // VACUITY GUARD: every row really is on the product route at the score it was measured at, so a
+        // "withheld: false" row is the floor's doing and not a question that routes somewhere else.
+        Assert.Equal(
+            ChatRoute.Product,
+            ProductChatRouter.Resolve(question, hasBookId: false, "en", guideTopScore));
+
+        Assert.Equal(
+            withheld,
+            ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", guideTopScore));
+    }
+
+    /// <summary>
+    /// HEBREW IS EXCLUDED, AND THAT ASYMMETRY IS DELIBERATE AND MEASURED. Hebrew's product-uncovered cell
+    /// is the win of the four gate runs (8/8 to 3/8), and its COVERED cell answers well at exactly the
+    /// scores this cut would take away. <c>B|he|0</c> and <c>B|he|2</c> are the two records that make the
+    /// case: both scored 3, and both returned a correct, substantive answer in all four runs -
+    /// <c>B|he|0</c> the drag-or-browse import flow with the add-or-replace choice, <c>B|he|2</c> the
+    /// proofread pass producing suggestions the author approves one at a time. Applying the English floor
+    /// to Hebrew would replace both with "I do not have that information".
+    ///
+    /// <para>SO A READER WHO NOTICES THE ASYMMETRY AND FIXES IT FAILS HERE, which is the point of pinning
+    /// the two questions verbatim rather than asserting on a language flag. The route is identical for the
+    /// pair; only the grounding decision differs.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("איך מייבאים כתב יד לתוכנה?")]      // B|he|0, score 3, answered well in all four runs
+    [InlineData("מה עושה כפתור ההגהה?")]             // B|he|2, score 3, answered well in all four runs
+    public void TheDocumentsFloor_NeverFiresOnHebrew(string question)
+    {
+        Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(question, hasBookId: false, "he", 3.0));
+
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 3.0));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 0.0));
+
+        // VACUITY GUARD: the same score on the same route DOES withhold in English, so the two falses above
+        // are the language condition and not a predicate that never fires.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
+    }
+
+    /// <summary>
+    /// A LANGUAGE THIS LAYER DOES NOT SERVE KEEPS ITS DOCUMENTS. The condition asks for
+    /// <see cref="ChatLanguage.English"/> rather than for "not Hebrew", so an unrecognised tag lands on the
+    /// status quo instead of inheriting an English-only lever by not being Hebrew. Null is included because
+    /// the predicate is public and a caller outside this service can reach it.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("fr")]
+    [InlineData("en-GB")]   // NOT normalized here: the service resolves the tag before this is ever called
+    public void TheDocumentsFloor_NeedsEnglishExactly(string? language)
+        => Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, language, 0.0));
+
+    /// <summary>
+    /// IT IS A PRODUCT-ROUTE LEVER AND NOTHING ELSE. The other three routes at the lowest possible score
+    /// keep what they had: Union is the fallback every misroute lands on and must return the status quo,
+    /// Book's answer comes out of the BOOK section, and General already carries no documents by its own
+    /// decision. Gate 4's floors include General/A at 0/16 and the Book route at 0/28, and this is what
+    /// keeps this change from being able to move either.
+    /// </summary>
+    [Theory]
+    [InlineData(ChatRoute.Union)]
+    [InlineData(ChatRoute.Book)]
+    [InlineData(ChatRoute.General)]
+    public void TheDocumentsFloor_FiresOnTheProductRouteAlone(ChatRoute route)
+    {
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(route, "en", 0.0));
+
+        // VACUITY GUARD: same language, same score, Product route.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0));
+    }
+
+    /// <summary>
+    /// A FLOOR OF ZERO IS THE KILL SWITCH, and it is tested for explicitly rather than left to arithmetic:
+    /// <c>score &lt; 0</c> would already be false for every real score, but a reader setting the config to 0
+    /// is saying "turn this off", and a later change that made the comparison inclusive would silently turn
+    /// the off switch into "withhold from everything". Negative values mean the same thing.
+    /// </summary>
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    public void TheDocumentsFloor_IsOffAtZeroOrBelow(double floor)
+    {
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0, floor));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0, floor));
+
+        // VACUITY GUARD: the shipped floor withholds both of those.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
+    }
+
+    /// <summary>
+    /// AND IT DID NOT LEAK INTO THE ROUTE. <see cref="ProductChatRouter.Resolve"/>'s language parameter is
+    /// documented as accepted and never consulted, and the whole table is resolved twice above to pin it.
+    /// This lever IS language-dependent, so it is kept out of <c>Resolve</c> deliberately; this asserts the
+    /// pin still holds at the scores the floor cares about, which is the one place a careless fold-in would
+    /// show up.
+    /// </summary>
+    [Fact]
+    public void TheRoute_IsStillLanguageIndependentAtTheFloorScores()
+    {
+        foreach (var score in new[] { 0.0, 3.0, 3.9, 4.0 })
+        {
+            foreach (var row in Table)
+            {
+                Assert.Equal(
+                    ProductChatRouter.Resolve(row.English, row.HasBookId, "he", score),
+                    ProductChatRouter.Resolve(row.English, row.HasBookId, "en", score));
+            }
+        }
+    }
 }

@@ -247,6 +247,25 @@ public static class ProductChatCitations
             // failure: this fires only when a token carries a shape that cannot be prose in either
             // language (see LooksFabricated), which is what both observed leaks had and what an ordinary
             // sentence beginning "Guides: none of them cover this" does not.
+            //
+            // A KNOWN RESIDUAL, LEFT OPEN DELIBERATELY AND WRITTEN DOWN SO IT IS NOT REDISCOVERED AS A
+            // SURPRISE (g3d/gate 4). When the acceptable set is EMPTY - the General route since g2, and now
+            // an English Product turn under ProductChatRouter.EnglishProductDocumentsFloor - every token on
+            // a whole-line citation is uncarried by construction, so a habitual "Guides: export" names
+            // nothing (the chips are correctly empty) but is still PUBLISHED as prose, because `export` has
+            // an ordinary word's shape and LooksFabricated is a test of the TOKEN, not of the turn.
+            //
+            // WIDENING THE STRIP TO "the set was empty" WAS TRIED HERE AND BACKED OUT, because it also
+            // deletes the sentence this comment's own last clause promises to leave alone: "Guides: none of
+            // them cover this" tokenizes to five ordinary words and would have been removed from the
+            // reader's answer. This workspace has already paid for a strip that generalized past its
+            // measured leaks and ate the author's prose, and there is no MEASURED instance of this leak -
+            // the withheld turn is not even asked for a citation line any more, and the only measurement
+            // that exists (g3c) says product refusals carry no citation line at all, which is why the
+            // fallback fired 16 times. It is also not a threat to the gate's number: that detector strips
+            // any line opening with a citation label BEFORE it counts narration. So this waits for a
+            // measured instance and a discriminator built from it, rather than for a shape rule invented
+            // in advance.
             if (wholeLine && cited.Any(c => LooksFabricated(c, selectedIds)))
             {
                 var stripped = string.Join("\n", lines.Take(last)).TrimEnd();

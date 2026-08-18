@@ -188,7 +188,29 @@ public static class ProductChatPrompt
     /// <see cref="ComposeInstruction"/> restates the head of the user message by CALLING this method, so
     /// one edit here moves both surfaces and they cannot drift.</para>
     /// </summary>
-    public static string SystemMessage(string language, ChatRoute route, bool bookAware)
+    /// <param name="guidesCarried">
+    /// Whether any guide document actually rides in this turn's prompt. THE CITATION SENTENCE RIDES EXACTLY
+    /// WHEN SOMETHING CITABLE DOES, which is the same invariant <see cref="ComposeInstruction"/> already
+    /// applies to <see cref="GuidesMarker"/> one layer down ("the marker rides only when there is something
+    /// under it") and which <see cref="ChatRoute.General"/> has satisfied since g2 by composing no citation
+    /// sentence at all.
+    ///
+    /// <para>IT IS REACHED BY EXACTLY ONE NEW CONFIGURATION (g3d/gate 4): an English
+    /// <see cref="ChatRoute.Product"/> turn whose guide top score fell below
+    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>, which
+    /// <c>ProductChatService</c> hands zero guides. Asking such a turn to "end your reply with a line of the
+    /// form 'Guides: id, id' naming the ids you used" would be asking it to name one of no ids, which is an
+    /// invitation to invent one; and the citation sentence is, with the documents themselves, one of the two
+    /// things the narrating product route composes that the never-narrating general route does not
+    /// (<see cref="GuidesMarker"/> writes that comparison up). Withholding the documents and keeping the
+    /// sentence would ship neither configuration.</para>
+    ///
+    /// <para>DEFAULTED TRUE so every caller written before this composes byte-identically. The other way to
+    /// reach false is the Union book-less arm with an empty selection, which the service fail-safes before
+    /// composing, so no shipped composition moves.</para>
+    /// </param>
+    public static string SystemMessage(
+        string language, ChatRoute route, bool bookAware, bool guidesCarried = true)
     {
         var hebrew = ChatLanguage.IsHebrew(language);
         var languageRule = hebrew ? ProductChatPromptBlocks.LanguageHe : ProductChatPromptBlocks.LanguageEn;
@@ -206,6 +228,11 @@ public static class ProductChatPrompt
                 ? (hebrew ? ProductChatPromptBlocks.CitationLineBookAwareHe : ProductChatPromptBlocks.CitationLineBookAwareEn)
                 : (hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn);
 
+            // UNION IS DELIBERATELY NOT GIVEN THE guidesCarried INVARIANT. The only way to reach this arm
+            // with no guides is an empty selection, which ProductChatService fail-safes on before it ever
+            // composes, so the branch would be dead code on the one route whose whole contract is that a
+            // misroute returns the status quo. Adding an untestable arm to it buys nothing and puts a second
+            // version of the fallback in the file.
             return unionHead + unionMiddle + unionCitation + languageRule;
         }
 
@@ -238,10 +265,25 @@ public static class ProductChatPrompt
         }
 
         // ─── PRODUCT, and BOOK with nothing left to ground a book rule on ────────────────────────
+        //
+        // THE ANTI-FABRICATION HALF IS WHAT THE WITHHELD TURN KEEPS, and that is the whole reason this arm
+        // is reused rather than the General one (g3d/gate 4). Gate 4's lever is "the General route's
+        // treatment" of the DOCUMENTS, not of the contract: GeneralGrounding licenses an answer out of
+        // Show's own knowledge, which on a product question is the definition of an invented product
+        // behaviour, and holding the C cell at 16/16 appropriate refusals with 0 fabrications is a floor
+        // this round may not trade. ProductGroundingScoped carries all three rules g4's PASS is a
+        // measurement of - never state a setting, button, screen or behavior that is not written there,
+        // never assemble one out of partly relevant parts, never turn a gap into a claim that PageDraft
+        // lacks a thing - plus the finished refusal exemplar to say instead. With nothing written below,
+        // "what you say about PageDraft comes only from what is written below" is not a dangling referent
+        // but the tightest form of the rule: there is nothing, so there is nothing to say, so the block's
+        // own last sentence is the only move left. ProductChatRoutePartitionTests pins the four sentences.
         var productGrounding = hebrew
             ? ProductChatPromptBlocks.ProductGroundingScopedHe
             : ProductChatPromptBlocks.ProductGroundingScopedEn;
-        var citation = hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn;
+        var citation = guidesCarried
+            ? (hebrew ? ProductChatPromptBlocks.CitationLineHe : ProductChatPromptBlocks.CitationLineEn)
+            : string.Empty;
 
         return persona + productGrounding + citation + languageRule;
     }
@@ -306,7 +348,13 @@ public static class ProductChatPrompt
         var bookBlocks = book ?? Array.Empty<BookArtifactBlock>();
         var sb = new StringBuilder();
 
-        sb.Append(SystemMessage(language, route, bookAware: bookBlocks.Count > 0)).Append("\n\n");
+        // guidesCarried IS DERIVED FROM THE SAME LIST THIS METHOD IS ABOUT TO RENDER, never passed in, so
+        // the rule at the head of the user message and the section under it cannot disagree about whether
+        // there are documents. ProductChatBudget derives it from the same trimmed list for the system slot,
+        // on the same iteration - the single-derivation discipline Composition.SystemMessage records.
+        sb.Append(SystemMessage(
+              language, route, bookAware: bookBlocks.Count > 0, guidesCarried: guides.Count > 0))
+          .Append("\n\n");
 
         // THE MARKER RIDES ONLY WHEN THERE IS SOMETHING UNDER IT (g3). Until the General route stopped
         // carrying guides this was unreachable - the service fail-safes before composing when the selector

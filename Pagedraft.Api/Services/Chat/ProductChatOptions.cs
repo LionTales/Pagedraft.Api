@@ -34,4 +34,26 @@ public class ProductChatOptions
     /// call site.</para>
     /// </summary>
     public bool RoutingEnabled { get; set; }
+
+    /// <summary>
+    /// THE GUIDE TOP SCORE BELOW WHICH AN ENGLISH PRODUCT TURN IS HANDED NO DOCUMENTS (g3d/gate 4). The
+    /// derivation, the cut point, the two covered records it also moves and the reason Hebrew is excluded
+    /// are all in <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>; read that before changing
+    /// this. Zero or less turns the withholding OFF and is the kill switch.
+    ///
+    /// <para>IT IS CONFIG AND NOT A BARE CONST BECAUSE IT IS AN UNMEASURED NUMBER. Every other threshold in
+    /// this feature was moved after a run showed where it should sit; this one is fitted to one question set
+    /// at n=8 per cell and the run that judges it has not been taken. A value the next gate is going to argue
+    /// with has to be arguable without a deploy, which is the same posture
+    /// <see cref="RoutingEnabled"/> records for the routing layer as a whole.</para>
+    ///
+    /// <para>UNLIKE <see cref="RoutingEnabled"/>, THE CLASS DEFAULT IS THE SHIPPED VALUE AND THAT IS SAFE.
+    /// The flag's default diverges from appsettings so the suite's byte-identity fences keep measuring the
+    /// inert Union posture; this one cannot disturb them, because
+    /// <see cref="ProductChatRouter.WithholdsProductDocuments"/> fires only on an APPLIED
+    /// <see cref="ChatRoute.Product"/>, and with routing off the applied route is always
+    /// <see cref="ChatRoute.Union"/>. A test that never configures the flag is untouched by this number.</para>
+    /// </summary>
+    public double EnglishProductDocumentsFloor { get; set; }
+        = ProductChatRouter.EnglishProductDocumentsFloor;
 }

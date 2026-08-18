@@ -88,6 +88,92 @@ public static class ProductChatRouter
     public const double StrongGuideTopScore = 7.0;
 
     /// <summary>
+    /// THE ENGLISH PRODUCT ROUTE'S DOCUMENT FLOOR (g3d/gate 4). Below this guide top score an English
+    /// product turn is handed NO DOCUMENTS AT ALL, and the model is left with the product grounding rule
+    /// and nothing to read - which is the configuration that can only produce a refusal.
+    ///
+    /// <para>THIS IS A STRUCTURAL LEVER AND IT EXISTS BECAUSE FOUR RE-WORDINGS DID NOT MOVE THE CLASS. The
+    /// English product-uncovered cell read 8/8, 8/8, 8/8, 7/8 source-narrating across four gate runs, under
+    /// four different attempts at the exemplar and its frame: a re-word (g3), a data-envelope rename (g3b),
+    /// place-grounding (g3c) and sentence-completion (g3d). One record of movement across four runs is a
+    /// draw, and gate 4 fired the standing stop-condition. The residual is not the exemplar. The one
+    /// configuration measured at 0 of 16 narration in EVERY one of those four runs is the General route's,
+    /// and the two things General has that Product does not are that it is handed no documents and composes
+    /// no citation sentence (<see cref="ProductChatPrompt.GuidesMarker"/> writes that comparison up). This
+    /// gives an English product turn the same treatment when the corpus scored too low to be worth reading.
+    /// It changes NO prompt string: every byte the model sees here already shipped.</para>
+    ///
+    /// <para>THE CUT POINT COMES FROM g3d'S OWN SCORES AND NOTHING ELSE. Re-derived off that run's 102
+    /// records before this was written: on the English product route the UNCOVERED cell scores
+    /// {0,0,0,0,3,3,3,3} (max 3) and the COVERED cell scores {3,3,4,6,7,7,7,9}. A cut at 4.0 therefore moves
+    /// all eight uncovered turns off the documents and takes exactly two covered turns with them,
+    /// <c>B|en|4</c> ("what settings can I change?") and <c>B|en|7</c> ("how do I open the editor?"), both of
+    /// which already answered with a refusal in all four runs. The two other English product-route records
+    /// below 4 do not exist: <c>F|en|2</c> scored 9 and <c>R|en|0</c>/<c>R|en|1</c> scored 4, so nothing in
+    /// the residual or book-less cells moves either.</para>
+    ///
+    /// <para>IT IS A VALUE TO BE MEASURED AND NOT A VALIDATED CONSTANT, stated plainly because the number
+    /// LOOKS like the calibrated one above it and is not. <see cref="StrongGuideTopScore"/> was moved after a
+    /// run showed a whole cell sitting exactly on the old value; this one is fitted to a single question set
+    /// at n=8 per cell, on one manuscript, in one language, and no run has yet been taken with it in place.
+    /// The next gate measures THE THRESHOLD as much as it measures the fix: the numbers that would say it is
+    /// wrong are a rise in the English product route's refusal count (the cut bought the drop by refusing
+    /// questions the corpus does cover) or an English product answer that invents a behaviour (the withheld
+    /// turn fabricated instead of refusing). Do not promote it to "calibrated" on one green run.</para>
+    ///
+    /// <para>HEBREW IS EXCLUDED BY CONSTRUCTION AND THAT ASYMMETRY IS THE POINT, NOT AN OVERSIGHT. The same
+    /// cut applied to Hebrew would break the one route that is already working: Hebrew's product-uncovered
+    /// cell is the win of these four runs, having gone 8/8 to 3/8, and its covered cell answers WELL at
+    /// score 3. <c>B|he|0</c> ("איך מייבאים כתב יד?") and <c>B|he|2</c> ("מה קורה כשלוחצים על הגהה?") both
+    /// score 3 and both returned a correct, substantive, cited answer in all four runs; a floor of 4 would
+    /// have replaced both with "I do not have that information". A later reader who notices the asymmetry and
+    /// "fixes" it will delete two measured good answers to close a class that Hebrew does not have.
+    /// <c>ProductChatRouterTests</c> pins both halves.</para>
+    ///
+    /// <para>THE DEFAULT LIVES HERE AND THE OPERATIONAL VALUE LIVES IN
+    /// <see cref="ProductChatOptions.EnglishProductDocumentsFloor"/>, for the reason
+    /// <see cref="ProductChatOptions.RoutingEnabled"/> records: a value the next gate is going to argue with
+    /// must be changeable without a deploy. A floor of 0 or less turns the withholding OFF entirely and is
+    /// the kill switch, which is why <see cref="WithholdsProductDocuments"/> tests for it rather than letting
+    /// a mis-typed 0 read as "withhold from everything".</para>
+    /// </summary>
+    public const double EnglishProductDocumentsFloor = 4.0;
+
+    /// <summary>
+    /// Whether this turn's documents are WITHHELD: the English product route, below
+    /// <paramref name="documentsFloor"/>. See <see cref="EnglishProductDocumentsFloor"/> for the
+    /// measurement, for why the cut is 4.0, and for why Hebrew is not in it.
+    ///
+    /// <para>IT IS DELIBERATELY NOT PART OF <see cref="Resolve"/>, AND THAT IS A PROPERTY THIS FILE ALREADY
+    /// OWES. <see cref="Resolve"/>'s <c>language</c> parameter is documented as accepted and never consulted,
+    /// and <c>ProductChatRouterTests</c> pins that by resolving the whole table twice, once per language, and
+    /// asserting the two agree. This decision IS language-dependent, so folding it into the route would
+    /// silently retire that pin. A route says what KIND of question the turn is; this says what grounding the
+    /// turn gets, which is the same layer <c>ProductChatService.GeneralRouteGuideCount</c> lives at.</para>
+    ///
+    /// <para>THE LANGUAGE TEST IS POSITIVE ON PURPOSE. It asks for <see cref="ChatLanguage.English"/> rather
+    /// than for "not Hebrew", so a language this layer does not serve keeps its documents - the status quo -
+    /// instead of inheriting an English-only lever by being unrecognised.</para>
+    /// </summary>
+    /// <param name="route">The APPLIED route for this turn, not the resolved one: with routing off the
+    /// applied route is <see cref="ChatRoute.Union"/> and nothing here fires, which is what keeps the flag a
+    /// true rollback for this lever too.</param>
+    /// <param name="language">The answer's language, already resolved by <see cref="ChatLanguage.Detect"/>.</param>
+    /// <param name="guideTopScore">The best <see cref="GuideSelector"/> score for this question, the same
+    /// value <see cref="Resolve"/> was given.</param>
+    /// <param name="documentsFloor">The floor to apply. Zero or less means the lever is off.</param>
+    public static bool WithholdsProductDocuments(
+        ChatRoute route, string? language, double guideTopScore,
+        double documentsFloor = EnglishProductDocumentsFloor)
+    {
+        if (route != ChatRoute.Product) return false;
+        if (!string.Equals(language, ChatLanguage.English, StringComparison.OrdinalIgnoreCase)) return false;
+        if (documentsFloor <= 0.0) return false;
+
+        return guideTopScore < documentsFloor;
+    }
+
+    /// <summary>
     /// PRODUCT-SURFACE VOCABULARY: the things PageDraft has, as an author would name them. NEW, because
     /// no existing class owned a product lexicon - <see cref="GuideSelector"/> scores against guide
     /// headings rather than against a word list.

@@ -293,6 +293,21 @@ public class ProductChatService
                 ArtifactRefs: Array.Empty<string>(), BookFaultReason: null);
         }
 
+        // ─── g3d/gate 4: AN ENGLISH PRODUCT TURN UNDER THE FLOOR IS HANDED NO DOCUMENTS ──────────
+        //
+        // THE ONE STRUCTURAL LEVER OF THIS ROUND, AND IT CHANGES NO PROMPT STRING. Four gate runs and four
+        // re-wordings left the English product-uncovered cell at 8/8, 8/8, 8/8, 7/8 source-narrating, which
+        // is a draw; the residual is not the exemplar. The only configuration measured at 0 of 16 narration
+        // in all four runs is the one where the model is handed nothing to talk about, so an English product
+        // turn whose corpus scored below the floor gets it. Hebrew is excluded IN THE PREDICATE and must
+        // stay excluded - its covered cell answers well at exactly the scores this cut would take away. Read
+        // ProductChatRouter.EnglishProductDocumentsFloor for the score distribution and the two covered
+        // records that move with it, and for the honest statement that the floor is an unmeasured number.
+        var documentsFloor = _productChatOptions?.Value.EnglishProductDocumentsFloor
+                             ?? ProductChatRouter.EnglishProductDocumentsFloor;
+        var withholdDocuments = ProductChatRouter.WithholdsProductDocuments(
+            route, language, guideTopScore, documentsFloor);
+
         // THE ROUTE DECIDES HOW MANY GUIDES THE TURN HAS. Trimmed from the SCORED selection rather than
         // re-selected: the selection had to run first so the router could threshold its top score.
         // The Book route pays the guides for the artifacts; the General route pays them for nothing at
@@ -302,12 +317,29 @@ public class ProductChatService
         {
             ChatRoute.Book => BookRouteGuideCount,
             ChatRoute.General => GeneralRouteGuideCount,
+            // LITERALLY THE GENERAL ROUTE'S COUNT, reused rather than re-declared as a third number. Gate 4
+            // named General's treatment as the thing to copy, and a second zero with its own name is a
+            // second thing to keep in step with the first.
+            ChatRoute.Product when withholdDocuments => GeneralRouteGuideCount,
             _ => selected.Count,
         };
 
         if (selected.Count > routeGuideCount)
         {
             selected = selected.Take(routeGuideCount).ToList();
+        }
+
+        if (withholdDocuments)
+        {
+            // LOGGED ON ITS OWN LINE so the next gate can attribute per record without re-deriving the
+            // decision from the score, and so the ROUTED line below keeps the exact shape the existing gate
+            // harness parses. No question text, the same rule as everywhere else in this service.
+            _logger.LogInformation(
+                "Product chat WITHHELD the documents on this turn: {Language} {Route}, guide top score " +
+                "{GuideTopScore} below the English product documents floor of {DocumentsFloor}. The model " +
+                "gets the product grounding rule and no guide text and no citation sentence, so the only " +
+                "answer available to it is the refusal that rule ends with. Guides dropped: {DroppedGuides}.",
+                language, route, guideTopScore, documentsFloor, scored.Count);
         }
 
         // ─── The BOOK half (phase B). Absent bookId = no read, no blocks, no prompt change ───────
@@ -358,13 +390,19 @@ public class ProductChatService
         // The route is logged whether or not it was applied, and BOTH values are logged, because "what it
         // would have done" is the only calibration data that exists while the flag is off. No question
         // text: the same rule as everywhere else in this service.
+        //
+        // THE PREFIX OF THIS MESSAGE, UP TO AND INCLUDING THE SCORE, IS PARSED BY THE LIVE GATE HARNESS to
+        // attach a route and a score to every recorded turn. New facts go on the END of it (or on their own
+        // line, as the withholding above does); re-ordering the head silently empties four runs' worth of
+        // route columns.
         _logger.LogInformation(
             "Product chat ROUTED this turn to {ResolvedRoute} (applied: {AppliedRoute}; routing enabled: " +
             "{RoutingEnabled}). Language {Language}, bookId present: {HasBookId}, guide top score " +
-            "{GuideTopScore} against a strong-match threshold of {StrongGuideTopScore}. A route resolved " +
+            "{GuideTopScore} against a strong-match threshold of {StrongGuideTopScore}. Documents withheld: " +
+            "{DocumentsWithheld} (English product documents floor {DocumentsFloor}). A route resolved " +
             "but not applied changed nothing about this answer: the turn composed Union either way.",
             resolvedRoute, route, routingEnabled, language, request.BookId.HasValue,
-            guideTopScore, ProductChatRouter.StrongGuideTopScore);
+            guideTopScore, ProductChatRouter.StrongGuideTopScore, withholdDocuments, documentsFloor);
 
         AiResponse response;
         try
@@ -422,7 +460,14 @@ public class ProductChatService
         // route exists to remove, arriving through the belt instead of through the prompt. An empty set
         // also keeps the parser's one safety property intact in the strongest form: a citation can only
         // ever NARROW what the turn carried, and here the turn licenses none.
-        var acceptable = route == ChatRoute.General
+        //
+        // A WITHHELD PRODUCT TURN TAKES THE SAME EMPTY SET, WHICH IS THE SAME DECISION AND NOT A THIRD
+        // POLICY (g3d/gate 4). It was handed no documents, so it licenses no citation, exactly as General
+        // does and for exactly General's reason. Written as an explicit arm rather than left to fall out of
+        // an empty AcceptableReferences: today the two agree only because a withheld turn also carries no
+        // book artifacts (Product never reads the book), and a policy that holds by coincidence is a policy
+        // that stops holding without anyone editing it.
+        var acceptable = route == ChatRoute.General || withholdDocuments
             ? Array.Empty<string>()
             : composed.AcceptableReferences;
 
