@@ -103,21 +103,51 @@ public static class GuideSelector
         IReadOnlyList<GuideDocument> corpus,
         string questionLanguage,
         int count = DefaultCount)
+        => SelectScored(question, corpus, questionLanguage, count).Select(x => x.Document).ToList();
+
+    /// <summary>One selected guide and the penalized score it was selected on.</summary>
+    public readonly record struct ScoredGuide(GuideDocument Document, double Score);
+
+    /// <summary>
+    /// <see cref="Select"/>, WITH THE SCORES IT ALREADY COMPUTED. Added by g1 because
+    /// <see cref="ProductChatRouter"/> needs to know how well the corpus matched, and the alternative was
+    /// a second ranking pass over the same corpus with the same weights - a second place for a weight
+    /// change to go stale, and a second answer to one question.
+    ///
+    /// <para><see cref="Select"/> DELEGATES TO THIS rather than the other way round, so there is exactly
+    /// one ordering in this class and no possibility of the ranked list and the scored list disagreeing
+    /// about which guide came first.</para>
+    ///
+    /// <para>IT DOES NOT AND MUST NOT REFUSE. The scores are reported; nothing here reads them as a
+    /// coverage verdict. See the class doc: judging whether the guides answer the question is the model's
+    /// job, and the router treats a strong score as evidence FOR the product route and a weak one as no
+    /// evidence at all.</para>
+    /// </summary>
+    public static IReadOnlyList<ScoredGuide> SelectScored(
+        string question,
+        IReadOnlyList<GuideDocument> corpus,
+        string questionLanguage,
+        int count = DefaultCount)
     {
-        if (corpus.Count == 0 || count <= 0) return Array.Empty<GuideDocument>();
+        if (corpus.Count == 0 || count <= 0) return Array.Empty<ScoredGuide>();
 
         var questionTokens = Tokenize(question);
 
         return corpus
-            .Select(doc => (doc, score: Score(questionTokens, doc, questionLanguage)))
-            .OrderByDescending(x => x.score)
-            .ThenBy(x => IsSameLanguage(x.doc, questionLanguage) ? 0 : 1)
-            .ThenBy(x => x.doc.NumericPrefix)
-            .ThenBy(x => x.doc.FileName, StringComparer.Ordinal)
+            .Select(doc => new ScoredGuide(doc, Score(questionTokens, doc, questionLanguage)))
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => IsSameLanguage(x.Document, questionLanguage) ? 0 : 1)
+            .ThenBy(x => x.Document.NumericPrefix)
+            .ThenBy(x => x.Document.FileName, StringComparer.Ordinal)
             .Take(count)
-            .Select(x => x.doc)
             .ToList();
     }
+
+    /// <summary>The best score in a scored selection, or 0 when nothing was selected. The selection is
+    /// ordered best-first, so this is the head; it is a named method rather than an indexer at the call
+    /// site because "the top score" is the concept the router thresholds.</summary>
+    public static double TopScore(IReadOnlyList<ScoredGuide> selection)
+        => selection.Count == 0 ? 0.0 : selection[0].Score;
 
     /// <summary>
     /// The penalized score for one document. Exposed so a test can assert the RANKING RULE rather

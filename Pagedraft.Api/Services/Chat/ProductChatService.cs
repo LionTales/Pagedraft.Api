@@ -103,7 +103,16 @@ public class ProductChatService
     private readonly IBookChatContextReader _bookContext;
     private readonly ILogger<ProductChatService> _logger;
     private readonly ProductChatGroundingCapture? _capture;
+    private readonly IOptions<ProductChatOptions>? _productChatOptions;
 
+    /// <param name="productChatOptions">
+    /// The routing flag (g1), OPTIONAL and defaulted to null for the same reason
+    /// <paramref name="capture"/> is: this service is constructed directly by the composed-prompt pin
+    /// tests, which must keep passing with zero edits, and a required parameter would have forced an edit
+    /// to the very files that prove the prompt did not move. NULL MEANS ROUTING OFF, which is also the
+    /// class default of <see cref="ProductChatOptions.RoutingEnabled"/>, so the two ways of not
+    /// configuring it agree.
+    /// </param>
     /// <param name="capture">
     /// Show C1's per-request grounding scratchpad, OPTIONAL and defaulted to null. Optional because this
     /// service is constructed directly by the composed-prompt pin tests, which must keep passing with zero
@@ -117,7 +126,8 @@ public class ProductChatService
         IOptions<AiOptions> aiOptions,
         IBookChatContextReader bookContext,
         ILogger<ProductChatService> logger,
-        ProductChatGroundingCapture? capture = null)
+        ProductChatGroundingCapture? capture = null,
+        IOptions<ProductChatOptions>? productChatOptions = null)
     {
         _guides = guides;
         _router = router;
@@ -125,6 +135,7 @@ public class ProductChatService
         _bookContext = bookContext;
         _logger = logger;
         _capture = capture;
+        _productChatOptions = productChatOptions;
     }
 
     /// <summary>
@@ -150,9 +161,13 @@ public class ProductChatService
             return FailSafe(language, fault);
         }
 
-        var selected = GuideSelector.Select(
+        // SCORED, so the router can threshold the top score the ranking ALREADY computed rather than
+        // ranking the corpus a second time with a copy of the weights (g1). Select() itself now delegates
+        // to SelectScored, so there is one ordering and the two cannot disagree.
+        var scored = GuideSelector.SelectScored(
             question, corpus.Documents, language,
             request.BookId.HasValue ? BookAwareGuideCount : GuideSelector.DefaultCount);
+        IReadOnlyList<GuideDocument> selected = scored.Select(s => s.Document).ToList();
         if (selected.Count == 0)
         {
             // Unreachable while the corpus is non-empty (the selector never refuses on a weak match),
@@ -167,6 +182,18 @@ public class ProductChatService
 
         var receivedTurns = request.History?.Count ?? 0;
         var history = CapHistory(request.History);
+
+        // ─── THE ROUTE (g1). RESOLVED ALWAYS, APPLIED ONLY BEHIND THE FLAG ───────────────────────
+        //
+        // Resolving is a pure string scan, so it is done on every turn even while the flag is off: a
+        // route nobody can see is a route nobody can calibrate, and g3 needs the resolved route beside
+        // the answer it is scoring. What the flag gates is USE. With it off the composed prompt is forced
+        // to Union, which ProductChatPrompt defines to be byte-identical to what shipped before routing
+        // existed, so an unconfigured deployment composes exactly the message g4 and g5 measured.
+        var routingEnabled = _productChatOptions?.Value.RoutingEnabled ?? false;
+        var resolvedRoute = ProductChatRouter.Resolve(
+            question, request.BookId.HasValue, language, GuideSelector.TopScore(scored));
+        var route = routingEnabled ? resolvedRoute : ChatRoute.Union;
 
         // ─── The BOOK half (phase B). Absent bookId = no read, no blocks, no prompt change ───────
         //
@@ -202,10 +229,22 @@ public class ProductChatService
         // guides and artifacts are what the citation is computed against.
         var composed = ProductChatBudget.Compose(
             language, selected, history, question, InputTokenBudget(), book.Blocks, book.BookTitle,
-            book.Keys);
+            book.Keys, route);
         var instruction = composed.Instruction;
         selected = composed.Guides;
         LogTrim(composed, history.Count);
+
+        // The route is logged whether or not it was applied, and BOTH values are logged, because "what it
+        // would have done" is the only calibration data that exists while the flag is off. No question
+        // text: the same rule as everywhere else in this service.
+        _logger.LogInformation(
+            "Product chat ROUTED this turn to {ResolvedRoute} (applied: {AppliedRoute}; routing enabled: " +
+            "{RoutingEnabled}). Language {Language}, bookId present: {HasBookId}, guide top score " +
+            "{GuideTopScore} against a strong-match threshold of {StrongGuideTopScore}. Union composes " +
+            "byte-identically to the pre-routing prompt, so a route resolved but not applied changed " +
+            "nothing about this answer.",
+            resolvedRoute, route, routingEnabled, language, request.BookId.HasValue,
+            GuideSelector.TopScore(scored), ProductChatRouter.StrongGuideTopScore);
 
         AiResponse response;
         try

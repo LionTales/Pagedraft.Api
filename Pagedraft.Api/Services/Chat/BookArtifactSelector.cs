@@ -184,6 +184,36 @@ public static class BookArtifactSelector
         "פרק", "פרקים", "חלק", "פרולוג", "אפילוג", "מבוא", "סצנה"
     };
 
+    /// <summary>
+    /// THE BOOK-CONTENT LEXICON, AS ONE LIST, FOR <see cref="ProductChatRouter"/> (g1). DERIVED from the
+    /// vocabularies above rather than re-typed, for the same reason
+    /// <see cref="AmbientLocationWords"/> is derived: a word added to the location or dimension
+    /// vocabulary has to reach the router automatically, or the router will route Book for a question the
+    /// selector retrieves nothing for, and the reverse. Two copies of a question vocabulary WILL drift,
+    /// and this drift is invisible from either side.
+    ///
+    /// <para>THE THREE FAMILIES IT UNIONS, and why each one belongs: <see cref="ChapterWords"/> and
+    /// <see cref="SceneWords"/> are LOCATIONS in the manuscript, and <see cref="DimensionVocabulary"/>'s
+    /// surfaces are what the author calls the things a review found in it. Deliberately NOT included:
+    /// <see cref="PositionalWords"/>, because "first"/"end"/"סוף" read as a place inside anything at all
+    /// and would route half the product questions in the corpus to Book; and
+    /// <see cref="DeicticMarkers"/>, which are exposed SEPARATELY as
+    /// <see cref="BookDeicticWords"/> because they only point at a book when one is open.</para>
+    ///
+    /// <para>Note the ceiling on what a WORD LIST can decide: a question that names only the
+    /// manuscript's characters carries none of these tokens, because the cast is in the register and the
+    /// register needs a database. The router documents that blind spot and pins it.</para>
+    /// </summary>
+    internal static readonly IReadOnlyList<string> BookContentWords = ChapterWords
+        .Concat(SceneWords)
+        .Concat(DimensionVocabulary.SelectMany(d => d.Surfaces))
+        .Distinct(StringComparer.Ordinal)
+        .ToArray();
+
+    /// <summary>The deictic markers, exposed for <see cref="ProductChatRouter"/> (g1). The SAME array
+    /// the ambient rules read, so a marker added for retrieval reaches routing too.</summary>
+    internal static IReadOnlyList<string> BookDeicticWords => DeicticMarkers;
+
     // ─── Result ─────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -1003,7 +1033,14 @@ public static class BookArtifactSelector
         return keys;
     }
 
-    private static bool ContainsAnyWord(string text, IReadOnlyList<string> words)
+    /// <summary>
+    /// Whole-word scan of <paramref name="text"/> for any of <paramref name="words"/>, case-insensitive
+    /// on both scripts. INTERNAL since g1 so <see cref="ProductChatRouter"/> matches its lexicons with
+    /// the SAME matcher this class matches its own with: the whole-word rule (see
+    /// <see cref="MatchesWordAt"/>) is what stops "ch" matching inside "chapter" and "פרק" inside
+    /// "פרקליט", and a router that reimplemented it would reimplement it slightly differently.
+    /// </summary>
+    internal static bool ContainsAnyWord(string text, IReadOnlyList<string> words)
     {
         for (var i = 0; i < text.Length; i++)
         {
