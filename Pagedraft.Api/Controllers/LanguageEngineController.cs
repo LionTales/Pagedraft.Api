@@ -168,11 +168,13 @@ public class LanguageEngineController : ControllerBase
             var result = await _languageEngine.ProcessAsync(request, ct);
             var unav = result.Metadata.TryGetValue("languageToolUnavailable", out var unavObj) && unavObj is true;
             var msg = result.Metadata.TryGetValue("languageToolMessage", out var msgObj) ? msgObj?.ToString() : null;
+            var code = result.Metadata.TryGetValue("languageToolCode", out var codeObj) ? codeObj?.ToString() : null;
             return Ok(new IssuesResponse
             {
                 Issues = result.Issues,
                 LanguageToolUnavailable = unav ? true : null,
-                LanguageToolMessage = msg
+                LanguageToolMessage = msg,
+                LanguageToolCode = code
             });
         }
         catch (Exception ex)
@@ -188,6 +190,7 @@ public class IssuesResponse
     public List<LanguageIssue> Issues { get; set; } = new();
     public bool? LanguageToolUnavailable { get; set; }
     public string? LanguageToolMessage { get; set; }
+    public string? LanguageToolCode { get; set; }
 }
 
 /// <summary>DTO for language engine requests.</summary>
