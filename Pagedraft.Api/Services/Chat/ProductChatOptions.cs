@@ -36,23 +36,20 @@ public class ProductChatOptions
     public bool RoutingEnabled { get; set; }
 
     /// <summary>
-    /// THE GUIDE TOP SCORE BELOW WHICH AN ENGLISH PRODUCT TURN IS HANDED NO DOCUMENTS (g3d/gate 4). The
-    /// derivation, the cut point, the two covered records it also moves and the reason Hebrew is excluded
-    /// are all in <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>; read that before changing
-    /// this. Zero or less turns the withholding OFF and is the kill switch.
+    /// THE GUIDE TOP SCORE BELOW WHICH AN ENGLISH PRODUCT TURN IS HANDED NO DOCUMENTS (g3d/gate 4), AND IT
+    /// SHIPS AT 0, WHICH IS THE KILL SWITCH: no turn is withheld from. Gate run 5 measured the lever at 4.0
+    /// and it produced four English answers asserting PageDraft behaviour that does not exist, against 0 in
+    /// 408 prior records, while the metric it was built to move stayed put. The whole measurement is on
+    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/> - READ IT BEFORE RAISING THIS.
     ///
-    /// <para>IT IS CONFIG AND NOT A BARE CONST BECAUSE IT IS AN UNMEASURED NUMBER. Every other threshold in
-    /// this feature was moved after a run showed where it should sit; this one is fitted to one question set
-    /// at n=8 per cell and the run that judges it has not been taken. A value the next gate is going to argue
-    /// with has to be arguable without a deploy, which is the same posture
-    /// <see cref="RoutingEnabled"/> records for the routing layer as a whole.</para>
+    /// <para>IT IS CONFIG AND NOT A BARE CONST BECAUSE IT IS A NUMBER THE GATES ARGUE WITH, which is the
+    /// same posture <see cref="RoutingEnabled"/> records for the routing layer as a whole: it was config so
+    /// the lever could be turned off without a deploy, and that is exactly what happened.</para>
     ///
-    /// <para>UNLIKE <see cref="RoutingEnabled"/>, THE CLASS DEFAULT IS THE SHIPPED VALUE AND THAT IS SAFE.
-    /// The flag's default diverges from appsettings so the suite's byte-identity fences keep measuring the
-    /// inert Union posture; this one cannot disturb them, because
-    /// <see cref="ProductChatRouter.WithholdsProductDocuments"/> fires only on an APPLIED
-    /// <see cref="ChatRoute.Product"/>, and with routing off the applied route is always
-    /// <see cref="ChatRoute.Union"/>. A test that never configures the flag is untouched by this number.</para>
+    /// <para>THE CLASS DEFAULT IS THE SHIPPED VALUE AND BOTH ARE OFF, WHICH MATTERS BEYOND TIDINESS:
+    /// <c>appsettings.Production.json</c> carries no <c>ProductChat</c> section at all, so production binds
+    /// THIS default. A rollback that moved only <c>appsettings.json</c> would have left the lever running in
+    /// production. <c>ProductChatRouterTests.TheShippedFloor_WithholdsOnNoTurn</c> pins the pair.</para>
     /// </summary>
     public double EnglishProductDocumentsFloor { get; set; }
         = ProductChatRouter.EnglishProductDocumentsFloor;

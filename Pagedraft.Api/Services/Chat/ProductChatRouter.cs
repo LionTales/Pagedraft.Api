@@ -88,9 +88,64 @@ public static class ProductChatRouter
     public const double StrongGuideTopScore = 7.0;
 
     /// <summary>
-    /// THE ENGLISH PRODUCT ROUTE'S DOCUMENT FLOOR (g3d/gate 4). Below this guide top score an English
-    /// product turn is handed NO DOCUMENTS AT ALL, and the model is left with the product grounding rule
-    /// and nothing to read - which is the configuration that can only produce a refusal.
+    /// THE SHIPPED ENGLISH PRODUCT DOCUMENT FLOOR, AND IT IS 0.0, WHICH MEANS THE WITHHOLDING IS OFF ON
+    /// EVERY TURN. Gate run 5 measured the lever in place and it FAILED HARMFULLY; this is the rollback,
+    /// and the record of it is the paragraphs below rather than a deleted mechanism. The mechanism,
+    /// <see cref="WithholdsProductDocuments"/>, its tests and the whole derivation on
+    /// <see cref="RolledBackEnglishProductDocumentsFloor"/> are kept ON PURPOSE - they are what was
+    /// measured, and the owner may want to revisit the class with a different instrument.
+    ///
+    /// <para>READ THIS BEFORE RE-ENABLING IT. The derivation next door is intact and reads persuasively;
+    /// it is the rationale for a value that has since been measured IN PLACE and rejected. A reader who
+    /// takes only that paragraph away from this file will re-enable a lever that made the answers worse.
+    /// Re-enabling means moving this constant, the class default in
+    /// <see cref="ProductChatOptions.EnglishProductDocumentsFloor"/> and the shipped
+    /// <c>ProductChat:EnglishProductDocumentsFloor</c> key together, AND changing
+    /// <c>ProductChatRouterTests.TheShippedFloor_WithholdsOnNoTurn</c> and
+    /// <c>ProductChatRoutedAnswerTests.TheShippedConfiguration_SendsDocumentsOnEveryEnglishProductTurn</c>,
+    /// which exist so that turning it back on is a deliberate act and not a config typo.</para>
+    ///
+    /// <para>WHAT RUN 5 MEASURED (evidence <c>g3e/results.jsonl</c>, 102 records, the lever at 4.0 on
+    /// commit <c>bf6088f</c>). The lever FIRED correctly: exactly the 10 intended records were withheld,
+    /// the whole English product-uncovered cell plus <c>B|en|4</c> and <c>B|en|7</c>. It DID NOT MOVE THE
+    /// TARGET METRIC: under the blindness-corrected detector (<c>g3e/detect4.js</c>) the English
+    /// product-uncovered cell went 7/8 to 6/8 source-narrating, the same draw the four prior re-wordings
+    /// produced. The apparent 7/8 to 2/8 was the OLD detector going blind to vocabulary the withheld
+    /// turns INVENTED for the thing they had been handed - "the details provided", "what I have been
+    /// given", "our materials", "what I have access to" - none of which the old pattern list knew. The
+    /// metric only appeared to move.</para>
+    ///
+    /// <para>AND IT BROKE THE ONE FLOOR THAT HAD HELD IN ALL FOUR PRIOR RUNS: 0 of 408 records had ever
+    /// asserted a PageDraft behaviour that does not exist, and this run produced 4 of 102, every one of
+    /// them a WITHHELD turn. <c>C|en|6</c> sent the author to "the settings menu where appearance options
+    /// are usually found"; <c>C|en|0</c> to "the settings screen related to security"; <c>C|en|3</c> to
+    /// "the official documentation or support resources"; <c>B|en|7</c> to "your specific instructions or
+    /// documentation". Grep-verified against the shipped corpus: the English guides contain NO occurrence
+    /// of "settings" at all. Two more withheld turns (<c>C|en|1</c>, <c>C|en|5</c>) rendered a gap as a
+    /// FACT about the product ("No, I don't have any information about whether there is a mobile app"),
+    /// which is the one thing <c>ProductGroundingScoped</c> forbids by name, and 5 lost Show's persona for
+    /// a generic assistant voice. Handing the model nothing did not make it quiet; it made it fall back on
+    /// what a generic assistant knows about apps in general, which is the failure the documents were
+    /// preventing.</para>
+    ///
+    /// <para>SO THE CLASS IS STILL OPEN AND THIS WAS NOT ITS FIX. Do not read the rollback as "the
+    /// narration class is closed" - it is exactly where the four prior runs left it, minus one instrument
+    /// bug. The next attempt needs a detector validated before the run, not another lever measured with a
+    /// detector that cannot see what the lever invents.</para>
+    /// </summary>
+    public const double EnglishProductDocumentsFloor = 0.0;
+
+    /// <summary>
+    /// THE VALUE GATE 4 FITTED AND GATE RUN 5 ROLLED BACK, kept named so the tests that exercise the
+    /// mechanism can ask for it explicitly instead of inheriting it from a shipped default that no longer
+    /// turns it on. NOTHING IN THE APPLICATION READS THIS. Read
+    /// <see cref="EnglishProductDocumentsFloor"/> FIRST: it carries the measurement that disabled the
+    /// lever, and everything below is the reasoning that shipped it, preserved unedited.
+    ///
+    /// <para>THE ORIGINAL DERIVATION FOLLOWS, AND IT IS SUPERSEDED. Below this guide top score an English
+    /// product turn was handed NO DOCUMENTS AT ALL, leaving the model the product grounding rule and
+    /// nothing to read - which was expected to be the configuration that can only produce a refusal, and
+    /// measured as the configuration that produces an invented settings menu.</para>
     ///
     /// <para>THIS IS A STRUCTURAL LEVER AND IT EXISTS BECAUSE FOUR RE-WORDINGS DID NOT MOVE THE CLASS. The
     /// English product-uncovered cell read 8/8, 8/8, 8/8, 7/8 source-narrating across four gate runs, under
@@ -121,6 +176,11 @@ public static class ProductChatRouter
     /// questions the corpus does cover) or an English product answer that invents a behaviour (the withheld
     /// turn fabricated instead of refusing). Do not promote it to "calibrated" on one green run.</para>
     ///
+    /// <para>THAT RUN WAS TAKEN, AND THE SECOND OF THOSE TWO NUMBERS CAME BACK: gate run 5 produced four
+    /// English product answers that invent a behaviour, all four on withheld turns, against 0 in 408 prior
+    /// records. The stop-condition this paragraph wrote in advance is what disabled the lever. See
+    /// <see cref="EnglishProductDocumentsFloor"/>.</para>
+    ///
     /// <para>HEBREW IS EXCLUDED BY CONSTRUCTION AND THAT ASYMMETRY IS THE POINT, NOT AN OVERSIGHT. The same
     /// cut applied to Hebrew would break the one route that is already working: Hebrew's product-uncovered
     /// cell is the win of these four runs, having gone 8/8 to 3/8, and its covered cell answers WELL at
@@ -135,14 +195,22 @@ public static class ProductChatRouter
     /// <see cref="ProductChatOptions.RoutingEnabled"/> records: a value the next gate is going to argue with
     /// must be changeable without a deploy. A floor of 0 or less turns the withholding OFF entirely and is
     /// the kill switch, which is why <see cref="WithholdsProductDocuments"/> tests for it rather than letting
-    /// a mis-typed 0 read as "withhold from everything".</para>
+    /// a mis-typed 0 read as "withhold from everything". That kill switch is what ships today: the default
+    /// next door is 0.0 and this value is reachable only from a test or a deliberate config edit.</para>
     /// </summary>
-    public const double EnglishProductDocumentsFloor = 4.0;
+    public const double RolledBackEnglishProductDocumentsFloor = 4.0;
 
     /// <summary>
     /// Whether this turn's documents are WITHHELD: the English product route, below
     /// <paramref name="documentsFloor"/>. See <see cref="EnglishProductDocumentsFloor"/> for the
-    /// measurement, for why the cut is 4.0, and for why Hebrew is not in it.
+    /// measurement that turned this OFF, and <see cref="RolledBackEnglishProductDocumentsFloor"/> for why
+    /// the cut had been 4.0 and for why Hebrew was never in it.
+    ///
+    /// <para>IT RETURNS FALSE ON EVERY TURN AS SHIPPED, because the floor defaults to
+    /// <see cref="EnglishProductDocumentsFloor"/> and that is 0.0. The predicate is kept whole rather than
+    /// deleted: it is the mechanism gate run 5 measured, and its tests are the record of what it did. A
+    /// caller who wants the withholding behaviour must pass a positive floor explicitly, which is what the
+    /// tests below do.</para>
     ///
     /// <para>IT IS DELIBERATELY NOT PART OF <see cref="Resolve"/>, AND THAT IS A PROPERTY THIS FILE ALREADY
     /// OWES. <see cref="Resolve"/>'s <c>language</c> parameter is documented as accepted and never consulted,
@@ -161,7 +229,8 @@ public static class ProductChatRouter
     /// <param name="language">The answer's language, already resolved by <see cref="ChatLanguage.Detect"/>.</param>
     /// <param name="guideTopScore">The best <see cref="GuideSelector"/> score for this question, the same
     /// value <see cref="Resolve"/> was given.</param>
-    /// <param name="documentsFloor">The floor to apply. Zero or less means the lever is off.</param>
+    /// <param name="documentsFloor">The floor to apply. Zero or less means the lever is off, and zero is
+    /// what the default resolves to today.</param>
     public static bool WithholdsProductDocuments(
         ChatRoute route, string? language, double guideTopScore,
         double documentsFloor = EnglishProductDocumentsFloor)

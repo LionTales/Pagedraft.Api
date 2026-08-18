@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.Configuration;
 using Pagedraft.Api.Services.Chat;
 using Xunit;
 
@@ -652,24 +653,95 @@ public class ProductChatRouterTests
     /// every covered turn that answered; 3.0 would take none of the uncovered cell at all, and 5.0 would
     /// start eating covered turns that answer well (<c>B|en|3</c> scored exactly 4).
     ///
-    /// <para>UNLIKE THE THRESHOLD ABOVE IT, THIS NUMBER HAS NOT BEEN MEASURED IN PLACE. It is fitted to one
-    /// question set at n=8 per cell and the run that judges it has not been taken; see
-    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/> for the two numbers that would say it is
-    /// wrong. This test pins WHAT WAS SHIPPED so a later change is deliberate, not that the value is right.</para>
+    /// <para>THE NUMBER WAS THEN MEASURED IN PLACE AND ROLLED BACK, so this pins the cut on
+    /// <see cref="ProductChatRouter.RolledBackEnglishProductDocumentsFloor"/> - which nothing in the
+    /// application reads any more - rather than on the shipped default, and the mechanism is driven by
+    /// passing that value explicitly. What ships is 0, pinned by
+    /// <see cref="TheShippedFloor_WithholdsOnNoTurn"/>. This test says the mechanism still behaves the way
+    /// gate run 5 measured it behaving; it does not say the lever should be on.</para>
     /// </summary>
     [Fact]
     public void TheEnglishDocumentsFloor_IsTheCutGate4TookFromItsOwnScores()
     {
-        Assert.Equal(4.0, ProductChatRouter.EnglishProductDocumentsFloor);
+        Assert.Equal(4.0, ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
+
+        var floor = ProductChatRouter.RolledBackEnglishProductDocumentsFloor;
 
         // THE BOUNDARY, BOTH SIDES. 3 is the top of the uncovered cell and 4 is the bottom of the covered
         // one, so this is the exact pair the cut was chosen to separate.
-        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
-        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 4.0));
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0, floor));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 4.0, floor));
 
         // The ends of the measured range, so a future off-by-one at either edge fails here.
-        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0));
-        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 9.0));
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0, floor));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 9.0, floor));
+    }
+
+    /// <summary>
+    /// AND WHAT SHIPS IS OFF, WHICH IS THE PIN THAT MAKES RE-ENABLING THE LEVER A DELIBERATE ACT. Gate run 5
+    /// measured the floor at 4.0 and it produced four English answers asserting PageDraft behaviour that does
+    /// not exist - a settings menu, a security settings screen, official documentation, "your specific
+    /// instructions" - against 0 in the 408 records of the four prior runs, while the source-narration cell
+    /// it exists for did not move (7/8 to 6/8; the apparent 7/8 to 2/8 was the old detector going blind to
+    /// vocabulary the withheld turns invented). The full record is on
+    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>.
+    ///
+    /// <para>THREE SURFACES HAVE TO AGREE ON OFF AND ALL THREE ARE ASSERTED HERE, because each one alone
+    /// leaves the lever running somewhere: the CONST is what the predicate defaults to, the CLASS DEFAULT is
+    /// what <c>appsettings.Production.json</c> binds (it carries no <c>ProductChat</c> section at all), and
+    /// the SHIPPED KEY is what the owner's machine runs. A rollback that moved only the JSON would have left
+    /// production withholding.</para>
+    ///
+    /// <para>THE SWEEP IS OVER THE PREDICATE'S WHOLE INPUT SPACE, not over a sample: every route, both
+    /// languages, and every score the corpus can produce. "Withholds on no turn" is the claim, so a single
+    /// question would be a weaker assertion than the sentence it is defending.</para>
+    /// </summary>
+    [Fact]
+    public void TheShippedFloor_WithholdsOnNoTurn()
+    {
+        Assert.Equal(0.0, ProductChatRouter.EnglishProductDocumentsFloor);
+        Assert.Equal(0.0, new ProductChatOptions().EnglishProductDocumentsFloor);
+
+        var config = ProviderTuningConfigParityTests.LoadShippedConfiguration();
+        var raw = config[ProductChatOptions.SectionName + ":EnglishProductDocumentsFloor"];
+        Assert.False(
+            string.IsNullOrWhiteSpace(raw),
+            "ProductChat:EnglishProductDocumentsFloor is absent from the shipped appsettings.json. It must "
+            + "be written out as 0: an absent key leaves the class default in charge, and a later reader "
+            + "who raises that default would turn the lever back on with nothing in this file to stop them.");
+
+        var options = new ProductChatOptions();
+        config.GetSection(ProductChatOptions.SectionName).Bind(options);
+        Assert.True(
+            options.EnglishProductDocumentsFloor <= 0.0,
+            $"the shipped ProductChat:EnglishProductDocumentsFloor bound to {options.EnglishProductDocumentsFloor}. "
+            + "Gate run 5 measured this lever at 4.0 and it fabricated PageDraft behaviour on 4 of 102 records "
+            + "(0 of 408 in the four runs before it) without moving the metric it exists for. Read "
+            + "ProductChatRouter.EnglishProductDocumentsFloor before changing this test.");
+
+        // THE WHOLE INPUT SPACE, at the shipped floor and at the bound one.
+        foreach (var route in new[] { ChatRoute.Product, ChatRoute.Book, ChatRoute.General, ChatRoute.Union })
+        {
+            foreach (var language in new[] { "en", "he" })
+            {
+                for (var score = 0.0; score <= 12.0; score += 0.5)
+                {
+                    Assert.False(
+                        ProductChatRouter.WithholdsProductDocuments(route, language, score),
+                        $"the DEFAULT floor withheld on {language} {route} at score {score}");
+                    Assert.False(
+                        ProductChatRouter.WithholdsProductDocuments(
+                            route, language, score, options.EnglishProductDocumentsFloor),
+                        $"the SHIPPED floor withheld on {language} {route} at score {score}");
+                }
+            }
+        }
+
+        // VACUITY GUARD: the predicate can still say true, so the sweep above is the floor being off and not
+        // a mechanism that was quietly deleted. This is the same call the rolled-back value's own test makes.
+        Assert.True(
+            ProductChatRouter.WithholdsProductDocuments(
+                ChatRoute.Product, "en", 3.0, ProductChatRouter.RolledBackEnglishProductDocumentsFloor));
     }
 
     /// <summary>
@@ -708,9 +780,14 @@ public class ProductChatRouterTests
             ChatRoute.Product,
             ProductChatRouter.Resolve(question, hasBookId: false, "en", guideTopScore));
 
+        // AT THE ROLLED-BACK VALUE, PASSED EXPLICITLY. The shipped floor is 0 and withholds on nothing
+        // (TheShippedFloor_WithholdsOnNoTurn), so this table is a record of what the lever DID, driven
+        // through the mechanism rather than through a default that no longer turns it on.
         Assert.Equal(
             withheld,
-            ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", guideTopScore));
+            ProductChatRouter.WithholdsProductDocuments(
+                ChatRoute.Product, "en", guideTopScore,
+                ProductChatRouter.RolledBackEnglishProductDocumentsFloor));
     }
 
     /// <summary>
@@ -733,12 +810,14 @@ public class ProductChatRouterTests
     {
         Assert.Equal(ChatRoute.Product, ProductChatRouter.Resolve(question, hasBookId: false, "he", 3.0));
 
-        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 3.0));
-        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 0.0));
+        var floor = ProductChatRouter.RolledBackEnglishProductDocumentsFloor;
+
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 3.0, floor));
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "he", 0.0, floor));
 
         // VACUITY GUARD: the same score on the same route DOES withhold in English, so the two falses above
         // are the language condition and not a predicate that never fires.
-        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0, floor));
     }
 
     /// <summary>
@@ -753,7 +832,8 @@ public class ProductChatRouterTests
     [InlineData("fr")]
     [InlineData("en-GB")]   // NOT normalized here: the service resolves the tag before this is ever called
     public void TheDocumentsFloor_NeedsEnglishExactly(string? language)
-        => Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, language, 0.0));
+        => Assert.False(ProductChatRouter.WithholdsProductDocuments(
+            ChatRoute.Product, language, 0.0, ProductChatRouter.RolledBackEnglishProductDocumentsFloor));
 
     /// <summary>
     /// IT IS A PRODUCT-ROUTE LEVER AND NOTHING ELSE. The other three routes at the lowest possible score
@@ -768,10 +848,12 @@ public class ProductChatRouterTests
     [InlineData(ChatRoute.General)]
     public void TheDocumentsFloor_FiresOnTheProductRouteAlone(ChatRoute route)
     {
-        Assert.False(ProductChatRouter.WithholdsProductDocuments(route, "en", 0.0));
+        var floor = ProductChatRouter.RolledBackEnglishProductDocumentsFloor;
+
+        Assert.False(ProductChatRouter.WithholdsProductDocuments(route, "en", 0.0, floor));
 
         // VACUITY GUARD: same language, same score, Product route.
-        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0));
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0, floor));
     }
 
     /// <summary>
@@ -788,8 +870,11 @@ public class ProductChatRouterTests
         Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 0.0, floor));
         Assert.False(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0, floor));
 
-        // VACUITY GUARD: the shipped floor withholds both of those.
-        Assert.True(ProductChatRouter.WithholdsProductDocuments(ChatRoute.Product, "en", 3.0));
+        // VACUITY GUARD: the rolled-back floor withholds both of those. It is named explicitly because the
+        // SHIPPED floor is now 0 too, and reading the vacuity guard off the default would make this whole
+        // test vacuous the moment the kill switch became the default - which is exactly what happened.
+        Assert.True(ProductChatRouter.WithholdsProductDocuments(
+            ChatRoute.Product, "en", 3.0, ProductChatRouter.RolledBackEnglishProductDocumentsFloor));
     }
 
     /// <summary>

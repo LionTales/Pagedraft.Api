@@ -195,10 +195,11 @@ public static class ProductChatPrompt
     /// under it") and which <see cref="ChatRoute.General"/> has satisfied since g2 by composing no citation
     /// sentence at all.
     ///
-    /// <para>IT IS REACHED BY EXACTLY ONE NEW CONFIGURATION (g3d/gate 4): an English
+    /// <para>IT IS REACHED BY EXACTLY ONE NEW CONFIGURATION (g3d/gate 4), AND THAT CONFIGURATION IS OFF AS
+    /// SHIPPED, so nothing in production composes this arm today: an English
     /// <see cref="ChatRoute.Product"/> turn whose guide top score fell below
-    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/>, which
-    /// <c>ProductChatService</c> hands zero guides. Asking such a turn to "end your reply with a line of the
+    /// <see cref="ProductChatRouter.EnglishProductDocumentsFloor"/> - a floor gate run 5 rolled back to 0 -
+    /// which <c>ProductChatService</c> hands zero guides. Asking such a turn to "end your reply with a line of the
     /// form 'Guides: id, id' naming the ids you used" would be asking it to name one of no ids, which is an
     /// invitation to invent one; and the citation sentence is, with the documents themselves, one of the two
     /// things the narrating product route composes that the never-narrating general route does not

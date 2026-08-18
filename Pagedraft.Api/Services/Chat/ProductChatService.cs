@@ -295,14 +295,16 @@ public class ProductChatService
 
         // ─── g3d/gate 4: AN ENGLISH PRODUCT TURN UNDER THE FLOOR IS HANDED NO DOCUMENTS ──────────
         //
-        // THE ONE STRUCTURAL LEVER OF THIS ROUND, AND IT CHANGES NO PROMPT STRING. Four gate runs and four
-        // re-wordings left the English product-uncovered cell at 8/8, 8/8, 8/8, 7/8 source-narrating, which
-        // is a draw; the residual is not the exemplar. The only configuration measured at 0 of 16 narration
-        // in all four runs is the one where the model is handed nothing to talk about, so an English product
-        // turn whose corpus scored below the floor gets it. Hebrew is excluded IN THE PREDICATE and must
-        // stay excluded - its covered cell answers well at exactly the scores this cut would take away. Read
-        // ProductChatRouter.EnglishProductDocumentsFloor for the score distribution and the two covered
-        // records that move with it, and for the honest statement that the floor is an unmeasured number.
+        // OFF AS SHIPPED, AND THIS BLOCK IS DEAD ON EVERY TURN UNTIL SOMEONE RAISES THE FLOOR. Gate run 5
+        // measured the lever at 4.0: it fired on exactly the 10 intended records, did NOT move the
+        // source-narration cell it exists for (7/8 to 6/8, a draw - the apparent 7/8 to 2/8 was detector
+        // blindness to vocabulary the withheld turns invented), and produced 4 English answers asserting
+        // PageDraft behaviour that does not exist against 0 in the 408 records of the four prior runs. The
+        // floor is now 0 in appsettings.json AND in the ProductChatOptions class default, and 0 or less is
+        // the documented kill switch. The code is kept because it is the mechanism that was measured; read
+        // ProductChatRouter.EnglishProductDocumentsFloor for the full record BEFORE re-enabling it, and note
+        // that everything below - the guide trim, the WITHHELD log line, the empty acceptable set - keeps
+        // working unchanged the moment a positive floor is configured.
         var documentsFloor = _productChatOptions?.Value.EnglishProductDocumentsFloor
                              ?? ProductChatRouter.EnglishProductDocumentsFloor;
         var withholdDocuments = ProductChatRouter.WithholdsProductDocuments(

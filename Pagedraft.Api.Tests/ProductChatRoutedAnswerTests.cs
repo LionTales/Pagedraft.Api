@@ -520,6 +520,13 @@ public class ProductChatRoutedAnswerTests
     // the lever rather than of a fixture: the scores the floor compares against are the corpus's own, the
     // same ones the four gate runs recorded, so a corpus edit that lifted an uncovered question above the
     // floor fails here instead of in a live run.
+    //
+    // AND THE LEVER IS OFF AS SHIPPED, so every test in this section passes the rolled-back floor EXPLICITLY
+    // rather than inheriting it. Gate run 5 measured the floor at 4.0 and rolled it back to 0 - it fabricated
+    // PageDraft behaviour on 4 of 102 records against 0 of 408 before, without moving the source-narration
+    // cell it exists for (ProductChatRouter.EnglishProductDocumentsFloor carries the whole record). What
+    // these tests defend is that the MECHANISM still behaves as measured; what the shipped configuration
+    // does is TheShippedConfiguration_SendsDocumentsOnEveryEnglishProductTurn, at the end of this section.
 
     /// <summary>
     /// AN ENGLISH PRODUCT QUESTION THE CORPUS DOES NOT COVER IS SENT NO DOCUMENTS AT ALL (g3d/gate 4), and
@@ -539,7 +546,8 @@ public class ProductChatRoutedAnswerTests
         var captured = new List<AiRequest>();
         var svc = ProductChatBudgetTests.Service(
             AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
-            routingEnabled: true);
+            routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
 
         await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
 
@@ -560,7 +568,8 @@ public class ProductChatRoutedAnswerTests
         var coveredCaptured = new List<AiRequest>();
         var covered = ProductChatBudgetTests.Service(
             AnsweringRouter(coveredCaptured), out _, guidesDirectory: null, aiOptions: null,
-            routingEnabled: true);
+            routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
         await covered.AnswerAsync(
             new ProductChatRequest("How do I import my manuscript into PageDraft?"),   // B|en|0, score 7
             CancellationToken.None);
@@ -582,6 +591,13 @@ public class ProductChatRoutedAnswerTests
     ///
     /// <para>THE LITERALS ARE TYPED BY HAND, NEVER PASTED FROM THE COMPOSER, which is this suite's standing
     /// rule for a pin: a literal lifted from the code under test asserts that the code equals itself.</para>
+    ///
+    /// <para>AND THE RULES REACHING THE MODEL TURNED OUT NOT TO BE ENOUGH, WHICH IS WHY THE LEVER IS OFF.
+    /// Gate run 5 ran this exact configuration live: every sentence asserted below was in front of the model,
+    /// and four withheld English turns invented a settings menu, a security settings screen, official
+    /// documentation and "your specific instructions" anyway. This test still says what it always said - the
+    /// contract survives the withholding - and that is now on the record as necessary and NOT sufficient. Do
+    /// not read a green here as licence to raise the floor.</para>
     /// </summary>
     [Fact]
     public async Task AWithheldProductTurn_StillCarriesEveryAntiFabricationRule()
@@ -589,7 +605,8 @@ public class ProductChatRoutedAnswerTests
         var captured = new List<AiRequest>();
         var svc = ProductChatBudgetTests.Service(
             AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
-            routingEnabled: true);
+            routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
 
         await svc.AnswerAsync(
             new ProductChatRequest("How much does the monthly subscription cost?"), CancellationToken.None);
@@ -631,7 +648,8 @@ public class ProductChatRoutedAnswerTests
         var coveredCaptured = new List<AiRequest>();
         var covered = ProductChatBudgetTests.Service(
             AnsweringRouter(coveredCaptured), out _, guidesDirectory: null, aiOptions: null,
-            routingEnabled: true);
+            routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
         await covered.AnswerAsync(
             new ProductChatRequest("How do I import my manuscript into PageDraft?"), CancellationToken.None);
 
@@ -691,7 +709,8 @@ public class ProductChatRoutedAnswerTests
         var captured = new List<AiRequest>();
         var svc = ProductChatBudgetTests.Service(
             AnsweringRouter(captured, "I do not have that information.\nGuides: export"), out _,
-            guidesDirectory: null, aiOptions: null, routingEnabled: true);
+            guidesDirectory: null, aiOptions: null, routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
 
         var result = await svc.AnswerAsync(
             new ProductChatRequest("Is there a dark mode in the settings?"), CancellationToken.None);
@@ -705,7 +724,8 @@ public class ProductChatRoutedAnswerTests
         var citing = new List<AiRequest>();
         var covered = ProductChatBudgetTests.Service(
             AnsweringRouter(citing, "You can export it.\nGuides: export"), out _,
-            guidesDirectory: null, aiOptions: null, routingEnabled: true);
+            guidesDirectory: null, aiOptions: null, routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
         var cited = await covered.AnswerAsync(
             new ProductChatRequest("How do I export my book to a file?"), CancellationToken.None);
         Assert.NotEmpty(cited.GuideIds);
@@ -716,6 +736,11 @@ public class ProductChatRoutedAnswerTests
     /// the pre-lever behaviour for the very question the lever was built for, without a code change - the
     /// same rollback posture <c>ProductChat:RoutingEnabled</c> carries for the routing layer as a whole. A
     /// threshold nobody can turn off is a threshold the next gate cannot argue with.
+    ///
+    /// <para>THE NEXT GATE ARGUED WITH IT AND WON, AND THIS IS THE PATH IT LEFT BY: gate run 5 set exactly
+    /// this key to 0. What ships is now the left-hand side of this test, so the assertions here are also the
+    /// shipped behaviour - <see cref="TheShippedConfiguration_SendsDocumentsOnEveryEnglishProductTurn"/>
+    /// states that separately, against the real default rather than against a hand-passed 0.</para>
     /// </summary>
     [Fact]
     public async Task TheDocumentsFloor_CanBeTurnedOffInConfig()
@@ -734,15 +759,73 @@ public class ProductChatRoutedAnswerTests
             ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
             request.SystemMessageOverride);
 
-        // VACUITY GUARD: the SAME question on the SAME harness at the shipped floor is withheld, so the
-        // documents above are the config value and not a question that never qualified.
-        var shipped = new List<AiRequest>();
+        // VACUITY GUARD: the SAME question on the SAME harness at the ROLLED-BACK floor is withheld, so the
+        // documents above are the config value and not a question that never qualified. It is passed by name
+        // rather than left to the default, which is 0 now and would have made this guard assert nothing.
+        var rolledBack = new List<AiRequest>();
         var withheld = ProductChatBudgetTests.Service(
-            AnsweringRouter(shipped), out _, guidesDirectory: null, aiOptions: null, routingEnabled: true);
+            AnsweringRouter(rolledBack), out _, guidesDirectory: null, aiOptions: null, routingEnabled: true,
+            englishProductDocumentsFloor: ProductChatRouter.RolledBackEnglishProductDocumentsFloor);
         await withheld.AnswerAsync(
             new ProductChatRequest("Is there a dark mode in the settings?"), CancellationToken.None);
         Assert.DoesNotContain(
             ProductChatPrompt.GuidesMarker,
-            Assert.Single(shipped).Instruction, StringComparison.Ordinal);
+            Assert.Single(rolledBack).Instruction, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// WHAT SHIPS WITHHOLDS FROM NOBODY, DRIVEN END TO END THROUGH THE REAL DEFAULT. Gate run 5 measured the
+    /// floor at 4.0 on the ten records it was built for and the result was worse, not better: the English
+    /// product-uncovered cell did not move (7/8 to 6/8 source-narrating under the blindness-corrected
+    /// detector; the apparent 7/8 to 2/8 was the old detector failing to recognise vocabulary the withheld
+    /// turns invented), and 4 of the 102 records asserted PageDraft behaviour that does not exist - a
+    /// settings menu with appearance options, a security settings screen, "the official documentation",
+    /// "your specific instructions" - against 0 in the 408 records of the four runs before it. Every one of
+    /// the four was a withheld turn. <c>ProductChatRouter.EnglishProductDocumentsFloor</c> holds the record.
+    ///
+    /// <para>THE FIXTURE IS THE TEN RECORDS THE LEVER ACTUALLY MOVED, verbatim: the whole <c>C|en</c> cell
+    /// plus <c>B|en|4</c> and <c>B|en|7</c>. Asserting on the questions it fired on is what makes this a pin
+    /// on the rollback rather than a pin on an arbitrary question, and the four that fabricated are named in
+    /// the table below so a reader of a failure here meets them.</para>
+    ///
+    /// <para>IT PASSES NO FLOOR, WHICH IS THE POINT. The helper's null default is the shipped value, so
+    /// raising the const, the class default or the JSON key turns this red - re-enabling the lever has to be
+    /// a deliberate act that changes a test, not a config typo nobody notices.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("How do I change my account password?")]                            // C|en|0, fabricated
+    [InlineData("Is there a mobile app for PageDraft?")]                             // C|en|1, gap as fact
+    [InlineData("How much does the monthly subscription cost?")]                     // C|en|2
+    [InlineData("How do I invite a co-editor to my account so they can leave comments?")]  // C|en|3, fabricated
+    [InlineData("What is the keyboard shortcut for inserting a comment?")]           // C|en|4
+    [InlineData("Can I share my screen with a publisher through the app?")]          // C|en|5, gap as fact
+    [InlineData("Is there a dark mode in the settings?")]                            // C|en|6, fabricated
+    [InlineData("How do I permanently delete my account?")]                          // C|en|7
+    [InlineData("What settings can I change in the app?")]                           // B|en|4
+    [InlineData("How do I open the editor and start working?")]                      // B|en|7, fabricated
+    public async Task TheShippedConfiguration_SendsDocumentsOnEveryEnglishProductTurn(string question)
+    {
+        var captured = new List<AiRequest>();
+        var svc = ProductChatBudgetTests.Service(
+            AnsweringRouter(captured), out _, guidesDirectory: null, aiOptions: null,
+            routingEnabled: true);   // NO floor: the shipped default, which is the kill switch.
+
+        await svc.AnswerAsync(new ProductChatRequest(question), CancellationToken.None);
+
+        var request = Assert.Single(captured);
+        Assert.Equal(ChatLanguage.English, request.Language);
+
+        // The documents are there, and so is the labelled place they sit in.
+        Assert.Contains(ProductChatPrompt.GuidesMarker, request.Instruction, StringComparison.Ordinal);
+        Assert.True(
+            request.Instruction!.Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1 > 0,
+            "the shipped configuration handed this English product turn no guide documents, which is the "
+            + "lever gate run 5 rolled back");
+
+        // AND THE CITATION SENTENCE RIDES AGAIN, which is the other half of the withholding: the turn gets
+        // the ordinary Product system message, byte for byte, not the guides-carried:false variant.
+        Assert.Equal(
+            ProductChatPrompt.SystemMessage(request.Language, ChatRoute.Product, bookAware: false),
+            request.SystemMessageOverride);
     }
 }

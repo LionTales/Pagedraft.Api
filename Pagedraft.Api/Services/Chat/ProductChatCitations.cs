@@ -249,8 +249,9 @@ public static class ProductChatCitations
             // sentence beginning "Guides: none of them cover this" does not.
             //
             // A KNOWN RESIDUAL, LEFT OPEN DELIBERATELY AND WRITTEN DOWN SO IT IS NOT REDISCOVERED AS A
-            // SURPRISE (g3d/gate 4). When the acceptable set is EMPTY - the General route since g2, and now
-            // an English Product turn under ProductChatRouter.EnglishProductDocumentsFloor - every token on
+            // SURPRISE (g3d/gate 4). When the acceptable set is EMPTY - the General route since g2, and an
+            // English Product turn under a POSITIVE ProductChatRouter.EnglishProductDocumentsFloor, which
+            // ships at 0 since gate run 5 rolled that lever back and so reaches nothing today - every token on
             // a whole-line citation is uncarried by construction, so a habitual "Guides: export" names
             // nothing (the chips are correctly empty) but is still PUBLISHED as prose, because `export` has
             // an ordinary word's shape and LooksFabricated is a test of the TOKEN, not of the turn.

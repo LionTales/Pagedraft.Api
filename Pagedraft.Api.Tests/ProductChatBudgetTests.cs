@@ -65,11 +65,13 @@ public class ProductChatBudgetTests
     /// readable at its own call site rather than in this file.
     /// </param>
     /// <param name="englishProductDocumentsFloor">
-    /// The English product documents floor (g3d/gate 4). DEFAULT NULL MEANS THE SHIPPED VALUE, which is the
-    /// opposite convention to <paramref name="routingEnabled"/> above and is safe for the reason
-    /// <c>ProductChatOptions.EnglishProductDocumentsFloor</c> records: the floor is only ever consulted on an
-    /// APPLIED Product route, so a test that leaves <paramref name="routingEnabled"/> false composes Union
-    /// and cannot see this number at all. Tests that want the kill switch pass 0.
+    /// The English product documents floor (g3d/gate 4). DEFAULT NULL MEANS THE SHIPPED VALUE, and SINCE
+    /// GATE RUN 5 THE SHIPPED VALUE IS 0 - the withholding is OFF, so a service built here withholds on no
+    /// turn, which is the posture production runs. A test that wants to exercise the mechanism passes
+    /// <c>ProductChatRouter.RolledBackEnglishProductDocumentsFloor</c> explicitly, so "this test measures a
+    /// lever that is not shipped on" is readable at its own call site rather than in this file - the same
+    /// convention <paramref name="routingEnabled"/> follows. Read
+    /// <c>ProductChatRouter.EnglishProductDocumentsFloor</c> for why it was rolled back.
     /// </param>
     internal static ProductChatService Service(
         Mock<IAiRouter> router,
