@@ -8,6 +8,15 @@ namespace Pagedraft.Api.Services.LanguageEngine.Detect;
 /// <summary>LanguageTool integration for Hebrew issue detection.</summary>
 public class LanguageToolEngine : IDetectEngine
 {
+    /// <summary>Stable ServiceUnavailableCode values. Kept as constants so the client contract and tests share one spelling.</summary>
+    public static class Codes
+    {
+        public const string HebrewUnsupported = "hebrew-unsupported";
+        public const string Disabled = "disabled";
+        public const string Unavailable = "unavailable";
+        public const string Timeout = "timeout";
+    }
+
     private readonly HttpClient _httpClient;
     private readonly LanguageToolOptions _options;
     private readonly ILogger<LanguageToolEngine>? _logger;
@@ -27,7 +36,7 @@ public class LanguageToolEngine : IDetectEngine
         if (!_options.Enabled)
         {
             _logger?.LogWarning("LanguageTool is disabled in configuration");
-            return new DetectResult { Issues = [], ServiceUnavailable = true, ServiceUnavailableMessage = "The language checker is turned off in settings." };
+            return new DetectResult { Issues = [], ServiceUnavailable = true, ServiceUnavailableMessage = "The language checker is turned off in settings.", ServiceUnavailableCode = Codes.Disabled };
         }
 
         try
@@ -61,7 +70,8 @@ public class LanguageToolEngine : IDetectEngine
                     {
                         Issues = [],
                         ServiceUnavailable = true,
-                        ServiceUnavailableMessage = "The language checker doesn't support Hebrew. Use a LanguageTool server with Hebrew support (e.g. a community Docker image), or rely on other checks."
+                        ServiceUnavailableMessage = "The language checker doesn't support Hebrew. Use a LanguageTool server with Hebrew support (e.g. a community Docker image), or rely on other checks.",
+                        ServiceUnavailableCode = Codes.HebrewUnsupported
                     };
                 }
             }
@@ -86,7 +96,8 @@ public class LanguageToolEngine : IDetectEngine
             {
                 Issues = [],
                 ServiceUnavailable = true,
-                ServiceUnavailableMessage = "The language checker (LanguageTool) isn't available right now. Make sure the LanguageTool server is running, or try again later."
+                ServiceUnavailableMessage = "The language checker (LanguageTool) isn't available right now. Make sure the LanguageTool server is running, or try again later.",
+                ServiceUnavailableCode = Codes.Unavailable
             };
         }
         catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException or null)
@@ -96,7 +107,8 @@ public class LanguageToolEngine : IDetectEngine
             {
                 Issues = [],
                 ServiceUnavailable = true,
-                ServiceUnavailableMessage = "The language checker took too long to respond. Try again in a moment."
+                ServiceUnavailableMessage = "The language checker took too long to respond. Try again in a moment.",
+                ServiceUnavailableCode = Codes.Timeout
             };
         }
         catch (Exception ex)
