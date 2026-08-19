@@ -168,11 +168,13 @@ public class LanguageEngineController : ControllerBase
             var result = await _languageEngine.ProcessAsync(request, ct);
             var unav = result.Metadata.TryGetValue("languageToolUnavailable", out var unavObj) && unavObj is true;
             var msg = result.Metadata.TryGetValue("languageToolMessage", out var msgObj) ? msgObj?.ToString() : null;
+            var code = result.Metadata.TryGetValue("languageToolCode", out var codeObj) ? codeObj?.ToString() : null;
             return Ok(new IssuesResponse
             {
                 Issues = result.Issues,
                 LanguageToolUnavailable = unav ? true : null,
-                LanguageToolMessage = msg
+                LanguageToolMessage = msg,
+                LanguageToolCode = code
             });
         }
         catch (Exception ex)
@@ -187,7 +189,20 @@ public class IssuesResponse
 {
     public List<LanguageIssue> Issues { get; set; } = new();
     public bool? LanguageToolUnavailable { get; set; }
+    /// <summary>
+    /// Mirrors DetectResult.ServiceUnavailableMessage. Prefer LanguageToolCode. Kept UNTIL the fifth
+    /// ServiceUnavailable path (LanguageToolEngine's `he` auto-retry-success branch, which carries no
+    /// code today) is assigned a code - not for a fixed number of releases. See PAGEDRAFT_DESIGN.md's
+    /// "KNOWN GAP" paragraph for this endpoint: "a code should be assigned before the message field is
+    /// removed."
+    /// </summary>
     public string? LanguageToolMessage { get; set; }
+    /// <summary>
+    /// Mirrors DetectResult.ServiceUnavailableCode; see LanguageToolEngine.Codes for the four named
+    /// values. Null on the fifth ServiceUnavailable path (the `he` auto-retry-success branch), which
+    /// PAGEDRAFT_DESIGN.md's "KNOWN GAP" paragraph for this endpoint records as an open gap, not a bug.
+    /// </summary>
+    public string? LanguageToolCode { get; set; }
 }
 
 /// <summary>DTO for language engine requests.</summary>

@@ -165,7 +165,8 @@ public class ProductChatServiceTests : IDisposable
         Assert.Contains("Answer ONLY from the guide content provided below", instruction, StringComparison.Ordinal);
         // (2) The coverage refusal and (3) the book-specific refusal, worded distinctly (d1 item 5).
         Assert.Contains("If the guides do not address the question", instruction, StringComparison.Ordinal);
-        Assert.Contains("not available yet", instruction, StringComparison.Ordinal);
+        Assert.Contains(
+            "'I can only see a book while it is open.", instruction, StringComparison.Ordinal);
         // (2b) THE g2/g3 HALT RULES, by their own words rather than by "some refusal rule is present":
         // a refusal may name another topic the guides DO cover WHEN one is relevant, may fall back to
         // a bare refusal when none is, and may never characterize what they say about what they do not
@@ -178,7 +179,7 @@ public class ProductChatServiceTests : IDisposable
             instruction, StringComparison.Ordinal);
         Assert.Contains("not as a fact about the product", instruction, StringComparison.Ordinal);
         // (4) The selected guide's real text, and its citable id.
-        Assert.Contains("=== GUIDE id=export lang=en ===", instruction, StringComparison.Ordinal);
+        Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}export lang=en ===", instruction, StringComparison.Ordinal);
         Assert.Contains("Export produces a DOCX file", instruction, StringComparison.Ordinal);
         // A section heading from deep inside the guide, so this asserts the WHOLE file travels rather
         // than only its opening. be-c06 renamed it (from "Save before you export", which blamed the
@@ -241,9 +242,15 @@ public class ProductChatServiceTests : IDisposable
             he.Contains("ציין אותו לפי המזהה שלו", StringComparison.Ordinal),
             "GroundingHe no longer tells the model to name a covered topic on a refusal.");
 
-        // d1 item 5's two refusal reasons stay DISTINCTLY worded. Both runs confirmed this held.
-        Assert.Contains("not available yet and is coming", en, StringComparison.Ordinal);
-        Assert.Contains("עדיין אינו זמין", he, StringComparison.Ordinal);
+        // d1 item 5's two refusal reasons stay DISTINCTLY worded. Both runs confirmed this held. g3
+        // rewrote WHAT the book refusal says (its old sentence had gone false and was reaching users)
+        // and g3b rewrote HOW the English half says it - it is now the finished first-person sentence in
+        // quotes, which is the construction the Hebrew half has used since g3 and which that block's
+        // docstring records as the thing that stopped the model echoing an imperative. The English
+        // fragment below therefore moved from "say that you can only see..." to the quoted sentence; the
+        // property being asserted, that the two reasons are still worded distinctly, is unchanged.
+        Assert.Contains("'I can only see a book while it is open.", en, StringComparison.Ordinal);
+        Assert.Contains("אני יכול לראות ספר רק כשהוא פתוח", he, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -315,6 +322,13 @@ public class ProductChatServiceTests : IDisposable
     /// 2 of 18 Hebrew answers in g1, 6 of 6 runs of that question shape in g2. Both measurements
     /// recommended a wording pass. The refusal is still correct either way, so nothing but the wording
     /// catches this, and nothing but a test keeps it caught.
+    ///
+    /// <para>g3 REWROTE WHAT THE QUOTED SENTENCE SAYS AND DELIBERATELY KEPT THE CONSTRUCTION. The old
+    /// sentence claimed the book feature "is not available yet and is coming", which had been false since
+    /// phase B and which g3 measured reaching a real user on 5 of 102 turns. What this test pins is
+    /// therefore the SHAPE - a finished first-person sentence handed over inside quotes - plus the fact
+    /// that the sentence inside them is the one the deterministic code path already gives, so an echo
+    /// costs the author nothing.</para>
     /// </summary>
     [Fact]
     public void TheHebrewBookSpecificRefusal_IsPhrasedAsASentenceToSay_NotAsAnImperative()
@@ -322,10 +336,15 @@ public class ProductChatServiceTests : IDisposable
         var he = ProductChatPrompt.SystemMessage("he");
 
         Assert.True(
-            he.Contains("אשמח לעזור בשאלות כלליות", StringComparison.Ordinal),
-            "GroundingHe no longer offers the book-specific refusal as a finished first-person sentence. When it " +
-            "was phrased as an order to the model ('and offer help with general questions'), the model echoed the " +
-            "order into the user-visible answer in 6 of 6 g2 runs of that question shape.");
+            he.Contains("ענה בגוף ראשון במשמעות הזו: '", StringComparison.Ordinal),
+            "GroundingHe no longer hands the book-specific refusal over as a finished first-person sentence. When " +
+            "it was phrased as an order to the model ('and offer help with general questions'), the model echoed " +
+            "the order into the user-visible answer in 6 of 6 g2 runs of that question shape.");
+        Assert.True(
+            he.Contains("אני יכול לראות ספר רק כשהוא פתוח.", StringComparison.Ordinal),
+            "GroundingHe's quoted sentence is no longer the one ProductChatService.OpenTheBookHe returns from the " +
+            "deterministic path. Two paths answer this question shape and they must not tell the author two " +
+            "different stories about the product.");
         Assert.False(
             he.Contains("והצע עזרה", StringComparison.Ordinal),
             "GroundingHe has gone back to the imperative 'והצע עזרה'. That is the exact string g1 and g2 both " +
@@ -449,7 +468,7 @@ public class ProductChatServiceTests : IDisposable
 
         Assert.Equal("he", result.Language);
         var instruction = Assert.Single(captured).Instruction!;
-        Assert.Contains("=== GUIDE id=export lang=he ===", instruction, StringComparison.Ordinal);
+        Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}export lang=he ===", instruction, StringComparison.Ordinal);
         Assert.DoesNotContain("lang=en", instruction, StringComparison.Ordinal);
         Assert.Contains("ענה אך ורק מתוך תוכן המדריכים", instruction, StringComparison.Ordinal);
     }

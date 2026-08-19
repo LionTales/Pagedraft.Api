@@ -64,6 +64,8 @@ public class LanguageEngine : Contracts.ILanguageEngine
                 {
                     result.Metadata["languageToolUnavailable"] = true;
                     result.Metadata["languageToolMessage"] = detectResult.ServiceUnavailableMessage ?? "The language checker is not available.";
+                    if (detectResult.ServiceUnavailableCode is not null)
+                        result.Metadata["languageToolCode"] = detectResult.ServiceUnavailableCode;
                 }
                 _logger?.LogInformation("Detection completed. Found {Count} issues", detectResult.Issues.Count);
             }

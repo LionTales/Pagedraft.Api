@@ -28,9 +28,9 @@ namespace Pagedraft.Api.Models.Dtos;
 /// </summary>
 /// <param name="BookId">
 /// The book the user is CURRENTLY inside, or null when the drawer is open outside any book (chatbot
-/// phase B). Present = the assistant may answer from that book's artifacts; absent = phase A's behavior
-/// byte-for-byte, including its "answering questions about a specific book is not available yet"
-/// refusal.
+/// phase B). Present = the assistant may answer from that book's artifacts; absent = phase A's behavior,
+/// whose book question is met with "I can only see a book while it is open" (g3 replaced the false "not
+/// available yet and is coming" that sentence used to be).
 ///
 /// <para>THE PRIVACY FENCE IS THAT THIS IS A SINGLE VALUE FROM THE CLIENT'S CURRENT BOOK, never a list
 /// and never inferred server-side. There is no cross-book retrieval of any kind: answering across a

@@ -191,6 +191,13 @@ public static class ProductChatBudget
     /// between the selector and the renderer. The RESPONSE flag the client branches on comes from these
     /// same keys and never from what the model wrote, so the prose and the flag cannot disagree.</para>
     /// </param>
+    /// <param name="route">
+    /// The resolved <see cref="ChatRoute"/> for this turn (g1), defaulted to <see cref="ChatRoute.Union"/>
+    /// so every caller written before routing existed composes byte-identically. It is threaded into the
+    /// system message and the instruction TOGETHER, on the same iteration, for the reason
+    /// <see cref="Composition.SystemMessage"/> already records: the two must be the same string, and one
+    /// derivation is the only way to guarantee it.
+    /// </param>
     public static Composition Compose(
         string language,
         IReadOnlyList<GuideDocument> guides,
@@ -199,7 +206,8 @@ public static class ProductChatBudget
         int budgetTokens,
         IReadOnlyList<BookArtifactBlock>? bookBlocks = null,
         string? bookTitle = null,
-        BookArtifactSelector.BookQuestionKeys? questionKeys = null)
+        BookArtifactSelector.BookQuestionKeys? questionKeys = null,
+        ChatRoute route = ChatRoute.Union)
     {
         var keptGuides = guides.ToList();
         var keptHistory = history.ToList();
@@ -214,10 +222,11 @@ public static class ProductChatBudget
             // is the BOOK-AWARE one exactly when book artifacts survive, so this same string is what the
             // estimate measures, what ComposeInstruction restates at the head of the user message, and
             // what the caller puts in the request's system slot. See Composition.SystemMessage.
-            var systemMessage = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
+            var systemMessage = ProductChatPrompt.SystemMessage(
+                language, route, keptBlocks.Count > 0, keptGuides.Count > 0);
             var instruction = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
-                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks));
+                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks), route);
 
             // What the provider actually sends: the system slot, the composed instruction (which
             // restates the rule) and the question appended after it.
@@ -262,10 +271,11 @@ public static class ProductChatBudget
 
             // Unreachable: nothingLeftToGiveUp above covers exactly this state. Stated rather than
             // assumed so a future tier added to BookArtifactKind cannot spin this loop forever.
-            var finalSystem = ProductChatPrompt.SystemMessage(language, keptBlocks.Count > 0);
+            var finalSystem = ProductChatPrompt.SystemMessage(
+                language, route, keptBlocks.Count > 0, keptGuides.Count > 0);
             var final = ProductChatPrompt.ComposeInstruction(
                 language, keptGuides, keptHistory, keptBlocks, bookTitle,
-                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks));
+                BookArtifactBlocks.BookSectionNote(language, questionKeys, keptBlocks), route);
             return new Composition(
                 finalSystem, final, keptGuides, keptHistory, droppedTurns, droppedGuideIds,
                 EstimateTokens(finalSystem) + EstimateTokens(final) + EstimateTokens(question),

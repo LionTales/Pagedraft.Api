@@ -147,8 +147,15 @@ public class ProductChatComposedSystemSlotTests
         }
     }
 
+    /// <param name="routingEnabled">
+    /// WHETHER THE ROUTER'S ANSWER IS APPLIED (g2). DEFAULT FALSE, which is NOT the shipped config value:
+    /// <c>appsettings.json</c> ships <c>true</c>. The default is deliberately the inert one, because every
+    /// literal above is a byte-identity fence around the Union message and a harness that silently
+    /// switched them to a routed one would turn the fences into moving targets. Section 4 below asks for
+    /// the routed posture explicitly.
+    /// </param>
     private static (ProductChatService Service, CapturingProvider Provider) ChatOverTheRealRouter(
-        IBookChatContextReader? bookContext = null)
+        IBookChatContextReader? bookContext = null, bool routingEnabled = false)
     {
         var provider = new CapturingProvider();
         var options = ProductChatBudgetTests.AiConfig();
@@ -180,7 +187,9 @@ public class ProductChatComposedSystemSlotTests
         var service = new ProductChatService(
             guides, router, Options.Create(options),
             bookContext ?? new ProductChatBudgetTests.ThrowingBookChatContextReader(),
-            ProductChatCorpusTests.NullLoggerFor<ProductChatService>());
+            ProductChatCorpusTests.NullLoggerFor<ProductChatService>(),
+            capture: null,
+            productChatOptions: Options.Create(new ProductChatOptions { RoutingEnabled = routingEnabled }));
 
         return (service, provider);
     }
@@ -280,9 +289,10 @@ public class ProductChatComposedSystemSlotTests
     /// in the user message.
     /// </summary>
     [Theory]
-    [InlineData("What happens to Miriam in chapter 4?", "is not available yet and is coming",
+    [InlineData("What happens to Miriam in chapter 4?",
+        "answer in the first person to this effect: 'I can only see a book while it is open.",
                 "answer it from the BOOK section below")]
-    [InlineData("מה קורה למרים בפרק 4?", "מענה על שאלות לגבי ספר מסוים עדיין אינו",
+    [InlineData("מה קורה למרים בפרק 4?", "ענה בגוף ראשון במשמעות הזו: 'אני יכול לראות ספר רק כשהוא פתוח.",
                 "ענה עליה מתוך מקטע הספר שמופיע למטה")]
     public async Task WithABookId_TheRefusalAndTheGroundingRule_AreNeverBothInThePayload(
         string question, string refusalFragment, string groundingFragment)
@@ -387,6 +397,83 @@ public class ProductChatComposedSystemSlotTests
             new ProductChatRequest(question, BookId: Guid.NewGuid()), CancellationToken.None);
 
         Assert.DoesNotContain("Note: ", plainProvider.Captured!.Instruction, StringComparison.Ordinal);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── 4. WITH ROUTING ON, WHICH IS WHAT THE SHIPPED CONFIG DOES (g2) ─────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// THE ROUTED BOOK MESSAGE AT THE PROVIDER BOUNDARY, LITERALLY. Everything above this section measures
+    /// the INERT posture, which is the right thing for a byte-identity fence and the wrong thing for a
+    /// claim about production: <c>appsettings.json</c> ships <c>ProductChat:RoutingEnabled</c> true, so
+    /// without this test the whole file would be green over a path no deployment takes.
+    ///
+    /// <para>It is driven through the REAL <see cref="AiRouter"/> and the REAL <see cref="PromptFactory"/>
+    /// for the same reason section 2 is: the factory sees only the task type and cannot know this turn
+    /// carries a book, so which of the composer's messages actually reaches a provider is decided two
+    /// layers away from the composer, and that gap is where F-1 lived.</para>
+    ///
+    /// <para>The expected literals are <c>ProductChatRoutePartitionTests</c>' hand-typed ones, shared
+    /// rather than copied a third time: three copies of one string drift, and a shared HAND-TYPED literal
+    /// still satisfies this file's rule, which forbids regenerating a pin from the composer and not
+    /// reusing an independently written one.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("What happens to Miriam in chapter 4?", ProductChatRoutePartitionTests.BookRouteEn)]
+    [InlineData("מה קורה למרים בפרק 4?", ProductChatRoutePartitionTests.BookRouteHe)]
+    public async Task WithRoutingOn_ABookQuestion_ReachesTheProviderAsTheHedgedBookMessage(
+        string question, string expected)
+    {
+        var (service, provider) = ChatOverTheRealRouter(BookReader(Status()), routingEnabled: true);
+
+        await service.AnswerAsync(
+            new ProductChatRequest(question, BookId: Guid.NewGuid()), CancellationToken.None);
+
+        Assert.NotNull(provider.Captured);
+        Assert.Equal(expected, provider.Captured!.SystemMessage);
+
+        // And the instruction still OPENS with the very string the provider was handed: the route is
+        // applied to both copies of the rule or to neither.
+        Assert.StartsWith(
+            provider.Captured.SystemMessage, provider.Captured.Instruction, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// AND THE SOURCE-NARRATION IS GONE FROM WHAT THE PROVIDER RECEIVES. The literal above answers "is
+    /// this the string I wrote"; this answers "did the change reach the model", which is the question the
+    /// owner's report is actually about. Asserted over the WHOLE payload - system slot plus instruction -
+    /// because the rule is stated twice and a deletion applied to one copy leaves the other saying the
+    /// opposite.
+    /// </summary>
+    [Theory]
+    [InlineData("What happens to Miriam in chapter 4?", "say that the briefs do not mention it",
+                "never say that it does not happen in the book")]
+    [InlineData("מה קורה למרים בפרק 4?", "אמור שהתקצירים אינם מזכירים",
+                "לעולם אל תאמר שזה אינו קורה בספר")]
+    public async Task WithRoutingOn_TheBriefsNarration_IsNotInThePayload_AndTheAbsenceBanStillIs(
+        string question, string narration, string absenceBan)
+    {
+        var (service, provider) = ChatOverTheRealRouter(BookReader(Status()), routingEnabled: true);
+
+        await service.AnswerAsync(
+            new ProductChatRequest(question, BookId: Guid.NewGuid()), CancellationToken.None);
+
+        var payload = provider.Captured!.SystemMessage + "\n" + provider.Captured.Instruction;
+
+        Assert.DoesNotContain(narration, payload, StringComparison.Ordinal);
+        Assert.Contains(absenceBan, payload, StringComparison.Ordinal);
+
+        // VACUITY GUARD: the narration IS reachable on this exact code path with the flag off, so its
+        // absence above is the routing and not a fragment that appears in no composed payload.
+        var (union, unionProvider) = ChatOverTheRealRouter(BookReader(Status()), routingEnabled: false);
+        await union.AnswerAsync(
+            new ProductChatRequest(question, BookId: Guid.NewGuid()), CancellationToken.None);
+
+        Assert.Contains(
+            narration,
+            unionProvider.Captured!.SystemMessage + "\n" + unionProvider.Captured.Instruction,
+            StringComparison.Ordinal);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════

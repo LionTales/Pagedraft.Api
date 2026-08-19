@@ -11,12 +11,51 @@ namespace Pagedraft.Api.Services.Chat;
 /// the answer was actually built from.</para>
 ///
 /// <para>FAIL-SAFE, in the direction that cannot mislead. A citation is accepted only when the line
-/// parses AND names at least one id that was genuinely in this turn's selection. Anything else (no
-/// line, a hallucinated id, a line naming nothing) falls back to the full selected set and leaves the
-/// answer text untouched, so a parsing miss degrades to "here is what this answer was grounded in"
-/// rather than to a WRONG citation or a silently truncated answer. A model can never widen its
-/// citation to a guide it was not given, because the accepted set is always intersected with the
+/// parses AND names at least one id that was genuinely in this turn's selection. A model can never widen
+/// its citation to a guide it was not given, because the accepted set is always intersected with the
 /// selection.</para>
+///
+/// <para>WHAT A REPLY THAT NAMES NOTHING CITES IS A STATED RULE ON ONE ROUTE, AND STILL THE OLD FALLBACK ON
+/// THE REST (g3c). The fallback is the FULL SELECTION: no line, a hallucinated id, a line naming nothing,
+/// all degrade to "here is everything this turn was given". g3c measured what that publishes once the
+/// PRODUCT route learned to refuse a question the guides do not cover. Most of those refusals carry no
+/// citation line - there is nothing to cite when you used nothing - and the fallback filled the gap in, so
+/// narrowed citations on that route fell 32/36 to 20/36 while the 4-id full-selection result jumped 4 to
+/// 16. What the reader saw was four documents chipped underneath "I do not have that information", which
+/// asserts the exact thing the sentence above it denies. The fallback was never wrong about the SELECTION;
+/// it was wrong about the question the chips answer, which is not "what was this turn handed" but "where
+/// did this come from".</para>
+///
+/// <para>SO THE RULE IS: WHERE A REPLY MAY LEGITIMATELY HAVE USED NOTHING, NAMING NOTHING CITES NOTHING.
+/// <see cref="CiteNothingWhenNothingIsNamed"/> selects it, and <c>ProductChatService</c> turns it on for
+/// <see cref="ChatRoute.Product"/> alone. It is a route policy and not a prose test, because deciding
+/// whether an answer IS a refusal means classifying prose, and this layer has a standing rule against
+/// that (see the mid-sentence-label paragraph below, and the "never delete something that could be a
+/// sentence" asymmetry the strips are built on). Refusing is a licensed outcome on the product route -
+/// its own grounding block ends by telling the model to say it does not have the answer and stop - so on
+/// that route "used nothing" is an ordinary turn rather than a parse failure, and it is the only route
+/// where that is true.</para>
+///
+/// <para>WHY IT IS NOT TURNED ON EVERYWHERE, WHICH WAS TRIED FIRST AND REJECTED BY THE SUITE. Applying it
+/// unconditionally turned 45 facts red, and reading them apart is what scoped it: several are not pins of
+/// the fallback at all but CONTRACTS of a different kind - that a grounded 200 carries a non-empty
+/// citation, that a citation naming a dropped guide still degrades to the honest carried set - and on the
+/// Book route the chips are how an author checks an answer against their own manuscript, which is
+/// provenance worth keeping even when the model forgot its line. Union stays the untouched status quo for
+/// the reason the whole routing layer rests on: a misroute must be able to return only what was already
+/// measured.</para>
+///
+/// <para>ZERO CHIPS IS AN ALREADY-SHIPPED READER STATE, so this is not a new response shape for the client:
+/// <see cref="ChatRoute.General"/> has passed an EMPTY acceptable set since g2 precisely so its no-line
+/// answers cannot be decorated with chips they never used. The cost of the change is real and is accepted
+/// deliberately: a product answer that did use its guides and merely forgot the line now shows no chips
+/// instead of showing all of them. That is a missing statement rather than a false one.</para>
+///
+/// <para>THE REFS FALL BACK; THE PROSE IS NOT ALWAYS LEFT ALONE, AND THAT SENTENCE USED TO CLAIM IT WAS.
+/// Three narrow strips remove a REFUSED line from the answer, and every one of them fires only on the
+/// whole-line shape, where position has already proved the line is a citation: a line naming a ref that
+/// was never carried, a citation stranded mid-answer, and (g3b) a line that names nothing at all. Each is
+/// described at its own site.</para>
 ///
 /// <para>TWO ACCEPTED SHAPES, WITH DELIBERATELY DIFFERENT STRICTNESS (g1 finding F1). The prompt asks
 /// for the label on a line of its own, and 3 of g1's 72 measured answers put it at the END OF A PROSE
@@ -90,6 +129,30 @@ public static class ProductChatCitations
     private static readonly string[] Labels = { "guides:", "מדריכים:", "sources:", "מקורות:" };
 
     /// <summary>
+    /// THE POLICY A CALLER PASSES TO SAY "A REPLY ON THIS ROUTE MAY LEGITIMATELY HAVE USED NOTHING" (g3c).
+    /// With <see cref="FallBackToTheCarriedSet"/> - the default, and every caller written before g3c - a
+    /// miss returns the full acceptable set, which is the fail-safe every gate before g3c measured. With
+    /// <see cref="CiteNothingWhenNothingIsNamed"/> a miss returns no references at all.
+    ///
+    /// <para>Read the class summary for the measurement and for why exactly one route turns it on.</para>
+    /// </summary>
+    public enum MissPolicy
+    {
+        /// <summary>Degrade to "here is everything this turn was given".</summary>
+        FallBackToTheCarriedSet = 0,
+
+        /// <summary>Publish no reference, because the reply named none.</summary>
+        CiteNothingWhenNothingIsNamed = 1,
+    }
+
+    /// <summary>
+    /// What a reply that named nothing cites under <see cref="MissPolicy.CiteNothingWhenNothingIsNamed"/>.
+    /// It is <see cref="Array.Empty{T}()"/> and not a fresh list, because a caller must never be able to add
+    /// a reference to a turn that named none.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> NoReferences = Array.Empty<string>();
+
+    /// <summary>
     /// How much text after an INLINE label may be treated as the citation. A real citation is a short
     /// list of slugs; this bounds the blast radius of any mis-parse to a fragment rather than a
     /// paragraph, which is the "bound the SHAPE, not just the content" lesson from the fail-safe
@@ -122,21 +185,39 @@ public static class ProductChatCitations
     /// <para>Returns the references in SELECTION order (not the model's order) so the client renders a
     /// stable list, and strips the citation from the prose only when the citation was actually
     /// accepted.</para>
+    ///
+    /// <para>EVERY MISS RETURNS <paramref name="onMiss"/>'s answer, which is the g3c rule stated at the top
+    /// of this class. There is one such return for each way of naming nothing - no answer, no line, a line
+    /// naming only refs this turn never carried, an empty line, and a stranded line whose tokens all miss -
+    /// and they read the policy from one local rather than agreeing by care. The DEFAULT is the pre-g3c
+    /// fail-safe, so every caller written before the policy existed is byte-unchanged in behaviour.</para>
     /// </summary>
+    /// <param name="onMiss">
+    /// What to publish when the reply named no reference this turn carried. Defaults to
+    /// <see cref="MissPolicy.FallBackToTheCarriedSet"/>; <c>ProductChatService</c> passes
+    /// <see cref="MissPolicy.CiteNothingWhenNothingIsNamed"/> on <see cref="ChatRoute.Product"/> alone.
+    /// </param>
     public static (string Answer, IReadOnlyList<string> References) Extract(
-        string answer, IReadOnlyList<string> acceptableRefs)
+        string answer,
+        IReadOnlyList<string> acceptableRefs,
+        MissPolicy onMiss = MissPolicy.FallBackToTheCarriedSet)
     {
         var selectedIds = acceptableRefs
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (string.IsNullOrWhiteSpace(answer)) return (answer, selectedIds);
+        // THE ONE PLACE THE POLICY IS READ. Every miss below returns this local, so the two arms cannot
+        // drift apart one return at a time.
+        IReadOnlyList<string> missResult =
+            onMiss == MissPolicy.CiteNothingWhenNothingIsNamed ? NoReferences : selectedIds;
+
+        if (string.IsNullOrWhiteSpace(answer)) return (answer, missResult);
 
         var lines = answer.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
 
         var last = lines.Length - 1;
         while (last >= 0 && string.IsNullOrWhiteSpace(lines[last])) last--;
-        if (last < 0) return (answer, selectedIds);
+        if (last < 0) return (answer, missResult);
 
         var (head, cited, wholeLine) = SplitCitation(lines[last], selectedIds);
 
@@ -158,7 +239,7 @@ public static class ProductChatCitations
             // A WHOLE-LINE CITATION NAMING A REF THAT WAS NEVER CARRIED IS A FABRICATION, and leaving it
             // in the prose publishes it (g1 F-3: a visible "מדריכים: chapter-brief:5" for a brief the
             // trim had deliberately withheld; g1 F-6: "guide-id#a-heading-that-does-not-exist", which in
-            // this codebase points at a retrieval key). The refs returned are still the honest full set,
+            // this codebase points at a retrieval key). The refs returned are this turn's miss result,
             // exactly as on any other miss - only the fabricated LINE stops reaching the reader.
             //
             // Narrow on purpose. The general "a citation naming nothing selected leaves the prose alone"
@@ -166,13 +247,58 @@ public static class ProductChatCitations
             // failure: this fires only when a token carries a shape that cannot be prose in either
             // language (see LooksFabricated), which is what both observed leaks had and what an ordinary
             // sentence beginning "Guides: none of them cover this" does not.
+            //
+            // A KNOWN RESIDUAL, LEFT OPEN DELIBERATELY AND WRITTEN DOWN SO IT IS NOT REDISCOVERED AS A
+            // SURPRISE (g3d/gate 4). When the acceptable set is EMPTY - the General route since g2, and an
+            // English Product turn under a POSITIVE ProductChatRouter.EnglishProductDocumentsFloor, which
+            // ships at 0 since gate run 5 rolled that lever back and so reaches nothing today - every token on
+            // a whole-line citation is uncarried by construction, so a habitual "Guides: export" names
+            // nothing (the chips are correctly empty) but is still PUBLISHED as prose, because `export` has
+            // an ordinary word's shape and LooksFabricated is a test of the TOKEN, not of the turn.
+            //
+            // WIDENING THE STRIP TO "the set was empty" WAS TRIED HERE AND BACKED OUT, because it also
+            // deletes the sentence this comment's own last clause promises to leave alone: "Guides: none of
+            // them cover this" tokenizes to five ordinary words and would have been removed from the
+            // reader's answer. This workspace has already paid for a strip that generalized past its
+            // measured leaks and ate the author's prose, and there is no MEASURED instance of this leak -
+            // the withheld turn is not even asked for a citation line any more, and the only measurement
+            // that exists (g3c) says product refusals carry no citation line at all, which is why the
+            // fallback fired 16 times. It is also not a threat to the gate's number: that detector strips
+            // any line opening with a citation label BEFORE it counts narration. So this waits for a
+            // measured instance and a discriminator built from it, rather than for a shape rule invented
+            // in advance.
             if (wholeLine && cited.Any(c => LooksFabricated(c, selectedIds)))
             {
                 var stripped = string.Join("\n", lines.Take(last)).TrimEnd();
-                return (stripped.Length == 0 ? answer : stripped, selectedIds);
+                return (stripped.Length == 0 ? answer : stripped, missResult);
             }
 
-            return (answer, selectedIds);
+            // AN EMPTY WHOLE-LINE CITATION IS SCAFFOLDING WITH NOTHING IN IT, AND IT REACHED THE READER
+            // (g3b, 0 of 102 to 2 of 102). Two answers rendered a literal "Guides: ," under the prose while
+            // the response carried three perfectly good guide ids: the model wrote the label and the
+            // separator and no id between them. Tokenize returns an EMPTY list there rather than a null one,
+            // so `cited != null` was true, the intersection was empty, and no token existed for the
+            // fabrication strip above to look at - the line fell through to the untouched-answer return and
+            // was published verbatim.
+            //
+            // Stripping it is safe under this class's own asymmetry (never delete something that could be a
+            // sentence), and it needs no new judgement call to see that: POSITION already proved this line is
+            // a citation, and an empty token list means the tail holds no word at all. Tokenize Clean()s each
+            // token and drops the empties, so "Guides:", "Guides: ," and "Guides: ***" all land here while
+            // "Guides: none of them cover this" does not - that tokenizes to real words, keeps its non-empty
+            // list, and is still left exactly where it was. This is the never-empty contract the rest of the
+            // chat layer already carries, floored on "holds no letter or digit" rather than on whitespace.
+            //
+            // The refs returned are this turn's miss result, exactly as on every other miss: what stops
+            // reaching the reader is only the empty line. This is the sharpest case for g3c's rule - a model
+            // that wrote the label and no id named nothing in the most literal way this parser can observe.
+            if (wholeLine && cited.Count == 0)
+            {
+                var withoutEmpty = string.Join("\n", lines.Take(last)).TrimEnd();
+                return (withoutEmpty.Length == 0 ? answer : withoutEmpty, missResult);
+            }
+
+            return (answer, missResult);
         }
 
         // A CITATION LINE THE MODEL THEN KEPT WRITING PAST (g1 F-10). The parser reads the LAST line, so
@@ -180,8 +306,12 @@ public static class ProductChatCitations
         // middle of the answer, where it is scaffolding the reader has to skip. Position proves nothing
         // there, so the SHAPE has to, and the bar is the strictest one in this class: the line must be
         // the label and NOTHING but refs this turn actually carried.
+        //
+        // THIS IS THE MISS g3c WAS ABOUT: the model wrote no citation line anywhere. Falling back to the
+        // whole selection here is what put four guide chips under a bare refusal 16 times in 36 product
+        // turns, which is why the product route now passes CiteNothingWhenNothingIsNamed.
         var stranded = StrandedCitationLine(lines, last, selectedIds);
-        if (stranded < 0) return (answer, selectedIds);
+        if (stranded < 0) return (answer, missResult);
 
         var strandedTokens = StrictTokens(TailOf(lines[stranded]), selectedIds)!;
         var strandedRefs = selectedIds
@@ -192,7 +322,7 @@ public static class ProductChatCitations
             "\n", lines.Where((_, i) => i != stranded)).TrimEnd();
 
         return (withoutStranded.Length == 0 ? answer : withoutStranded,
-                strandedRefs.Count == 0 ? selectedIds : strandedRefs);
+                strandedRefs.Count == 0 ? missResult : strandedRefs);
     }
 
     /// <summary>

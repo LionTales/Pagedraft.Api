@@ -529,9 +529,32 @@ public class PromptFactoryByteIdentityPinTests
         "GetPrompt/LinguisticAnalysis/he/instruction\t168\t14CEF296C3A3061F1E8CAC7E06A95189FB32B1A32B77890127BE3C015EAD5EE5",
         "GetPrompt/LinguisticAnalysis/en/system\t240\t362705C2BBAFBEE517BAA0B6CE2D59F853554278F7FBE8DBDBA0398E79F0A7A0",
         "GetPrompt/LinguisticAnalysis/en/instruction\t196\tF071C7B2350EBBA3EDAD63F144240D08B3A3BEDED7E10B422922A537B70891FE",
-        "GetPrompt/ProductChat/he/system\t1082\t6831FA13A9130A1C39B3EEF366857747E5BA3CA03FF39104B43E4F9F96C64432",
+        // RE-STAMPED BY g3, DELIBERATELY, AND THESE TWO ROWS ONLY. ProductChat's system surface is
+        // ProductChatPrompt's Union book-less message, whose book refusal told the author that answering
+        // about a specific book "is not available yet and is coming" - false since phase B taught Show to
+        // read the book, and measured reaching a real user on 5 of 102 turns in g3's live run. It now says
+        // what ProductChatService's deterministic path says: "I can only see a book while it is open".
+        // he 1082 -> 1061 chars, en 1429 -> 1368. The manifest was diffed row by row against the previous
+        // stamp and NOTHING ELSE MOVED (2 of 225 rows), which is what says the edit stayed inside the one
+        // block it was aimed at. The prose pins for the same change were re-typed by hand out of
+        // ProductChatPromptBlocks; a SHA cannot be, so this row is a re-measurement and is recorded as one.
+        //
+        // RE-STAMPED AGAIN BY g3b, THE SAME TWO ROWS AND NO OTHERS. Two blocks on this surface moved.
+        // (1) BookRefusalEn was given the Hebrew twin's construction - the finished first-person sentence
+        //     in quotes, word for word ProductChatService.OpenTheBookEn - because the English half had been
+        //     left as the imperative that BookRefusalHe's docstring records the model reading back verbatim;
+        //     and its closing clause stopped naming the source ("from the guides" -> "from what is written
+        //     below"). BookRefusalHe's closing clause moved the same way, its quoted sentence untouched.
+        // (2) CitationLineEn/He dropped the source noun from the DESCRIPTION around the label ("naming the
+        //     guide ids you used" -> "naming the ids you used"). The quoted label itself did not move, so
+        //     the parser and the reader's chips are unaffected; see that block for why it is not being bet.
+        // he 1061 -> 1055 chars, en 1368 -> 1432. Diffed row by row against the g3 stamp: 2 of 225 rows
+        // moved, which is what says a change aimed at the product route did not leak into another surface.
+        // Same discipline as above - the prose pins were re-typed by hand out of ProductChatPromptBlocks
+        // and only these SHAs are a re-measurement.
+        "GetPrompt/ProductChat/he/system\t1055\t2ED9495919DEE32DC2DCCD982D2F983BFF9E0867FD7601813261CD073E7E3084",
         "GetPrompt/ProductChat/he/instruction\t0\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
-        "GetPrompt/ProductChat/en/system\t1429\tAF9251B0291228E5CA4425FC1B18B8FFF247DA9A08030E995C7AC62E60181F00",
+        "GetPrompt/ProductChat/en/system\t1432\tAC6630B944DBA899EABE02E330062DA3CFC7E3F1D553F4520A3D71650512A31C",
         "GetPrompt/ProductChat/en/instruction\t0\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
         "GetPrompt/Proofread/he/system\t168\t45130835902EA3187BB088C036AF02725ABE98FAA889E32E7849CB2B85E1DF1E",
         "GetPrompt/Proofread/he/instruction\t707\t52202EF23CCE0DDF7DC86CBB9A79FA7BC9669C5935D3A1A271B736A027297A8A",

@@ -56,12 +56,31 @@ public class ProductChatBudgetTests
         }
     };
 
+    /// <param name="routingEnabled">
+    /// WHETHER THIS SERVICE APPLIES THE ROUTER'S ANSWER (g2). DEFAULT FALSE, which is not the shipped
+    /// config value: <c>appsettings.json</c> ships <c>true</c> since g2, and this parameter deliberately
+    /// does NOT follow it. Every byte-identity pin in this suite is written against the Union prompt, and
+    /// a helper that quietly switched them all to a routed one would turn a fence into a moving target.
+    /// A test that wants the routed behaviour passes <c>true</c> here, so which prompt a test measures is
+    /// readable at its own call site rather than in this file.
+    /// </param>
+    /// <param name="englishProductDocumentsFloor">
+    /// The English product documents floor (g3d/gate 4). DEFAULT NULL MEANS THE SHIPPED VALUE, and SINCE
+    /// GATE RUN 5 THE SHIPPED VALUE IS 0 - the withholding is OFF, so a service built here withholds on no
+    /// turn, which is the posture production runs. A test that wants to exercise the mechanism passes
+    /// <c>ProductChatRouter.RolledBackEnglishProductDocumentsFloor</c> explicitly, so "this test measures a
+    /// lever that is not shipped on" is readable at its own call site rather than in this file - the same
+    /// convention <paramref name="routingEnabled"/> follows. Read
+    /// <c>ProductChatRouter.EnglishProductDocumentsFloor</c> for why it was rolled back.
+    /// </param>
     internal static ProductChatService Service(
         Mock<IAiRouter> router,
         out CapturingLogger<ProductChatService> logger,
         string? guidesDirectory,
         AiOptions? aiOptions,
-        IBookChatContextReader? bookContext = null)
+        IBookChatContextReader? bookContext = null,
+        bool routingEnabled = false,
+        double? englishProductDocumentsFloor = null)
     {
         logger = new CapturingLogger<ProductChatService>();
         var reader = new GuidesCorpusReader(
@@ -73,7 +92,16 @@ public class ProductChatBudgetTests
             // ever reaches it, so a request that silently gained a book context would fail loudly here
             // rather than quietly changing what a phase-A test measures.
             bookContext ?? new ThrowingBookChatContextReader(),
-            logger);
+            logger,
+            capture: null,
+            productChatOptions: Microsoft.Extensions.Options.Options.Create(
+                new ProductChatOptions
+                {
+                    RoutingEnabled = routingEnabled,
+                    EnglishProductDocumentsFloor =
+                        englishProductDocumentsFloor
+                        ?? ProductChatRouter.EnglishProductDocumentsFloor,
+                }));
     }
 
     /// <summary>The book reader a book-less turn must never reach.</summary>
@@ -352,7 +380,7 @@ public class ProductChatBudgetTests
 
         // Every selected guide is still in the prompt, by id AND by its real text.
         Assert.Equal(4, guides.Count);
-        Assert.All(guides, g => Assert.Contains($"=== GUIDE id={g.Id} lang={g.Lang} ===", instruction, StringComparison.Ordinal));
+        Assert.All(guides, g => Assert.Contains($"{ProductChatPrompt.GuideHeaderPrefix}{g.Id} lang={g.Lang} ===", instruction, StringComparison.Ordinal));
         Assert.Contains(ProductChatPrompt.SystemMessage("he"), instruction, StringComparison.Ordinal);
 
         // The history is gone, whole. Asserted over the non-empty population that was sent.

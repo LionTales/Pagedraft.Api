@@ -155,6 +155,12 @@ builder.Services.AddScoped<FeedbackService>();
 builder.Services.Configure<FeedbackOptions>(
     builder.Configuration.GetSection(FeedbackOptions.SectionName));
 
+// Show's question router (g1). The flag defaults to FALSE and ships false, so the route is resolved and
+// logged on every turn but never applied: the composed prompt stays on ChatRoute.Union, which is
+// byte-identical to the pre-routing message. g2 writes the per-route blocks and flips it; g3 measures it.
+builder.Services.Configure<Pagedraft.Api.Services.Chat.ProductChatOptions>(
+    builder.Configuration.GetSection(Pagedraft.Api.Services.Chat.ProductChatOptions.SectionName));
+
 builder.Services.Configure<AiOptions>(builder.Configuration.GetSection(AiOptions.SectionName));
 // Hebrew house-style toggles (e.g. ktiv-male enforcement). Default ON; bound from "Ai:HebrewStyle".
 builder.Services.Configure<Pagedraft.Api.Services.Analysis.Hebrew.HebrewStyleOptions>(

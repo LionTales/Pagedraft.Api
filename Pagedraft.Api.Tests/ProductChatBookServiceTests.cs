@@ -68,7 +68,9 @@ public class ProductChatBookServiceTests
 
         var request = Assert.Single(captured);
         Assert.DoesNotContain(ProductChatPrompt.BookMarker, request.Instruction);
-        Assert.Contains("is not available yet and is coming", request.Instruction, StringComparison.Ordinal);
+        Assert.Contains(
+            "'I can only see a book while it is open.", request.Instruction,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -87,7 +89,7 @@ public class ProductChatBookServiceTests
         var request = Assert.Single(captured);
         Assert.NotNull(request.Instruction);
         var guideHeaders = request.Instruction
-            .Split("=== GUIDE id=", StringSplitOptions.None).Length - 1;
+            .Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1;
 
         Assert.Equal(GuideSelector.DefaultCount, guideHeaders);
     }
@@ -123,7 +125,22 @@ public class ProductChatBookServiceTests
 
         // The book-aware rule replaced the phase-A refusal, and A's product half is still there.
         Assert.Contains("answer it from the BOOK section below", instruction, StringComparison.Ordinal);
-        Assert.DoesNotContain("is not available yet and is coming", instruction, StringComparison.Ordinal);
+
+        // THIS ABSENCE PIN COULD NOT FAIL UNTIL final-r03, and the reason is worth keeping. It used to
+        // look for "say that you can only see a book while it is open" - the IMPERATIVE form of the
+        // English refusal, which g3 retired in favour of the quoted form now in
+        // ProductChatPromptBlocks.BookRefusalEn ("answer in the first person to this effect: 'I can only
+        // see a book while it is open."). After that rewording the needle existed nowhere in any composed
+        // prompt, only in two comments quoting it BECAUSE it was retired, so the assertion held for every
+        // possible instruction and a book-scoped turn carrying both the book-grounding rule and the
+        // book-less refusal would have kept it green - which is the collision this test exists to catch.
+        //
+        // The needle is now the one the book-less sibling asserts PRESENT
+        // (WithNoBookId_TheBookReader_IsNeverCalled), deliberately the same literal in both: that pairing
+        // is what makes this pin discriminating rather than merely true. If the refusal is reworded
+        // again, the sibling goes red first and names the new text.
+        Assert.DoesNotContain(
+            "'I can only see a book while it is open.", instruction, StringComparison.Ordinal);
         Assert.Contains("a bare refusal is the whole answer", instruction, StringComparison.Ordinal);
     }
 
@@ -147,7 +164,7 @@ public class ProductChatBookServiceTests
         var request = Assert.Single(captured);
         Assert.NotNull(request.Instruction);
         var guideHeaders = request.Instruction
-            .Split("=== GUIDE id=", StringSplitOptions.None).Length - 1;
+            .Split(ProductChatPrompt.GuideHeaderPrefix, StringSplitOptions.None).Length - 1;
 
         Assert.Equal(ProductChatService.BookAwareGuideCount, guideHeaders);
         Assert.True(guideHeaders >= ProductChatBudget.MinGuides,

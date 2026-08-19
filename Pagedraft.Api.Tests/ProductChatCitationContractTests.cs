@@ -49,8 +49,8 @@ public class ProductChatCitationContractTests
     /// string comparison, so it survives a rewording of either sentence.
     /// </summary>
     [Theory]
-    [InlineData("en", "naming the guide ids you used", "naming what you actually used")]
-    [InlineData("he", "שמציינת את מזהי המדריכים שהשתמשת בהם", "שמציינת את מה שבאמת השתמשת בו")]
+    [InlineData("en", "naming the ids you used", "naming what you actually used")]
+    [InlineData("he", "שמציינת את המזהים שהשתמשת בהם", "שמציינת את מה שבאמת השתמשת בו")]
     public void TheBookAwareMessage_CarriesExactlyOneCitationSentence(
         string language, string phaseASentence, string bookAwareSentence)
     {
@@ -312,6 +312,69 @@ public class ProductChatCitationContractTests
         Assert.Equal(Carried, refs);
     }
 
+    /// <summary>
+    /// g3b: A CITATION LINE WITH NOTHING IN IT REACHED THE READER (0 of 102 to 2 of 102). Two English
+    /// answers rendered a literal <c>Guides: ,</c> under the prose while the response carried three
+    /// perfectly good guide ids - the model wrote the label and the separator and no id between them.
+    ///
+    /// <para>WHY NO EXISTING TEST CAUGHT IT, WHICH IS THE INTERESTING PART. <c>Tokenize</c> returns an
+    /// EMPTY list for that tail rather than a null one, so the parser's "did anything parse" check passed,
+    /// the intersection with the selection came back empty, and the fabrication strip above found no token
+    /// to judge - every branch behaved exactly as designed and the line fell through to the leave-the-answer
+    /// alone return. The gap was between two guards, not inside either.</para>
+    ///
+    /// <para>The refs still degrade to the honest full set, exactly as on every other miss. The Hebrew case
+    /// is pinned beside the English one because the label is a different string in each and a fix keyed on
+    /// one of them would look complete.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export writes a DOCX.\n\nGuides: ,", "Export writes a DOCX.")]
+    [InlineData("Export writes a DOCX.\n\nGuides:", "Export writes a DOCX.")]
+    [InlineData("Export writes a DOCX.\n\n**Guides:** ,", "Export writes a DOCX.")]
+    [InlineData("הייצוא מפיק DOCX.\n\nמדריכים: ,", "הייצוא מפיק DOCX.")]
+    [InlineData("הייצוא מפיק DOCX.\n\nמקורות:", "הייצוא מפיק DOCX.")]
+    public void AWholeLineCitation_NamingNothingAtAll_IsNotPublished(string answer, string expectedProse)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(expectedProse, prose);
+        Assert.Equal(Carried, refs);   // the honest fallback, unchanged
+    }
+
+    /// <summary>
+    /// AND THE STRIP STILL CANNOT REACH A SENTENCE. The line above is removed because its tail holds no
+    /// word at all; the moment it holds one, the pre-existing leave-it-alone behaviour applies and is
+    /// pinned in <see cref="AWholeLineCitation_NamingSomethingThatIsNotARefShape_IsStillLeftAlone"/>.
+    /// Asserted here as its own case anyway, on the shape closest to the empty one, because the whole risk
+    /// of this fix is a floor that creeps from "no word" up to "no id".
+    /// </summary>
+    [Fact]
+    public void AWholeLineCitation_NamingOneOrdinaryWord_IsStillLeftAlone()
+    {
+        const string answer = "Export writes a DOCX.\n\nGuides: none";
+
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
+    /// <summary>
+    /// An answer that is ONLY an empty citation line keeps its text. The strip's every sibling carries this
+    /// floor and this one is no different: returning an empty answer to the reader is worse than returning
+    /// scaffolding, so a strip that would empty the answer does not run.
+    /// </summary>
+    [Fact]
+    public void AnAnswerThatIsNothingButAnEmptyCitationLine_IsLeftAlone()
+    {
+        const string answer = "Guides: ,";
+
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════════════════
     // ─── 5. THE CITATION LINE THE MODEL KEPT WRITING PAST ───────────────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -389,6 +452,182 @@ public class ProductChatCitationContractTests
 
             Assert.All(refs, reference => Assert.Contains(reference, Carried));
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ─── 7. AN ANSWER WITH NO CITATION LINE AT ALL (g2, the General route) ──────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// AN ANSWER THAT NEVER CITES ANYTHING SURVIVES INTACT. g2's General route asks for NO citation line -
+    /// an answer out of Show's own knowledge has no guide to name - so what was a rare parse miss becomes
+    /// the normal shape of a whole route's traffic, and the parser's behaviour on it stops being an edge
+    /// case. Two properties, and they are different facts: the PROSE comes back untouched (the parser must
+    /// not decide that the last sentence of an uncited answer was scaffolding), and the refs fall back to
+    /// the full carried set, which is the deliberate fail-safe direction - "here is what this answer was
+    /// grounded in" rather than a wrong citation.
+    ///
+    /// <para>Both languages, and the multi-line case, because the parser reads the LAST non-blank line and
+    /// a one-line fixture would not exercise that walk.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export runs from the book menu and produces a DOCX.")]
+    [InlineData("Export runs from the book menu.\nIt produces a DOCX.\n")]
+    [InlineData("הייצוא מופעל מתפריט הספר ומפיק קובץ DOCX.")]
+    [InlineData("הייצוא מופעל מתפריט הספר.\nהוא מפיק קובץ DOCX.\n")]
+    public void AnAnswerWithNoCitationLine_KeepsItsProse_AndFallsBackToTheCarriedSet(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Carried);
+
+        Assert.Equal(answer, prose);
+        Assert.Equal(Carried, refs);
+    }
+
+    /// <summary>
+    /// AND UNDER g3c's MISS POLICY THE SAME ANSWER CITES NOTHING, which is the whole of the rule stated as
+    /// one fact: the references are what the reply NAMED, and a reply that named nothing has none. The
+    /// fixtures are the ones above deliberately - identical inputs, opposite outcomes, one argument apart -
+    /// so the pair reads as the policy switch it is and not as two behaviours that drifted.
+    ///
+    /// <para>WHY IT EXISTS. Once the product route learned to refuse, "no citation line" stopped being a
+    /// parse miss and became the normal shape of a refusal, and the fallback rendered the whole selection as
+    /// chips beneath sentences saying the answer was not there: g3c measured narrowed citations on that
+    /// route at 20/36 against 32/36 the run before, with the 4-id full selection up from 4 to 16. Which
+    /// routes turn it on is <c>ProductChatService</c>'s decision and is pinned in
+    /// <c>ProductChatRoutedAnswerTests</c>; this fact pins only what the policy DOES.</para>
+    ///
+    /// <para>THE PROSE MUST STILL SURVIVE UNTOUCHED, which is the half that could silently break: nothing
+    /// about citing less licenses deleting a sentence.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("Export runs from the book menu and produces a DOCX.")]
+    [InlineData("Export runs from the book menu.\nIt produces a DOCX.\n")]
+    [InlineData("הייצוא מופעל מתפריט הספר ומפיק קובץ DOCX.")]
+    [InlineData("הייצוא מופעל מתפריט הספר.\nהוא מפיק קובץ DOCX.\n")]
+    public void AnAnswerWithNoCitationLine_CitesNothing_UnderTheCiteNothingPolicy(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(
+            answer, Carried, ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+
+        Assert.Equal(answer, prose);
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: the policy narrows a MISS and nothing else. An answer that names a carried guide
+        // still cites it under the very same policy, so the emptiness above is the miss and not a switch
+        // that turns citations off.
+        var (_, named) = ProductChatCitations.Extract(
+            answer + "\nGuides: export", Carried,
+            ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+        Assert.Equal(new[] { "export" }, named);
+    }
+
+    /// <summary>
+    /// EVERY WAY OF NAMING NOTHING AGREES UNDER THE POLICY, which is the property the single <c>missResult</c>
+    /// local in <c>Extract</c> exists to guarantee. Five shapes reach five different returns - an empty
+    /// answer, no line at all, a line naming only refs this turn never carried, a label with no id after it,
+    /// and a stranded line whose tokens all miss - and a policy applied at four of five sites would be a
+    /// rule that holds until the fifth shape arrives.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("Export runs from the book menu.")]
+    [InlineData("Export runs from the book menu.\nGuides: chapter-brief:5")]
+    [InlineData("Export runs from the book menu.\nGuides: ,")]
+    [InlineData("Guides: nothing-selected\nExport runs from the book menu.")]
+    public void EveryShapeThatNamesNothing_CitesNothing_UnderTheCiteNothingPolicy(string answer)
+    {
+        var (_, refs) = ProductChatCitations.Extract(
+            answer, Carried, ProductChatCitations.MissPolicy.CiteNothingWhenNothingIsNamed);
+
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: every one of these shapes returns the carried set under the DEFAULT policy, so the
+        // list above is five real paths through Extract and not five inputs that were empty anyway.
+        var (_, fallback) = ProductChatCitations.Extract(answer, Carried);
+        Assert.Equal(Carried, fallback);
+    }
+
+    /// <summary>
+    /// AND WITH NOTHING LICENSED, IT CITES NOTHING - which is the state <c>ProductChatService</c> puts the
+    /// General route in on purpose. The fallback returns the acceptable set, so handing the parser the
+    /// surviving guides there would decorate every general answer with chips for guides it never used;
+    /// handing it an empty set makes "this answer cites nothing" the outcome rather than a hope about what
+    /// the model wrote. The prose still has to survive, which is the half that could silently break.
+    /// </summary>
+    [Theory]
+    [InlineData("Dialogue reads faster when the beats carry the blocking.")]
+    [InlineData("דיאלוג נקרא מהר יותר כשהפעולות נושאות את התנועה.")]
+    public void WithNoAcceptableReferences_TheAnswerCitesNothing_AndKeepsItsProse(string answer)
+    {
+        var (prose, refs) = ProductChatCitations.Extract(answer, Array.Empty<string>());
+
+        Assert.Equal(answer, prose);
+        Assert.Empty(refs);
+
+        // VACUITY GUARD: the same call WITH a carried set does return something, so the emptiness above is
+        // the licensing and not a parser that returns nothing for every input.
+        var (_, carriedRefs) = ProductChatCitations.Extract(answer, Carried);
+        Assert.NotEmpty(carriedRefs);
+    }
+
+    /// <summary>
+    /// A MODEL THAT WRITES A CITATION LINE ANYWAY, ON A TURN THAT LICENSES NONE, CANNOT MANUFACTURE ONE.
+    /// This is the safety property of the file's section 6 applied to g2's empty-set case, and it is the
+    /// direction that matters: the General route's whole point is that Show stops attributing an answer to
+    /// a source, so a habitual "Guides: faq" must not become a chip.
+    /// </summary>
+    [Fact]
+    public void WithNoAcceptableReferences_AHabitualCitationLine_NamesNothing()
+    {
+        var (_, refs) = ProductChatCitations.Extract(
+            "Dialogue reads faster when the beats carry the blocking.\nGuides: faq",
+            Array.Empty<string>());
+
+        Assert.Empty(refs);
+    }
+
+    /// <summary>
+    /// AND THE LINE ITSELF IS STILL PUBLISHED, WHICH IS A KNOWN AND DELIBERATELY UNCLOSED RESIDUAL
+    /// (g3d/gate 4). Naming nothing is only half of it: a habitual "Guides: export" written on a turn that
+    /// carried nothing correctly yields no chip, and is still left in the prose, because
+    /// <c>LooksFabricated</c> tests the TOKEN's shape and <c>export</c> has an ordinary word's shape.
+    ///
+    /// <para>THIS IS PINNED AS THE CURRENT TRUTH RATHER THAN FIXED, and the reasoning is in
+    /// <c>ProductChatCitations</c> beside the strip. Widening the strip to "the carried set was empty" was
+    /// tried and backed out: it also deletes "Guides: none of them cover this", an ordinary sentence the
+    /// strip's own comment promises to leave alone, and this workspace has already paid once for a strip
+    /// that generalized past its measured leaks. There is no measured instance of the leak - a withheld
+    /// turn is not asked for a citation line at all - and the live gate's detector strips any line opening
+    /// with a citation label before it counts narration, so it cannot distort the number either. The test
+    /// exists so that when a run DOES measure one, this is a decision on the record and not an oversight.</para>
+    /// </summary>
+    [Fact]
+    public void WithNoAcceptableReferences_AHabitualCitationLine_IsStillPublished_KnownResidual()
+    {
+        const string prose = "I do not have that information.";
+        var (answer, refs) = ProductChatCitations.Extract(
+            prose + "\nGuides: export", Array.Empty<string>());
+
+        // The half that IS closed: nothing is cited.
+        Assert.Empty(refs);
+
+        // The half that is not: the line is still there. Asserted so the day it changes, it changes here.
+        Assert.Contains("Guides: export", answer, StringComparison.Ordinal);
+
+        // VACUITY GUARD: a turn that DID carry the guide accepts the line, takes it OUT of the prose and
+        // returns the chip, so the publication above is the empty carried set and not a parser that never
+        // strips anything.
+        var (carriedProse, carriedRefs) = ProductChatCitations.Extract(
+            prose + "\nGuides: export", Carried);
+        Assert.Equal(prose, carriedProse);
+        Assert.Contains("export", carriedRefs);
+
+        // AND THE SHAPE RULE STILL FIRES ON AN EMPTY SET: a token that cannot be prose in either language
+        // is stripped even here, so the residual above is scoped to word-shaped ids and is not "the strip
+        // is dead whenever the set is empty".
+        var (strippedProse, _) = ProductChatCitations.Extract(
+            prose + "\nGuides: chapter-brief:5", Array.Empty<string>());
+        Assert.Equal(prose, strippedProse);
     }
 
     // ─── Fixtures ───────────────────────────────────────────────────────────────────────────────

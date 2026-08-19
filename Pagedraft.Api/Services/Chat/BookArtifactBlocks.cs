@@ -238,7 +238,7 @@ public static class BookArtifactBlocks
     /// grounding clause started putting a note's content into the author's answer; see
     /// <see cref="BookSectionNote"/> for the whole argument and for what is measured and what is not. The
     /// rule that governs what the model DOES with the note is in both languages too, in
-    /// <c>ProductChatPrompt.BookGroundingEn</c>/<c>He</c>.</para>
+    /// <c>ProductChatPromptBlocks.BookGroundingEn</c>/<c>He</c>.</para>
     ///
     /// <para>ITS NUMBERS ARE THE AUTHOR'S, AND THE REASON IS THAT IT IS WRITTEN TO BE SPOKEN (be-c02,
     /// review finding #1). This used to claim to be the ONE line of the section with that property, which
