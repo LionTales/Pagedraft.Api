@@ -44,6 +44,13 @@ public class LanguageToolEngine : IDetectEngine
             var langCode = MapLanguageCode(language);
             var response = await PostCheckAsync(normalizedText, langCode, cancellationToken);
 
+            // be-c02: THIS BRANCH IS LANGUAGE-AGNOSTIC AND ITS TERMINAL CODE IS NOT. MapLanguageCode falls
+            // through to language.Split('-')[0], so ANY language this server does not know arrives here,
+            // and the no-retry-success exit below labels every one of them "hebrew-unsupported" with an
+            // English sentence about Hebrew. Not reachable for the two languages this product ships (he,
+            // and en-US which every server knows), but a third one would be mislabelled. Assigning it a
+            // language-neutral code is a wire-contract change (the client keys localized copy off these
+            // exact strings) and is deliberately NOT made here.
             if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -54,6 +61,15 @@ public class LanguageToolEngine : IDetectEngine
                     response = await PostCheckAsync(normalizedText, "auto", cancellationToken);
                     if (response.IsSuccessStatusCode)
                     {
+                        // be-c02: THE ISSUES BELOW WERE NOT COMPUTED IN THE REQUESTED LANGUAGE. A server
+                        // that 400s on `he` has no Hebrew module, so whatever `auto` identified, it was
+                        // not Hebrew - these matches are another language's rules applied to Hebrew text.
+                        // This is the fifth ServiceUnavailable path and the ONLY one that carries a
+                        // non-empty issue list and no code (PAGEDRAFT_DESIGN.md "KNOWN GAP"), so a
+                        // code-keyed client cannot tell it apart from an unknown reason and renders the
+                        // matches as ordinary results. Whether they should be shown at all is an open
+                        // product decision recorded in be-c02's investigation; assigning this branch a
+                        // code is its prerequisite and is deliberately NOT done here.
                         var autoResponse = await response.Content.ReadFromJsonAsync<LanguageToolResponse>(cancellationToken: cancellationToken);
                         var autoIssues = autoResponse?.Matches?.Select(match => ConvertToLanguageIssue(match, normalizedText)).ToList() ?? new List<LanguageIssue>();
                         _logger?.LogInformation("LanguageTool (auto) detected {Count} issues", autoIssues.Count);
