@@ -745,12 +745,34 @@ public class ProductChatRoutePartitionTests
         => Assert.False(new ProductChatOptions().RoutingEnabled);
 
     /// <summary>
-    /// AND THE SHIPPED CONFIG TURNS IT ON (g2). The two halves of the previous test were one assertion
-    /// about two different facts, and they now disagree on purpose, so they are asserted separately and
-    /// against the REAL file rather than against a copy. This is also the rollback's own test: setting the
-    /// key back to false is the documented way to put every turn on Union again with no code deploy, and
-    /// a key that had quietly gone missing would leave the class default in charge and read exactly like
-    /// a successful rollback.
+    /// AND THE SHIPPED CONFIG TURNS IT ON (g2), PINNED THE WAY THE FLOOR IS PINNED: presence, then the
+    /// bound value, then the class default it disagrees with, all in one test because all three are what
+    /// a rollback has to reason about at once. The two halves of the previous test were one assertion
+    /// about two different facts, and they now disagree on purpose, so they are asserted against the REAL
+    /// file rather than against a copy.
+    ///
+    /// <para>WHICH SURFACE PRODUCTION READS IS SETTLED ELSEWHERE AND NOT RE-DERIVED HERE: the layering is
+    /// written out once on <see cref="ProductChatOptions.EnglishProductDocumentsFloor"/>, and the
+    /// conclusion this test depends on is that the shipped key binds and the class default is unreachable
+    /// wherever <c>appsettings.json</c> loads. What is specific to THIS flag is the consequence, and it is
+    /// the whole reason the pair is pinned together: the two surfaces DIVERGE, class default <c>false</c>
+    /// against shipped key <c>true</c>, so a reader who believes the class default is production's value
+    /// would "roll back" by flipping a default that is already <c>false</c> and leave <c>appsettings.json</c>
+    /// shipping routing ON. The floor's own pin (<c>ProductChatRouterTests.TheShippedFloor_WithholdsOnNoTurn</c>)
+    /// cites this flag as the cautionary case; this is that case's own test.</para>
+    ///
+    /// <para>ABSENCE IS ASSERTED BEFORE THE VALUE IS BOUND, because binding cannot tell the two apart. A
+    /// removed or mistyped key binds the class default <c>false</c>, which is a silent, total rollback of
+    /// every wording g2 wrote and reads exactly like a deliberate one. Nothing else in the suite would go
+    /// red: the pin tests all measure the inert Union posture on purpose.</para>
+    ///
+    /// <para>WHAT THE TWO VALUES MEAN. <c>true</c> composes the per-route prompt blocks (Product / Book /
+    /// General / Union). <c>false</c> forces every turn to <see cref="ChatRoute.Union"/>, which is
+    /// byte-identical to the pre-routing message g4 and g5 measured, while the router still resolves and
+    /// logs the route so calibration data keeps arriving. Setting this key to <c>false</c> IS the
+    /// documented rollback and it needs no code deploy - <c>appsettings.json</c>'s own comment calls it
+    /// THE ROLLBACK - and g3 has not cleared the English product cell, so this one key is where the
+    /// feature's risk posture lives.</para>
     /// </summary>
     [Fact]
     public void TheShippedConfig_TurnsRoutingOn()
@@ -760,12 +782,31 @@ public class ProductChatRoutePartitionTests
         var raw = config[ProductChatOptions.SectionName + ":RoutingEnabled"];
         Assert.False(
             string.IsNullOrWhiteSpace(raw),
-            "ProductChat:RoutingEnabled is absent from the shipped appsettings.json. It must be written "
-            + "out: the class default is false, so an absent key silently reverts every turn to Union and "
-            + "is indistinguishable from a deliberate rollback.");
+            "ProductChat:RoutingEnabled is ABSENT from the shipped appsettings.json - the key is missing "
+            + "or misspelled, which is not the same failure as it being set to false. An absent key binds "
+            + "the class default false, so every turn silently composes Union again: that is a total "
+            + "rollback of g2's per-route wording, it is indistinguishable from a deliberate one, and no "
+            + "other test in this suite would notice because they all measure the inert posture on "
+            + "purpose. Write the key back out explicitly, true or false.");
 
         var options = new ProductChatOptions();
         config.GetSection(ProductChatOptions.SectionName).Bind(options);
-        Assert.True(options.RoutingEnabled);
+        Assert.True(
+            options.RoutingEnabled,
+            $"the shipped ProductChat:RoutingEnabled bound to {options.RoutingEnabled}, and it ships true. "
+            + "true composes the per-route prompt blocks; false forces every turn to Union, which is "
+            + "byte-identical to the pre-routing message g4 and g5 measured, with the route still resolved "
+            + "and logged. Flipping this key to false IS the documented rollback (appsettings.json's own "
+            + "comment calls it THE ROLLBACK) and needs no code deploy, so if this failure is a rollback "
+            + "you meant, change this assertion in the same commit and say which gate asked for it.");
+
+        Assert.False(
+            new ProductChatOptions().RoutingEnabled,
+            "the ProductChatOptions class default for RoutingEnabled is no longer false, and the shipped "
+            + "key above is true, so the two surfaces no longer diverge. The divergence is deliberate: "
+            + "every byte-identity pin in this suite constructs the service without configuring the flag "
+            + "and must keep getting the inert Union posture. Moving this default does NOT roll production "
+            + "back either - the shipped key is what binds wherever appsettings.json loads (see the "
+            + "layering written out on ProductChatOptions.EnglishProductDocumentsFloor).");
     }
 }

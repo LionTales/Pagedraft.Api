@@ -50,10 +50,16 @@ public class ProductChatOptions
     /// ENVIRONMENT THIS APP RUNS IN. <c>Program.cs</c> builds the host with a plain
     /// <c>WebApplication.CreateBuilder(args)</c> and adds no configuration source of its own, so the default
     /// layering applies everywhere: <c>appsettings.json</c> FIRST, then <c>appsettings.{Environment}.json</c>
-    /// on top of it, then environment variables, then the command line.
+    /// on top of it, then (in Development only) user secrets - this project declares a
+    /// <c>UserSecretsId</c>, so a dev whose behaviour does not match <c>appsettings.json</c> should look
+    /// there before anywhere else - then environment variables, then the command line. Each file is
+    /// flattened to colon-delimited LEAF keys and resolved per key, so an omitted key inherits the layer
+    /// below rather than the object block being replaced wholesale.
     /// <c>appsettings.Production.json</c> carries no <c>ProductChat</c> section, so nothing overrides the base
     /// file there and production binds <c>appsettings.json</c>'s 0. This class default is not what production
-    /// reads; it is unreachable in any environment that loads <c>appsettings.json</c> at all. Moving
+    /// reads; it is unreachable WHILE THE KEY IS PRESENT in a loaded <c>appsettings.json</c>, which is the
+    /// state today and is pinned. Delete the key and the class default binds again, silently - which is why
+    /// the pin asserts the key's PRESENCE and not only its value. Moving
     /// <c>appsettings.json</c> is therefore exactly what DOES roll production back, and changing this default
     /// alone would not touch it.</para>
     ///

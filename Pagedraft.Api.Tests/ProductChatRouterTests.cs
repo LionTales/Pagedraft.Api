@@ -693,9 +693,17 @@ public class ProductChatRouterTests
     /// that loads <c>appsettings.json</c> binds, PRODUCTION INCLUDED: <c>Program.cs</c> builds the host with a
     /// plain <c>WebApplication.CreateBuilder(args)</c> and adds no configuration source, so
     /// <c>appsettings.json</c> layers FIRST everywhere and <c>appsettings.{Environment}.json</c> overrides
-    /// only the keys it repeats. <c>appsettings.Production.json</c> repeats no <c>ProductChat</c> key, so
-    /// production reads the shipped 0 and the class default is unreachable there. A rollback therefore has to
-    /// move the JSON, because that file IS production's value.</para>
+    /// only the keys it repeats - per LEAF key, not per object block, because each file is flattened to
+    /// colon-delimited keys before they are resolved. (Development also layers user secrets in between;
+    /// that layer never loads in Production, so it does not change the conclusion.)
+    /// <c>appsettings.Production.json</c> repeats no <c>ProductChat</c> key, so
+    /// production reads the shipped 0 and the class default is unreachable there WHILE THE KEY IS PRESENT
+    /// in the base file - delete it and the class default binds again, which is why the sibling pin in
+    /// <c>ProductChatRoutePartitionTests</c> asserts presence as well as value. A rollback therefore has to
+    /// move the JSON, because that file IS production's value.
+    /// NOT ASSERTED ANYWHERE, and worth knowing: nothing in this suite OPENS
+    /// <c>appsettings.Production.json</c> to check that it still repeats no <c>ProductChat</c> key. Adding
+    /// one there would silently falsify this whole paragraph with the suite green.</para>
     ///
     /// <para>SO WHY PIN ALL THREE WHEN THEY ALREADY AGREE. Because the pin is against DRIFT, and the sibling
     /// flag shows what drift costs: <see cref="ProductChatOptions.RoutingEnabled"/> has class default
