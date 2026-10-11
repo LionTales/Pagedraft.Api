@@ -20,6 +20,10 @@ var builder = WebApplication.CreateBuilder(args);
 // TODO: Move this trial key to a secure location (user secrets / env var) before committing.
 SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JGaF5cXGpCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWX1feHVQRGheUUF+WUtWYEs=");
 
+// Windows code pages (1255 Hebrew, 1256 Arabic, ...) are not built into .NET; the clipboard RTF pre-pass
+// (RtfCodepageNormalizer) and any Encoding.GetEncoding(<code page>) need the provider registered once.
+System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
 var dbProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "SqlServer";
 if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("DatabaseProvider=Sqlite is no longer supported. The current EF Core model and migrations target SQL Server only.");
