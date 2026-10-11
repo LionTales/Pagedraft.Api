@@ -25,7 +25,9 @@ public class DocumentEditorController : ControllerBase
     /// Called when the user pastes from Word or other external sources with formatting.
     /// RTF goes through <see cref="RtfCodepageNormalizer"/> first: Word writes Hebrew as code-page byte escapes
     /// that Syncfusion's RTF reader decodes by the run font's charset alone, which turned pasted Hebrew into
-    /// Latin-1 gibberish whenever the font was one Word could not resolve.
+    /// Latin-1 gibberish whenever the font was one Word could not resolve. Then
+    /// <see cref="PseudoBidiFontNames.StripFromRtfFontTable"/> renames Word's charset-variant font entries
+    /// ("Calibri (Hebrew)") to the real face so the pasted runs never store a font no machine has.
     /// </summary>
     [HttpPost("SystemClipboard")]
     public IActionResult SystemClipboard([FromBody] SystemClipboardRequest request)
@@ -58,6 +60,16 @@ public class DocumentEditorController : ControllerBase
                     _logger.LogDebug(
                         "SystemClipboard re-encoded {RewrittenEscapes} RTF byte escapes as Unicode before conversion",
                         rewrittenEscapes);
+                }
+
+                // Word's font table names each charset variant "Calibri (Hebrew)" and the reader stores that
+                // name verbatim, which is how the pseudo font reached saved chapters and then every export.
+                content = PseudoBidiFontNames.StripFromRtfFontTable(content, out var renamedFonts);
+                if (renamedFonts > 0)
+                {
+                    _logger.LogDebug(
+                        "SystemClipboard renamed {RenamedFonts} charset-variant RTF font entries to their face name",
+                        renamedFonts);
                 }
             }
 

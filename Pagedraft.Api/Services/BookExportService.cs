@@ -222,13 +222,14 @@ public class BookExportService
     /// </summary>
     public async Task<BookExportResult> ExportBookAsync(Guid bookId, CancellationToken ct = default)
     {
-        var title = await _db.Books
+        var book = await _db.Books
             .AsNoTracking()
             .Where(b => b.Id == bookId)
-            .Select(b => b.Title)
+            .Select(b => new { b.Title, b.Language })
             .FirstOrDefaultAsync(ct);
 
-        if (title == null) return BookExportResult.BookNotFound();
+        if (book == null) return BookExportResult.BookNotFound();
+        var title = book.Title;
 
         var chapters = await _chapters.GetAllByBookAsync(bookId, ct);
         if (chapters.Count == 0) return BookExportResult.NothingToExport();
@@ -250,7 +251,7 @@ public class BookExportService
             // nothing inserted between them: scenes are contiguous prose inside one chapter, and the split
             // deleted whatever break marker the author had written, so inventing one would be writing into
             // their manuscript.
-            foreach (var unit in units) buffers.Add(_sfdtConversion.ConvertSfdtToDocx(unit));
+            foreach (var unit in units) buffers.Add(_sfdtConversion.ConvertSfdtToDocx(unit, book.Language));
         }
 
         // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
@@ -288,9 +289,19 @@ public class BookExportService
         var units = ResolveUnitsFor(chapter, scenes);
         if (units.Count == 0) return BookExportResult.NothingWritten();
 
+        // The book's language decides whether the export stamps he-IL on runs that carry no complex-script
+        // language (see SfdtConversionService.ConvertSfdtToDocx). The chapter row above is book-scoped, so the
+        // book exists; a missing language falls back to no stamping rather than failing the export.
+        var bookLanguage = await _db.Books
+            .AsNoTracking()
+            .Where(b => b.Id == bookId)
+            .Select(b => b.Language)
+            .FirstOrDefaultAsync(ct);
+
         // AssembleDocx returns a single buffer untouched, so an unsplit chapter produces byte-for-byte what
-        // it always did and only a scene-composed one goes through the assembler.
-        var docx = _bookAssembly.AssembleDocx(units.Select(_sfdtConversion.ConvertSfdtToDocx).ToList());
+        // ConvertSfdtToDocx produced and only a scene-composed one goes through the assembler.
+        var docx = _bookAssembly.AssembleDocx(
+            units.Select(unit => _sfdtConversion.ConvertSfdtToDocx(unit, bookLanguage)).ToList());
         return BookExportResult.Ok(docx, BuildFileName(chapter.Title, fallbackStem: "chapter"));
     }
 

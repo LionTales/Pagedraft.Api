@@ -266,6 +266,63 @@ public class DocumentEditorClipboardTests
         Assert.Contains(@"x\'e4y", text);
     }
 
+    // ---- charset-variant font names (todo c2): where "Calibri (Hebrew)" entered the stored SFDT ----------
+
+    [Fact]
+    public void RealWordHeader_font_table_loses_only_the_rtl_charset_variant_suffixes()
+    {
+        var rtf = RealHeaderDocument(LangDrivenHebrewRun(HebrewSentence));
+        var tableStart = rtf.IndexOf(@"{\fonttbl", StringComparison.Ordinal);
+        Assert.True(tableStart > 0);
+
+        var stripped = PseudoBidiFontNames.StripFromRtfFontTable(rtf, out var renamed);
+
+        // 21 = every "(Hebrew)" / "(Arabic)" entry Word wrote into the real clipboard's font table.
+        Assert.Equal(21, renamed);
+        Assert.DoesNotContain("(Hebrew)", stripped);
+        Assert.DoesNotContain("(Arabic)", stripped);
+        Assert.Contains("Calibri (Vietnamese);", stripped);
+        Assert.Contains(@"{\f45\fbidi \froman\fcharset0\fprq0{\*\panose 00000000000000000000}Calibri{\*\falt Calibri};}", stripped);
+        Assert.Contains(@"{\f1407\fbidi \fswiss\fcharset177\fprq2 Calibri;}", stripped);
+        // Everything outside the font table is byte-identical: the header before it and the whole body after it.
+        Assert.Equal(rtf[..tableStart], stripped[..tableStart]);
+        var body = LangDrivenHebrewRun(HebrewSentence) + "}";
+        Assert.EndsWith(body, stripped);
+        // ...and nothing but the suffixes left the table (" (Hebrew)" and " (Arabic)" are both 9 characters).
+        Assert.Equal(CountOf(rtf, " (Hebrew)") + CountOf(rtf, " (Arabic)"), renamed);
+        Assert.Equal(rtf.Length - (renamed * " (Hebrew)".Length), stripped.Length);
+    }
+
+    [Fact]
+    public void Font_table_strip_is_a_no_op_without_a_variant_and_ignores_body_text()
+    {
+        var rtf = SmallDocument(
+            header: @"\ansi\ansicpg1252\deff0",
+            fonts: @"{\f0\fswiss\fcharset0 Calibri;}",
+            body: @"\f0 Calibri (Hebrew); stays\par");
+
+        var stripped = PseudoBidiFontNames.StripFromRtfFontTable(rtf, out var renamed);
+
+        Assert.Equal(0, renamed);
+        Assert.Same(rtf, stripped);
+    }
+
+    [Fact]
+    public void RealWordHeader_paste_stores_the_face_name_not_the_charset_variant()
+    {
+        var rtf = RealHeaderDocument(LangDrivenHebrewRun(HebrewSentence));
+        var controller = new DocumentEditorController(NullLogger<DocumentEditorController>.Instance);
+
+        var json = Assert.IsType<ContentResult>(controller.SystemClipboard(new SystemClipboardRequest { Content = rtf, Type = ".rtf" })).Content!;
+
+        AssertCleanHebrew(TextOf(json));
+        var fonts = FontValuesOf(json);
+        Assert.NotEmpty(fonts);
+        Assert.DoesNotContain(fonts, f => PseudoBidiFontNames.IsPseudo(f.Value));
+        // The pasted Hebrew run (it referenced \f45 "Calibri (Hebrew)") now names Calibri.
+        Assert.Contains(fonts, f => f.Key is "ff" or "fontFamily" && f.Value == "Calibri");
+    }
+
     // ---- helpers ------------------------------------------------------------------------------------------
 
     private static string LangDrivenHebrewRun(string sentence) =>
@@ -357,6 +414,49 @@ public class DocumentEditorClipboardTests
 
         Walk(sfdt);
         return string.Concat(runs);
+    }
+
+    /// <summary>Every font-name value in the SFDT the endpoint returns, keyed by its SFDT property name.</summary>
+    private static List<KeyValuePair<string, string>> FontValuesOf(string endpointJson)
+    {
+        var fontKeys = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ff", "ffbi", "ffa", "ffnfe", "fffe",
+            "fontFamily", "fontFamilyBidi", "fontFamilyAscii", "fontFamilyNonFarEast", "fontFamilyFarEast",
+        };
+        var wrapper = JObject.Parse(endpointJson);
+        using var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String((string)wrapper["sfdt"]!)));
+        using var reader = new StreamReader(zip.Entries[0].Open());
+        var sfdt = JToken.Parse(reader.ReadToEnd());
+
+        var found = new List<KeyValuePair<string, string>>();
+        void Walk(JToken token)
+        {
+            if (token is JObject obj)
+            {
+                foreach (var property in obj.Properties())
+                {
+                    if (fontKeys.Contains(property.Name) && property.Value.Type == JTokenType.String)
+                        found.Add(new KeyValuePair<string, string>(property.Name, (string)property.Value!));
+                    Walk(property.Value);
+                }
+            }
+            else if (token is JArray array)
+            {
+                foreach (var item in array) Walk(item);
+            }
+        }
+
+        Walk(sfdt);
+        return found;
+    }
+
+    private static int CountOf(string text, string needle)
+    {
+        var count = 0;
+        for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = text.IndexOf(needle, i + 1, StringComparison.Ordinal))
+            count++;
+        return count;
     }
 
     private static bool HasHebrew(string text) => text.Any(c => c is >= '\u05D0' and <= '\u05EA');
