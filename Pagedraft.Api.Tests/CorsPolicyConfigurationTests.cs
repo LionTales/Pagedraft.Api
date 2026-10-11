@@ -27,4 +27,19 @@ public class CorsPolicyConfigurationTests
         Assert.Contains(BookExportService.SkippedCountHeader, policy.ExposedHeaders);
         Assert.Contains(BookExportService.SkippedChaptersHeader, policy.ExposedHeaders);
     }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheTwoAnnotationHeaders_UnderTheNamesTheClientReads()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        // Literal names, mirrored in pagedraft-client core/models/export.ts: a rename on either side breaks the read.
+        Assert.Equal("X-Export-Annotation-Count", BookExportService.AnnotationCountHeader);
+        Assert.Equal("X-Export-Unanchored-Count", BookExportService.UnanchoredCountHeader);
+        Assert.Contains(BookExportService.AnnotationCountHeader, policy.ExposedHeaders);
+        Assert.Contains(BookExportService.UnanchoredCountHeader, policy.ExposedHeaders);
+    }
 }

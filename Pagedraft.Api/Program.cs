@@ -43,6 +43,9 @@ builder.Services.AddScoped<SfdtConversionService>();
 builder.Services.AddScoped<ChapterService>();
 builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
+// Stateless Open XML writer for the proofread-annotated exports (comments + tracked changes); only
+// BookExportService uses it, so it is scoped alongside.
+builder.Services.AddScoped<Pagedraft.Api.Services.Export.ProofreadDocxAnnotator>();
 builder.Services.AddScoped<BookExportService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();

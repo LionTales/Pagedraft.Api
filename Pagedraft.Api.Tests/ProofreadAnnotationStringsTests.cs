@@ -15,6 +15,7 @@ public class ProofreadAnnotationStringsTests
         ProofreadAnnotationStrings.SuggestionLine(language, "X", ""),
         ProofreadAnnotationStrings.SuggestionLine(language, "", "Y"),
         ProofreadAnnotationStrings.CategoryLine(language, ProofreadAnnotationStrings.KtivMaleCategory),
+        ProofreadAnnotationStrings.FileNameSuffix(language),
     };
 
     [Theory]

@@ -44,6 +44,15 @@ internal static class ProofreadAnnotationStrings
             : $"Suggested: {suggested} instead of {original}";
     }
 
+    /// <summary>
+    /// Appended to the plain export's file-name stem (before <c>.docx</c>) on an annotated export, so the
+    /// annotated file never lands on top of the clean one in the author's downloads folder.
+    /// </summary>
+    public static string FileNameSuffix(string? language) =>
+        IsHebrew(language)
+            ? " - הגהה" // DRAFT he - needs native review
+            : " - proofread";
+
     /// <summary>Comment line 2: present only for a category with an author-facing name.</summary>
     public static string? CategoryLine(string? language, string? category)
     {

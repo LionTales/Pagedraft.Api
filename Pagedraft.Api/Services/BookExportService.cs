@@ -56,16 +56,24 @@ public sealed record ExportSkippedChapter(int Order, string Title);
 /// the assembled document does NOT contain, in <c>Order</c>. Empty on the chapter path by construction: a
 /// single unrenderable chapter is <see cref="BookExportOutcome.NothingWritten"/>, not a skip.
 /// </param>
+/// <param name="Annotation">
+/// Null on a plain export. On a proofread-annotated export (<see cref="BookExportService.ExportBookProofreadAsync"/>,
+/// <see cref="BookExportService.ExportChapterProofreadAsync"/>) with outcome Ok, how many pending suggestions
+/// were written into the file and how many could not be placed; the controller turns it into the two
+/// annotation headers.
+/// </param>
 public sealed record BookExportResult(
     BookExportOutcome Outcome,
     byte[]? Content,
     string? FileName,
-    IReadOnlyList<ExportSkippedChapter> SkippedChapters)
+    IReadOnlyList<ExportSkippedChapter> SkippedChapters,
+    ExportAnnotationCounts? Annotation = null)
 {
     private static readonly IReadOnlyList<ExportSkippedChapter> NoneSkipped = Array.Empty<ExportSkippedChapter>();
 
-    public static BookExportResult Ok(byte[] content, string fileName, IReadOnlyList<ExportSkippedChapter>? skipped = null)
-        => new(BookExportOutcome.Ok, content, fileName, skipped ?? NoneSkipped);
+    public static BookExportResult Ok(
+        byte[] content, string fileName, IReadOnlyList<ExportSkippedChapter>? skipped = null, ExportAnnotationCounts? annotation = null)
+        => new(BookExportOutcome.Ok, content, fileName, skipped ?? NoneSkipped, annotation);
     public static BookExportResult BookNotFound() => new(BookExportOutcome.BookNotFound, null, null, NoneSkipped);
     public static BookExportResult ChapterNotFound() => new(BookExportOutcome.ChapterNotFound, null, null, NoneSkipped);
     public static BookExportResult NothingToExport() => new(BookExportOutcome.NothingToExport, null, null, NoneSkipped);
@@ -86,7 +94,7 @@ public sealed record BookExportResult(
 /// calls, and needs no job/progress contract. If a very long book ever makes that untrue, the fix is a job
 /// registry like the book-level builds have, not a background thread here.
 /// </summary>
-public class BookExportService
+public partial class BookExportService
 {
     /// <summary>
     /// The DOCX media type, spelled once. Both endpoints and their tests read it from here.
@@ -184,18 +192,25 @@ public class BookExportService
     /// </summary>
     private readonly ILogger<BookExportService>? _logger;
 
+    /// <summary>Writes pending proofread suggestions into a unit's DOCX, on the annotated exports only.</summary>
+    private readonly Export.ProofreadDocxAnnotator _proofreadAnnotator;
+
     public BookExportService(
         AppDbContext db,
         ChapterService chapters,
         SfdtConversionService sfdtConversion,
         BookAssemblyService bookAssembly,
-        ILogger<BookExportService>? logger = null)
+        ILogger<BookExportService>? logger = null,
+        Export.ProofreadDocxAnnotator? proofreadAnnotator = null)
     {
         _db = db;
         _chapters = chapters;
         _sfdtConversion = sfdtConversion;
         _bookAssembly = bookAssembly;
         _logger = logger;
+        _proofreadAnnotator = proofreadAnnotator
+            ?? new Export.ProofreadDocxAnnotator(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<Export.ProofreadDocxAnnotator>.Instance);
     }
 
     /// <summary>
@@ -220,20 +235,33 @@ public class BookExportService
     /// is assembled from those scenes when they hold the writing, because <c>chapter.ContentSfdt</c> is then a
     /// frozen pre-split copy. See <see cref="RenderableUnitsOf"/> for the rule and why it is conditional.
     /// </summary>
-    public async Task<BookExportResult> ExportBookAsync(Guid bookId, CancellationToken ct = default)
+    public Task<BookExportResult> ExportBookAsync(Guid bookId, CancellationToken ct = default)
+        => ExportBookCoreAsync(bookId, proofread: false, ct);
+
+    /// <summary>
+    /// The book path, plain or proofread-annotated. ONE body for both so the annotated export cannot drift
+    /// from the plain one on the unit rule, the skip rule or the empty-book answers: the only differences are
+    /// that each unit's buffer goes through <see cref="AnnotationSession.Annotate"/> BEFORE assembly (DocIO's
+    /// ImportContent carries the hand-written revisions and comments through and renumbers comment ids, pinned
+    /// by <c>ProofreadAnnotatedAssemblyPremiseTests</c>), and that the file name and result carry the annotation.
+    /// </summary>
+    private async Task<BookExportResult> ExportBookCoreAsync(Guid bookId, bool proofread, CancellationToken ct)
     {
-        var title = await _db.Books
+        var book = await _db.Books
             .AsNoTracking()
             .Where(b => b.Id == bookId)
-            .Select(b => b.Title)
+            .Select(b => new { b.Title, b.Language })
             .FirstOrDefaultAsync(ct);
 
-        if (title == null) return BookExportResult.BookNotFound();
+        if (book?.Title == null) return BookExportResult.BookNotFound();
+        var title = book.Title;
 
         var chapters = await _chapters.GetAllByBookAsync(bookId, ct);
         if (chapters.Count == 0) return BookExportResult.NothingToExport();
 
-        var scenesByChapter = await LoadScenesAsync(chapters.Select(c => c.Id).ToList(), ct);
+        var chapterIds = chapters.Select(c => c.Id).ToList();
+        var scenesByChapter = await LoadScenesAsync(chapterIds, ct);
+        var annotation = proofread ? await StartAnnotationAsync(chapterIds, book.Language, ct) : null;
 
         var buffers = new List<byte[]>(chapters.Count);
         var skipped = new List<ExportSkippedChapter>();
@@ -250,7 +278,7 @@ public class BookExportService
             // nothing inserted between them: scenes are contiguous prose inside one chapter, and the split
             // deleted whatever break marker the author had written, so inventing one would be writing into
             // their manuscript.
-            foreach (var unit in units) buffers.Add(_sfdtConversion.ConvertSfdtToDocx(unit));
+            foreach (var unit in units) buffers.Add(Render(unit, annotation));
         }
 
         // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
@@ -258,7 +286,11 @@ public class BookExportService
         if (buffers.Count == 0) return BookExportResult.NothingWritten();
 
         var docx = _bookAssembly.AssembleDocx(buffers);
-        return BookExportResult.Ok(docx, BuildFileName(title, fallbackStem: "book"), skipped);
+        return BookExportResult.Ok(
+            docx,
+            BuildFileName(title, fallbackStem: "book", annotation?.FileNameSuffix),
+            skipped,
+            annotation?.Finish(bookId, chapterId: null));
     }
 
     /// <summary>
@@ -277,7 +309,11 @@ public class BookExportService
     /// the decision through the one <see cref="RenderableUnitsOf"/>, so they cannot answer differently about
     /// the same chapter.
     /// </summary>
-    public async Task<BookExportResult> ExportChapterAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
+    public Task<BookExportResult> ExportChapterAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
+        => ExportChapterCoreAsync(bookId, chapterId, proofread: false, ct);
+
+    /// <summary>The chapter path, plain or proofread-annotated; see <see cref="ExportBookCoreAsync"/>.</summary>
+    private async Task<BookExportResult> ExportChapterCoreAsync(Guid bookId, Guid chapterId, bool proofread, CancellationToken ct)
     {
         var chapter = await _chapters.GetByIdAsync(bookId, chapterId, ct);
         if (chapter == null) return BookExportResult.ChapterNotFound();
@@ -288,10 +324,15 @@ public class BookExportService
         var units = ResolveUnitsFor(chapter, scenes);
         if (units.Count == 0) return BookExportResult.NothingWritten();
 
+        var annotation = proofread ? await StartChapterAnnotationAsync(bookId, chapter.Id, ct) : null;
+
         // AssembleDocx returns a single buffer untouched, so an unsplit chapter produces byte-for-byte what
         // it always did and only a scene-composed one goes through the assembler.
-        var docx = _bookAssembly.AssembleDocx(units.Select(_sfdtConversion.ConvertSfdtToDocx).ToList());
-        return BookExportResult.Ok(docx, BuildFileName(chapter.Title, fallbackStem: "chapter"));
+        var docx = _bookAssembly.AssembleDocx(units.Select(u => Render(u, annotation)).ToList());
+        return BookExportResult.Ok(
+            docx,
+            BuildFileName(chapter.Title, fallbackStem: "chapter", annotation?.FileNameSuffix),
+            annotation: annotation?.Finish(bookId, chapter.Id));
     }
 
     /// <summary>
@@ -439,10 +480,10 @@ public class BookExportService
     /// export had to choose between two written copies of the same chapter. Both export paths go through this
     /// rather than calling the resolver directly, so the warning cannot exist on one path only.
     /// </summary>
-    private IReadOnlyList<string> ResolveUnitsFor(Chapter chapter, IReadOnlyList<Scene>? scenes)
+    private IReadOnlyList<RenderableUnit> ResolveUnitsFor(Chapter chapter, IReadOnlyList<Scene>? scenes)
     {
         WarnIfBothCopiesLookWritten(chapter, scenes);
-        return RenderableUnitsOf(chapter, scenes);
+        return RenderableUnitSourcesOf(chapter, scenes);
     }
 
     /// <summary>
@@ -487,19 +528,26 @@ public class BookExportService
     /// falling back to a pre-split draft the author has replaced with nothing.
     /// </summary>
     internal static IReadOnlyList<string> RenderableUnitsOf(Chapter chapter, IReadOnlyList<Scene>? scenes)
+        => RenderableUnitSourcesOf(chapter, scenes).Select(u => u.Sfdt).ToList();
+
+    /// <summary>
+    /// <see cref="RenderableUnitsOf"/> with each unit's identity kept: the chapter row (<c>SceneId</c> null) or
+    /// the scene it came from. The annotated export needs it to find the unit's OWN proofread result (Chapter
+    /// scope keyed by chapter, Scene scope keyed by scene); the plain export ignores it.
+    /// </summary>
+    internal static IReadOnlyList<RenderableUnit> RenderableUnitSourcesOf(Chapter chapter, IReadOnlyList<Scene>? scenes)
     {
         if (ScenesHoldTheChaptersCurrentText(scenes))
         {
             return scenes!
-                .Select(s => s.ContentSfdt)
-                .Where(HasRenderableContent)
-                .Select(sfdt => sfdt!)
+                .Where(s => HasRenderableContent(s.ContentSfdt))
+                .Select(s => new RenderableUnit(s.ContentSfdt!, chapter.Id, s.Id))
                 .ToList();
         }
 
         return HasRenderableContent(chapter.ContentSfdt)
-            ? new[] { chapter.ContentSfdt }
-            : Array.Empty<string>();
+            ? new[] { new RenderableUnit(chapter.ContentSfdt, chapter.Id, SceneId: null) }
+            : Array.Empty<RenderableUnit>();
     }
 
     /// <summary>
@@ -573,11 +621,11 @@ public class BookExportService
     /// <c>filename</c> (ASCII approximation) and a <c>filename*=UTF-8''...</c> parameter, and every browser
     /// this product targets reads the latter.
     /// </summary>
-    internal static string BuildFileName(string? title, string fallbackStem)
+    internal static string BuildFileName(string? title, string fallbackStem, string? suffix = null)
     {
         var stem = SanitizeFileNameStem(title);
         if (stem.Length == 0) stem = fallbackStem;
-        return stem + ".docx";
+        return stem + (suffix ?? string.Empty) + ".docx";
     }
 
     /// <summary>
