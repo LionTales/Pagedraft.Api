@@ -107,6 +107,9 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 // In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
 // registry so a running summary build never blocks a review build (and vice versa) for the same book.
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
+// In-progress whole-book proofread run registry (with per-job cancellation) - singleton for the SAME reason.
+builder.Services.AddSingleton<BookProofreadBuildRegistry>();
+builder.Services.AddScoped<IBookProofreadService, BookProofreadService>();
 // Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
 // reason as the three registries above (one shared map across request scopes), and the runner is stateless.
 // Unlike them this one keys by BookId ALONE - BookProfile is one row per BOOK, so two languages contend for

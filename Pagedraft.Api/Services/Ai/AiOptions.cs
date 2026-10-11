@@ -36,6 +36,12 @@ public class AiOptions
     /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
     public int MaxParallelProofreadChunks { get; set; } = 2;
 
+    /// <summary>Chapters proofread concurrently in a whole-book run. 1: the 8GB card is single-slot and chunks inside one chapter already run <see cref="MaxParallelProofreadChunks"/> wide.</summary>
+    public int MaxParallelBookProofreadChapters { get; set; } = 1;
+
+    /// <summary>Seconds per proofread chunk used for the whole-book ETA (measured 42.2 min / 64 chunks, CHARACTER_CONTEXT_ADHERENCE_GAPS.md).</summary>
+    public int ProofreadSecondsPerChunkEstimate { get; set; } = 40;
+
     /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel. Default 500.</summary>
     public int LineEditChunkTargetWords { get; set; } = DefaultLineEditChunkTargetWords;
 
