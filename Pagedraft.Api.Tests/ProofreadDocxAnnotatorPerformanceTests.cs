@@ -66,6 +66,8 @@ public class ProofreadDocxAnnotatorPerformanceTests
         clock.Stop();
         _output.WriteLine($"Annotate: {clock.ElapsedMilliseconds} ms, placed {result.Placed}, unanchored {result.Unanchored}");
 
+        // No suggestion here is whitespace-only, so none may be skipped as one.
+        Assert.Equal(0, result.WhitespaceSkipped);
         Assert.Equal(SuggestionCount, result.Placed + result.Unanchored);
         Assert.True(result.Placed >= 950, $"only {result.Placed} of {SuggestionCount} placed: the fixture stopped anchoring");
         Assert.True(clock.Elapsed < Bound, $"Annotate took {clock.ElapsedMilliseconds} ms (bound {Bound.TotalMilliseconds} ms)");

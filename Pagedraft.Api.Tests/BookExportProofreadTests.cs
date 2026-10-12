@@ -45,7 +45,9 @@ public class BookExportProofreadTests
         SeedResult(db, chapter, sceneId: null,
             Sug("לבית הספר", "לביה\"ס", explanation: "קיצור מקובל."),
             Sug("הגדול", "הגדולה"),
-            Sug("מילה שאיננה בטקסט", "x")); // pending but unplaceable
+            Sug("מילה שאיננה בטקסט", "x"), // pending but unplaceable
+            Sug(" ", ""),                  // pending, whitespace only: left out and counted apart (plan c16)
+            Sug("\u00A0", " "));
         await db.SaveChangesAsync();
 
         var result = await controller.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None);
@@ -54,6 +56,7 @@ public class BookExportProofreadTests
         Assert.Equal("פרק ראשון - הגהה.docx", file.FileDownloadName);
         Assert.Equal("2", Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Equal("1", Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("2", Header(controller, BookExportService.WhitespaceSkippedCountHeader)); // 2 + 1 + 2 = 5 pending
 
         using var reloaded = Reload(file);
         Assert.Equal(1, reloaded.Comments.Count); // only the explained one: a comment restating a change is not written
@@ -95,6 +98,7 @@ public class BookExportProofreadTests
         // A plain export never carries the annotation headers: their presence means "this was annotated".
         Assert.Null(Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Null(Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Null(Header(controller, BookExportService.WhitespaceSkippedCountHeader));
         Assert.Null(Header(controller, BookExportService.UnreliableSkippedCountHeader));
 
         var (annotatedController, _, _) = Build(db);
@@ -103,6 +107,7 @@ public class BookExportProofreadTests
 
         Assert.Equal("0", Header(annotatedController, BookExportService.AnnotationCountHeader));
         Assert.Equal("0", Header(annotatedController, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("0", Header(annotatedController, BookExportService.WhitespaceSkippedCountHeader));
         Assert.Equal("0", Header(annotatedController, BookExportService.UnreliableSkippedCountHeader));
         Assert.Null(Entry(annotated.FileContents, "word/comments.xml"));
         Assert.Equal(TextOf(plain), TextOf(annotated));

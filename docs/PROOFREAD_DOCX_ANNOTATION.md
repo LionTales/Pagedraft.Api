@@ -43,11 +43,24 @@ The author's own comments and tracked changes already in the chapters pass throu
 - Suggestions come from the chapter's current Active Proofread result. A chapter with no result, or only
   results from before its last edit, annotates what the result holds or nothing; run the whole-book
   proofread first so every chapter is fresh.
+- Whitespace-only suggestions are left out. A suggestion whose original and suggested text are equal
+  once leading and trailing whitespace is trimmed (the client's own hide rule in `proofread-diff.ts`, with
+  JavaScript's whitespace set: it includes the no-break space U+00A0) changes nothing an author can act
+  on, so it is never written as a tracked change. The count is returned in
+  `X-Export-Whitespace-Skipped-Count`; the download notice does not mention it. Measured on a 55-chapter
+  book (2026-10-12): 4,009 of 4,676 pending suggestions were whitespace-only, 4,008 of them a space or
+  no-break space at a paragraph edge that the proofread chunker had trimmed and reported back as a
+  deletion. One was a real spacing fix (a space before a closing quote) and is lost to this rule.
+- A real edit that the diff fused with paragraph-edge whitespace (`" כול"` to `"כל"`, the space being the
+  break between two paragraphs) is placed on its words. The edge whitespace both sides share is taken off
+  first; only when that still cannot be placed is all of the original's edge whitespace taken off, so a
+  word deleted together with its following space inside a paragraph still takes the space with it.
 - Some suggestions cannot be placed: the original text is not found, is ambiguous even with its
   context, crosses a paragraph boundary, or overlaps a suggestion already placed. They are not guessed at.
-  The count is returned in the `X-Export-Unanchored-Count` header and shown in the download notice;
-  placed plus unanchored equals the pending total. `X-Export-Annotation-Count` counts placed suggestions
-  (tracked changes), not comments.
+  The count is returned in the `X-Export-Unanchored-Count` header and shown in the download notice.
+  `X-Export-Annotation-Count` counts placed suggestions (tracked changes), not comments. Placed plus
+  unanchored plus whitespace-skipped equals the pending total; on the book above that was 666 + 1 + 4,009
+  (the one unplaced suggestion is a real edit spanning two paragraphs).
 - Unreliable results are exported by default. When the system flagged a chapter's Active Proofread result
   as unreliable (the model output looked broken), the export page asks first: export everything, skip
   those chapters, or cancel. The choice travels as `?unreliable=include|skip` (default `include`,
@@ -66,5 +79,9 @@ Comments and tracked changes are hand-written Open XML (`Services/Export/Proofre
 because DocIO's `TrackChanges = true` records no revisions for API edits on the shipped 32.1.24. The
 comment rule and the explanation floor live in `ProofreadAnnotationStrings.CommentLines` /
 `SanitizeExplanation`; a file whose suggestions all lack information has no comments part at all. Anchoring
-is by text plus context into a normalized paragraph view, never by raw offset. Annotation happens on each
+is by text plus context into a normalized paragraph view, never by raw offset. The whitespace rules
+(whitespace-only skip, common-edge trim, boundary-edge fallback) live in `ProofreadWhitespace`, whose
+whitespace set is pinned code unit by code unit against JavaScript's `trim` (it is not .NET's
+`char.IsWhiteSpace`: U+FEFF is whitespace there, U+0085 is not). Note the client applies its hide rule
+only to suggestions it diffs itself; stored server suggestions reach the chapter view unfiltered. Annotation happens on each
 unit's buffer before book assembly, which was premise-tested to keep all revisions and comments.

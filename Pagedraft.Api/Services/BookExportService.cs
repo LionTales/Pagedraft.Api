@@ -59,8 +59,8 @@ public sealed record ExportSkippedChapter(int Order, string Title);
 /// <param name="Annotation">
 /// Null on a plain export. On a proofread-annotated export (<see cref="BookExportService.ExportBookProofreadAsync"/>,
 /// <see cref="BookExportService.ExportChapterProofreadAsync"/>) with outcome Ok, how many pending suggestions
-/// were written into the file and how many could not be placed; the controller turns it into the two
-/// annotation headers.
+/// were written into the file, how many could not be placed and how many were left out as whitespace-only; the
+/// controller turns it into the annotation headers.
 /// </param>
 public sealed record BookExportResult(
     BookExportOutcome Outcome,

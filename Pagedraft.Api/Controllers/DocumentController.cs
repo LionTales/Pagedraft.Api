@@ -181,8 +181,9 @@ public class DocumentController : ControllerBase
     /// The whole book as one DOCX with every unit's PENDING proofread suggestions written in as tracked changes
     /// (a Word comment only where there is a label or an explanation to add), named like the plain export plus " - הגהה" / " - proofread". Same 404/409 answers
     /// and skipped-chapter headers as <see cref="ExportBook"/>; a <c>200</c> also carries
-    /// <see cref="BookExportService.AnnotationCountHeader"/>, <see cref="BookExportService.UnanchoredCountHeader"/>
-    /// and <see cref="BookExportService.UnreliableSkippedCountHeader"/>.
+    /// <see cref="BookExportService.AnnotationCountHeader"/>, <see cref="BookExportService.UnanchoredCountHeader"/>,
+    /// <see cref="BookExportService.WhitespaceSkippedCountHeader"/> and
+    /// <see cref="BookExportService.UnreliableSkippedCountHeader"/>.
     ///
     /// <c>?unreliable=include|skip</c> (default include, case-insensitive): skip leaves every unit whose Active
     /// result is flagged unreliable as plain text. Any other value is <c>400</c> ProblemDetails, checked first.
@@ -292,8 +293,9 @@ public class DocumentController : ControllerBase
     }
 
     /// <summary>
-    /// On an annotated export, how many pending suggestions the file carries, how many could not be placed,
-    /// and how many chapters were left unannotated as unreliable. All three are written, zeros included,
+    /// On an annotated export, how many pending suggestions the file carries, how many could not be placed, how
+    /// many were left out as whitespace-only, and how many chapters were left unannotated as unreliable. All four
+    /// are written, zeros included,
     /// whenever the export was an annotated one, so the client can tell "nothing to annotate" from "this server
     /// did not say"; a plain export writes none.
     /// </summary>
@@ -304,6 +306,8 @@ public class DocumentController : ControllerBase
             annotation.Placed.ToString(System.Globalization.CultureInfo.InvariantCulture);
         Response.Headers[BookExportService.UnanchoredCountHeader] =
             annotation.Unanchored.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Response.Headers[BookExportService.WhitespaceSkippedCountHeader] =
+            annotation.WhitespaceSkipped.ToString(System.Globalization.CultureInfo.InvariantCulture);
         Response.Headers[BookExportService.UnreliableSkippedCountHeader] =
             annotation.UnreliableSkippedChapters.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }

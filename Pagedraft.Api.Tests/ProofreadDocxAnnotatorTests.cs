@@ -22,7 +22,7 @@ namespace Pagedraft.Api.Tests;
 /// something; only then is it ranged by a comment, whose body is that information and never a restatement
 /// of the change (owner decision 2026-10-12).
 /// </summary>
-public class ProofreadDocxAnnotatorTests
+public partial class ProofreadDocxAnnotatorTests
 {
     private static readonly XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private static readonly DateTime Stamp = new(2026, 10, 11, 12, 0, 0, DateTimeKind.Utc);

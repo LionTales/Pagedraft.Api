@@ -9,13 +9,16 @@ namespace Pagedraft.Api.Services;
 
 /// <summary>
 /// What an annotated export wrote: <paramref name="Placed"/> pending suggestions became tracked change(s)
-/// (a Word comment too only when there was a label or an explanation to add); <paramref name="Unanchored"/> could not be placed (no match, ambiguous, crossing a
-/// paragraph, or overlapping a placed one). <c>Placed + Unanchored</c> is the number of pending suggestions
-/// on the Active Proofread results of the units in the file, minus those of skipped units:
+/// (a Word comment too only when there was a label or an explanation to add); <paramref name="Unanchored"/> could
+/// not be placed (no match, ambiguous, crossing a paragraph, or overlapping a placed one);
+/// <paramref name="WhitespaceSkipped"/> changed whitespace only and were deliberately not written (plan c16, the
+/// client diff's own hide rule). <c>Placed + Unanchored + WhitespaceSkipped</c> is the number of pending
+/// suggestions on the Active Proofread results of the units in the file, minus those of skipped units:
 /// <paramref name="UnreliableSkippedChapters"/> is how many CHAPTERS had at least one unit left unannotated
 /// because its Active result is flagged unreliable and the export asked to skip those (always 0 on include).
 /// </summary>
-public sealed record ExportAnnotationCounts(int Placed, int Unanchored, int UnreliableSkippedChapters = 0);
+public sealed record ExportAnnotationCounts(
+    int Placed, int Unanchored, int WhitespaceSkipped = 0, int UnreliableSkippedChapters = 0);
 
 /// <summary>
 /// What an annotated export does with a unit whose Active Proofread result is flagged
@@ -81,6 +84,13 @@ public partial class BookExportService
     /// CORS note as <see cref="AnnotationCountHeader"/>.
     /// </summary>
     public const string UnreliableSkippedCountHeader = "X-Export-Unreliable-Skipped-Count";
+
+    /// <summary>
+    /// How many pending suggestions changed whitespace only (or nothing) and were therefore not written into the
+    /// file (plan c16): <c>Placed + Unanchored + WhitespaceSkipped</c> = pending, so a caller can reconcile the
+    /// file against the stored rows. Same presence rule and CORS note as <see cref="AnnotationCountHeader"/>.
+    /// </summary>
+    public const string WhitespaceSkippedCountHeader = "X-Export-Whitespace-Skipped-Count";
 
     /// <summary>
     /// Parses the <c>unreliable</c> query value: absent or blank is <see cref="UnreliableProofreadMode.Include"/>,
@@ -202,6 +212,7 @@ public partial class BookExportService
         private readonly HashSet<Guid> _unreliableSkippedChapters = new();
         private int _placed;
         private int _unanchored;
+        private int _whitespaceSkipped;
         private int _unitsWithResult;
         private int _unitsSkipped;
 
@@ -234,6 +245,7 @@ public partial class BookExportService
             var outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions, _language, _stamp);
             _placed += outcome.Placed;
             _unanchored += outcome.Unanchored;
+            _whitespaceSkipped += outcome.WhitespaceSkipped;
             return outcome.Docx;
         }
 
@@ -241,11 +253,12 @@ public partial class BookExportService
         {
             _owner._logger?.LogInformation(
                 "Proofread-annotated export of book {BookId} (chapter {ChapterId}): {Placed} suggestions placed, " +
-                "{Unanchored} not placed, from {UnitsWithResult} unit(s) with an Active proofread result; " +
+                "{Unanchored} not placed, {WhitespaceSkipped} whitespace-only skipped, from {UnitsWithResult} unit(s) " +
+                "with an Active proofread result; " +
                 "unreliable={Unreliable}, {UnitsSkipped} unreliable unit(s) skipped in {ChaptersSkipped} chapter(s).",
-                bookId, chapterId?.ToString() ?? "all", _placed, _unanchored, _unitsWithResult,
+                bookId, chapterId?.ToString() ?? "all", _placed, _unanchored, _whitespaceSkipped, _unitsWithResult,
                 _unreliable, _unitsSkipped, _unreliableSkippedChapters.Count);
-            return new ExportAnnotationCounts(_placed, _unanchored, _unreliableSkippedChapters.Count);
+            return new ExportAnnotationCounts(_placed, _unanchored, _whitespaceSkipped, _unreliableSkippedChapters.Count);
         }
     }
 }

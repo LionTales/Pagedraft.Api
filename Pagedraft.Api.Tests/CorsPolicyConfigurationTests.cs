@@ -54,4 +54,17 @@ public class CorsPolicyConfigurationTests
         Assert.Equal("X-Export-Unreliable-Skipped-Count", BookExportService.UnreliableSkippedCountHeader);
         Assert.Contains(BookExportService.UnreliableSkippedCountHeader, policy.ExposedHeaders);
     }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheWhitespaceSkippedHeader_UnderItsLiteralName()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        // Plan c16: Placed + Unanchored + WhitespaceSkipped = pending, readable cross-origin like the other three.
+        Assert.Equal("X-Export-Whitespace-Skipped-Count", BookExportService.WhitespaceSkippedCountHeader);
+        Assert.Contains(BookExportService.WhitespaceSkippedCountHeader, policy.ExposedHeaders);
+    }
 }

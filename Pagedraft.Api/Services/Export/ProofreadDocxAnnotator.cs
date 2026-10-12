@@ -20,9 +20,13 @@ namespace Pagedraft.Api.Services.Export;
 /// Pending suggestions that could not be placed: no match, an ambiguous match the contexts do not settle,
 /// a span crossing a paragraph or touching text that is not plain body text (a field result, an existing
 /// tracked insertion, a tab or break), or a span overlapping one placed before it.
-/// <c>Placed + Unanchored</c> is always the number of pending suggestions.
 /// </param>
-public sealed record ProofreadAnnotationResult(byte[] Docx, int Placed, int Unanchored);
+/// <param name="WhitespaceSkipped">
+/// Pending suggestions that change whitespace only (or nothing), by the client's own hide rule
+/// (<see cref="ProofreadWhitespace.IsWhitespaceOnlyChange"/>): never written, and neither placed nor unanchored.
+/// <c>Placed + Unanchored + WhitespaceSkipped</c> is always the number of pending suggestions.
+/// </param>
+public sealed record ProofreadAnnotationResult(byte[] Docx, int Placed, int Unanchored, int WhitespaceSkipped);
 
 /// <summary>
 /// Writes pending proofread suggestions into a DOCX as Word tracked changes (<c>w:del</c> / <c>w:ins</c>),
@@ -47,6 +51,14 @@ public sealed record ProofreadAnnotationResult(byte[] Docx, int Placed, int Unan
 /// <para>Only pending suggestions (<c>Outcome == null</c>) are written: an Accepted one is already in the
 /// text, Dismissed/Reverted/Superseded ones are not proposals any more. They are taken in
 /// <c>StartOffset</c> order and one that overlaps an earlier placed one is dropped (counted unanchored).</para>
+///
+/// <para>WHITESPACE (plan c16; c15 measured 86% of a 4,676-suggestion book changing whitespace only). A
+/// suggestion that changes nothing but whitespace is skipped and counted apart, under the client's own hide
+/// rule. A real edit is located with the edge whitespace both sides share taken off; when that form cannot be
+/// placed, it is tried again with all of the original's edge whitespace off, so an edit fused with a paragraph
+/// boundary (<c>" כול" -&gt; "כל"</c>, the space being the separator) lands on the word and not on the paragraph
+/// mark, while a word deleted with its space inside a paragraph still takes the space with it. The rules are
+/// <see cref="ProofreadWhitespace"/>'s.</para>
 /// </summary>
 public sealed partial class ProofreadDocxAnnotator
 {
@@ -65,13 +77,25 @@ public sealed partial class ProofreadDocxAnnotator
     {
         ArgumentNullException.ThrowIfNull(docx);
 
-        var pending = (suggestions ?? Array.Empty<AnalysisSuggestion>())
-            .Where(s => s.Outcome == null)
-            .OrderBy(s => s.StartOffset ?? int.MaxValue)
-            .ThenBy(s => s.OrderIndex)
-            .ToList();
+        var whitespaceSkipped = 0;
+        var candidates = new List<Candidate>();
+        foreach (var s in suggestions ?? Array.Empty<AnalysisSuggestion>())
+        {
+            if (s.Outcome != null) continue;
+            if (ProofreadWhitespace.IsWhitespaceOnlyChange(s.OriginalText, s.SuggestedText))
+            {
+                whitespaceSkipped++;
+                continue;
+            }
+            candidates.Add(Candidate.Of(s));
+        }
+        if (whitespaceSkipped > 0)
+            _logger.LogDebug("Proofread annotation: {Count} whitespace-only suggestion(s) skipped", whitespaceSkipped);
+
+        // Ordered by where the edit's own text starts, past the original's leading whitespace.
+        var pending = candidates.OrderBy(c => c.Start).ThenBy(c => c.Suggestion.OrderIndex).ToList();
         if (pending.Count == 0)
-            return new ProofreadAnnotationResult(docx, 0, 0);
+            return new ProofreadAnnotationResult(docx, 0, 0, whitespaceSkipped);
 
         using var stream = new MemoryStream();
         stream.Write(docx, 0, docx.Length);
@@ -84,12 +108,12 @@ public sealed partial class ProofreadDocxAnnotator
             var main = package.MainDocumentPart;
             var body = main?.Document?.Body;
             if (main == null || body == null)
-                return new ProofreadAnnotationResult(docx, 0, pending.Count);
+                return new ProofreadAnnotationResult(docx, 0, pending.Count, whitespaceSkipped);
 
             var text = DocumentText.Build(body);
-            foreach (var suggestion in pending)
+            foreach (var candidate in pending)
             {
-                var edit = Resolve(suggestion, text, out var reason);
+                var edit = Resolve(candidate, text, out var reason);
                 if (edit != null && placed.Any(p => p.Conflicts(edit)))
                 {
                     edit = null;
@@ -99,7 +123,7 @@ public sealed partial class ProofreadDocxAnnotator
                 {
                     unanchored++;
                     _logger.LogDebug(
-                        "Proofread annotation: suggestion {SuggestionId} not placed ({Reason})", suggestion.Id, reason);
+                        "Proofread annotation: suggestion {SuggestionId} not placed ({Reason})", candidate.Suggestion.Id, reason);
                     continue;
                 }
                 placed.Add(edit);
@@ -107,21 +131,57 @@ public sealed partial class ProofreadDocxAnnotator
 
             // Nothing to write: hand back the caller's own bytes, untouched.
             if (placed.Count == 0)
-                return new ProofreadAnnotationResult(docx, 0, unanchored);
+                return new ProofreadAnnotationResult(docx, 0, unanchored, whitespaceSkipped);
 
             WriteEdits(main, text, placed, language, stamp);
         }
 
-        return new ProofreadAnnotationResult(stream.ToArray(), placed.Count, unanchored);
+        return new ProofreadAnnotationResult(stream.ToArray(), placed.Count, unanchored, whitespaceSkipped);
     }
 
     // ---------------------------------------------------------------- resolution
 
-    private static Edit? Resolve(AnalysisSuggestion s, DocumentText text, out string reason)
+    /// <summary>
+    /// A pending, not whitespace-only suggestion as it is located, its original on the normalized axis, in up to
+    /// two forms: <see cref="Original"/>/<see cref="Suggested"/> with the edge whitespace both sides share taken off
+    /// (<see cref="ProofreadWhitespace.TrimCommonEdges"/>), tried first; and, when it differs, a fallback with ALL of
+    /// the original's edge whitespace off (<see cref="ProofreadWhitespace.TrimBoundaryEdges"/>), tried only when the
+    /// first cannot be placed. <see cref="Start"/> is the stored start shifted past the original's leading
+    /// whitespace (where the edit's own text begins) and orders the candidates.
+    /// </summary>
+    private sealed record Candidate(
+        AnalysisSuggestion Suggestion, string Original, string Suggested, int Start,
+        string? FallbackOriginal, string? FallbackSuggested)
+    {
+        public static Candidate Of(AnalysisSuggestion s)
+        {
+            var normalized = TextNormalization.NormalizeTextForAnalysis(s.OriginalText ?? string.Empty) ?? string.Empty;
+            var raw = s.SuggestedText ?? string.Empty;
+            var (original, suggested, _) = ProofreadWhitespace.TrimCommonEdges(normalized, raw);
+            var (boundaryOriginal, boundarySuggested, lead) = ProofreadWhitespace.TrimBoundaryEdges(normalized, raw);
+            var start = s.StartOffset is int at ? at + lead : int.MaxValue;
+            var same = boundaryOriginal == original && boundarySuggested == suggested;
+            return new Candidate(
+                s, original, suggested, start, same ? null : boundaryOriginal, same ? null : boundarySuggested);
+        }
+    }
+
+    /// <summary>
+    /// Locates <paramref name="candidate"/> in its first form and, when that cannot be placed, in its boundary
+    /// fallback (the reason reported is the last form's).
+    /// </summary>
+    private static Edit? Resolve(Candidate candidate, DocumentText text, out string reason)
+    {
+        var edit = Resolve(candidate.Suggestion, candidate.Original, candidate.Suggested, text, out reason);
+        if (edit == null && candidate.FallbackOriginal != null)
+            edit = Resolve(candidate.Suggestion, candidate.FallbackOriginal, candidate.FallbackSuggested!, text, out reason);
+        return edit;
+    }
+
+    private static Edit? Resolve(
+        AnalysisSuggestion s, string original, string suggested, DocumentText text, out string reason)
     {
         var map = text.Map;
-        var original = TextNormalization.NormalizeTextForAnalysis(s.OriginalText ?? string.Empty) ?? string.Empty;
-        var suggested = s.SuggestedText ?? string.Empty;
 
         if (original.Length == 0)
             return ResolveInsertion(s, text, suggested, out reason);
