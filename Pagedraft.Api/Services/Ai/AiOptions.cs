@@ -39,8 +39,14 @@ public class AiOptions
     /// <summary>Chapters proofread concurrently in a whole-book run. 1: the 8GB card is single-slot and chunks inside one chapter already run <see cref="MaxParallelProofreadChunks"/> wide.</summary>
     public int MaxParallelBookProofreadChapters { get; set; } = 1;
 
-    /// <summary>Seconds per proofread chunk used for the whole-book ETA (measured 42.2 min / 64 chunks, CHARACTER_CONTEXT_ADHERENCE_GAPS.md).</summary>
-    public int ProofreadSecondsPerChunkEstimate { get; set; } = 40;
+    /// <summary>
+    /// Wall-clock seconds per proofread chunk used for the whole-book ETA. Calibrated 2026-10-12 on a real
+    /// whole-book run: 55 chapters, 107,161 words, 458 chunks, about 78 min wall-clock (chapters sequential,
+    /// chunks 2-wide, local gemma4:12b) = 10.3 s/chunk (12.1 s/chunk over chapters 2-55 including about
+    /// 29 s of per-chapter overhead outside the chunk stage), rounded to 10. Per-chunk median 12.4 s, p90 20.0 s.
+    /// The earlier 40 came from a cold-start run (42.2 min / 64 chunks), which overstates a warm long run.
+    /// </summary>
+    public int ProofreadSecondsPerChunkEstimate { get; set; } = 10;
 
     /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel. Default 500.</summary>
     public int LineEditChunkTargetWords { get; set; } = DefaultLineEditChunkTargetWords;
