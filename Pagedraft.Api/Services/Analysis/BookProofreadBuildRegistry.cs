@@ -9,6 +9,10 @@ namespace Pagedraft.Api.Services.Analysis;
 /// cancel endpoint can stop a run between chapters. MUST be a SINGLETON: the run executes on a background DI
 /// scope while status/cancel requests run on their own scopes. <see cref="TryStart"/> is the atomic
 /// compare-and-set; only one active run per key.
+///
+/// It also keeps the FAILED-CHAPTERS record (c20, <see cref="RecordChapterOutcome"/>): a chapter that fails keeps
+/// its previous Active result, which the freshness rule counts as fresh, so without this record a normal start
+/// plans nothing for it and the only recourse is forcing every chapter.
 /// </summary>
 public sealed class BookProofreadBuildRegistry
 {
@@ -68,4 +72,40 @@ public sealed class BookProofreadBuildRegistry
         try { e.Cts.Cancel(); return true; }
         catch (ObjectDisposedException) { return false; } // run completed between lookup and cancel
     }
+
+    // ── The failed-chapters record (c20) ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Per (book, language): the chapters whose LATEST whole-book attempt failed or produced an unreliable result,
+    /// each with the moment that attempt STARTED. IN-MEMORY BY DESIGN: it survives until the API restarts and is
+    /// then empty (the failed chapters still hold their previous Active result, so the only recourse after a
+    /// restart is a forced run, as before c20).
+    /// </summary>
+    private readonly ConcurrentDictionary<(Guid BookId, string Language), ConcurrentDictionary<Guid, DateTimeOffset>> _failed = new();
+
+    /// <summary>
+    /// Records how one chapter's attempt in a whole-book run ended. A failed (or unreliable) attempt is recorded
+    /// with <paramref name="attemptStartedAt"/>; a clean one removes the chapter, which is how a retry that
+    /// succeeds clears it. Chapters a run did not attempt keep whatever an earlier run recorded, so a later
+    /// normal run that skips a failed chapter (its old result still counts as fresh) cannot hide the failure.
+    /// </summary>
+    public void RecordChapterOutcome(Guid bookId, string language, Guid chapterId, bool succeeded, DateTimeOffset attemptStartedAt)
+    {
+        var key = (bookId, Normalize(language));
+        if (succeeded)
+        {
+            if (_failed.TryGetValue(key, out var map)) map.TryRemove(chapterId, out _);
+            return;
+        }
+        _failed.GetOrAdd(key, _ => new ConcurrentDictionary<Guid, DateTimeOffset>())[chapterId] = attemptStartedAt;
+    }
+
+    /// <summary>
+    /// A snapshot of the failed-chapters record for (bookId, language): chapter id to the start of its failed
+    /// attempt. Empty when nothing failed since the API started.
+    /// </summary>
+    public IReadOnlyDictionary<Guid, DateTimeOffset> FailedChapters(Guid bookId, string language) =>
+        _failed.TryGetValue((bookId, Normalize(language)), out var map)
+            ? new Dictionary<Guid, DateTimeOffset>(map)
+            : new Dictionary<Guid, DateTimeOffset>();
 }

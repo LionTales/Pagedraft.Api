@@ -117,6 +117,11 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
 // In-progress whole-book proofread run registry (with per-job cancellation) - singleton for the SAME reason.
 builder.Services.AddSingleton<BookProofreadBuildRegistry>();
+// TEST-ONLY fault seam (c20): inert unless the environment is Development AND Testing:BookProofread:
+// FailChapterIdsOnce is set (no appsettings file carries it). See BookProofreadFaultInjection.
+builder.Services.AddSingleton(sp => BookProofreadFaultInjection.FromConfiguration(
+    sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IHostEnvironment>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger<BookProofreadFaultInjection>()));
 builder.Services.AddScoped<IBookProofreadService, BookProofreadService>();
 // Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
 // reason as the three registries above (one shared map across request scopes), and the runner is stateless.

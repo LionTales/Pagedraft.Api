@@ -25,6 +25,13 @@ public record StartBookProofreadResponse(
 /// <para><see cref="UnreliableChapters"/>: chapters, in reading order, where ANY Active Proofread result (Chapter
 /// or Scene scope) in the status language is flagged <c>ProofreadResultUnreliable</c>. The client asks the author
 /// whether the annotated export should include or skip them (<c>?unreliable=include|skip</c>).</para>
+///
+/// <para><see cref="FailedChapters"/> (c20): chapters, in reading order, whose LATEST whole-book attempt failed or
+/// produced an unreliable result and that no reliable proofread has covered since. A failed chapter keeps its
+/// previous Active result, which counts as fresh, so the normal plan skips it; <c>POST .../proofread?onlyFailed=true</c>
+/// plans exactly these (force semantics for them, every other chapter untouched), and
+/// <see cref="FailedEstimatedChunks"/> / <see cref="FailedEstimatedSeconds"/> are that plan's estimate, from the
+/// same <c>Plan</c>. The record behind it is IN MEMORY: it is empty after an API restart.</para>
 /// </summary>
 public record BookProofreadStatusDto(
     Guid? ActiveJobId,
@@ -38,10 +45,19 @@ public record BookProofreadStatusDto(
     int ForcePlannedChapters,
     int ForceEstimatedChunks,
     int ForceEstimatedSeconds,
-    IReadOnlyList<BookProofreadUnreliableChapterDto> UnreliableChapters);
+    IReadOnlyList<BookProofreadUnreliableChapterDto> UnreliableChapters,
+    IReadOnlyList<BookProofreadFailedChapterDto> FailedChapters,
+    int FailedEstimatedChunks,
+    int FailedEstimatedSeconds);
 
 /// <summary>
 /// A chapter whose Active Proofread result was flagged unreliable. <paramref name="Order"/> is the stored
 /// 0-based <c>Chapter.Order</c>; the client owns the 1-based display number.
 /// </summary>
 public record BookProofreadUnreliableChapterDto(Guid ChapterId, string Title, int Order);
+
+/// <summary>
+/// A chapter whose latest whole-book proofread attempt failed or came back unreliable (c20). <paramref name="Order"/>
+/// is the stored 0-based <c>Chapter.Order</c>; the client owns the 1-based display number.
+/// </summary>
+public record BookProofreadFailedChapterDto(Guid ChapterId, string Title, int Order);

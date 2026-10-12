@@ -25,6 +25,13 @@ public interface IBookProofreadService
     Task<StartBookProofreadResponse> StartAsync(Guid bookId, string language, bool force, CancellationToken ct);
 
     /// <summary>
+    /// c20: starts a run over exactly the status's FailedChapters (force semantics for them, every other chapter
+    /// untouched). Same answer shape and rules as <see cref="StartAsync"/>; Started=false with no job when the
+    /// record is empty.
+    /// </summary>
+    Task<StartBookProofreadResponse> StartFailedAsync(Guid bookId, string language, CancellationToken ct);
+
+    /// <summary>
     /// Coverage, staleness, the in-flight run id, the plan + ETA a normal and a forced start would have right
     /// now (the same <c>Plan</c> the start runs), and the chapters whose Active result is flagged unreliable.
     /// </summary>
@@ -60,6 +67,11 @@ public interface IBookProofreadService
 /// WORD-weighted and its EstimatedRemainingSeconds is computed here from the plan's word counts and the observed
 /// pace, both published by <see cref="BookProofreadRunProgress"/> (formula in its remarks); the chunk fields above
 /// stay chapters.</para>
+///
+/// <para>RETRY THE FAILED CHAPTERS (c20). A chapter that fails (or comes back unreliable) keeps its previous Active
+/// result, which counts as fresh, so a normal start skips it. Every attempt's outcome goes to the registry's
+/// in-memory failed-chapters record; the status lists what is still uncovered (<see cref="FailedStates"/>) and
+/// <see cref="StartFailedAsync"/> plans exactly that, forced. Lost on API restart (then: force, as before).</para>
 /// </summary>
 public sealed class BookProofreadService : IBookProofreadService
 {
@@ -78,9 +90,12 @@ public sealed class BookProofreadService : IBookProofreadService
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<BookProofreadService> _logger;
     private readonly TimeProvider _clock;
+    private readonly BookProofreadFaultInjection _faults;
 
     /// <param name="clock">The ONE clock the run's ETA reads (elapsed since the parent started); the system clock
     /// unless a test registers a <see cref="TimeProvider"/>.</param>
+    /// <param name="faults">The TEST-ONLY fault seam (c20); inert when not registered and in every non-Development
+    /// host (see <see cref="BookProofreadFaultInjection"/>).</param>
     public BookProofreadService(
         IServiceScopeFactory scopeFactory,
         AnalysisProgressTracker progress,
@@ -88,7 +103,8 @@ public sealed class BookProofreadService : IBookProofreadService
         IOptions<AiOptions> aiOptions,
         IHostApplicationLifetime lifetime,
         ILogger<BookProofreadService> logger,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        BookProofreadFaultInjection? faults = null)
     {
         _scopeFactory = scopeFactory;
         _progress = progress;
@@ -97,16 +113,25 @@ public sealed class BookProofreadService : IBookProofreadService
         _lifetime = lifetime;
         _logger = logger;
         _clock = clock ?? TimeProvider.System;
+        _faults = faults ?? BookProofreadFaultInjection.None;
     }
 
     /// <summary>The background run started by the last successful <see cref="StartAsync"/>; a test seam only.</summary>
     internal Task? RunTask { get; private set; }
 
-    public async Task<StartBookProofreadResponse> StartAsync(Guid bookId, string language, bool force, CancellationToken ct)
+    public Task<StartBookProofreadResponse> StartAsync(Guid bookId, string language, bool force, CancellationToken ct) =>
+        StartCoreAsync(bookId, language, force, onlyFailed: false, ct);
+
+    public Task<StartBookProofreadResponse> StartFailedAsync(Guid bookId, string language, CancellationToken ct) =>
+        StartCoreAsync(bookId, language, force: true, onlyFailed: true, ct);
+
+    private async Task<StartBookProofreadResponse> StartCoreAsync(
+        Guid bookId, string language, bool force, bool onlyFailed, CancellationToken ct)
     {
         var lang = BaselineLanguageResolver.Normalize(language);
         var (states, tier) = await LoadPlanningInputsAsync(bookId, lang, ct);
-        var plan = Plan(states, force, _aiOptions.Value, lang, tier);
+        var only = onlyFailed ? FailedStates(bookId, lang, states).Select(s => s.ChapterId).ToHashSet() : null;
+        var plan = Plan(states, force, _aiOptions.Value, lang, tier, only);
         var planned = plan.Planned;
 
         StartBookProofreadResponse Response(Guid jobId, bool started) =>
@@ -164,6 +189,9 @@ public sealed class BookProofreadService : IBookProofreadService
         var (states, tier) = await LoadPlanningInputsAsync(bookId, lang, ct);
         var normal = Plan(states, force: false, _aiOptions.Value, lang, tier);
         var forced = Plan(states, force: true, _aiOptions.Value, lang, tier);
+        var failedStates = FailedStates(bookId, lang, states);
+        var failed = Plan(states, force: true, _aiOptions.Value, lang, tier,
+            only: failedStates.Select(s => s.ChapterId).ToHashSet());
 
         return new BookProofreadStatusDto(
             ActiveJobId: _registry.TryGetActive(bookId, lang),
@@ -180,7 +208,30 @@ public sealed class BookProofreadService : IBookProofreadService
             UnreliableChapters: states
                 .Where(s => s.HasUnreliableResult)
                 .Select(s => new BookProofreadUnreliableChapterDto(s.ChapterId, s.Title, s.Order))
-                .ToList());
+                .ToList(),
+            FailedChapters: failedStates
+                .Select(s => new BookProofreadFailedChapterDto(s.ChapterId, s.Title, s.Order))
+                .ToList(),
+            FailedEstimatedChunks: failed.EstimatedChunks,
+            FailedEstimatedSeconds: failed.EstimatedSeconds);
+    }
+
+    /// <summary>
+    /// c20: the chapters of the registry's failed-chapters record that still need a retry, in reading order. A
+    /// recorded chapter drops out when it no longer has text, or when EVERY one of its units now holds a reliable
+    /// Active result in this language created at or after the failed attempt started (a later per-chapter run or a
+    /// retry covered it). Measured from the attempt's START, so a scene that succeeded inside the failed attempt
+    /// already counts as covered and only the unit that failed needs a newer result.
+    /// </summary>
+    internal List<ChapterProofreadState> FailedStates(Guid bookId, string language, IReadOnlyList<ChapterProofreadState> states)
+    {
+        var record = _registry.FailedChapters(bookId, language);
+        if (record.Count == 0) return new List<ChapterProofreadState>();
+        return states
+            .Where(s => s.Units.Count > 0
+                && record.TryGetValue(s.ChapterId, out var failedAt)
+                && !(s.ReliableThrough is DateTimeOffset covered && covered >= failedAt))
+            .ToList();
     }
 
     /// <summary>The chapter states and the book's Proofread tier: everything <see cref="Plan"/> reads, in one scope.</summary>
@@ -232,6 +283,8 @@ public sealed class BookProofreadService : IBookProofreadService
                 _progress.ChunkStarted(parentId, index + 1, total);
 
                 bool ok;
+                // Wall clock, not _clock: it is compared with AnalysisResult.CreatedAt, which is stamped with it.
+                var attemptStartedAt = DateTimeOffset.UtcNow;
                 try
                 {
                     ok = await RunChapterAsync(bookId, language, index, chapter, runProgress, stoppingToken);
@@ -241,6 +294,8 @@ public sealed class BookProofreadService : IBookProofreadService
                     return; // application shutdown: the child is already marked Canceled
                 }
 
+                // c20: the failed-chapters record follows every attempt, so a retry that succeeds clears it.
+                _registry.RecordChapterOutcome(bookId, language, chapter.ChapterId, ok, attemptStartedAt);
                 Interlocked.Increment(ref processed);
                 if (ok)
                 {
@@ -314,6 +369,11 @@ public sealed class BookProofreadService : IBookProofreadService
             var heartbeat = HeartbeatAsync(runProgress, heartbeatStop.Token);
             try
             {
+                // TEST-ONLY seam (c20): inert unless armed in a Development host; see BookProofreadFaultInjection.
+                if (_faults.TryConsume(chapter.ChapterId))
+                    throw new InvalidOperationException(
+                        $"Injected test fault ({BookProofreadFaultInjection.ConfigKey}) for chapter {chapter.ChapterId}");
+
                 using var diScope = _scopeFactory.CreateScope();
                 var unified = diScope.ServiceProvider.GetRequiredService<UnifiedAnalysisService>();
                 var result = await unified.RunAsync(
@@ -374,6 +434,8 @@ public sealed class BookProofreadService : IBookProofreadService
     /// A chapter with text, the units a run would proofread, and whether its results are fresh.
     /// <paramref name="HasUnreliableResult"/>: ANY Active Proofread result on the chapter (Chapter or Scene scope)
     /// in the planning language is flagged unreliable, which is what the status's UnreliableChapters lists.
+    /// <paramref name="ReliableThrough"/> (c20): the OLDEST of the units' newest reliable Active results in the
+    /// planning language, i.e. every unit has a reliable result at least this new; null when any unit has none.
     /// </summary>
     internal sealed record ChapterProofreadState(
         Guid ChapterId,
@@ -384,7 +446,8 @@ public sealed class BookProofreadService : IBookProofreadService
         bool IsFresh,
         DateTimeOffset? NewestResultAt,
         string Title = "",
-        bool HasUnreliableResult = false);
+        bool HasUnreliableResult = false,
+        DateTimeOffset? ReliableThrough = null);
 
     /// <summary>What a run with this <c>force</c> would do: the chapters it proofreads, the fresh ones it skips, its ETA.</summary>
     internal sealed record ProofreadPlan(
@@ -395,12 +458,14 @@ public sealed class BookProofreadService : IBookProofreadService
     /// shows it on the consent before the author starts, both with and without force): candidates are chapters
     /// with at least one unit; planned are the candidates that are not fresh, or all of them when forced; the
     /// estimate is <see cref="Estimate"/> over the planned ones. One method, so the ETA the author agrees to is
-    /// the ETA the run starts with.
+    /// the ETA the run starts with. <paramref name="only"/> (c20, the retry of the failed chapters) narrows the
+    /// candidates to those chapter ids before the rule applies; the retry passes force=true with it.
     /// </summary>
     internal static ProofreadPlan Plan(
-        IReadOnlyList<ChapterProofreadState> states, bool force, AiOptions opts, string language, AiTier tier)
+        IReadOnlyList<ChapterProofreadState> states, bool force, AiOptions opts, string language, AiTier tier,
+        IReadOnlySet<Guid>? only = null)
     {
-        var candidates = states.Where(s => s.Units.Count > 0).ToList();
+        var candidates = states.Where(s => s.Units.Count > 0 && (only == null || only.Contains(s.ChapterId))).ToList();
         var planned = candidates.Where(s => force || !s.IsFresh).ToList();
         var (chunks, seconds) = Estimate(planned, opts, language, tier);
         return new ProofreadPlan(planned, candidates.Count - planned.Count, chunks, seconds);
@@ -476,13 +541,25 @@ public sealed class BookProofreadService : IBookProofreadService
                 && r.ProofreadResultUnreliable
                 && BaselineLanguageResolver.Normalize(r.Language) == language);
 
+            // c20: per unit, its newest reliable result in this language; the chapter is covered through the oldest.
+            var newestReliablePerUnit = unitResults
+                .Select(rs => rs
+                    .Where(r => !r.ProofreadResultUnreliable && BaselineLanguageResolver.Normalize(r.Language) == language)
+                    .Select(r => (DateTimeOffset?)r.CreatedAt)
+                    .Max())
+                .ToList();
+            DateTimeOffset? reliableThrough = units.Count > 0 && newestReliablePerUnit.All(d => d.HasValue)
+                ? newestReliablePerUnit.Min()
+                : null;
+
             states.Add(new ChapterProofreadState(
                 c.Id, c.Order, c.WordCount, units,
                 HasActiveResult: all.Count > 0,
                 IsFresh: isFresh,
                 NewestResultAt: all.Count > 0 ? all.Max(r => r.CreatedAt) : null,
                 Title: c.Title ?? "",
-                HasUnreliableResult: hasUnreliable));
+                HasUnreliableResult: hasUnreliable,
+                ReliableThrough: reliableThrough));
         }
         return states;
     }

@@ -15,7 +15,7 @@ namespace Pagedraft.Api.Controllers;
 ///
 /// | call     | route                                         | answer                               |
 /// |----------|-----------------------------------------------|--------------------------------------|
-/// | start    | POST .../proofread?language=&amp;force=       | <see cref="StartBookProofreadResponse"/> |
+/// | start    | POST .../proofread?language=&amp;force=&amp;onlyFailed= | <see cref="StartBookProofreadResponse"/> |
 /// | progress | GET  .../proofread/progress/{jobId}           | <see cref="AnalysisProgressDto"/> (review shape) |
 /// | status   | GET  .../proofread/status?language=           | <see cref="BookProofreadStatusDto"/> |
 /// | cancel   | POST .../proofread/cancel?jobId={jobId}       | 200, empty body accepted             |
@@ -47,13 +47,16 @@ public class BookProofreadController : ControllerBase
     /// <summary>
     /// Start a whole-book proofread. Chapters whose Active proofread result is fresh are skipped unless
     /// <paramref name="force"/>; Started=false (no job) when nothing needs running; an in-flight run for the same
-    /// (book, language) comes back as Started=true with its own job id.
+    /// (book, language) comes back as Started=true with its own job id. <paramref name="onlyFailed"/> (c20) plans
+    /// exactly the status's FailedChapters instead (force semantics for them, other chapters untouched); it wins
+    /// over <paramref name="force"/>.
     /// </summary>
     [HttpPost]
     public async Task<ActionResult<StartBookProofreadResponse>> Start(
         Guid bookId,
         [FromQuery] string? language,
         [FromQuery] bool force,
+        [FromQuery] bool onlyFailed,
         CancellationToken ct)
     {
         var lang = await ResolveLanguageAsync(bookId, language, ct);
@@ -62,7 +65,9 @@ public class BookProofreadController : ControllerBase
         if (_appLifetime.ApplicationStopping.IsCancellationRequested)
             return StatusCode(503, new { error = "Server is shutting down; cannot start a new proofread run." });
 
-        return Ok(await _bookProofread.StartAsync(bookId, lang, force, ct));
+        return Ok(onlyFailed
+            ? await _bookProofread.StartFailedAsync(bookId, lang, ct)
+            : await _bookProofread.StartAsync(bookId, lang, force, ct));
     }
 
     /// <summary>

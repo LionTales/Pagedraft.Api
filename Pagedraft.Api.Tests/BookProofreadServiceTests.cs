@@ -48,6 +48,9 @@ public class BookProofreadServiceTests
         /// <summary>Called inside the model call with the request's input text; may throw to fail that unit.</summary>
         public Action<string>? OnModelCall;
 
+        /// <summary>When set, the model's answer for the request's input text (c20: an unreliable output).</summary>
+        public Func<string, string?>? Respond;
+
         /// <param name="clock">Registered for the service's ETA clock when given (c10); the system clock otherwise.</param>
         public Harness(TimeProvider? clock = null)
         {
@@ -62,7 +65,7 @@ public class BookProofreadServiceTests
                     // A one-word correction, so the diff yields a pending suggestion and the run is not "unrelated".
                     return Task.FromResult(new AiResponse
                     {
-                        Content = req.InputText.Replace("×”×‘×™×ª", "×”×‘×™×ª×”"),
+                        Content = Respond?.Invoke(req.InputText) ?? req.InputText.Replace("×”×‘×™×ª", "×”×‘×™×ª×”"),
                         Provider = "test-provider",
                         Model = "test-model"
                     });
@@ -566,7 +569,7 @@ public class BookProofreadServiceTests
         using var h = new Harness();
         var controller = Controller(h);
 
-        Assert.IsType<NotFoundResult>((await controller.Start(Guid.NewGuid(), "he", false, CancellationToken.None)).Result);
+        Assert.IsType<NotFoundResult>((await controller.Start(Guid.NewGuid(), "he", false, onlyFailed: false, CancellationToken.None)).Result);
         Assert.IsType<NotFoundResult>((await controller.GetStatus(Guid.NewGuid(), null, CancellationToken.None)).Result);
     }
 
