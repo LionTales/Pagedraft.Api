@@ -1907,6 +1907,7 @@ public class UnifiedAnalysisService
 
             await semaphore.WaitAsync(ct);
             var chunkSw = Stopwatch.StartNew();
+            string? retryNote = null; // c19: set when the model call was retried once after a transient failure
             try
             {
                 var chunkNumber = index + 1;
@@ -1935,7 +1936,9 @@ public class UnifiedAnalysisService
                     JsonMode = true
                 };
 
-                var response = await _router.CompleteAsync(request, ct);
+                var response = await ModelCallRetry.CompleteWithOneRetryAsync(
+                    _router, request, _logger, "LineEdit", chunkNumber, chunks.Count,
+                    ex => retryNote = $"retried once after {ModelCallRetry.Describe(ex)}", ct);
                 var raw = response.Content ?? string.Empty;
                 _logger.LogDebug(
                     "LineEdit chunk {Index}/{Total} raw response: length={Len}, preview={Preview}",
@@ -1993,13 +1996,17 @@ public class UnifiedAnalysisService
                     inputText: text,
                     outputText: clean,
                     durationMs: chunkSw.ElapsedMilliseconds,
-                    outcome: outcome));
+                    outcome: outcome,
+                    note: retryNote));
 
                 _logger.LogDebug("LineEdit chunk {Index}/{Total} finished", chunkNumber, chunks.Count);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                // ONLY the caller's cancellation aborts the run (c19). An HttpClient timeout is also an
+                // OperationCanceledException, but with OUR token live it is a failed call: it falls through to the
+                // fail-safe below (after ModelCallRetry's one retry) so this chunk degrades, not the whole chapter.
                 throw;
             }
             catch (Exception ex)
@@ -2012,7 +2019,7 @@ public class UnifiedAnalysisService
                     outputText: "",
                     durationMs: chunkSw.ElapsedMilliseconds,
                     outcome: "FallbackError",
-                    note: ex.Message.Length > 200 ? ex.Message[..200] : ex.Message));
+                    note: ModelCallRetry.FailureNote(ex, retryNote)));
                 chunkResults[index] = new LineEditResult();
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
@@ -2205,6 +2212,7 @@ public class UnifiedAnalysisService
             }
             await semaphore.WaitAsync(ct);
             var chunkSw = Stopwatch.StartNew();
+            string? retryNote = null; // c19: set when the model call was retried once after a transient failure
             try
             {
                 var chunkNumber = index + 1;
@@ -2226,7 +2234,9 @@ public class UnifiedAnalysisService
                     SourceId = targetId.ToString(),
                     Tier = tier
                 };
-                var response = await _router.CompleteAsync(request, ct);
+                var response = await ModelCallRetry.CompleteWithOneRetryAsync(
+                    _router, request, _logger, "Proofread", chunkNumber, chunks.Count,
+                    ex => retryNote = $"retried once after {ModelCallRetry.Describe(ex)}", ct);
                 var raw = response.Content ?? "";
                 var clean = SanitizeResponse(raw);
                 if (string.IsNullOrWhiteSpace(clean) && !string.IsNullOrEmpty(raw))
@@ -2250,7 +2260,8 @@ public class UnifiedAnalysisService
                     inputText: text,
                     outputText: chunkOutcomeOutputText,
                     durationMs: chunkSw.ElapsedMilliseconds,
-                    outcome: chunkOutcomeOutcome);
+                    outcome: chunkOutcomeOutcome,
+                    note: retryNote);
 
                 // Only run unrelated/repetition heuristics when we actually have a "Succeeded" output.
                 // For FallbackEmpty we keep the original chunk for merging and avoid mutating the fallback outcome.
@@ -2288,8 +2299,12 @@ public class UnifiedAnalysisService
                 _logger.LogDebug("Proofread chunk {Index}/{Total} finished (result length {Len})", chunkNumber, chunks.Count, clean.Length);
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                // ONLY the caller's cancellation aborts the run (c19). Before this filter an HttpClient TIMEOUT
+                // (TaskCanceledException, our token live) was rethrown here and killed the whole chapter: 10 of 55
+                // chapters of one whole-book run. Now it reaches the fail-safe below after ModelCallRetry's one
+                // retry, and this chunk keeps its original text (FallbackError) while the chapter completes.
                 throw;
             }
             catch (Exception ex)
@@ -2302,7 +2317,7 @@ public class UnifiedAnalysisService
                     outputText: "",
                     durationMs: chunkSw.ElapsedMilliseconds,
                     outcome: "FallbackError",
-                    note: ex.Message.Length > 200 ? ex.Message[..200] : ex.Message));
+                    note: ModelCallRetry.FailureNote(ex, retryNote)));
                 corrected[index] = text;
                 _progress.ChunkCompleted(jobId, chunkNumber, chunks.Count);
             }

@@ -369,7 +369,7 @@ public class AnalysisContextService : IAnalysisContextService
 
             return profile;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Preserve cooperative cancellation so the outer analysis can stop immediately.
             throw;
@@ -596,7 +596,7 @@ public class AnalysisContextService : IAnalysisContextService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -1101,7 +1101,7 @@ public class AnalysisContextService : IAnalysisContextService
 
             return CharacterRegisterMerge.ForAnalysis(final);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Preserve cooperative cancellation so the outer analysis can stop immediately.
             throw;
@@ -1190,7 +1190,7 @@ public class AnalysisContextService : IAnalysisContextService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Let cancellation propagate to the caller.
             throw;

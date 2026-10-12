@@ -969,7 +969,7 @@ public class BookReviewService
                         }
                     }
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
                 {
                     throw;
                 }
@@ -1012,7 +1012,7 @@ public class BookReviewService
                         accumulated.AddRange(continuityFindings);
                     }
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
                 {
                     throw;
                 }
@@ -1573,7 +1573,7 @@ public class BookReviewService
             StampShownSet(parsed.Findings, shownOrders);
             return parsed.Findings;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -1767,7 +1767,7 @@ public class BookReviewService
 
             return new SynthesisOutcome(findings, merges);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -2113,7 +2113,7 @@ public class BookReviewService
             StampShownSet(parsed.Findings, shownOrders);
             return parsed.Findings;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -2218,7 +2218,7 @@ public class BookReviewService
 
             return parsed.Findings;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }

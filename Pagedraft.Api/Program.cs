@@ -196,6 +196,10 @@ builder.Services.AddHttpClient("Ollama", (sp, client) =>
     if (timeoutMinutes <= 0) timeoutMinutes = 30;
     client.Timeout = TimeSpan.FromMinutes(timeoutMinutes);
 });
+// The cloud providers' named clients, same idiom: "Ai:Providers:{provider}:TimeoutSeconds" (default 300).
+// Before c19 they sent through the unnamed client and inherited .NET's 100 s default, which a thinking-tier
+// model exceeds on one proofread chunk. See AiProviderHttpClients.
+builder.Services.AddCloudAiProviderHttpClients();
 builder.Services.AddHttpClient("LanguageTool", (sp, client) =>
 {
     var config = sp.GetRequiredService<IConfiguration>();

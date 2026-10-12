@@ -46,7 +46,8 @@ public class AzureOpenAiProvider : IAiAnalysisProvider
             max_tokens = tuning.MaxTokens
         };
 
-        var client = _httpFactory.CreateClient();
+        // c19: the NAMED client carries Ai:Providers:Azure:TimeoutSeconds; the unnamed one timed out at 100 s.
+        var client = _httpFactory.CreateClient(AiProviderHttpClients.ClientName("Azure"));
         client.DefaultRequestHeaders.Add("api-key", apiKey);
 
         var url = baseUrl + "/chat/completions?api-version=2024-02-15-preview";

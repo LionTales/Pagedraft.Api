@@ -222,7 +222,7 @@ public class ChapterBriefService
 
             return brief;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -282,7 +282,7 @@ public class ChapterBriefService
                     if (brief != null)
                         Interlocked.Increment(ref built);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
                 {
                     throw;
                 }
@@ -412,7 +412,7 @@ public class ChapterBriefService
 
             return brief;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -461,7 +461,7 @@ public class ChapterBriefService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }

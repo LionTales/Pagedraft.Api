@@ -33,7 +33,8 @@ public class OpenAiProvider : IAiAnalysisProvider
 
         var payload = BuildPayload(model, request, tuning);
 
-        var client = _httpFactory.CreateClient();
+        // c19: the NAMED client carries Ai:Providers:OpenAI:TimeoutSeconds; the unnamed one timed out at 100 s.
+        var client = _httpFactory.CreateClient(AiProviderHttpClients.ClientName("OpenAI"));
         client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
         var response = await client.PostAsJsonAsync("https://api.openai.com/v1/chat/completions", payload, cancellationToken).ConfigureAwait(false);

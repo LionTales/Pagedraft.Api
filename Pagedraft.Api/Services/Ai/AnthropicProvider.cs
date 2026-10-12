@@ -33,7 +33,8 @@ public class AnthropicProvider : IAiAnalysisProvider
 
         var payload = BuildPayload(model, request, tuning);
 
-        var client = _httpFactory.CreateClient();
+        // c19: the NAMED client carries Ai:Providers:Anthropic:TimeoutSeconds; the unnamed one timed out at 100 s.
+        var client = _httpFactory.CreateClient(AiProviderHttpClients.ClientName("Anthropic"));
         client.DefaultRequestHeaders.Add("x-api-key", apiKey);
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 

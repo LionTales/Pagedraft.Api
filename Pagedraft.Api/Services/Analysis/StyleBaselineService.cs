@@ -465,7 +465,7 @@ public class StyleBaselineService
                     var chapterContextService = scope.ServiceProvider.GetRequiredService<IAnalysisContextService>();
                     await chapterContextService.LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, lang, ct, tier);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
                 {
                     throw;
                 }

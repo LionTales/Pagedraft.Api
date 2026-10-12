@@ -426,7 +426,7 @@ public class BookSummaryService
                     var briefService = scope.ServiceProvider.GetRequiredService<ChapterBriefService>();
                     await briefService.LoadOrBuildChapterBriefAsync(bookId, chapterId, lang, ct);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
                 {
                     throw;
                 }
