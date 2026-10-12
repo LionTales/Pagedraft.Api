@@ -38,12 +38,12 @@ public class BookExportProofreadTests
     // ─── chapter path ─────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task ExportChapterProofread_PendingSuggestions_AreWrittenAsCommentsAndTrackedChanges()
+    public async Task ExportChapterProofread_PendingSuggestions_AreTrackedChanges_CommentedOnlyWhenExplained()
     {
         var (controller, db, _) = Build();
         var (book, chapter) = await SeedChapterAsync(db, "he", "פרק ראשון", ChapterText);
         SeedResult(db, chapter, sceneId: null,
-            Sug("לבית הספר", "לביה\"ס"),
+            Sug("לבית הספר", "לביה\"ס", explanation: "קיצור מקובל."),
             Sug("הגדול", "הגדולה"),
             Sug("מילה שאיננה בטקסט", "x")); // pending but unplaceable
         await db.SaveChangesAsync();
@@ -56,7 +56,7 @@ public class BookExportProofreadTests
         Assert.Equal("1", Header(controller, BookExportService.UnanchoredCountHeader));
 
         using var reloaded = Reload(file);
-        Assert.Equal(2, reloaded.Comments.Count);
+        Assert.Equal(1, reloaded.Comments.Count); // only the explained one: a comment restating a change is not written
         Assert.Equal(4, reloaded.Revisions.Count);
         Assert.Equal(2, reloaded.Revisions.Cast<Revision>().Count(r => r.RevisionType == RevisionType.Deletions));
         Assert.Equal(2, reloaded.Revisions.Cast<Revision>().Count(r => r.RevisionType == RevisionType.Insertions));
@@ -82,7 +82,7 @@ public class BookExportProofreadTests
         Assert.Equal("1", Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Equal("0", Header(controller, BookExportService.UnanchoredCountHeader));
         using var reloaded = Reload(file);
-        Assert.Equal(1, reloaded.Comments.Count);
+        Assert.Equal(2, reloaded.Revisions.Count); // the one pending replacement: del + ins
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public class BookExportProofreadTests
     {
         var (controller, db, _) = Build();
         var (book, chapter) = await SeedChapterAsync(db, "en", "Chapter One", "The cat sat on teh mat.\nIt was a sunny day.");
-        SeedResult(db, chapter, sceneId: null, Sug("teh", "the"));
+        SeedResult(db, chapter, sceneId: null, Sug("teh", "the", explanation: "Typo."));
         await db.SaveChangesAsync();
 
         var file = Assert.IsType<FileContentResult>(
@@ -124,6 +124,7 @@ public class BookExportProofreadTests
         Assert.Equal("Chapter One - proofread.docx", file.FileDownloadName);
         using var reloaded = Reload(file);
         Assert.Equal("PageDraft Proofreader", reloaded.Comments[0].Format.User);
+        Assert.All(reloaded.Revisions.Cast<Revision>(), r => Assert.Equal("PageDraft Proofreader", r.Author));
     }
 
     [Fact]
@@ -177,7 +178,7 @@ public class BookExportProofreadTests
         Assert.Equal("3", Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Equal("0", Header(controller, BookExportService.UnanchoredCountHeader));
         using var reloaded = Reload(file);
-        Assert.Equal(3, reloaded.Comments.Count);
+        Assert.Equal(0, reloaded.Comments.Count); // none explained
         Assert.Equal(6, reloaded.Revisions.Count);
         // The chapter-row suggestion was not applied: its original word is still plain, un-deleted text.
         foreach (var revision in reloaded.Revisions.Cast<Revision>().ToList()) revision.Accept();
@@ -199,7 +200,7 @@ public class BookExportProofreadTests
         var unwritten = new Chapter { Id = Guid.NewGuid(), BookId = book.Id, Order = 2, Title = "ריק", ContentSfdt = "{}" };
         db.Chapters.AddRange(two, unwritten);
         SeedResult(db, one, sceneId: null, Sug("לבית הספר", "לביה\"ס"), Sug("לא קיים כאן", "y"));
-        SeedResult(db, two, sceneId: null, Sug("שלום", "שלומות"), Sug("חזק ", ""));
+        SeedResult(db, two, sceneId: null, Sug("שלום", "שלומות", explanation: "צורת רבים."), Sug("חזק ", ""));
         await db.SaveChangesAsync();
 
         var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, null, CancellationToken.None));
@@ -211,7 +212,7 @@ public class BookExportProofreadTests
         Assert.NotNull(Header(controller, BookExportService.SkippedChaptersHeader));
 
         using var reloaded = Reload(file);
-        Assert.Equal(3, reloaded.Comments.Count);
+        Assert.Equal(1, reloaded.Comments.Count); // the explained one, carried through assembly
         Assert.Equal(5, reloaded.Revisions.Count); // (del + ins) x2 + del
     }
 
@@ -274,7 +275,7 @@ public class BookExportProofreadTests
         Assert.Equal("1", Header(controller, BookExportService.UnanchoredCountHeader));
         Assert.Equal("0", Header(controller, BookExportService.UnreliableSkippedCountHeader));
         using var reloaded = Reload(file);
-        Assert.Equal(3, reloaded.Comments.Count);
+        Assert.Equal(6, reloaded.Revisions.Count); // three replacements, the unreliable chapter's two included
     }
 
     [Fact]
@@ -291,7 +292,7 @@ public class BookExportProofreadTests
         Assert.Equal("1", Header(controller, BookExportService.UnreliableSkippedCountHeader));
         Assert.Equal("0", Header(controller, BookExportService.SkippedCountHeader)); // still in the file
         using var reloaded = Reload(file);
-        Assert.Equal(1, reloaded.Comments.Count);
+        Assert.Equal(2, reloaded.Revisions.Count); // chapter two's one replacement only
         foreach (var revision in reloaded.Revisions.Cast<Revision>().ToList()) revision.Accept();
         var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(reloaded.GetText());
         Assert.Contains(ParagraphOne, text, StringComparison.Ordinal); // chapter one rendered, untouched
@@ -377,7 +378,8 @@ public class BookExportProofreadTests
 
     // ─── fixture ──────────────────────────────────────────────────────────────────────────────────
 
-    private static AnalysisSuggestion Sug(string original, string suggested, SuggestionOutcome? outcome = null) => new()
+    private static AnalysisSuggestion Sug(
+        string original, string suggested, SuggestionOutcome? outcome = null, string? explanation = null) => new()
     {
         Id = Guid.NewGuid(),
         OriginalText = original,
@@ -385,6 +387,7 @@ public class BookExportProofreadTests
         StartOffset = 0,
         EndOffset = original.Length,
         Outcome = outcome,
+        Explanation = explanation,
     };
 
     private static AnalysisResult SeedResult(AppDbContext db, Chapter chapter, Guid? sceneId, params AnalysisSuggestion[] suggestions)

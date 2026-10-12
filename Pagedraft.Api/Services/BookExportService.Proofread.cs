@@ -7,8 +7,8 @@ using Pagedraft.Api.Services.Export;
 namespace Pagedraft.Api.Services;
 
 /// <summary>
-/// What an annotated export wrote: <paramref name="Placed"/> pending suggestions became a Word comment plus
-/// tracked change(s); <paramref name="Unanchored"/> could not be placed (no match, ambiguous, crossing a
+/// What an annotated export wrote: <paramref name="Placed"/> pending suggestions became tracked change(s)
+/// (a Word comment too only when there was a label or an explanation to add); <paramref name="Unanchored"/> could not be placed (no match, ambiguous, crossing a
 /// paragraph, or overlapping a placed one). <c>Placed + Unanchored</c> is the number of pending suggestions
 /// on the Active Proofread results of the units in the file, minus those of skipped units:
 /// <paramref name="UnreliableSkippedChapters"/> is how many CHAPTERS had at least one unit left unannotated
@@ -37,7 +37,8 @@ internal sealed record RenderableUnit(string Sfdt, Guid ChapterId, Guid? SceneId
 /// <summary>
 /// The proofread-annotated exports (plan whole-book-proofread-and-annotated-docx-2026-10-11, c4): the same
 /// document as the plain export, with every PENDING suggestion of each unit's Active Proofread result written
-/// in as a Word comment and a tracked change, ready to hand back to the author.
+/// in as a tracked change (with a Word comment only when it carries a label or an explanation the change
+/// does not show; see <c>ProofreadDocxAnnotator</c>), ready to hand back to the author.
 ///
 /// <para>WHICH RESULT, PER UNIT. The unit rule is the plain export's (<see cref="RenderableUnitSourcesOf"/>),
 /// so a unit is either the chapter row, whose suggestions live on the Active Chapter-scope result keyed by
@@ -59,7 +60,7 @@ internal sealed record RenderableUnit(string Sfdt, Guid ChapterId, Guid? SceneId
 public partial class BookExportService
 {
     /// <summary>
-    /// How many pending suggestions the downloaded file carries as comments + tracked changes, as a decimal
+    /// How many pending suggestions the downloaded file carries as tracked changes (commented or not), as a decimal
     /// integer. Written on every successful ANNOTATED export, <c>"0"</c> included; never on a plain one.
     /// READ BY THE CLIENT (pagedraft-client <c>core/models/export.ts</c> <c>EXPORT_ANNOTATION_COUNT_HEADER</c>)
     /// and therefore listed in the CORS policy's exposed headers.
@@ -68,7 +69,7 @@ public partial class BookExportService
 
     /// <summary>
     /// How many pending suggestions could NOT be placed in the file, so the author is told the file holds
-    /// fewer comments than the chapter view shows. Same presence rule and CORS note as
+    /// fewer tracked changes than the chapter view shows suggestions. Same presence rule and CORS note as
     /// <see cref="AnnotationCountHeader"/>.
     /// </summary>
     public const string UnanchoredCountHeader = "X-Export-Unanchored-Count";

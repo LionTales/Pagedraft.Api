@@ -1,4 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using Pagedraft.Api.Services.Analysis;
 
 namespace Pagedraft.Api.Services.Export;
 
@@ -6,6 +10,11 @@ namespace Pagedraft.Api.Services.Export;
 /// Author-facing text the proofread DOCX annotator writes into Word comments and revision metadata.
 /// Hebrew for a Hebrew book, English otherwise (the book's language, not the UI's: the file goes back to
 /// the author). No em-dash in any string (house rule for user-facing text).
+///
+/// <para>A suggestion is a tracked change ONLY; a comment is written only when it carries something the
+/// change does not show (owner decision 2026-10-12: a comment that repeated the change cost the author a
+/// third click per suggestion, and Word's Accept never clears a comment). <see cref="CommentLines"/> is
+/// that rule.</para>
 /// </summary>
 internal static class ProofreadAnnotationStrings
 {
@@ -14,6 +23,9 @@ internal static class ProofreadAnnotationStrings
 
     /// <summary>The category <c>KtivMaleChecker</c> stamps on its deterministic suggestions.</summary>
     public const string KtivMaleCategory = "ktiv-male";
+
+    /// <summary>Longest explanation written into a comment, before the ellipsis.</summary>
+    public const int MaxExplanationLength = 500;
 
     public static bool IsHebrew(string? language) =>
         !string.IsNullOrEmpty(language) && language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
@@ -25,26 +37,6 @@ internal static class ProofreadAnnotationStrings
             : "PageDraft Proofreader";
 
     /// <summary>
-    /// Comment line 1. A replacement names both sides, a pure deletion names what goes, a pure insertion
-    /// names what comes.
-    /// </summary>
-    public static string SuggestionLine(string? language, string original, string suggested)
-    {
-        var he = IsHebrew(language);
-        if (original.Length == 0)
-            return he
-                ? $"הצעה: להוסיף {suggested}" // DRAFT he - needs native review
-                : $"Suggested: add {suggested}";
-        if (suggested.Length == 0)
-            return he
-                ? $"הצעה: למחוק {original}" // DRAFT he - needs native review
-                : $"Suggested: delete {original}";
-        return he
-            ? $"הצעה: {suggested} במקום {original}" // DRAFT he - needs native review
-            : $"Suggested: {suggested} instead of {original}";
-    }
-
-    /// <summary>
     /// Appended to the plain export's file-name stem (before <c>.docx</c>) on an annotated export, so the
     /// annotated file never lands on top of the clean one in the author's downloads folder.
     /// </summary>
@@ -53,12 +45,69 @@ internal static class ProofreadAnnotationStrings
             ? " - הגהה" // DRAFT he - needs native review
             : " - proofread";
 
-    /// <summary>Comment line 2: present only for a category with an author-facing name.</summary>
+    /// <summary>The label line for a category with an author-facing name; null for every other category.</summary>
     public static string? CategoryLine(string? language, string? category)
     {
         if (!string.Equals(category, KtivMaleCategory, StringComparison.Ordinal)) return null;
         return IsHebrew(language)
             ? "כתיב מלא לפי האקדמיה" // DRAFT he - needs native review
             : "Academy full spelling";
+    }
+
+    /// <summary>
+    /// The body of the comment a placed suggestion gets: the category label when it has one, then the
+    /// explanation when it says anything. EMPTY means no comment at all: the tracked change already shows
+    /// what goes and what comes, so a comment restating it is not written.
+    /// </summary>
+    public static IReadOnlyList<string> CommentLines(string? language, string? category, string? explanation)
+    {
+        var lines = new List<string>(2);
+        var label = CategoryLine(language, category);
+        if (label != null) lines.Add(label);
+        var text = SanitizeExplanation(explanation);
+        if (text != null) lines.Add(text);
+        return lines;
+    }
+
+    /// <summary>
+    /// An explanation is model output, so it is cleaned before it reaches the author's Word file:
+    /// every whitespace run (line breaks and tabs included) becomes one space and the ends are trimmed;
+    /// other control characters are dropped (they are not legal in the XML part); the result is capped at
+    /// <see cref="MaxExplanationLength"/> characters plus an ellipsis, never splitting a surrogate pair.
+    /// It is ABSENT (null) when it holds no letter or digit (whitespace-only and punctuation-only both
+    /// say nothing) or when it is <see cref="UnifiedAnalysisService.NoExplanationFallback"/>, the
+    /// placeholder stored when the model returned nothing. Everything else, bidi marks included, is kept
+    /// as written: this is a floor, not a filter on what the model may say.
+    /// </summary>
+    public static string? SanitizeExplanation(string? explanation)
+    {
+        if (string.IsNullOrEmpty(explanation)) return null;
+
+        var builder = new StringBuilder(explanation.Length);
+        var pendingSpace = false;
+        foreach (var c in explanation)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                pendingSpace = builder.Length > 0;
+                continue;
+            }
+            if (char.IsControl(c)) continue;
+            if (pendingSpace) builder.Append(' ');
+            pendingSpace = false;
+            builder.Append(c);
+        }
+
+        var text = builder.ToString();
+        if (!text.Any(char.IsLetterOrDigit)) return null;
+        if (string.Equals(text, UnifiedAnalysisService.NoExplanationFallback, StringComparison.Ordinal)) return null;
+
+        if (text.Length > MaxExplanationLength)
+        {
+            var cut = MaxExplanationLength;
+            if (char.IsHighSurrogate(text[cut - 1])) cut--;
+            text = text[..cut].TrimEnd() + "…";
+        }
+        return text;
     }
 }

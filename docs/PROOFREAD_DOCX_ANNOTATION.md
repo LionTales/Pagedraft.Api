@@ -7,21 +7,32 @@ contracts: `PAGEDRAFT_DESIGN.md` section 6.2.1.
 
 `GET /api/document/export/book/{bookId}/proofread` (or the single-chapter variant) returns a normal DOCX
 of the book, named `<title> - הגהה.docx` (Hebrew books) or `<title> - proofread.docx` (others). Every
-pending Proofread suggestion that could be placed in the text appears as:
+pending Proofread suggestion that could be placed in the text appears as a **tracked change**: the
+original words struck through (a Word deletion) followed by the suggested words (a Word insertion); a pure
+deletion has only the strike-through, a pure insertion only the new words. Revisions are authored
+`PageDraft הגהה` (Hebrew) or `PageDraft Proofreader`.
 
-- a tracked change: the original words struck through (a Word deletion) followed by the suggested words
-  (a Word insertion); a pure deletion has only the strike-through, a pure insertion only the new words;
-- a Word comment on the same span, authored `PageDraft הגהה` (Hebrew) or `PageDraft Proofreader`
-  (initials PD), saying what is suggested instead of what, then the category when it is the Academy full
-  spelling rule, then the model's explanation when there is one.
+**A Word comment appears only when it adds something the change does not show** (owner decision
+2026-10-12): the label `כתיב מלא לפי האקדמיה` / `Academy full spelling` on a suggestion from the Academy
+full-spelling rule, and/or the suggestion's explanation when one was generated. The comment, initials PD,
+is ranged over that suggestion's change and holds only those lines; it never restates "X instead of Y",
+which the change itself already shows. Most suggestions therefore carry no comment at all.
+
+An explanation is model output, so before it is written it is trimmed, every whitespace run (line breaks
+included) becomes one space, control characters are dropped, and it is capped at 500 characters plus an
+ellipsis. One that holds no letter or digit, or is the stored "No explanation could be generated"
+placeholder, counts as absent.
 
 The author's own comments and tracked changes already in the chapters pass through untouched.
 
-## Accept everything in Word
+## Reviewing in Word
 
-Review tab, Accept, Accept All Changes in Document. Every suggestion is applied and the corrected text
-results. To refuse one, Reject that change and delete its comment. Comments can be removed in bulk with
-Delete, Delete All Comments in Document.
+- **One suggestion:** select it (or put the cursor in it) and press Review, Accept or Reject once. A
+  replacement's deletion and insertion are one selection, so a single Reject restores the original word.
+  A commented suggestion also needs its comment deleted (Word's Accept and Reject never remove a comment),
+  which is why comments are kept to the ones that carry information.
+- **Everything:** Review, Accept, Accept All Changes in Document applies every suggestion. Any remaining
+  comments can be removed with Delete, Delete All Comments in Document.
 
 ## Limits
 
@@ -35,7 +46,8 @@ Delete, Delete All Comments in Document.
 - Some suggestions cannot be placed: the original text is not found, is ambiguous even with its
   context, crosses a paragraph boundary, or overlaps a suggestion already placed. They are not guessed at.
   The count is returned in the `X-Export-Unanchored-Count` header and shown in the download notice;
-  placed plus unanchored equals the pending total.
+  placed plus unanchored equals the pending total. `X-Export-Annotation-Count` counts placed suggestions
+  (tracked changes), not comments.
 - Unreliable results are exported by default. When the system flagged a chapter's Active Proofread result
   as unreliable (the model output looked broken), the export page asks first: export everything, skip
   those chapters, or cancel. The choice travels as `?unreliable=include|skip` (default `include`,
@@ -51,6 +63,8 @@ Delete, Delete All Comments in Document.
 ## For maintainers
 
 Comments and tracked changes are hand-written Open XML (`Services/Export/ProofreadDocxAnnotator.cs`),
-because DocIO's `TrackChanges = true` records no revisions for API edits on the shipped 32.1.24. Anchoring
+because DocIO's `TrackChanges = true` records no revisions for API edits on the shipped 32.1.24. The
+comment rule and the explanation floor live in `ProofreadAnnotationStrings.CommentLines` /
+`SanitizeExplanation`; a file whose suggestions all lack information has no comments part at all. Anchoring
 is by text plus context into a normalized paragraph view, never by raw offset. Annotation happens on each
 unit's buffer before book assembly, which was premise-tested to keep all revisions and comments.

@@ -18,6 +18,9 @@ namespace Pagedraft.Api.Tests;
 /// <c>word/document.xml</c> / <c>word/comments.xml</c> first, then a DocIO reload (revision and comment
 /// counts), then accept-all through DocIO yielding the corrected text, which pins the part of Word
 /// compatibility the structural assertions cannot. Inputs are built with DocIO, the writer the export uses.
+/// A suggestion is its tracked change alone unless it carries a ktiv-male label or an explanation that says
+/// something; only then is it ranged by a comment, whose body is that information and never a restatement
+/// of the change (owner decision 2026-10-12).
 /// </summary>
 public class ProofreadDocxAnnotatorTests
 {
@@ -29,7 +32,7 @@ public class ProofreadDocxAnnotatorTests
     // ------------------------------------------------------------------ structure
 
     [Fact]
-    public void Single_run_span_becomes_del_then_ins_inside_one_comment_range()
+    public void A_plain_replacement_is_a_del_then_ins_with_no_comment_at_all()
     {
         var docx = Docx(P(("רוני הלכה לבית הספר היום.", false)), P(("היא פגשה את דני ליד השער.", false)));
 
@@ -38,9 +41,7 @@ public class ProofreadDocxAnnotatorTests
         Assert.Equal((1, 0), (result.Placed, result.Unanchored));
         var p = ParagraphContaining(result.Docx, "רוני");
         var kinds = p.Elements().Where(e => e.Name != W + "pPr").Select(Describe).ToList();
-        Assert.Equal(
-            new[] { "r:רוני הלכה ", "commentRangeStart", "del:לבית הספר", "ins:לביה\"ס", "commentRangeEnd", "r:[ref]", "r: היום." },
-            kinds);
+        Assert.Equal(new[] { "r:רוני הלכה ", "del:לבית הספר", "ins:לביה\"ס", "r: היום." }, kinds);
 
         var del = p.Element(W + "del")!;
         var ins = p.Element(W + "ins")!;
@@ -50,6 +51,28 @@ public class ProofreadDocxAnnotatorTests
         Assert.NotEqual((string?)del.Attribute(W + "id"), (string?)ins.Attribute(W + "id"));
         Assert.Equal("preserve", (string?)del.Descendants(W + "delText").Single().Attribute(XNamespace.Xml + "space"));
 
+        // The change already shows what goes and what comes: no comments part, no range, no reference.
+        Assert.Null(PartOrNull(result.Docx, "word/comments.xml"));
+        AssertNoCommentMarkup(result.Docx);
+
+        // The other paragraph is untouched.
+        Assert.Empty(ParagraphContaining(result.Docx, "השער").Descendants(W + "del"));
+    }
+
+    [Fact]
+    public void An_explained_replacement_gets_one_comment_ranged_over_its_del_and_ins_holding_only_the_explanation()
+    {
+        var docx = Docx(P(("רוני הלכה לבית הספר היום.", false)));
+
+        var result = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 10, explanation: "קיצור מקובל בכתיבה יומיומית."));
+
+        Assert.Equal((1, 0), (result.Placed, result.Unanchored));
+        var p = ParagraphContaining(result.Docx, "רוני");
+        var kinds = p.Elements().Where(e => e.Name != W + "pPr").Select(Describe).ToList();
+        Assert.Equal(
+            new[] { "r:רוני הלכה ", "commentRangeStart", "del:לבית הספר", "ins:לביה\"ס", "commentRangeEnd", "r:[ref]", "r: היום." },
+            kinds);
+
         var commentId = (string?)p.Element(W + "commentRangeStart")!.Attribute(W + "id");
         Assert.Equal(commentId, (string?)p.Element(W + "commentRangeEnd")!.Attribute(W + "id"));
         Assert.Equal(commentId, (string?)p.Descendants(W + "commentReference").Single().Attribute(W + "id"));
@@ -57,10 +80,50 @@ public class ProofreadDocxAnnotatorTests
         var comment = Comments(result.Docx).Single();
         Assert.Equal(commentId, (string?)comment.Attribute(W + "id"));
         Assert.Equal("PD", (string?)comment.Attribute(W + "initials"));
-        Assert.Equal(new[] { "הצעה: לביה\"ס במקום לבית הספר" }, CommentLines(comment));
+        Assert.Equal("PageDraft הגהה", (string?)comment.Attribute(W + "author"));
+        Assert.Equal(new[] { "קיצור מקובל בכתיבה יומיומית." }, CommentLines(comment));
+    }
 
-        // The other paragraph is untouched.
-        Assert.Empty(ParagraphContaining(result.Docx, "השער").Descendants(W + "del"));
+    [Fact]
+    public void A_ktiv_male_suggestion_gets_one_comment_holding_only_its_label()
+    {
+        var docx = Docx(P(("הוא שמר על המסורת.", false)));
+
+        var result = Annotate(docx, Sug("שמר", "שומר", 4, category: "ktiv-male"));
+
+        Assert.Equal(1, result.Placed);
+        Assert.Equal(new[] { "כתיב מלא לפי האקדמיה" }, CommentLines(Comments(result.Docx).Single()));
+        Assert.Single(Document(result.Docx).Descendants(W + "commentReference"));
+    }
+
+    [Theory]
+    [InlineData("   ")]
+    [InlineData(" ... ")]
+    [InlineData("\n\t")]
+    [InlineData("No explanation could be generated for this suggestion.")]
+    public void An_explanation_that_says_nothing_writes_no_comment(string explanation)
+    {
+        var docx = Docx(P(("רוני הלכה לבית הספר היום.", false)));
+
+        var result = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 10, explanation: explanation));
+
+        Assert.Equal(1, result.Placed);
+        Assert.Null(PartOrNull(result.Docx, "word/comments.xml"));
+        AssertNoCommentMarkup(result.Docx);
+    }
+
+    [Fact]
+    public void A_model_explanation_is_cleaned_before_it_reaches_the_comment()
+    {
+        var docx = Docx(P(("רוני הלכה לבית הספר היום.", false)));
+        var longTail = new string('ב', ProofreadAnnotationStrings.MaxExplanationLength);
+
+        var result = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 10, explanation: "  שורה\r\n\r\nשנייה\u0001 " + longTail));
+
+        var line = CommentLines(Comments(result.Docx).Single()).Single();
+        Assert.StartsWith("שורה שנייה ב", line, StringComparison.Ordinal);
+        Assert.EndsWith("…", line, StringComparison.Ordinal);
+        Assert.Equal(ProofreadAnnotationStrings.MaxExplanationLength + 1, line.Length);
     }
 
     [Fact]
@@ -89,8 +152,8 @@ public class ProofreadDocxAnnotatorTests
         var docx = Docx(P(("רוני הלכה לבית הספר והיא חזרה הבייתה מאוחר.", false)));
 
         var result = Annotate(docx,
-            Sug("הבייתה", "הביתה", 30),
-            Sug("לבית הספר", "לבית־הספר", 10));
+            Sug("הבייתה", "הביתה", 30, explanation: "כתיב תקני."),
+            Sug("לבית הספר", "לבית־הספר", 10, explanation: "צירוף סמיכות."));
 
         Assert.Equal((2, 0), (result.Placed, result.Unanchored));
         var p = ParagraphContaining(result.Docx, "רוני");
@@ -172,7 +235,8 @@ public class ProofreadDocxAnnotatorTests
         var p = ParagraphContaining(result.Docx, "הוא");
         Assert.Equal("הלך ", p.Element(W + "del")!.Value);
         Assert.Empty(p.Descendants(W + "ins"));
-        Assert.Equal(new[] { "הצעה: למחוק הלך " }, CommentLines(Comments(result.Docx).Single()));
+        Assert.Null(PartOrNull(result.Docx, "word/comments.xml"));
+        AssertNoCommentMarkup(result.Docx);
     }
 
     [Fact]
@@ -186,9 +250,22 @@ public class ProofreadDocxAnnotatorTests
         var p = ParagraphContaining(result.Docx, "רוני");
         Assert.Empty(p.Descendants(W + "del"));
         var kinds = p.Elements().Where(e => e.Name != W + "pPr").Select(Describe).ToList();
+        Assert.Equal(new[] { "r:רוני הלכה ", "ins:לבית ", "r:הספר היום." }, kinds);
+    }
+
+    [Fact]
+    public void An_explained_pure_insertion_is_ranged_by_its_comment()
+    {
+        var docx = Docx(P(("רוני הלכה הספר היום.", false)));
+
+        var result = Annotate(docx, Sug("", "לבית ", 10, before: "רוני הלכה ", after: "הספר היום.", explanation: "חסרה מילת יחס."));
+
+        var p = ParagraphContaining(result.Docx, "רוני");
+        var kinds = p.Elements().Where(e => e.Name != W + "pPr").Select(Describe).ToList();
         Assert.Equal(
             new[] { "r:רוני הלכה ", "commentRangeStart", "ins:לבית ", "commentRangeEnd", "r:[ref]", "r:הספר היום." },
             kinds);
+        Assert.Equal(new[] { "חסרה מילת יחס." }, CommentLines(Comments(result.Docx).Single()));
     }
 
     [Fact]
@@ -235,19 +312,41 @@ public class ProofreadDocxAnnotatorTests
         var docx = Docx(P(("אחת שתיים שלוש.", false)), P(("ארבע חמש שש.", false)));
 
         var result = Annotate(docx,
-            Sug("אחת", "אחד", 0),
+            Sug("אחת", "אחד", 0, explanation: "התאמה במין."),
             Sug("שלוש", "שלש", 10),
-            Sug("חמש", "חמישה", 21),
+            Sug("חמש", "חמישה", 21, category: "ktiv-male"),
             Sug("שבע", "שבעה", 30),
             Sug("שתיים", "שניים", 4, outcome: SuggestionOutcome.Dismissed));
 
+        // Placed counts tracked changes; comments are only the two that add information.
         Assert.Equal((3, 1), (result.Placed, result.Unanchored));
-        Assert.Equal(3, Comments(result.Docx).Count);
-        Assert.Equal(3, Document(result.Docx).Descendants(W + "commentReference").Count());
+        Assert.Equal(3, Document(result.Docx).Descendants(W + "del").Count());
+        Assert.Equal(2, Comments(result.Docx).Count);
+        Assert.Equal(2, Document(result.Docx).Descendants(W + "commentReference").Count());
+        Assert.Equal(2, Document(result.Docx).Descendants(W + "commentRangeStart").Count());
+        Assert.Equal(2, Document(result.Docx).Descendants(W + "commentRangeEnd").Count());
     }
 
     [Fact]
-    public void Comment_body_carries_the_category_and_explanation_lines_in_the_books_language()
+    public void Revision_ids_are_unique_across_the_document_with_and_without_comments()
+    {
+        var docx = Docx(P(("אחת שתיים שלוש.", false)), P(("ארבע חמש שש.", false)));
+
+        var result = Annotate(docx,
+            Sug("אחת", "אחד", 0, explanation: "התאמה במין."),
+            Sug("שלוש", "שלש", 10),
+            Sug("חמש ", "", 21),
+            Sug("שש", "שישה", 25, category: "ktiv-male"));
+
+        Assert.Equal(4, result.Placed);
+        var ids = Document(result.Docx).Descendants().Where(e => e.Name == W + "del" || e.Name == W + "ins")
+            .Select(e => (string)e.Attribute(W + "id")!).ToList();
+        Assert.Equal(7, ids.Count);
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+    }
+
+    [Fact]
+    public void Comment_body_carries_only_the_category_and_explanation_lines_in_the_books_language()
     {
         var docx = Docx(P(("הוא שמר על המסורת.", false)));
         var s = Sug("שמר", "שומר", 4, category: "ktiv-male", explanation: "  כתיב מלא בבינוני.  ");
@@ -255,10 +354,12 @@ public class ProofreadDocxAnnotatorTests
         var he = Annotate(docx, s);
         var en = _annotator.Annotate(docx, new[] { s }, "en", Stamp);
 
-        Assert.Equal(new[] { "הצעה: שומר במקום שמר", "כתיב מלא לפי האקדמיה", "כתיב מלא בבינוני." },
-            CommentLines(Comments(he.Docx).Single()));
-        Assert.Equal(new[] { "Suggested: שומר instead of שמר", "Academy full spelling", "כתיב מלא בבינוני." },
-            CommentLines(Comments(en.Docx).Single()));
+        var heLines = CommentLines(Comments(he.Docx).Single());
+        Assert.Equal(new[] { "כתיב מלא לפי האקדמיה", "כתיב מלא בבינוני." }, heLines);
+        Assert.Equal(new[] { "Academy full spelling", "כתיב מלא בבינוני." }, CommentLines(Comments(en.Docx).Single()));
+        // The change is not restated: no "X instead of Y" line in either language.
+        Assert.DoesNotContain(heLines, l => l.Contains("במקום", StringComparison.Ordinal));
+        Assert.DoesNotContain(CommentLines(Comments(en.Docx).Single()), l => l.Contains("instead of", StringComparison.Ordinal));
         Assert.Equal("PageDraft Proofreader", (string?)Comments(en.Docx).Single().Attribute(W + "author"));
         Assert.Equal("PageDraft Proofreader",
             (string?)Document(en.Docx).Descendants(W + "del").Single().Attribute(W + "author"));
@@ -278,15 +379,28 @@ public class ProofreadDocxAnnotatorTests
         target.ParagraphFormat.Bidi = true;
         target.AppendText("רוני הלכה לבית הספר.");
         var docx = Save(doc);
+        var authorIds = Comments(docx).Select(c => (string)c.Attribute(W + "id")!).ToList();
 
-        var result = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 25));
+        var explained = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 25, explanation: "קיצור מקובל."));
 
-        Assert.Equal(1, result.Placed);
-        var ids = Comments(result.Docx).Select(c => (string)c.Attribute(W + "id")!).ToList();
+        Assert.Equal(1, explained.Placed);
+        var ids = Comments(explained.Docx).Select(c => (string)c.Attribute(W + "id")!).ToList();
         Assert.Equal(2, ids.Count);
         Assert.Equal(ids.Count, ids.Distinct().Count());
-        using var reloaded = new WordDocument(new MemoryStream(result.Docx), FormatType.Docx);
-        Assert.Equal(2, reloaded.Comments.Count);
+        Assert.Equal(authorIds, ids.Take(1));
+        using (var reloaded = new WordDocument(new MemoryStream(explained.Docx), FormatType.Docx))
+            Assert.Equal(2, reloaded.Comments.Count);
+
+        // A plain suggestion adds no comment, and the author's own passes through as it was.
+        var plain = Annotate(docx, Sug("לבית הספר", "לביה\"ס", 25));
+        Assert.Equal(1, plain.Placed);
+        Assert.Equal(authorIds, Comments(plain.Docx).Select(c => (string)c.Attribute(W + "id")!));
+        Assert.Single(Document(plain.Docx).Descendants(W + "commentReference"));
+        using (var reloaded = new WordDocument(new MemoryStream(plain.Docx), FormatType.Docx))
+        {
+            Assert.Equal(1, reloaded.Comments.Count);
+            Assert.Equal(2, reloaded.Revisions.Count);
+        }
     }
 
     // ------------------------------------------------------------------ DocIO reload
@@ -298,9 +412,10 @@ public class ProofreadDocxAnnotatorTests
 
         Assert.Equal((4, 0), (result.Placed, result.Unanchored));
         using var reloaded = new WordDocument(new MemoryStream(result.Docx), FormatType.Docx);
-        // replacement (del + ins) x2, deletion (del), insertion (ins) = 6 revisions, 4 comments.
+        // replacement (del + ins) x2, deletion (del), insertion (ins) = 6 revisions; 2 of the 4 add
+        // information (one explained, one ktiv-male), so 2 comments.
         Assert.Equal(6, reloaded.Revisions.Count);
-        Assert.Equal(4, reloaded.Comments.Count);
+        Assert.Equal(2, reloaded.Comments.Count);
         Assert.All(reloaded.Revisions.Cast<Revision>(), r => Assert.Equal("PageDraft הגהה", r.Author));
         Assert.Equal(3, reloaded.Revisions.Cast<Revision>().Count(r => r.RevisionType == RevisionType.Deletions));
         Assert.Equal(3, reloaded.Revisions.Cast<Revision>().Count(r => r.RevisionType == RevisionType.Insertions));
@@ -344,9 +459,9 @@ public class ProofreadDocxAnnotatorTests
 
     private static AnalysisSuggestion[] MixedSuggestions() => new[]
     {
-        Sug("הלכה לבית", "צעדה אל בית", 5),
+        Sug("הלכה לבית", "צעדה אל בית", 5, explanation: "ניסוח מדויק יותר."),
         Sug("הלך ", "", 30, before: "היום. הוא ", after: "הלך הביתה ואמר"),
-        Sug("שלום", "שלומות", 50),
+        Sug("שלום", "שלומות", 50, category: "ktiv-male"),
         Sug("", "ליד ", 70, before: "היא פגשה את דני ", after: "השער."),
     };
 
@@ -407,6 +522,23 @@ public class ProofreadDocxAnnotatorTests
         var entry = zip.GetEntry(name) ?? throw new InvalidOperationException($"{name} missing");
         using var stream = entry.Open();
         return XDocument.Load(stream);
+    }
+
+    private static XDocument? PartOrNull(byte[] docx, string name)
+    {
+        using var zip = new ZipArchive(new MemoryStream(docx), ZipArchiveMode.Read);
+        var entry = zip.GetEntry(name);
+        if (entry == null) return null;
+        using var stream = entry.Open();
+        return XDocument.Load(stream);
+    }
+
+    private static void AssertNoCommentMarkup(byte[] docx)
+    {
+        var document = Document(docx);
+        Assert.Empty(document.Descendants(W + "commentRangeStart"));
+        Assert.Empty(document.Descendants(W + "commentRangeEnd"));
+        Assert.Empty(document.Descendants(W + "commentReference"));
     }
 
     private static XDocument Document(byte[] docx) => Part(docx, "word/document.xml");

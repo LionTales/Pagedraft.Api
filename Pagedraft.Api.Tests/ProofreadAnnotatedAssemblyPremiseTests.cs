@@ -44,16 +44,16 @@ public class ProofreadAnnotatedAssemblyPremiseTests
             Chapter("רוני הלכה לבית הספר היום.", "היא פגשה את דני ליד השער."),
             new[]
             {
-                Sug("לבית הספר", "לביה\"ס", 10),
-                Sug("השער", "השערים", 40),
+                Sug("לבית הספר", "לביה\"ס", 10, "קיצור מקובל."),
+                Sug("השער", "השערים", 40, "צורת רבים."),
             },
             "he", Stamp);
         var second = _annotator.Annotate(
             Chapter("הוא הלך הביתה ואמר שלום לכולם.", "בערב ירד גשם חזק על העיר."),
             new[]
             {
-                Sug("שלום", "שלומות", 20),
-                Sug("חזק ", "", 45),
+                Sug("שלום", "שלומות", 20, "צורת רבים."),
+                Sug("חזק ", "", 45, "מיותר."),
             },
             "he", Stamp);
         Assert.Equal((2, 0), (first.Placed, first.Unanchored));
@@ -103,16 +103,68 @@ public class ProofreadAnnotatedAssemblyPremiseTests
         Assert.Contains("גשם על העיר", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The common production shape since comments are written only when they add information: a buffer with
+    /// tracked changes and NO comments part, assembled ahead of one that has a comment. The revisions of both
+    /// survive, the one comment survives once, and no comment appears that nobody wrote.
+    /// </summary>
+    [Fact]
+    public void ImportContent_keeps_the_revisions_of_a_buffer_with_no_comments_part()
+    {
+        var plain = _annotator.Annotate(
+            Chapter("רוני הלכה לבית הספר היום.", "היא פגשה את דני ליד השער."),
+            new[] { Sug("לבית הספר", "לביה\"ס", 10, ""), Sug("השער", "השערים", 40, "") },
+            "he", Stamp);
+        var mixed = _annotator.Annotate(
+            Chapter("הוא הלך הביתה ואמר שלום לכולם.", "בערב ירד גשם חזק על העיר."),
+            new[] { Sug("שלום", "שלומות", 20, "צורת רבים."), Sug("חזק ", "", 45, "") },
+            "he", Stamp);
+        Assert.Equal(2, plain.Placed);
+        Assert.Equal(2, mixed.Placed);
+        Assert.Null(PartOrNull(plain.Docx, "word/comments.xml"));
+        Assert.Single(CommentIds(mixed.Docx));
+
+        var assembled = new BookAssemblyService().AssembleDocx(new[] { plain.Docx, mixed.Docx });
+
+        using (var reloaded = new WordDocument(new MemoryStream(assembled), FormatType.Docx))
+        {
+            Assert.Equal(7, reloaded.Revisions.Count); // (del + ins) x2 + (del + ins) + del
+            Assert.Equal(1, reloaded.Comments.Count);
+        }
+        var body = Part(assembled, "word/document.xml");
+        Assert.Single(body.Descendants(W + "commentReference"));
+
+        using var accepted = new WordDocument(new MemoryStream(assembled), FormatType.Docx);
+        foreach (var revision in accepted.Revisions.Cast<Revision>().ToList()) revision.Accept();
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(accepted.GetText());
+        Assert.Contains("לביה\"ס היום", text, StringComparison.Ordinal);
+        Assert.Contains("ליד השערים.", text, StringComparison.Ordinal);
+        Assert.Contains("שלומות לכולם", text, StringComparison.Ordinal);
+        Assert.Contains("גשם על העיר", text, StringComparison.Ordinal);
+    }
+
+    private static XDocument? PartOrNull(byte[] docx, string name)
+    {
+        using var zip = new ZipArchive(new MemoryStream(docx), ZipArchiveMode.Read);
+        var entry = zip.GetEntry(name);
+        if (entry == null) return null;
+        using var stream = entry.Open();
+        return XDocument.Load(stream);
+    }
+
     private byte[] Chapter(params string[] paragraphs) =>
         _sfdt.ConvertSfdtToDocx(SfdtConversionService.CreateMinimalSfdtFromText(string.Join("\n", paragraphs)));
 
-    private static AnalysisSuggestion Sug(string original, string suggested, int start) => new()
+    // Every suggestion carries an explanation: only an explained (or ktiv-male) suggestion gets a comment, and
+    // the premise is about comments surviving the import as much as revisions.
+    private static AnalysisSuggestion Sug(string original, string suggested, int start, string explanation) => new()
     {
         Id = Guid.NewGuid(),
         OriginalText = original,
         SuggestedText = suggested,
         StartOffset = start,
         EndOffset = start + original.Length,
+        Explanation = explanation,
     };
 
     private static string[] CommentIds(byte[] docx) =>

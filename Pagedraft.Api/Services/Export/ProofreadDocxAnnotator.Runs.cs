@@ -8,8 +8,9 @@ using W = DocumentFormat.OpenXml.Wordprocessing;
 namespace Pagedraft.Api.Services.Export;
 
 /// <summary>
-/// The raw-text model of the body and the run surgery that turns a resolved span into
-/// <c>w:commentRangeStart</c> / <c>w:del</c> / <c>w:ins</c> / <c>w:commentRangeEnd</c> / comment reference.
+/// The raw-text model of the body and the run surgery that turns a resolved span into <c>w:del</c> /
+/// <c>w:ins</c>, wrapped in <c>w:commentRangeStart</c> / <c>w:commentRangeEnd</c> / comment reference only
+/// when the suggestion gets a comment.
 /// </summary>
 public sealed partial class ProofreadDocxAnnotator
 {
@@ -165,7 +166,6 @@ public sealed partial class ProofreadDocxAnnotator
 
     private static void Place(DocumentText text, Edit edit, string author, DateTime stamp)
     {
-        var commentId = edit.CommentId.ToString();
         OpenXmlElement first;
         OpenXmlElement last;
 
@@ -232,6 +232,9 @@ public sealed partial class ProofreadDocxAnnotator
             }
         }
 
+        // A plain suggestion is its tracked change alone; only one with something to add is ranged by a comment.
+        if (edit.CommentId is not { } id) return;
+        var commentId = id.ToString();
         first.InsertBeforeSelf(new W.CommentRangeStart { Id = commentId });
         var rangeEnd = last.InsertAfterSelf(new W.CommentRangeEnd { Id = commentId });
         rangeEnd.InsertAfterSelf(new W.Run(new W.CommentReference { Id = commentId }));

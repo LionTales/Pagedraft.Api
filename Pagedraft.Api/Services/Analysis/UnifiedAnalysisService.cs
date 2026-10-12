@@ -3825,6 +3825,12 @@ public class UnifiedAnalysisService
     }
 
     /// <summary>
+    /// What <see cref="ExplainSuggestionAsync"/> stores when the model returned nothing. It says nothing
+    /// about the suggestion, so the annotated DOCX treats it as no explanation at all.
+    /// </summary>
+    public const string NoExplanationFallback = "No explanation could be generated for this suggestion.";
+
+    /// <summary>
     /// Explain why a specific suggestion was made. Uses LLM with a focused prompt and caches
     /// the explanation on the suggestion row. Centralized here so controllers do not depend
     /// directly on IAiRouter / PromptFactory.
@@ -3874,7 +3880,7 @@ public class UnifiedAnalysisService
         var explanation = (response.Content ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(explanation))
         {
-            explanation = "No explanation could be generated for this suggestion.";
+            explanation = NoExplanationFallback;
         }
 
         suggestion.Explanation = explanation;

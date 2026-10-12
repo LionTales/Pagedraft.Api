@@ -12,7 +12,10 @@ namespace Pagedraft.Api.Services.Export;
 
 /// <summary>Output of <see cref="ProofreadDocxAnnotator.Annotate"/>.</summary>
 /// <param name="Docx">The annotated package; the INPUT array itself when nothing was placed.</param>
-/// <param name="Placed">Pending suggestions written as a comment plus tracked change(s).</param>
+/// <param name="Placed">
+/// Pending suggestions written as tracked change(s), whether or not they also got a comment (only those with
+/// a category label or an explanation do; see <see cref="ProofreadAnnotationStrings.CommentLines"/>).
+/// </param>
 /// <param name="Unanchored">
 /// Pending suggestions that could not be placed: no match, an ambiguous match the contexts do not settle,
 /// a span crossing a paragraph or touching text that is not plain body text (a field result, an existing
@@ -22,8 +25,12 @@ namespace Pagedraft.Api.Services.Export;
 public sealed record ProofreadAnnotationResult(byte[] Docx, int Placed, int Unanchored);
 
 /// <summary>
-/// Writes pending proofread suggestions into a DOCX as Word tracked changes (<c>w:del</c> / <c>w:ins</c>)
-/// with one ranged Word comment per suggestion, using the Open XML SDK only.
+/// Writes pending proofread suggestions into a DOCX as Word tracked changes (<c>w:del</c> / <c>w:ins</c>),
+/// using the Open XML SDK only. A suggestion gets a ranged Word comment ONLY when it carries information the
+/// change does not show (the Academy full-spelling label, or an explanation that says something); a plain
+/// suggestion is its tracked change alone, so the author reviews it with one Accept or Reject on the
+/// selection (owner decision 2026-10-12: a comment restating the change cost a third click per suggestion,
+/// and Word's Accept never clears a comment).
 ///
 /// <para>WHY HAND-WRITTEN XML: DocIO's <c>TrackChanges = true</c> records NOTHING for API edits on the shipped
 /// 32.1.24 (five operations measured, 0 revisions each; plan whole-book-proofread-and-annotated-docx-2026-10-11).
@@ -227,19 +234,29 @@ public sealed partial class ProofreadDocxAnnotator
         MainDocumentPart main, DocumentText text, List<Edit> edits, string language, DateTime stamp)
     {
         var author = ProofreadAnnotationStrings.Author(language);
-        var commentsPart = main.WordprocessingCommentsPart ?? main.AddNewPart<WordprocessingCommentsPart>();
-        commentsPart.Comments ??= new W.Comments();
+        foreach (var edit in edits)
+            edit.CommentLines = ProofreadAnnotationStrings.CommentLines(
+                language, edit.Suggestion.Category, edit.Suggestion.Explanation);
 
-        var nextCommentId = MaxWordId(commentsPart.Comments) + 1;
-        var nextRevisionId = Math.Max(MaxWordId(main.Document!), MaxWordId(commentsPart.Comments)) + 1;
+        // The comments part is created only when some suggestion needs a comment: a document whose
+        // suggestions are all plain replacements carries tracked changes and no comments part at all.
+        var commentsPart = main.WordprocessingCommentsPart;
+        if (commentsPart == null && edits.Any(e => e.CommentLines.Count > 0))
+            commentsPart = main.AddNewPart<WordprocessingCommentsPart>();
+        if (commentsPart != null) commentsPart.Comments ??= new W.Comments();
+
+        var existingCommentMax = commentsPart != null ? MaxWordId(commentsPart.Comments!) : -1;
+        var nextCommentId = existingCommentMax + 1;
+        var nextRevisionId = Math.Max(MaxWordId(main.Document!), existingCommentMax) + 1;
 
         // Ids are handed out in document order so comment 1 is the first one the author meets.
         foreach (var edit in edits.OrderBy(e => e.RawStart))
         {
-            edit.CommentId = nextCommentId++;
             if (edit.Original.Length > 0) edit.DeletionId = nextRevisionId++;
             if (edit.Suggested.Length > 0) edit.InsertionId = nextRevisionId++;
-            commentsPart.Comments.Append(BuildComment(edit, language, author, stamp));
+            if (edit.CommentLines.Count == 0) continue;
+            edit.CommentId = nextCommentId++;
+            commentsPart!.Comments!.Append(BuildComment(edit, language, author, stamp));
         }
 
         // Placed right to left: splitting a w:t keeps the ORIGINAL node as the left fragment, so every
@@ -248,23 +265,16 @@ public sealed partial class ProofreadDocxAnnotator
             Place(text, edit, author, stamp);
 
         main.Document!.Save();
-        commentsPart.Comments.Save();
+        commentsPart?.Comments!.Save();
     }
 
     private static W.Comment BuildComment(Edit edit, string language, string author, DateTime stamp)
     {
-        var lines = new List<string>
-        {
-            ProofreadAnnotationStrings.SuggestionLine(language, edit.Original, edit.Suggested),
-        };
-        var category = ProofreadAnnotationStrings.CategoryLine(language, edit.Suggestion.Category);
-        if (category != null) lines.Add(category);
-        if (!string.IsNullOrWhiteSpace(edit.Suggestion.Explanation)) lines.Add(edit.Suggestion.Explanation.Trim());
-
+        var lines = edit.CommentLines;
         var rtl = ProofreadAnnotationStrings.IsHebrew(language);
         var comment = new W.Comment
         {
-            Id = edit.CommentId.ToString(),
+            Id = edit.CommentId!.Value.ToString(),
             Author = author,
             Initials = ProofreadAnnotationStrings.Initials,
             Date = stamp,
@@ -317,7 +327,9 @@ public sealed partial class ProofreadDocxAnnotator
         public int RawEnd { get; }
         public string Original { get; }
         public string Suggested { get; }
-        public int CommentId { get; set; }
+        /// <summary>Null when the suggestion gets no comment (<see cref="CommentLines"/> is empty).</summary>
+        public int? CommentId { get; set; }
+        public IReadOnlyList<string> CommentLines { get; set; } = Array.Empty<string>();
         public int DeletionId { get; set; }
         public int InsertionId { get; set; }
 

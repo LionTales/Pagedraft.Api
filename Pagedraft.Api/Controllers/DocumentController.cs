@@ -178,8 +178,8 @@ public class DocumentController : ControllerBase
         => ToFileResult(await _bookExport.ExportChapterAsync(bookId, chapterId, ct));
 
     /// <summary>
-    /// The whole book as one DOCX with every unit's PENDING proofread suggestions written in as Word comments
-    /// and tracked changes, named like the plain export plus " - הגהה" / " - proofread". Same 404/409 answers
+    /// The whole book as one DOCX with every unit's PENDING proofread suggestions written in as tracked changes
+    /// (a Word comment only where there is a label or an explanation to add), named like the plain export plus " - הגהה" / " - proofread". Same 404/409 answers
     /// and skipped-chapter headers as <see cref="ExportBook"/>; a <c>200</c> also carries
     /// <see cref="BookExportService.AnnotationCountHeader"/>, <see cref="BookExportService.UnanchoredCountHeader"/>
     /// and <see cref="BookExportService.UnreliableSkippedCountHeader"/>.
