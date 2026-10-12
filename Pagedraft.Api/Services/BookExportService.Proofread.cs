@@ -109,23 +109,17 @@ public partial class BookExportService
         CancellationToken ct = default)
         => ExportChapterCoreAsync(bookId, chapterId, proofread: true, ct, unreliable);
 
-    /// <summary>One unit's DOCX: the SFDT conversion, then the annotation pass when this is an annotated export.</summary>
-    private byte[] Render(RenderableUnit unit, AnnotationSession? annotation)
+    /// <summary>
+    /// One unit's DOCX: the SFDT conversion, then the annotation pass when this is an annotated export. The
+    /// conversion ALWAYS gets the book's language, plain or annotated: it decides the Hebrew export fidelity
+    /// (he-IL on runs without a complex-script language, right-to-left as the default paragraph direction; see
+    /// <see cref="SfdtConversionService.ConvertSfdtToDocx"/>), and an annotated export converted without it
+    /// was laid out left-to-right. Pinned by <c>ExportAnnotatedFidelityTests</c>.
+    /// </summary>
+    private byte[] Render(RenderableUnit unit, string? bookLanguage, AnnotationSession? annotation)
     {
-        var docx = _sfdtConversion.ConvertSfdtToDocx(unit.Sfdt);
+        var docx = _sfdtConversion.ConvertSfdtToDocx(unit.Sfdt, bookLanguage);
         return annotation == null ? docx : annotation.Annotate(unit, docx);
-    }
-
-    /// <summary>The chapter path's session: the book's language (the chapter row does not carry one), then the load.</summary>
-    private async Task<AnnotationSession> StartChapterAnnotationAsync(
-        Guid bookId, Guid chapterId, UnreliableProofreadMode unreliable, CancellationToken ct)
-    {
-        var language = await _db.Books
-            .AsNoTracking()
-            .Where(b => b.Id == bookId)
-            .Select(b => b.Language)
-            .FirstOrDefaultAsync(ct);
-        return await StartAnnotationAsync(new[] { chapterId }, language, unreliable, ct);
     }
 
     /// <summary>
