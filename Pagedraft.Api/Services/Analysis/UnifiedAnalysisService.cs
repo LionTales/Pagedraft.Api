@@ -3395,7 +3395,21 @@ public class UnifiedAnalysisService
     /// Archive the previous Active analysis for the same (BookId, ChapterId, SceneId, Scope, AnalysisType),
     /// and mark any pending suggestions as Superseded.
     /// </summary>
-    private async Task ArchivePreviousActiveAsync(
+    private Task ArchivePreviousActiveAsync(
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        AnalysisType analysisType,
+        CancellationToken ct)
+        => ArchivePreviousActiveAsync(_db, bookId, chapterId, sceneId, scope, analysisType, ct);
+
+    /// <summary>
+    /// The archive step on a given context (internal so a test can drive it without the service's dependencies).
+    /// Changes are tracked, not saved: the caller's SaveChanges persists them with the new result.
+    /// </summary>
+    internal static async Task ArchivePreviousActiveAsync(
+        AppDbContext db,
         Guid? bookId,
         Guid? chapterId,
         Guid? sceneId,
@@ -3403,23 +3417,16 @@ public class UnifiedAnalysisService
         AnalysisType analysisType,
         CancellationToken ct)
     {
-        // Chapter/scene-scoped runs archive the prior active run for the SAME chapter; a book-scoped run
-        // (QA / ask, chapterId == null) archives the prior active run for the SAME book+scope+type. The
-        // nullable equality below is null-safe (EF translates a null chapterId to `ChapterId IS NULL`), so
-        // book-scoped runs no longer accumulate unbounded Active rows (they used to early-return here).
-        var previous = await _db.AnalysisResults
-            .Include(a => a.Suggestions)
-            .Where(a =>
-                a.ChapterId == chapterId &&
-                a.BookId == bookId &&
-                a.SceneId == sceneId &&
-                a.Scope == scope &&
-                a.AnalysisType == analysisType &&
-                a.Status == AnalysisStatus.Active)
-            .ToListAsync(ct);
+        var previous = await PreviousActiveQuery(db, bookId, chapterId, sceneId, scope, analysisType).ToListAsync(ct);
 
         if (previous.Count == 0)
             return;
+
+        // Suggestions in a SECOND query (plan c14): including them on the result query repeated each result's
+        // chapter-sized columns on every suggestion row, ~2 minutes on a 1,476-suggestion chapter, paid by every
+        // re-run before its new result was saved. Tracked, so the change tracker fixes the navigations up and the
+        // Outcome writes below are saved with the caller's SaveChanges, exactly as through the include.
+        await AnalysisSuggestionLoad.OfResults(db, previous.Select(a => a.Id).ToList()).ToListAsync(ct);
 
         foreach (var analysis in previous)
         {
@@ -3430,6 +3437,30 @@ public class UnifiedAnalysisService
             }
         }
     }
+
+    /// <summary>
+    /// The prior Active results <see cref="ArchivePreviousActiveAsync(AppDbContext, Guid?, Guid?, Guid?, AnalysisScope, AnalysisType, CancellationToken)"/>
+    /// archives, without their suggestions (pinned by <c>AnalysisSuggestionLoadQueryShapeTests</c>).
+    /// Chapter/scene-scoped runs archive the prior active run for the SAME chapter; a book-scoped run
+    /// (QA / ask, chapterId == null) archives the prior active run for the SAME book+scope+type. The
+    /// nullable equality below is null-safe (EF translates a null chapterId to `ChapterId IS NULL`), so
+    /// book-scoped runs no longer accumulate unbounded Active rows (they used to early-return here).
+    /// </summary>
+    internal static IQueryable<AnalysisResult> PreviousActiveQuery(
+        AppDbContext db,
+        Guid? bookId,
+        Guid? chapterId,
+        Guid? sceneId,
+        AnalysisScope scope,
+        AnalysisType analysisType)
+        => db.AnalysisResults
+            .Where(a =>
+                a.ChapterId == chapterId &&
+                a.BookId == bookId &&
+                a.SceneId == sceneId &&
+                a.Scope == scope &&
+                a.AnalysisType == analysisType &&
+                a.Status == AnalysisStatus.Active);
 
     /// <summary>True when Proofread result is nearly identical to input (normalize whitespace then compare). Indicates possible truncation or model echo.</summary>
     private static bool IsProofreadResultNearlyIdentical(string input, string result)

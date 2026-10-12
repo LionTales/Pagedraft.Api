@@ -227,30 +227,49 @@ public class AnalysisController : ControllerBase
     [HttpGet("analyses")]
     public async Task<ActionResult<List<AnalysisResultDto>>> GetAnalyses(Guid bookId, Guid chapterId, [FromQuery] Guid? sceneId = null, [FromQuery] string? analysisType = null, CancellationToken ct = default)
     {
-        var query = _db.AnalysisResults
-            .AsNoTracking()
-            .Include(a => a.Suggestions)
-            .Where(a => a.ChapterId == chapterId && a.Status == AnalysisStatus.Active);
-        if (sceneId.HasValue)
-            query = query.Where(a => a.SceneId == sceneId);
+        AnalysisType? type = !string.IsNullOrWhiteSpace(analysisType) && Enum.TryParse<AnalysisType>(analysisType, ignoreCase: true, out var parsed)
+            ? parsed
+            : null;
 
-        if (!string.IsNullOrWhiteSpace(analysisType) && Enum.TryParse<AnalysisType>(analysisType, ignoreCase: true, out var type))
-            query = query.Where(a => a.AnalysisType == type);
+        var results = await ActiveAnalysesQuery(_db, chapterId, sceneId, type).ToListAsync(ct);
+        await AnalysisSuggestionLoad.AttachToUntrackedAsync(_db, results, ct);
 
-        var items = (await query.ToListAsync(ct)).OrderByDescending(a => a.CreatedAt).ToList();
+        var items = results.OrderByDescending(a => a.CreatedAt).ToList();
         var registerStamp = await GetCharacterRegisterStampAsync(bookId, ct);
         var dtos = items.Select(a => ToDto(a, registerStamp)).ToList();
 
         return Ok(dtos);
     }
 
+    /// <summary>
+    /// The Active results of a chapter (optionally one scene, optionally one type), WITHOUT their suggestions:
+    /// <see cref="AnalysisSuggestionLoad.AttachToUntrackedAsync"/> reads those in a second query (plan c14). Including
+    /// them here repeated each result's chapter-sized columns on every suggestion row, 120 to 150 s per read on a
+    /// 38,209-word chapter. Ordered by id, the order the include query returned, so the stable sort on
+    /// <c>CreatedAt</c> above breaks ties exactly as it did.
+    /// </summary>
+    internal static IQueryable<AnalysisResult> ActiveAnalysesQuery(
+        AppDbContext db, Guid chapterId, Guid? sceneId, AnalysisType? analysisType)
+    {
+        var query = db.AnalysisResults
+            .AsNoTracking()
+            .Where(a => a.ChapterId == chapterId && a.Status == AnalysisStatus.Active);
+        if (sceneId.HasValue)
+            query = query.Where(a => a.SceneId == sceneId);
+        if (analysisType is { } type)
+            query = query.Where(a => a.AnalysisType == type);
+        return query.OrderBy(a => a.Id);
+    }
+
     [HttpGet("analyses/{id:guid}")]
     public async Task<ActionResult<AnalysisResultDto>> GetAnalysisById(Guid bookId, Guid chapterId, Guid id, CancellationToken ct)
     {
+        // Read-only, so no tracking; suggestions in a second query (see ActiveAnalysesQuery).
         var a = await _db.AnalysisResults
-            .Include(x => x.Suggestions)
+            .AsNoTracking()
             .FirstOrDefaultAsync(x => x.ChapterId == chapterId && x.Id == id, ct);
         if (a == null) return NotFound();
+        await AnalysisSuggestionLoad.AttachToUntrackedAsync(_db, new[] { a }, ct);
 
         return Ok(ToDto(a, await GetCharacterRegisterStampAsync(bookId, ct)));
     }
@@ -406,12 +425,14 @@ public class AnalysisController : ControllerBase
         Guid jobId,
         CancellationToken ct)
     {
+        // Read-only, so no tracking; suggestions in a second query (see ActiveAnalysesQuery).
         var analysis = await _db.AnalysisResults
-            .Include(a => a.Suggestions)
+            .AsNoTracking()
             .FirstOrDefaultAsync(a => a.ChapterId == chapterId && a.BookId == bookId && a.JobId == jobId, ct);
 
         if (analysis == null)
             return NotFound();
+        await AnalysisSuggestionLoad.AttachToUntrackedAsync(_db, new[] { analysis }, ct);
 
         return Ok(ToDto(analysis, await GetCharacterRegisterStampAsync(bookId, ct)));
     }
