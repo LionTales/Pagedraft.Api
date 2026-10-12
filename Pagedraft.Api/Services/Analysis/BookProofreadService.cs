@@ -24,7 +24,10 @@ public interface IBookProofreadService
     /// </summary>
     Task<StartBookProofreadResponse> StartAsync(Guid bookId, string language, bool force, CancellationToken ct);
 
-    /// <summary>Coverage, staleness and the in-flight run id for (book, language).</summary>
+    /// <summary>
+    /// Coverage, staleness, the in-flight run id, the plan + ETA a normal and a forced start would have right
+    /// now (the same <c>Plan</c> the start runs), and the chapters whose Active result is flagged unreliable.
+    /// </summary>
     Task<BookProofreadStatusDto> GetStatusAsync(Guid bookId, string language, CancellationToken ct);
 
     /// <summary>Asks the active run with this job id to stop before its next chapter. False when none matches.</summary>
@@ -91,23 +94,12 @@ public sealed class BookProofreadService : IBookProofreadService
     public async Task<StartBookProofreadResponse> StartAsync(Guid bookId, string language, bool force, CancellationToken ct)
     {
         var lang = BaselineLanguageResolver.Normalize(language);
-
-        List<ChapterProofreadState> states;
-        AiTier tier;
-        using (var scope = _scopeFactory.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            states = await LoadChapterStatesAsync(db, bookId, lang, ct);
-            tier = await BookAiTierResolver.ResolveAsync(db, bookId, AiTaskType.Proofread, _logger, ct);
-        }
-
-        var candidates = states.Where(s => s.Units.Count > 0).ToList();
-        var planned = candidates.Where(s => force || !s.IsFresh).ToList();
-        var skippedFresh = candidates.Count - planned.Count;
-        var (estimatedChunks, estimatedSeconds) = Estimate(planned, _aiOptions.Value, lang, tier);
+        var (states, tier) = await LoadPlanningInputsAsync(bookId, lang, ct);
+        var plan = Plan(states, force, _aiOptions.Value, lang, tier);
+        var planned = plan.Planned;
 
         StartBookProofreadResponse Response(Guid jobId, bool started) =>
-            new(jobId, started, skippedFresh, planned.Count, estimatedChunks, estimatedSeconds);
+            new(jobId, started, plan.SkippedFresh, planned.Count, plan.EstimatedChunks, plan.EstimatedSeconds);
 
         // A run already in flight wins over everything, including "nothing to do": the caller reattaches.
         if (_registry.TryGetActive(bookId, lang) is Guid active)
@@ -154,16 +146,37 @@ public sealed class BookProofreadService : IBookProofreadService
     public async Task<BookProofreadStatusDto> GetStatusAsync(Guid bookId, string language, CancellationToken ct)
     {
         var lang = BaselineLanguageResolver.Normalize(language);
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var states = await LoadChapterStatesAsync(db, bookId, lang, ct);
+        var (states, tier) = await LoadPlanningInputsAsync(bookId, lang, ct);
+        var normal = Plan(states, force: false, _aiOptions.Value, lang, tier);
+        var forced = Plan(states, force: true, _aiOptions.Value, lang, tier);
 
         return new BookProofreadStatusDto(
             ActiveJobId: _registry.TryGetActive(bookId, lang),
             ChaptersWithText: states.Count,
             ChaptersWithActiveProofread: states.Count(s => s.HasActiveResult),
             ChaptersStale: states.Count(s => s.HasActiveResult && !s.IsFresh),
-            LastRunAt: states.Select(s => s.NewestResultAt).Where(d => d.HasValue).Max());
+            LastRunAt: states.Select(s => s.NewestResultAt).Where(d => d.HasValue).Max(),
+            PlannedChapters: normal.Planned.Count,
+            EstimatedChunks: normal.EstimatedChunks,
+            EstimatedSeconds: normal.EstimatedSeconds,
+            ForcePlannedChapters: forced.Planned.Count,
+            ForceEstimatedChunks: forced.EstimatedChunks,
+            ForceEstimatedSeconds: forced.EstimatedSeconds,
+            UnreliableChapters: states
+                .Where(s => s.HasUnreliableResult)
+                .Select(s => new BookProofreadUnreliableChapterDto(s.ChapterId, s.Title, s.Order))
+                .ToList());
+    }
+
+    /// <summary>The chapter states and the book's Proofread tier: everything <see cref="Plan"/> reads, in one scope.</summary>
+    private async Task<(List<ChapterProofreadState> States, AiTier Tier)> LoadPlanningInputsAsync(
+        Guid bookId, string language, CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var states = await LoadChapterStatesAsync(db, bookId, language, ct);
+        var tier = await BookAiTierResolver.ResolveAsync(db, bookId, AiTaskType.Proofread, _logger, ct);
+        return (states, tier);
     }
 
     public bool Cancel(Guid bookId, Guid jobId)
@@ -328,7 +341,11 @@ public sealed class BookProofreadService : IBookProofreadService
     /// <summary>One proofreadable unit: the chapter row (SceneId null) or one scene.</summary>
     internal sealed record ProofreadUnit(Guid? SceneId, DateTimeOffset UpdatedAt);
 
-    /// <summary>A chapter with text, the units a run would proofread, and whether its results are fresh.</summary>
+    /// <summary>
+    /// A chapter with text, the units a run would proofread, and whether its results are fresh.
+    /// <paramref name="HasUnreliableResult"/>: ANY Active Proofread result on the chapter (Chapter or Scene scope)
+    /// in the planning language is flagged unreliable, which is what the status's UnreliableChapters lists.
+    /// </summary>
     internal sealed record ChapterProofreadState(
         Guid ChapterId,
         int Order,
@@ -336,7 +353,29 @@ public sealed class BookProofreadService : IBookProofreadService
         IReadOnlyList<ProofreadUnit> Units,
         bool HasActiveResult,
         bool IsFresh,
-        DateTimeOffset? NewestResultAt);
+        DateTimeOffset? NewestResultAt,
+        string Title = "",
+        bool HasUnreliableResult = false);
+
+    /// <summary>What a run with this <c>force</c> would do: the chapters it proofreads, the fresh ones it skips, its ETA.</summary>
+    internal sealed record ProofreadPlan(
+        IReadOnlyList<ChapterProofreadState> Planned, int SkippedFresh, int EstimatedChunks, int EstimatedSeconds);
+
+    /// <summary>
+    /// THE planning rule, shared by <see cref="StartAsync"/> (which runs it) and <see cref="GetStatusAsync"/> (which
+    /// shows it on the consent before the author starts, both with and without force): candidates are chapters
+    /// with at least one unit; planned are the candidates that are not fresh, or all of them when forced; the
+    /// estimate is <see cref="Estimate"/> over the planned ones. One method, so the ETA the author agrees to is
+    /// the ETA the run starts with.
+    /// </summary>
+    internal static ProofreadPlan Plan(
+        IReadOnlyList<ChapterProofreadState> states, bool force, AiOptions opts, string language, AiTier tier)
+    {
+        var candidates = states.Where(s => s.Units.Count > 0).ToList();
+        var planned = candidates.Where(s => force || !s.IsFresh).ToList();
+        var (chunks, seconds) = Estimate(planned, opts, language, tier);
+        return new ProofreadPlan(planned, candidates.Count - planned.Count, chunks, seconds);
+    }
 
     /// <summary>
     /// Every chapter with text (<see cref="ChapterTextPredicate.HasText"/>) in reading order, with its units and
@@ -353,7 +392,7 @@ public sealed class BookProofreadService : IBookProofreadService
             .Where(c => c.BookId == bookId)
             .Where(ChapterTextPredicate.HasText)
             .OrderBy(c => c.Order)
-            .Select(c => new { c.Id, c.Order, c.WordCount, c.UpdatedAt })
+            .Select(c => new { c.Id, c.Order, c.WordCount, c.UpdatedAt, c.Title })
             .ToListAsync(ct);
         if (chapters.Count == 0) return new List<ChapterProofreadState>();
 
@@ -402,11 +441,19 @@ public sealed class BookProofreadService : IBookProofreadService
                     && BaselineLanguageResolver.Normalize(r.Language) == language))
                 .All(fresh => fresh);
 
+            // Deliberately ANY of the chapter's Active results, not only the units' own: the status lists the
+            // chapter whenever the system flagged a proofread of it, and the export's skip decides per unit.
+            var hasUnreliable = results.Any(r => r.ChapterId == c.Id
+                && r.ProofreadResultUnreliable
+                && BaselineLanguageResolver.Normalize(r.Language) == language);
+
             states.Add(new ChapterProofreadState(
                 c.Id, c.Order, c.WordCount, units,
                 HasActiveResult: all.Count > 0,
                 IsFresh: isFresh,
-                NewestResultAt: all.Count > 0 ? all.Max(r => r.CreatedAt) : null));
+                NewestResultAt: all.Count > 0 ? all.Max(r => r.CreatedAt) : null,
+                Title: c.Title ?? "",
+                HasUnreliableResult: hasUnreliable));
         }
         return states;
     }

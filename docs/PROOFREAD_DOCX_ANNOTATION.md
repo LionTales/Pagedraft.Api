@@ -36,9 +36,15 @@ Delete, Delete All Comments in Document.
   context, crosses a paragraph boundary, or overlaps a suggestion already placed. They are not guessed at.
   The count is returned in the `X-Export-Unanchored-Count` header and shown in the download notice;
   placed plus unanchored equals the pending total.
-- Unreliable results are not filtered out. A non-forced re-run of the whole-book proofread supersedes an
-  unreliable result (it counts as stale), but the export itself does not skip one. Whether it should is an
-  open owner decision.
+- Unreliable results are exported by default. When the system flagged a chapter's Active Proofread result
+  as unreliable (the model output looked broken), the export page asks first: export everything, skip
+  those chapters, or cancel. The choice travels as `?unreliable=include|skip` (default `include`,
+  case-insensitive; any other value is a 400). With `skip`, such a chapter is still in the file as plain
+  text, its suggestions are neither placed nor counted as unanchored, and the
+  `X-Export-Unreliable-Skipped-Count` header reports how many chapters were left unannotated (0 on
+  include). The chapters to ask about come from `GET /api/books/{bookId}/proofread/status`
+  (`unreliableChapters`). A non-forced re-run of the whole-book proofread also replaces an unreliable
+  result, since it counts as stale.
 - Pasting the annotated file back into the editor drops comments and revisions (the editor import has no
   comments part today); use the file for the author's review in Word, not as the next manuscript.
 

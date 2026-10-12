@@ -33,10 +33,10 @@ namespace Pagedraft.Api.Tests;
 /// </summary>
 public class BookProofreadServiceTests
 {
-    private static readonly DateTimeOffset Edited = new(2026, 1, 1, 10, 0, 0, TimeSpan.Zero);
+    internal static readonly DateTimeOffset Edited = new(2026, 1, 1, 10, 0, 0, TimeSpan.Zero);
 
     /// <summary>One book's fixture: the DI graph the service runs in, plus the texts the mocked context serves.</summary>
-    private sealed class Harness : IDisposable
+    internal sealed class Harness : IDisposable
     {
         public readonly Guid BookId = Guid.NewGuid();
         public readonly ServiceProvider Provider;
@@ -180,7 +180,7 @@ public class BookProofreadServiceTests
         public void Dispose() => Provider.Dispose();
     }
 
-    private static async Task<StartBookProofreadResponse> StartAndFinish(Harness h, BookProofreadService svc, bool force = false)
+    internal static async Task<StartBookProofreadResponse> StartAndFinish(Harness h, BookProofreadService svc, bool force = false)
     {
         var response = await svc.StartAsync(h.BookId, "he", force, CancellationToken.None);
         if (response.Started && svc.RunTask != null) await svc.RunTask;

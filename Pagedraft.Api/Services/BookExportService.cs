@@ -245,7 +245,9 @@ public partial class BookExportService
     /// ImportContent carries the hand-written revisions and comments through and renumbers comment ids, pinned
     /// by <c>ProofreadAnnotatedAssemblyPremiseTests</c>), and that the file name and result carry the annotation.
     /// </summary>
-    private async Task<BookExportResult> ExportBookCoreAsync(Guid bookId, bool proofread, CancellationToken ct)
+    private async Task<BookExportResult> ExportBookCoreAsync(
+        Guid bookId, bool proofread, CancellationToken ct,
+        UnreliableProofreadMode unreliable = UnreliableProofreadMode.Include)
     {
         var book = await _db.Books
             .AsNoTracking()
@@ -261,7 +263,7 @@ public partial class BookExportService
 
         var chapterIds = chapters.Select(c => c.Id).ToList();
         var scenesByChapter = await LoadScenesAsync(chapterIds, ct);
-        var annotation = proofread ? await StartAnnotationAsync(chapterIds, book.Language, ct) : null;
+        var annotation = proofread ? await StartAnnotationAsync(chapterIds, book.Language, unreliable, ct) : null;
 
         var buffers = new List<byte[]>(chapters.Count);
         var skipped = new List<ExportSkippedChapter>();
@@ -313,7 +315,9 @@ public partial class BookExportService
         => ExportChapterCoreAsync(bookId, chapterId, proofread: false, ct);
 
     /// <summary>The chapter path, plain or proofread-annotated; see <see cref="ExportBookCoreAsync"/>.</summary>
-    private async Task<BookExportResult> ExportChapterCoreAsync(Guid bookId, Guid chapterId, bool proofread, CancellationToken ct)
+    private async Task<BookExportResult> ExportChapterCoreAsync(
+        Guid bookId, Guid chapterId, bool proofread, CancellationToken ct,
+        UnreliableProofreadMode unreliable = UnreliableProofreadMode.Include)
     {
         var chapter = await _chapters.GetByIdAsync(bookId, chapterId, ct);
         if (chapter == null) return BookExportResult.ChapterNotFound();
@@ -324,7 +328,7 @@ public partial class BookExportService
         var units = ResolveUnitsFor(chapter, scenes);
         if (units.Count == 0) return BookExportResult.NothingWritten();
 
-        var annotation = proofread ? await StartChapterAnnotationAsync(bookId, chapter.Id, ct) : null;
+        var annotation = proofread ? await StartChapterAnnotationAsync(bookId, chapter.Id, unreliable, ct) : null;
 
         // AssembleDocx returns a single buffer untouched, so an unsplit chapter produces byte-for-byte what
         // it always did and only a scene-composed one goes through the assembler.

@@ -42,4 +42,16 @@ public class CorsPolicyConfigurationTests
         Assert.Contains(BookExportService.AnnotationCountHeader, policy.ExposedHeaders);
         Assert.Contains(BookExportService.UnanchoredCountHeader, policy.ExposedHeaders);
     }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheUnreliableSkippedHeader_UnderTheNameTheClientReads()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        Assert.Equal("X-Export-Unreliable-Skipped-Count", BookExportService.UnreliableSkippedCountHeader);
+        Assert.Contains(BookExportService.UnreliableSkippedCountHeader, policy.ExposedHeaders);
+    }
 }

@@ -10,9 +10,23 @@ namespace Pagedraft.Api.Services;
 /// What an annotated export wrote: <paramref name="Placed"/> pending suggestions became a Word comment plus
 /// tracked change(s); <paramref name="Unanchored"/> could not be placed (no match, ambiguous, crossing a
 /// paragraph, or overlapping a placed one). <c>Placed + Unanchored</c> is the number of pending suggestions
-/// on the Active Proofread results of the units in the file.
+/// on the Active Proofread results of the units in the file, minus those of skipped units:
+/// <paramref name="UnreliableSkippedChapters"/> is how many CHAPTERS had at least one unit left unannotated
+/// because its Active result is flagged unreliable and the export asked to skip those (always 0 on include).
 /// </summary>
-public sealed record ExportAnnotationCounts(int Placed, int Unanchored);
+public sealed record ExportAnnotationCounts(int Placed, int Unanchored, int UnreliableSkippedChapters = 0);
+
+/// <summary>
+/// What an annotated export does with a unit whose Active Proofread result is flagged
+/// <see cref="AnalysisResult.ProofreadResultUnreliable"/>. <see cref="Include"/> (the default) annotates it like
+/// any other; <see cref="Skip"/> annotates nothing for that unit, which still renders as plain text. The wire
+/// form is <c>?unreliable=include|skip</c>, parsed by <see cref="BookExportService.TryParseUnreliableMode"/>.
+/// </summary>
+public enum UnreliableProofreadMode
+{
+    Include,
+    Skip,
+}
 
 /// <summary>
 /// One unit of an export, with where it came from: the chapter's own SFDT (<paramref name="SceneId"/> null)
@@ -31,6 +45,11 @@ internal sealed record RenderableUnit(string Sfdt, Guid ChapterId, Guid? SceneId
 /// Scene-scope result. A unit with no Active result annotates nothing and ships exactly as the plain export
 /// would. Only <c>Outcome == null</c> suggestions are loaded: an Accepted one is already in the text, a
 /// Dismissed / Reverted / Superseded one is not a proposal any more.</para>
+///
+/// <para>UNRELIABLE RESULTS (owner decision 2026-10-12). Everything is annotated by default, a result flagged
+/// <see cref="AnalysisResult.ProofreadResultUnreliable"/> included. The client reads the status's
+/// UnreliableChapters first and, when any are relevant, asks the author; <c>?unreliable=skip</c> then leaves
+/// each such unit as plain text and reports the chapters in <see cref="UnreliableSkippedCountHeader"/>.</para>
 ///
 /// <para>ANNOTATE BEFORE ASSEMBLY. Each unit's buffer is annotated on its own (its suggestions are anchored
 /// in its own text) and then assembled. DocIO's <c>ImportContent</c> carries the hand-written revisions and
@@ -54,13 +73,39 @@ public partial class BookExportService
     /// </summary>
     public const string UnanchoredCountHeader = "X-Export-Unanchored-Count";
 
+    /// <summary>
+    /// How many CHAPTERS had at least one unit left unannotated because its Active Proofread result is flagged
+    /// unreliable and the request said <c>?unreliable=skip</c>; <c>"0"</c> on include. Same presence rule and
+    /// CORS note as <see cref="AnnotationCountHeader"/>.
+    /// </summary>
+    public const string UnreliableSkippedCountHeader = "X-Export-Unreliable-Skipped-Count";
+
+    /// <summary>
+    /// Parses the <c>unreliable</c> query value: absent or blank is <see cref="UnreliableProofreadMode.Include"/>,
+    /// otherwise <c>include</c> or <c>skip</c>, case-insensitive. Anything else is false (the controller's 400).
+    /// </summary>
+    public static bool TryParseUnreliableMode(string? value, out UnreliableProofreadMode mode)
+    {
+        mode = UnreliableProofreadMode.Include;
+        if (string.IsNullOrWhiteSpace(value)) return true;
+        switch (value.Trim().ToLowerInvariant())
+        {
+            case "include": return true;
+            case "skip": mode = UnreliableProofreadMode.Skip; return true;
+            default: return false;
+        }
+    }
+
     /// <summary>The whole book as one DOCX with each unit's pending proofread suggestions annotated in.</summary>
-    public Task<BookExportResult> ExportBookProofreadAsync(Guid bookId, CancellationToken ct = default)
-        => ExportBookCoreAsync(bookId, proofread: true, ct);
+    public Task<BookExportResult> ExportBookProofreadAsync(
+        Guid bookId, UnreliableProofreadMode unreliable = UnreliableProofreadMode.Include, CancellationToken ct = default)
+        => ExportBookCoreAsync(bookId, proofread: true, ct, unreliable);
 
     /// <summary>One chapter as a DOCX with its pending proofread suggestions annotated in.</summary>
-    public Task<BookExportResult> ExportChapterProofreadAsync(Guid bookId, Guid chapterId, CancellationToken ct = default)
-        => ExportChapterCoreAsync(bookId, chapterId, proofread: true, ct);
+    public Task<BookExportResult> ExportChapterProofreadAsync(
+        Guid bookId, Guid chapterId, UnreliableProofreadMode unreliable = UnreliableProofreadMode.Include,
+        CancellationToken ct = default)
+        => ExportChapterCoreAsync(bookId, chapterId, proofread: true, ct, unreliable);
 
     /// <summary>One unit's DOCX: the SFDT conversion, then the annotation pass when this is an annotated export.</summary>
     private byte[] Render(RenderableUnit unit, AnnotationSession? annotation)
@@ -70,14 +115,15 @@ public partial class BookExportService
     }
 
     /// <summary>The chapter path's session: the book's language (the chapter row does not carry one), then the load.</summary>
-    private async Task<AnnotationSession> StartChapterAnnotationAsync(Guid bookId, Guid chapterId, CancellationToken ct)
+    private async Task<AnnotationSession> StartChapterAnnotationAsync(
+        Guid bookId, Guid chapterId, UnreliableProofreadMode unreliable, CancellationToken ct)
     {
         var language = await _db.Books
             .AsNoTracking()
             .Where(b => b.Id == bookId)
             .Select(b => b.Language)
             .FirstOrDefaultAsync(ct);
-        return await StartAnnotationAsync(new[] { chapterId }, language, ct);
+        return await StartAnnotationAsync(new[] { chapterId }, language, unreliable, ct);
     }
 
     /// <summary>
@@ -86,7 +132,7 @@ public partial class BookExportService
     /// row (archiving is not transactional with the insert), the newest wins, as it does in the chapter view.
     /// </summary>
     private async Task<AnnotationSession> StartAnnotationAsync(
-        IReadOnlyCollection<Guid> chapterIds, string? language, CancellationToken ct)
+        IReadOnlyCollection<Guid> chapterIds, string? language, UnreliableProofreadMode unreliable, CancellationToken ct)
     {
         var ids = chapterIds.ToList();
         var results = await _db.AnalysisResults
@@ -109,7 +155,7 @@ public partial class BookExportService
             byUnit[(result.ChapterId!.Value, sceneId)] = result; // ascending, so the newest is written last
         }
 
-        return new AnnotationSession(this, language ?? "he", byUnit);
+        return new AnnotationSession(this, language ?? "he", byUnit, unreliable);
     }
 
     /// <summary>
@@ -121,17 +167,22 @@ public partial class BookExportService
         private readonly BookExportService _owner;
         private readonly string _language;
         private readonly Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult> _byUnit;
+        private readonly UnreliableProofreadMode _unreliable;
         private readonly DateTime _stamp = DateTime.UtcNow;
+        private readonly HashSet<Guid> _unreliableSkippedChapters = new();
         private int _placed;
         private int _unanchored;
         private int _unitsWithResult;
+        private int _unitsSkipped;
 
         public AnnotationSession(
-            BookExportService owner, string language, Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult> byUnit)
+            BookExportService owner, string language, Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult> byUnit,
+            UnreliableProofreadMode unreliable)
         {
             _owner = owner;
             _language = language;
             _byUnit = byUnit;
+            _unreliable = unreliable;
         }
 
         public string FileNameSuffix => ProofreadAnnotationStrings.FileNameSuffix(_language);
@@ -139,8 +190,17 @@ public partial class BookExportService
         public byte[] Annotate(RenderableUnit unit, byte[] docx)
         {
             if (!_byUnit.TryGetValue((unit.ChapterId, unit.SceneId), out var result)) return docx;
-            _unitsWithResult++;
 
+            // Skip = the unit ships as plain text and its suggestions are neither placed nor unanchored: the
+            // author chose not to receive a proofread the system itself flagged as broken.
+            if (_unreliable == UnreliableProofreadMode.Skip && result.ProofreadResultUnreliable)
+            {
+                _unitsSkipped++;
+                _unreliableSkippedChapters.Add(unit.ChapterId);
+                return docx;
+            }
+
+            _unitsWithResult++;
             var outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions.ToList(), _language, _stamp);
             _placed += outcome.Placed;
             _unanchored += outcome.Unanchored;
@@ -151,9 +211,11 @@ public partial class BookExportService
         {
             _owner._logger?.LogInformation(
                 "Proofread-annotated export of book {BookId} (chapter {ChapterId}): {Placed} suggestions placed, " +
-                "{Unanchored} not placed, from {UnitsWithResult} unit(s) with an Active proofread result.",
-                bookId, chapterId?.ToString() ?? "all", _placed, _unanchored, _unitsWithResult);
-            return new ExportAnnotationCounts(_placed, _unanchored);
+                "{Unanchored} not placed, from {UnitsWithResult} unit(s) with an Active proofread result; " +
+                "unreliable={Unreliable}, {UnitsSkipped} unreliable unit(s) skipped in {ChaptersSkipped} chapter(s).",
+                bookId, chapterId?.ToString() ?? "all", _placed, _unanchored, _unitsWithResult,
+                _unreliable, _unitsSkipped, _unreliableSkippedChapters.Count);
+            return new ExportAnnotationCounts(_placed, _unanchored, _unreliableSkippedChapters.Count);
         }
     }
 }

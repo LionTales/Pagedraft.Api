@@ -25,7 +25,8 @@ internal static class CorsPolicyConfiguration
             // client's export code (pagedraft-client src/app/core/services/export.service.ts and
             // core/models/export.ts), and the whole export screen is built on those reads: the filename the
             // author sees, whether the file they just downloaded is missing any chapters, and on the
-            // proofread-annotated export how many suggestions it carries and how many could not be placed.
+            // proofread-annotated export how many suggestions it carries, how many could not be placed, and how
+            // many chapters were left unannotated because their result was flagged unreliable.
             // Dev runs through proxy.conf.json and is therefore same-origin, so a missing entry here CANNOT
             // be caught by driving the app locally.
             .WithExposedHeaders(
@@ -33,6 +34,7 @@ internal static class CorsPolicyConfiguration
                 Pagedraft.Api.Services.BookExportService.SkippedCountHeader,
                 Pagedraft.Api.Services.BookExportService.SkippedChaptersHeader,
                 Pagedraft.Api.Services.BookExportService.AnnotationCountHeader,
-                Pagedraft.Api.Services.BookExportService.UnanchoredCountHeader);
+                Pagedraft.Api.Services.BookExportService.UnanchoredCountHeader,
+                Pagedraft.Api.Services.BookExportService.UnreliableSkippedCountHeader);
     }
 }

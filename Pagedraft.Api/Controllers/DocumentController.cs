@@ -181,22 +181,41 @@ public class DocumentController : ControllerBase
     /// The whole book as one DOCX with every unit's PENDING proofread suggestions written in as Word comments
     /// and tracked changes, named like the plain export plus " - הגהה" / " - proofread". Same 404/409 answers
     /// and skipped-chapter headers as <see cref="ExportBook"/>; a <c>200</c> also carries
-    /// <see cref="BookExportService.AnnotationCountHeader"/> and <see cref="BookExportService.UnanchoredCountHeader"/>.
+    /// <see cref="BookExportService.AnnotationCountHeader"/>, <see cref="BookExportService.UnanchoredCountHeader"/>
+    /// and <see cref="BookExportService.UnreliableSkippedCountHeader"/>.
+    ///
+    /// <c>?unreliable=include|skip</c> (default include, case-insensitive): skip leaves every unit whose Active
+    /// result is flagged unreliable as plain text. Any other value is <c>400</c> ProblemDetails, checked first.
     /// </summary>
     [HttpGet("export/book/{bookId:guid}/proofread")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ExportUnavailableDto), StatusCodes.Status409Conflict)]
-    public async Task<IActionResult> ExportBookProofread(Guid bookId, CancellationToken ct)
-        => ToFileResult(await _bookExport.ExportBookProofreadAsync(bookId, ct));
+    public async Task<IActionResult> ExportBookProofread(Guid bookId, [FromQuery] string? unreliable, CancellationToken ct)
+    {
+        if (!BookExportService.TryParseUnreliableMode(unreliable, out var mode)) return InvalidUnreliableMode();
+        return ToFileResult(await _bookExport.ExportBookProofreadAsync(bookId, mode, ct));
+    }
 
     /// <summary>One chapter as a DOCX with its pending proofread suggestions annotated in; see <see cref="ExportBookProofread"/>.</summary>
     [HttpGet("export/chapter/{bookId:guid}/{chapterId:guid}/proofread")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ExportUnavailableDto), StatusCodes.Status409Conflict)]
-    public async Task<IActionResult> ExportChapterProofread(Guid bookId, Guid chapterId, CancellationToken ct)
-        => ToFileResult(await _bookExport.ExportChapterProofreadAsync(bookId, chapterId, ct));
+    public async Task<IActionResult> ExportChapterProofread(
+        Guid bookId, Guid chapterId, [FromQuery] string? unreliable, CancellationToken ct)
+    {
+        if (!BookExportService.TryParseUnreliableMode(unreliable, out var mode)) return InvalidUnreliableMode();
+        return ToFileResult(await _bookExport.ExportChapterProofreadAsync(bookId, chapterId, mode, ct));
+    }
+
+    /// <summary>The 400 for an <c>unreliable</c> value that is neither include nor skip. The value is not echoed.</summary>
+    private IActionResult InvalidUnreliableMode() => Problem(
+        statusCode: StatusCodes.Status400BadRequest,
+        title: "Invalid unreliable mode",
+        detail: "The 'unreliable' query parameter must be 'include' or 'skip'.");
 
     /// <summary>
     /// The one place an export outcome becomes an HTTP answer, so the book path and the chapter path cannot
@@ -273,9 +292,10 @@ public class DocumentController : ControllerBase
     }
 
     /// <summary>
-    /// On an annotated export, how many pending suggestions the file carries and how many could not be
-    /// placed. Both are written, zeros included, whenever the export was an annotated one, so the client can
-    /// tell "nothing to annotate" from "this server did not say"; a plain export writes neither.
+    /// On an annotated export, how many pending suggestions the file carries, how many could not be placed,
+    /// and how many chapters were left unannotated as unreliable. All three are written, zeros included,
+    /// whenever the export was an annotated one, so the client can tell "nothing to annotate" from "this server
+    /// did not say"; a plain export writes none.
     /// </summary>
     private void WriteAnnotationHeaders(ExportAnnotationCounts? annotation)
     {
@@ -284,6 +304,8 @@ public class DocumentController : ControllerBase
             annotation.Placed.ToString(System.Globalization.CultureInfo.InvariantCulture);
         Response.Headers[BookExportService.UnanchoredCountHeader] =
             annotation.Unanchored.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Response.Headers[BookExportService.UnreliableSkippedCountHeader] =
+            annotation.UnreliableSkippedChapters.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     /// <summary>Shortens a title for the header without ever cutting a surrogate pair in half.</summary>

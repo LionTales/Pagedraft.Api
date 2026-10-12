@@ -48,7 +48,7 @@ public class BookExportProofreadTests
             Sug("מילה שאיננה בטקסט", "x")); // pending but unplaceable
         await db.SaveChangesAsync();
 
-        var result = await controller.ExportChapterProofread(book.Id, chapter.Id, CancellationToken.None);
+        var result = await controller.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None);
 
         var file = Assert.IsType<FileContentResult>(result);
         Assert.Equal("פרק ראשון - הגהה.docx", file.FileDownloadName);
@@ -76,7 +76,7 @@ public class BookExportProofreadTests
         SeedResult(db, chapter, sceneId: null, status: AnalysisStatus.Archived, suggestions: Sug("פגשה", "ראתה"));
         await db.SaveChangesAsync();
 
-        var result = await controller.ExportChapterProofread(book.Id, chapter.Id, CancellationToken.None);
+        var result = await controller.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None);
 
         var file = Assert.IsType<FileContentResult>(result);
         Assert.Equal("1", Header(controller, BookExportService.AnnotationCountHeader));
@@ -95,13 +95,15 @@ public class BookExportProofreadTests
         // A plain export never carries the annotation headers: their presence means "this was annotated".
         Assert.Null(Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Null(Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Null(Header(controller, BookExportService.UnreliableSkippedCountHeader));
 
         var (annotatedController, _, _) = Build(db);
         var annotated = Assert.IsType<FileContentResult>(
-            await annotatedController.ExportChapterProofread(book.Id, chapter.Id, CancellationToken.None));
+            await annotatedController.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None));
 
         Assert.Equal("0", Header(annotatedController, BookExportService.AnnotationCountHeader));
         Assert.Equal("0", Header(annotatedController, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("0", Header(annotatedController, BookExportService.UnreliableSkippedCountHeader));
         Assert.Null(Entry(annotated.FileContents, "word/comments.xml"));
         Assert.Equal(TextOf(plain), TextOf(annotated));
         using var reloaded = Reload(annotated);
@@ -117,7 +119,7 @@ public class BookExportProofreadTests
         await db.SaveChangesAsync();
 
         var file = Assert.IsType<FileContentResult>(
-            await controller.ExportChapterProofread(book.Id, chapter.Id, CancellationToken.None));
+            await controller.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None));
 
         Assert.Equal("Chapter One - proofread.docx", file.FileDownloadName);
         using var reloaded = Reload(file);
@@ -134,10 +136,10 @@ public class BookExportProofreadTests
         await db.SaveChangesAsync();
 
         var conflict = Assert.IsType<ConflictObjectResult>(
-            await controller.ExportChapterProofread(book.Id, empty.Id, CancellationToken.None));
+            await controller.ExportChapterProofread(book.Id, empty.Id, null, CancellationToken.None));
         Assert.Equal(ExportUnavailableDto.NothingWritten, Assert.IsType<ExportUnavailableDto>(conflict.Value).Reason);
 
-        Assert.IsType<NotFoundResult>(await controller.ExportChapterProofread(book.Id, Guid.NewGuid(), CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await controller.ExportChapterProofread(book.Id, Guid.NewGuid(), null, CancellationToken.None));
     }
 
     // ─── scenes ───────────────────────────────────────────────────────────────────────────────────
@@ -170,7 +172,7 @@ public class BookExportProofreadTests
         await db.SaveChangesAsync();
 
         var file = Assert.IsType<FileContentResult>(
-            await controller.ExportChapterProofread(book.Id, chapter.Id, CancellationToken.None));
+            await controller.ExportChapterProofread(book.Id, chapter.Id, null, CancellationToken.None));
 
         Assert.Equal("3", Header(controller, BookExportService.AnnotationCountHeader));
         Assert.Equal("0", Header(controller, BookExportService.UnanchoredCountHeader));
@@ -200,7 +202,7 @@ public class BookExportProofreadTests
         SeedResult(db, two, sceneId: null, Sug("שלום", "שלומות"), Sug("חזק ", ""));
         await db.SaveChangesAsync();
 
-        var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, CancellationToken.None));
+        var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, null, CancellationToken.None));
 
         Assert.Equal("הספר שלי - הגהה.docx", file.FileDownloadName);
         Assert.Equal("3", Header(controller, BookExportService.AnnotationCountHeader));
@@ -217,13 +219,150 @@ public class BookExportProofreadTests
     public async Task ExportBookProofread_KeepsThePlainPathsEmptyBookAnswers()
     {
         var (controller, db, _) = Build();
-        Assert.IsType<NotFoundResult>(await controller.ExportBookProofread(Guid.NewGuid(), CancellationToken.None));
+        Assert.IsType<NotFoundResult>(await controller.ExportBookProofread(Guid.NewGuid(), null, CancellationToken.None));
 
         var book = new Book { Id = Guid.NewGuid(), Title = "ריק", Language = "he" };
         db.Books.Add(book);
         await db.SaveChangesAsync();
-        var conflict = Assert.IsType<ConflictObjectResult>(await controller.ExportBookProofread(book.Id, CancellationToken.None));
+        var conflict = Assert.IsType<ConflictObjectResult>(await controller.ExportBookProofread(book.Id, null, CancellationToken.None));
         Assert.Equal(ExportUnavailableDto.NoChapters, Assert.IsType<ExportUnavailableDto>(conflict.Value).Reason);
+    }
+
+    // ─── unreliable results (c7, owner decision 2026-10-12) ───────────────────────────────────────
+
+    [Theory]
+    [InlineData(null, true, UnreliableProofreadMode.Include)]
+    [InlineData("", true, UnreliableProofreadMode.Include)]
+    [InlineData("include", true, UnreliableProofreadMode.Include)]
+    [InlineData("INCLUDE", true, UnreliableProofreadMode.Include)]
+    [InlineData("skip", true, UnreliableProofreadMode.Skip)]
+    [InlineData("Skip", true, UnreliableProofreadMode.Skip)]
+    [InlineData("bogus", false, UnreliableProofreadMode.Include)]
+    [InlineData("skipped", false, UnreliableProofreadMode.Include)]
+    public void TryParseUnreliableMode_DefaultsToInclude_AndRejectsAnythingElse(
+        string? value, bool ok, UnreliableProofreadMode expected)
+    {
+        Assert.Equal(ok, BookExportService.TryParseUnreliableMode(value, out var mode));
+        Assert.Equal(expected, mode);
+    }
+
+    /// <summary>Chapter one's Active result is flagged unreliable; chapter two's is not.</summary>
+    private static async Task<Book> SeedBookWithOneUnreliableChapterAsync(AppDbContext db)
+    {
+        var (book, one) = await SeedChapterAsync(db, "he", "אחד", ChapterText, bookTitle: "הספר שלי");
+        var two = NewChapter(book.Id, 1, "שניים", "הוא הלך הביתה ואמר שלום לכולם.\nבערב ירד גשם חזק על העיר.");
+        db.Chapters.Add(two);
+        SeedResult(db, one, sceneId: null, Sug("לבית הספר", "לביה\"ס"), Sug("הגדול", "הגדולה"), Sug("לא קיים כאן", "y"))
+            .ProofreadResultUnreliable = true;
+        SeedResult(db, two, sceneId: null, Sug("שלום", "שלומות"));
+        await db.SaveChangesAsync();
+        return book;
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("include")]
+    [InlineData("Include")]
+    public async Task ExportBookProofread_IncludeIsTheDefault_AndAnnotatesUnreliableResultsToo(string? unreliable)
+    {
+        var (controller, db, _) = Build();
+        var book = await SeedBookWithOneUnreliableChapterAsync(db);
+
+        var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, unreliable, CancellationToken.None));
+
+        Assert.Equal("3", Header(controller, BookExportService.AnnotationCountHeader));
+        Assert.Equal("1", Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("0", Header(controller, BookExportService.UnreliableSkippedCountHeader));
+        using var reloaded = Reload(file);
+        Assert.Equal(3, reloaded.Comments.Count);
+    }
+
+    [Fact]
+    public async Task ExportBookProofread_Skip_LeavesTheUnreliableChapterPlain_AndCountsIt()
+    {
+        var (controller, db, _) = Build();
+        var book = await SeedBookWithOneUnreliableChapterAsync(db);
+
+        var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, "skip", CancellationToken.None));
+
+        // The skipped chapter's three pending suggestions are neither placed nor unanchored.
+        Assert.Equal("1", Header(controller, BookExportService.AnnotationCountHeader));
+        Assert.Equal("0", Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("1", Header(controller, BookExportService.UnreliableSkippedCountHeader));
+        Assert.Equal("0", Header(controller, BookExportService.SkippedCountHeader)); // still in the file
+        using var reloaded = Reload(file);
+        Assert.Equal(1, reloaded.Comments.Count);
+        foreach (var revision in reloaded.Revisions.Cast<Revision>().ToList()) revision.Accept();
+        var text = SyncfusionWatermarkStripper.StripSyncfusionWatermark(reloaded.GetText());
+        Assert.Contains(ParagraphOne, text, StringComparison.Ordinal); // chapter one rendered, untouched
+        Assert.Contains("שלומות", text, StringComparison.Ordinal);      // chapter two annotated as usual
+    }
+
+    [Fact]
+    public async Task ExportChapterProofread_Skip_OnlyTouchesAnUnreliableChapter()
+    {
+        var (controller, db, _) = Build();
+        var book = await SeedBookWithOneUnreliableChapterAsync(db);
+        var chapters = db.Chapters.Where(c => c.BookId == book.Id).OrderBy(c => c.Order).ToList();
+
+        var skipped = Assert.IsType<FileContentResult>(
+            await controller.ExportChapterProofread(book.Id, chapters[0].Id, "skip", CancellationToken.None));
+        Assert.Equal("0", Header(controller, BookExportService.AnnotationCountHeader));
+        Assert.Equal("0", Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("1", Header(controller, BookExportService.UnreliableSkippedCountHeader));
+        Assert.Null(Entry(skipped.FileContents, "word/comments.xml"));
+
+        var (second, _, _) = Build(db);
+        Assert.IsType<FileContentResult>(
+            await second.ExportChapterProofread(book.Id, chapters[1].Id, "SKIP", CancellationToken.None));
+        Assert.Equal("1", Header(second, BookExportService.AnnotationCountHeader));
+        Assert.Equal("0", Header(second, BookExportService.UnreliableSkippedCountHeader));
+    }
+
+    [Fact]
+    public async Task ExportChapterProofread_Skip_CountsChaptersNotScenes()
+    {
+        var (controller, db, scenes) = Build();
+        var book = new Book { Id = Guid.NewGuid(), Title = "ספר", Language = "he" };
+        db.Books.Add(book);
+        const string sceneOne = "SCENEONE הגיבור יוצא מן הבית לפני עלות השחר והולך לאורך הדרך השקטה.";
+        const string sceneTwo = "SCENETWO הסערה מגיעה אל החוף בערב והסירות נמשכות אל החול הרטוב.";
+        var chapter = NewChapter(book.Id, 0, "פרק", sceneOne + "\n\n***\n\n" + sceneTwo);
+        db.Chapters.Add(chapter);
+        await db.SaveChangesAsync();
+        var created = (await scenes.SplitScenesFromChapterAsync(book.Id, chapter.Id)).OrderBy(s => s.Order).ToList();
+        await scenes.UpdateAsync(book.Id, chapter.Id, created[0].Id, title: null, order: null,
+            contentSfdt: SfdtConversionService.CreateMinimalSfdtFromText(sceneOne + " ואז עצר."));
+        SeedResult(db, chapter, created[0].Id, Sug("השקטה", "השוקטת")).ProofreadResultUnreliable = true;
+        SeedResult(db, chapter, created[1].Id, Sug("הרטוב", "הלח")).ProofreadResultUnreliable = true;
+        await db.SaveChangesAsync();
+
+        Assert.IsType<FileContentResult>(
+            await controller.ExportChapterProofread(book.Id, chapter.Id, "skip", CancellationToken.None));
+
+        Assert.Equal("0", Header(controller, BookExportService.AnnotationCountHeader));
+        Assert.Equal("1", Header(controller, BookExportService.UnreliableSkippedCountHeader)); // two units, ONE chapter
+    }
+
+    [Fact]
+    public async Task ProofreadExports_AnyOtherUnreliableValue_Is400ProblemDetails_BeforeTheBookIsLookedUp()
+    {
+        var (controller, db, _) = Build();
+        var book = await SeedBookWithOneUnreliableChapterAsync(db);
+        var chapterId = db.Chapters.First(c => c.BookId == book.Id).Id;
+
+        foreach (var result in new[]
+                 {
+                     await controller.ExportBookProofread(book.Id, "bogus", CancellationToken.None),
+                     await controller.ExportChapterProofread(book.Id, chapterId, "bogus", CancellationToken.None),
+                     await controller.ExportBookProofread(Guid.NewGuid(), "bogus", CancellationToken.None),
+                 })
+        {
+            var problem = Assert.IsType<ObjectResult>(result);
+            Assert.Equal(StatusCodes.Status400BadRequest, problem.StatusCode);
+            Assert.Equal(StatusCodes.Status400BadRequest, Assert.IsType<ProblemDetails>(problem.Value).Status);
+        }
+        Assert.Null(Header(controller, BookExportService.AnnotationCountHeader));
     }
 
     [Fact]
@@ -248,10 +387,10 @@ public class BookExportProofreadTests
         Outcome = outcome,
     };
 
-    private static void SeedResult(AppDbContext db, Chapter chapter, Guid? sceneId, params AnalysisSuggestion[] suggestions)
+    private static AnalysisResult SeedResult(AppDbContext db, Chapter chapter, Guid? sceneId, params AnalysisSuggestion[] suggestions)
         => SeedResult(db, chapter, sceneId, AnalysisStatus.Active, suggestions);
 
-    private static void SeedResult(
+    private static AnalysisResult SeedResult(
         AppDbContext db, Chapter chapter, Guid? sceneId, AnalysisStatus status, params AnalysisSuggestion[] suggestions)
     {
         var result = new AnalysisResult
@@ -274,6 +413,7 @@ public class BookExportProofreadTests
             result.Suggestions.Add(s);
         }
         db.AnalysisResults.Add(result);
+        return result;
     }
 
     private static async Task<(Book Book, Chapter Chapter)> SeedChapterAsync(
