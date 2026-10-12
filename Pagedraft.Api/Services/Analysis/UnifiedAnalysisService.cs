@@ -1195,8 +1195,11 @@ public class UnifiedAnalysisService
     /// Chunk text for proofread: split by paragraphs then sentences, ~targetWords per chunk,
     /// with dialogue-aware grouping and soft overlaps. Returns chunks with:
     /// - Text: the chunk to correct
-    /// - SeparatorAfter: separator to append after this chunk when merging
+    /// - SeparatorAfter: separator to append after this chunk when merging (used only by
+    ///   <see cref="ProofreadChunkMerge"/>'s fail-safe; the merge copies the source's own whitespace instead)
     /// - OverlapPrefix: trailing sentences from previous chunk (read-only [CONTEXT_BEFORE])
+    /// The pieces are trimmed and re-joined with canonical separators, so a chunk's whitespace is NOT the source's;
+    /// the merge maps it back (c17). Never merge chunk outputs by joining them with SeparatorAfter.
     /// </summary>
     private static List<ProofreadChunk> ChunkForProofread(string fullText, int targetWordsPerChunk)
     {
@@ -2313,14 +2316,20 @@ public class UnifiedAnalysisService
         await Task.WhenAll(tasks);
         overallSw.Stop();
 
-        var merged = new StringBuilder();
-        for (var i = 0; i < chunks.Count; i++)
-        {
-            merged.Append(corrected[i]);
-            if (i < chunks.Count - 1 && !string.IsNullOrEmpty(chunks[i].SeparatorAfter))
-                merged.Append(chunks[i].SeparatorAfter);
-        }
-        var mergedResultText = StripTextToCorrectMarkers(merged.ToString());
+        // Replay each chunk's edits onto the SOURCE rather than joining the outputs with the chunker's separators:
+        // the chunker trims every paragraph/sentence edge (what the model is SENT is unchanged), and a plain join
+        // never put that whitespace back, so each trimmed space/NBSP became a stored whitespace-only deletion
+        // (c17; 4,007 of 4,676 rows on one book). See ProofreadChunkMerge.
+        var merge = ProofreadChunkMerge.Merge(
+            inputText,
+            chunks.Select(c => c.Text).ToList(),
+            chunks.Select(c => c.SeparatorAfter).ToList(),
+            corrected);
+        if (!merge.AlignedToSource)
+            _logger.LogWarning(
+                "Proofread merge: chunks do not align with the source text ({ChunkCount} chunks); fell back to joining the chunk outputs with their separators, so trimmed edge whitespace may surface as whitespace-only suggestions.",
+                chunks.Count);
+        var mergedResultText = StripTextToCorrectMarkers(merge.Text);
 
         _logger.LogInformation("Proofread merge complete: merged length {Len} chars", mergedResultText.Length);
 
