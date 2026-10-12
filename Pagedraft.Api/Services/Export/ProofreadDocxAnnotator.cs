@@ -126,7 +126,7 @@ public sealed partial class ProofreadDocxAnnotator
         if (original.Length == 0)
             return ResolveInsertion(s, text, suggested, out reason);
 
-        var matches = FindAll(map.Text, original);
+        var matches = text.Occurrences(original);
         int? at = matches.Count switch
         {
             0 => null,
@@ -200,32 +200,84 @@ public sealed partial class ProofreadDocxAnnotator
     /// The client's <c>pickBestMatch</c>: +2 when <c>ContextBefore</c> occurs in the 60 characters before
     /// the hit, +2 when <c>ContextAfter</c> occurs in the 60 after; the FIRST highest-scoring hit wins, and
     /// no hit scoring above zero means ambiguous (null), never an arbitrary pick.
+    ///
+    /// <para>COST (plan c12). A one-character original (a no-break space, a comma) occurs thousands of times in a
+    /// chapter: 10.4 million hits over the 1,476 suggestions of the 38,209-word chapter that made an annotated
+    /// book export take minutes, where slicing both windows per hit was 1.7 s of that chapter's 2.0 s resolve.
+    /// So the hits are not walked. Each context is located once in the whole text, and only a hit inside the
+    /// reach of one of its occurrences can score at all: <c>ContextBefore</c> at <c>q</c> lies in the window
+    /// before a hit at <c>pos</c> exactly when <c>q + |before| &lt;= pos &lt;= q + 60</c>, and
+    /// <c>ContextAfter</c> at <c>q</c> lies in the window after it exactly when
+    /// <c>q + |after| - |needle| - 60 &lt;= pos &lt;= q - |needle|</c> (an ordinal occurrence inside a slice is
+    /// a whole-text occurrence lying entirely inside it). Those candidates are scored in ascending order with the
+    /// same rule; every other hit scores 0, so the first highest-scoring candidate is the first highest-scoring
+    /// hit, and none above 0 is still null.</para>
     /// </summary>
     internal static int? PickBestMatch(IReadOnlyList<int> positions, int needleLength, string text, AnalysisSuggestion s)
     {
-        var bestPos = positions[0];
-        var bestScore = int.MinValue;
-        foreach (var pos in positions)
+        var before = string.IsNullOrEmpty(s.ContextBefore) ? null : FindAll(text, s.ContextBefore);
+        var after = string.IsNullOrEmpty(s.ContextAfter) ? null : FindAll(text, s.ContextAfter);
+        var maxScore = (before != null ? 2 : 0) + (after != null ? 2 : 0);
+
+        var candidates = new SortedSet<int>();
+        foreach (var q in before ?? Enumerable.Empty<int>())
+            AddHitsBetween(positions, q + s.ContextBefore!.Length, q + ContextWindow, candidates);
+        foreach (var q in after ?? Enumerable.Empty<int>())
+            AddHitsBetween(positions, q + s.ContextAfter!.Length - needleLength - ContextWindow, q - needleLength, candidates);
+
+        int? best = null;
+        var bestScore = 0;
+        foreach (var pos in candidates)
         {
             var score = 0;
-            if (!string.IsNullOrEmpty(s.ContextBefore))
-            {
-                var windowStart = Math.Max(0, pos - ContextWindow);
-                if (text[windowStart..pos].Contains(s.ContextBefore, StringComparison.Ordinal)) score += 2;
-            }
-            if (!string.IsNullOrEmpty(s.ContextAfter))
+            if (before != null && OccursWithin(before, s.ContextBefore!.Length, Math.Max(0, pos - ContextWindow), pos))
+                score += 2;
+            if (after != null)
             {
                 var afterStart = pos + needleLength;
                 var afterEnd = Math.Min(text.Length, afterStart + ContextWindow);
-                if (text[afterStart..afterEnd].Contains(s.ContextAfter, StringComparison.Ordinal)) score += 2;
+                if (OccursWithin(after, s.ContextAfter!.Length, afterStart, afterEnd)) score += 2;
             }
             if (score > bestScore)
             {
                 bestScore = score;
-                bestPos = pos;
+                best = pos;
+                if (bestScore == maxScore) break; // a later candidate can only tie, and the first highest wins
             }
         }
-        return bestScore <= 0 ? null : bestPos;
+        return best;
+    }
+
+    /// <summary>Adds every hit in <paramref name="positions"/> (ascending) that lies in <c>[from, to]</c>.</summary>
+    private static void AddHitsBetween(IReadOnlyList<int> positions, int from, int to, SortedSet<int> into)
+    {
+        for (var i = LowerBound(positions, from); i < positions.Count && positions[i] <= to; i++)
+            into.Add(positions[i]);
+    }
+
+    /// <summary>
+    /// True when some occurrence in <paramref name="starts"/> (ascending start positions of a string of
+    /// <paramref name="length"/> characters) lies entirely inside <c>[from, to)</c>. Only the first occurrence
+    /// starting at or after <paramref name="from"/> can: every later one ends later still.
+    /// </summary>
+    private static bool OccursWithin(IReadOnlyList<int> starts, int length, int from, int to)
+    {
+        var i = LowerBound(starts, from);
+        return i < starts.Count && starts[i] + length <= to;
+    }
+
+    /// <summary>Index of the first element of the ascending <paramref name="sorted"/> that is at least <paramref name="value"/>.</summary>
+    private static int LowerBound(IReadOnlyList<int> sorted, int value)
+    {
+        var lo = 0;
+        var hi = sorted.Count;
+        while (lo < hi)
+        {
+            var mid = lo + (hi - lo) / 2;
+            if (sorted[mid] < value) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
     }
 
     // ---------------------------------------------------------------- writing

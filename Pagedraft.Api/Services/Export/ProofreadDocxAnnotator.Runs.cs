@@ -39,6 +39,20 @@ public sealed partial class ProofreadDocxAnnotator
         public List<CharRef> Chars { get; }
         public NormalizedTextMap Map { get; }
 
+        private readonly Dictionary<string, List<int>> _occurrences = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Every start of <paramref name="needle"/> in <see cref="Map"/>'s text, ascending. Memoized for the document
+        /// (plan c12): a chapter's suggestions repeat the same one-character originals hundreds of times, so each
+        /// distinct original is searched once. Callers only read the list.
+        /// </summary>
+        public List<int> Occurrences(string needle)
+        {
+            if (!_occurrences.TryGetValue(needle, out var hits))
+                _occurrences[needle] = hits = FindAll(Map.Text, needle);
+            return hits;
+        }
+
         public static DocumentText Build(W.Body body)
         {
             var raw = new StringBuilder();

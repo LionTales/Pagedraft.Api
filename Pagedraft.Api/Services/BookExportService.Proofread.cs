@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Pagedraft.Api.Data;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Pagedraft.Api.Services.Export;
@@ -135,29 +136,63 @@ public partial class BookExportService
     private async Task<AnnotationSession> StartAnnotationAsync(
         IReadOnlyCollection<Guid> chapterIds, string? language, UnreliableProofreadMode unreliable, CancellationToken ct)
     {
-        var ids = chapterIds.ToList();
-        var results = await _db.AnalysisResults
-            .AsNoTracking()
-            .Where(a =>
-                a.AnalysisType == AnalysisType.Proofread &&
-                a.Status == AnalysisStatus.Active &&
-                (a.Scope == AnalysisScope.Chapter || a.Scope == AnalysisScope.Scene) &&
-                a.ChapterId != null && ids.Contains(a.ChapterId.Value))
-            .Include(a => a.Suggestions.Where(s => s.Outcome == null))
-            .ToListAsync(ct);
+        var results = await ActiveProofreadUnitsQuery(_db, chapterIds).ToListAsync(ct);
 
-        var byUnit = new Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult>();
+        var byUnit = new Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow>();
         foreach (var result in results.OrderBy(r => r.CreatedAt))
         {
             // A Chapter-scope row with a SceneId, or a Scene-scope row without one, is not either unit's.
             var sceneId = result.Scope == AnalysisScope.Scene ? result.SceneId : null;
             if (result.Scope == AnalysisScope.Scene && sceneId == null) continue;
             if (result.Scope == AnalysisScope.Chapter && result.SceneId != null) continue;
-            byUnit[(result.ChapterId!.Value, sceneId)] = result; // ascending, so the newest is written last
+            byUnit[(result.ChapterId, sceneId)] = result; // ascending, so the newest is written last
         }
 
         return new AnnotationSession(this, language ?? "he", byUnit, unreliable);
     }
+
+    /// <summary>
+    /// The suggestion load as a query, so <c>BookExportProofreadQueryShapeTests</c> can pin its SQL. It PROJECTS
+    /// the few result columns the export reads instead of including whole result rows (plan c12). Including
+    /// them put each result's <c>ResultText</c> and <c>SourceTextSnapshot</c> (a whole chapter each) on EVERY
+    /// joined suggestion row: 1.33 GB for 'זיכרונות של מכשף להגהה' (4,676 pending suggestions, 1,476 of them on a
+    /// 210,000-character chapter), which SqlClient's async reader took 130 to 190 s to drain (13 s synchronously)
+    /// before the first chapter rendered. The projection reads ~1 MB. Ordered by result id, the order the
+    /// include query had, so the newest-wins tie-break on <c>CreatedAt</c> sees results in the same order.
+    /// </summary>
+    internal static IQueryable<ProofreadUnitRow> ActiveProofreadUnitsQuery(
+        AppDbContext db, IReadOnlyCollection<Guid> chapterIds)
+    {
+        var ids = chapterIds.ToList();
+        return db.AnalysisResults
+            .AsNoTracking()
+            .Where(a =>
+                a.AnalysisType == AnalysisType.Proofread &&
+                a.Status == AnalysisStatus.Active &&
+                (a.Scope == AnalysisScope.Chapter || a.Scope == AnalysisScope.Scene) &&
+                a.ChapterId != null && ids.Contains(a.ChapterId.Value))
+            .OrderBy(a => a.Id)
+            .Select(a => new ProofreadUnitRow(
+                a.ChapterId!.Value,
+                a.SceneId,
+                a.Scope,
+                a.CreatedAt,
+                a.ProofreadResultUnreliable,
+                a.Suggestions.Where(s => s.Outcome == null).ToList()));
+    }
+
+    /// <summary>
+    /// What the annotated export needs of one Active Proofread result: which unit it belongs to, its age (newest
+    /// wins), its unreliable flag and its PENDING suggestions. Deliberately not the entity: see
+    /// <see cref="ActiveProofreadUnitsQuery"/>.
+    /// </summary>
+    internal sealed record ProofreadUnitRow(
+        Guid ChapterId,
+        Guid? SceneId,
+        AnalysisScope Scope,
+        DateTimeOffset CreatedAt,
+        bool ProofreadResultUnreliable,
+        List<AnalysisSuggestion> Suggestions);
 
     /// <summary>
     /// One annotated export in progress: the per-unit results, one timestamp for every comment and revision in
@@ -167,7 +202,7 @@ public partial class BookExportService
     {
         private readonly BookExportService _owner;
         private readonly string _language;
-        private readonly Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult> _byUnit;
+        private readonly Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow> _byUnit;
         private readonly UnreliableProofreadMode _unreliable;
         private readonly DateTime _stamp = DateTime.UtcNow;
         private readonly HashSet<Guid> _unreliableSkippedChapters = new();
@@ -177,7 +212,7 @@ public partial class BookExportService
         private int _unitsSkipped;
 
         public AnnotationSession(
-            BookExportService owner, string language, Dictionary<(Guid ChapterId, Guid? SceneId), AnalysisResult> byUnit,
+            BookExportService owner, string language, Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow> byUnit,
             UnreliableProofreadMode unreliable)
         {
             _owner = owner;
@@ -202,7 +237,7 @@ public partial class BookExportService
             }
 
             _unitsWithResult++;
-            var outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions.ToList(), _language, _stamp);
+            var outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions, _language, _stamp);
             _placed += outcome.Placed;
             _unanchored += outcome.Unanchored;
             return outcome.Docx;
