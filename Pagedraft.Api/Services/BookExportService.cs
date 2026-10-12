@@ -280,7 +280,12 @@ public partial class BookExportService
             // nothing inserted between them: scenes are contiguous prose inside one chapter, and the split
             // deleted whatever break marker the author had written, so inventing one would be writing into
             // their manuscript.
-            foreach (var unit in units) buffers.Add(Render(unit, annotation));
+            foreach (var unit in units)
+            {
+                buffers.Add(annotation == null
+                    ? _sfdtConversion.ConvertSfdtToDocx(unit.Sfdt, book.Language)
+                    : Render(unit, annotation));
+            }
         }
 
         // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
@@ -330,9 +335,22 @@ public partial class BookExportService
 
         var annotation = proofread ? await StartChapterAnnotationAsync(bookId, chapter.Id, unreliable, ct) : null;
 
+        // The book's language decides whether the export stamps he-IL on runs that carry no complex-script
+        // language (see SfdtConversionService.ConvertSfdtToDocx). The chapter row above is book-scoped, so the
+        // book exists; a missing language falls back to no stamping rather than failing the export.
+        var bookLanguage = await _db.Books
+            .AsNoTracking()
+            .Where(b => b.Id == bookId)
+            .Select(b => b.Language)
+            .FirstOrDefaultAsync(ct);
+
         // AssembleDocx returns a single buffer untouched, so an unsplit chapter produces byte-for-byte what
-        // it always did and only a scene-composed one goes through the assembler.
-        var docx = _bookAssembly.AssembleDocx(units.Select(u => Render(u, annotation)).ToList());
+        // ConvertSfdtToDocx produced and only a scene-composed one goes through the assembler.
+        var docx = _bookAssembly.AssembleDocx(units
+            .Select(u => annotation == null
+                ? _sfdtConversion.ConvertSfdtToDocx(u.Sfdt, bookLanguage)
+                : Render(u, annotation))
+            .ToList());
         return BookExportResult.Ok(
             docx,
             BuildFileName(chapter.Title, fallbackStem: "chapter", annotation?.FileNameSuffix),

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
+using Pagedraft.Api.Services;
 using Syncfusion.EJ2.DocumentEditor;
 
 namespace Pagedraft.Api.Controllers;
@@ -12,9 +13,21 @@ namespace Pagedraft.Api.Controllers;
 [Route("api/documenteditor")]
 public class DocumentEditorController : ControllerBase
 {
+    private readonly ILogger<DocumentEditorController> _logger;
+
+    public DocumentEditorController(ILogger<DocumentEditorController> logger)
+    {
+        _logger = logger;
+    }
+
     /// <summary>
     /// Converts clipboard content (HTML, RTF, or plain text) to SFDT JSON for the Document Editor paste.
     /// Called when the user pastes from Word or other external sources with formatting.
+    /// RTF goes through <see cref="RtfCodepageNormalizer"/> first: Word writes Hebrew as code-page byte escapes
+    /// that Syncfusion's RTF reader decodes by the run font's charset alone, which turned pasted Hebrew into
+    /// Latin-1 gibberish whenever the font was one Word could not resolve. Then
+    /// <see cref="PseudoBidiFontNames.StripFromRtfFontTable"/> renames Word's charset-variant font entries
+    /// ("Calibri (Hebrew)") to the real face so the pasted runs never store a font no machine has.
     /// </summary>
     [HttpPost("SystemClipboard")]
     public IActionResult SystemClipboard([FromBody] SystemClipboardRequest request)
@@ -38,7 +51,29 @@ public class DocumentEditorController : ControllerBase
 
         try
         {
-            var sfdtDocument = WordDocument.LoadString(request.Content, formatType);
+            var content = request.Content;
+            if (formatType == FormatType.Rtf)
+            {
+                content = RtfCodepageNormalizer.Normalize(content, out var rewrittenEscapes);
+                if (rewrittenEscapes > 0)
+                {
+                    _logger.LogDebug(
+                        "SystemClipboard re-encoded {RewrittenEscapes} RTF byte escapes as Unicode before conversion",
+                        rewrittenEscapes);
+                }
+
+                // Word's font table names each charset variant "Calibri (Hebrew)" and the reader stores that
+                // name verbatim, which is how the pseudo font reached saved chapters and then every export.
+                content = PseudoBidiFontNames.StripFromRtfFontTable(content, out var renamedFonts);
+                if (renamedFonts > 0)
+                {
+                    _logger.LogDebug(
+                        "SystemClipboard renamed {RenamedFonts} charset-variant RTF font entries to their face name",
+                        renamedFonts);
+                }
+            }
+
+            var sfdtDocument = WordDocument.LoadString(content, formatType);
             try
             {
                 var json = JsonConvert.SerializeObject(sfdtDocument);
@@ -51,6 +86,12 @@ public class DocumentEditorController : ControllerBase
         }
         catch (Exception ex)
         {
+            // The content is the author's own text: log its type and size, never the content itself.
+            _logger.LogWarning(
+                ex,
+                "SystemClipboard failed to convert clipboard content of type {ClipboardType} ({ContentLength} chars)",
+                type,
+                request.Content.Length);
             // Return a generic error to avoid leaking internal details (paths, stack traces) to clients.
             return StatusCode(500, new { error = "Failed to convert clipboard content to document format." });
         }

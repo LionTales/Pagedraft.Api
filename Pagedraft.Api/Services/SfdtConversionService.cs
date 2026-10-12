@@ -59,10 +59,34 @@ public class SfdtConversionService
 
     /// <summary>
     /// Converts SFDT JSON back to DOCX bytes for export.
+    /// <para>
+    /// Before saving, <see cref="ExportBidiFontNormalizer"/> replaces Word's charset-variant font names
+    /// (<c>"Calibri (Hebrew)"</c>, which a paste from Word stores in the SFDT) with the real face, and on a
+    /// Hebrew book (<paramref name="bookLanguage"/> "he") stamps he-IL as the complex-script language of every
+    /// run that has none. Without it the export names a font no machine has, and copying the file out of Word
+    /// and pasting it back turned the Hebrew into Latin-1.
+    /// </para>
+    /// <para>
+    /// On a Hebrew book it also makes right-to-left the default paragraph direction (Normal style and every
+    /// section, <see cref="ExportBidiFontNormalizer.ApplyRightToLeftDefaults"/>). The stored SFDT carries no
+    /// paragraph direction for imported prose, so without it Word laid the whole export out left-to-right.
+    /// Any other language is exported exactly as before.
+    /// </para>
     /// </summary>
-    public byte[] ConvertSfdtToDocx(string sfdtJson)
+    public byte[] ConvertSfdtToDocx(string sfdtJson, string? bookLanguage = null)
     {
         using var docIoDocument = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(sfdtJson);
+        var hebrew = IsHebrew(bookLanguage);
+        var changedFormats = ExportBidiFontNormalizer.Apply(docIoDocument, hebrew);
+        var changedDirections = hebrew ? ExportBidiFontNormalizer.ApplyRightToLeftDefaults(docIoDocument) : 0;
+        if (changedFormats > 0 || changedDirections > 0)
+        {
+            _logger?.LogDebug(
+                "ConvertSfdtToDocx cleaned complex-script font data on {ChangedFormats} character formats and set right-to-left on {ChangedDirections} style/section defaults",
+                changedFormats,
+                changedDirections);
+        }
+
         using var outStream = new MemoryStream();
         docIoDocument.Save(outStream, Syncfusion.DocIO.FormatType.Docx);
         return outStream.ToArray();
@@ -113,6 +137,9 @@ public class SfdtConversionService
         }
         return stream;
     }
+
+    private static bool IsHebrew(string? bookLanguage)
+        => bookLanguage != null && bookLanguage.StartsWith("he", StringComparison.OrdinalIgnoreCase);
 
     private static int CountWords(string text)
     {
