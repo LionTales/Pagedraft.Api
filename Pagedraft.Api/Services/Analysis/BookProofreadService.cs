@@ -55,15 +55,21 @@ public interface IBookProofreadService
 /// or unreliable chapter moves the position but not the count). So a terminal Succeeded with
 /// Completed &lt; Total is a partial run, and Canceled's Completed is "chapters proofread and saved", which is
 /// exactly what the client's partial/canceled copy prints.</para>
+///
+/// <para>PARENT PERCENT AND ETA (c10). Chapters are wildly uneven, so the parent's EstimatedCompletionPercent is
+/// WORD-weighted and its EstimatedRemainingSeconds is computed here from the plan's word counts and the observed
+/// pace, both published by <see cref="BookProofreadRunProgress"/> (formula in its remarks); the chunk fields above
+/// stay chapters.</para>
 /// </summary>
 public sealed class BookProofreadService : IBookProofreadService
 {
     /// <summary>
-    /// The parent's LastUpdatedUtc only moves at chapter boundaries, and the tracker prunes an entry 30 minutes
-    /// after its last update. A long chapter (~45+ chunks at ~40 s each) would therefore lose the parent from
-    /// under its poller, so the parent is touched on this cadence while a chapter runs.
+    /// The run's TICK while a unit is in flight. It republishes the parent's word-weighted percent and ETA
+    /// (<see cref="BookProofreadRunProgress.Refresh"/>) from the child's chunk progress, so a 3-hour chapter moves
+    /// smoothly instead of jumping at its end; and since that publish moves the parent's LastUpdatedUtc, it is
+    /// also the heartbeat that keeps the parent from the tracker's 30-minute prune during a long chapter.
     /// </summary>
-    internal static TimeSpan ParentHeartbeatInterval { get; set; } = TimeSpan.FromMinutes(1);
+    internal static TimeSpan ParentHeartbeatInterval { get; set; } = TimeSpan.FromSeconds(10);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly AnalysisProgressTracker _progress;
@@ -71,14 +77,18 @@ public sealed class BookProofreadService : IBookProofreadService
     private readonly IOptions<AiOptions> _aiOptions;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<BookProofreadService> _logger;
+    private readonly TimeProvider _clock;
 
+    /// <param name="clock">The ONE clock the run's ETA reads (elapsed since the parent started); the system clock
+    /// unless a test registers a <see cref="TimeProvider"/>.</param>
     public BookProofreadService(
         IServiceScopeFactory scopeFactory,
         AnalysisProgressTracker progress,
         BookProofreadBuildRegistry registry,
         IOptions<AiOptions> aiOptions,
         IHostApplicationLifetime lifetime,
-        ILogger<BookProofreadService> logger)
+        ILogger<BookProofreadService> logger,
+        TimeProvider? clock = null)
     {
         _scopeFactory = scopeFactory;
         _progress = progress;
@@ -86,6 +96,7 @@ public sealed class BookProofreadService : IBookProofreadService
         _aiOptions = aiOptions;
         _lifetime = lifetime;
         _logger = logger;
+        _clock = clock ?? TimeProvider.System;
     }
 
     /// <summary>The background run started by the last successful <see cref="StartAsync"/>; a test seam only.</summary>
@@ -121,17 +132,21 @@ public sealed class BookProofreadService : IBookProofreadService
         _progress.StartJob(parentId, AnalysisScope.Book, AnalysisType.Proofread, bookId, null, null,
             $"Queued whole-book proofread of {planned.Count} chapters");
         _progress.SetTotalChunks(parentId, planned.Count);
+        // The first ETA the poll sees is the one this response returns (c10).
+        var runProgress = new BookProofreadRunProgress(_progress, parentId, planned, plan.EstimatedSeconds, _clock);
+        runProgress.Refresh();
 
         RunTask = Task.Run(async () =>
         {
             try
             {
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancelSource.Token, stopping);
-                await RunAsync(parentId, bookId, lang, planned, linked.Token, stopping);
+                await RunAsync(parentId, bookId, lang, planned, runProgress, linked.Token, stopping);
             }
             catch (Exception ex)
             {
                 try { _logger.LogError(ex, "Whole-book proofread {JobId} for book {BookId} failed", parentId, bookId); } catch { }
+                try { runProgress.Finish(AnalysisProgressStatus.Failed); } catch { }
                 try { _progress.SetStatus(parentId, AnalysisProgressStatus.Failed, "Whole-book proofread failed."); } catch { }
             }
             finally
@@ -192,11 +207,12 @@ public sealed class BookProofreadService : IBookProofreadService
     /// Works through <paramref name="planned"/> in reading order, at most MaxParallelBookProofreadChapters at a
     /// time (default 1: the 8GB card is single-slot). Workers TAKE the next chapter only while
     /// <paramref name="cancelToken"/> is clear, which is what "stop before the next chapter" means; the chapter
-    /// itself runs under <paramref name="stoppingToken"/> only.
+    /// itself runs under <paramref name="stoppingToken"/> only. <paramref name="runProgress"/> owns the parent's
+    /// word-weighted percent and ETA; the chapter counts stay on the tracker's chunk fields.
     /// </summary>
     internal async Task RunAsync(
         Guid parentId, Guid bookId, string language, IReadOnlyList<ChapterProofreadState> planned,
-        CancellationToken cancelToken, CancellationToken stoppingToken)
+        BookProofreadRunProgress runProgress, CancellationToken cancelToken, CancellationToken stoppingToken)
     {
         var total = planned.Count;
         var maxParallel = Math.Clamp(_aiOptions.Value.MaxParallelBookProofreadChapters, 1, Math.Max(1, total));
@@ -218,7 +234,7 @@ public sealed class BookProofreadService : IBookProofreadService
                 bool ok;
                 try
                 {
-                    ok = await RunChapterAsync(parentId, bookId, language, chapter, stoppingToken);
+                    ok = await RunChapterAsync(bookId, language, index, chapter, runProgress, stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -240,31 +256,37 @@ public sealed class BookProofreadService : IBookProofreadService
 
         await Task.WhenAll(Enumerable.Range(0, maxParallel).Select(_ => Worker()));
 
+        AnalysisProgressStatus status;
+        string message;
         if (processed < total)
         {
             var why = stoppingToken.IsCancellationRequested ? "the server is shutting down" : "it was canceled";
             _logger.LogInformation(
                 "Whole-book proofread {JobId} for book {BookId} stopped because {Why}: {Done} of {Total} chapters proofread",
                 parentId, bookId, why, proofread, total);
-            _progress.SetStatus(parentId, AnalysisProgressStatus.Canceled,
-                $"Whole-book proofread stopped: {proofread} of {total} chapters proofread.");
+            status = AnalysisProgressStatus.Canceled;
+            message = $"Whole-book proofread stopped: {proofread} of {total} chapters proofread.";
         }
         else if (failed == 0)
         {
-            _progress.SetStatus(parentId, AnalysisProgressStatus.Succeeded,
-                $"Whole-book proofread finished: {proofread} chapters proofread.");
+            status = AnalysisProgressStatus.Succeeded;
+            message = $"Whole-book proofread finished: {proofread} chapters proofread.";
         }
         else if (proofread == 0)
         {
-            _progress.SetStatus(parentId, AnalysisProgressStatus.Failed,
-                $"Whole-book proofread failed: none of the {total} chapters could be proofread.");
+            status = AnalysisProgressStatus.Failed;
+            message = $"Whole-book proofread failed: none of the {total} chapters could be proofread.";
         }
         else
         {
             // Partial: Succeeded with CompletedChunks < TotalChunks (see the class remarks).
-            _progress.SetStatus(parentId, AnalysisProgressStatus.Succeeded,
-                $"Whole-book proofread finished partially: {proofread} of {total} chapters proofread, {failed} failed.");
+            status = AnalysisProgressStatus.Succeeded;
+            message = $"Whole-book proofread finished partially: {proofread} of {total} chapters proofread, {failed} failed.";
         }
+
+        // The estimate first, so the poll that sees the terminal status also sees 100 % / 0 s.
+        runProgress.Finish(status);
+        _progress.SetStatus(parentId, status, message);
     }
 
     /// <summary>
@@ -274,18 +296,22 @@ public sealed class BookProofreadService : IBookProofreadService
     /// unit produced a result that is not flagged unreliable.
     /// </summary>
     private async Task<bool> RunChapterAsync(
-        Guid parentId, Guid bookId, string language, ChapterProofreadState chapter, CancellationToken stoppingToken)
+        Guid bookId, string language, int chapterIndex, ChapterProofreadState chapter,
+        BookProofreadRunProgress runProgress, CancellationToken stoppingToken)
     {
+        var parentId = runProgress.ParentId;
         var allOk = true;
-        foreach (var unit in chapter.Units)
+        for (var unitIndex = 0; unitIndex < chapter.Units.Count; unitIndex++)
         {
+            var unit = chapter.Units[unitIndex];
             var childId = Guid.NewGuid();
             var scope = unit.SceneId.HasValue ? AnalysisScope.Scene : AnalysisScope.Chapter;
             _progress.StartJob(childId, scope, AnalysisType.Proofread, bookId, chapter.ChapterId, unit.SceneId,
                 "Queued Proofread job (whole-book run)");
+            runProgress.UnitStarted(chapterIndex, unitIndex, childId);
 
             using var heartbeatStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            var heartbeat = HeartbeatAsync(parentId, heartbeatStop.Token);
+            var heartbeat = HeartbeatAsync(runProgress, heartbeatStop.Token);
             try
             {
                 using var diScope = _scopeFactory.CreateScope();
@@ -324,16 +350,19 @@ public sealed class BookProofreadService : IBookProofreadService
             {
                 heartbeatStop.Cancel();
                 try { await heartbeat; } catch (OperationCanceledException) { }
+                // Any outcome: the unit's words are processed (the time was spent).
+                runProgress.UnitFinished(chapterIndex, unitIndex);
             }
         }
         return allOk;
     }
 
-    private async Task HeartbeatAsync(Guid parentId, CancellationToken ct)
+    /// <summary>The tick: republish the parent's estimate (which also touches it) until the unit ends.</summary>
+    private static async Task HeartbeatAsync(BookProofreadRunProgress runProgress, CancellationToken ct)
     {
         using var timer = new PeriodicTimer(ParentHeartbeatInterval);
         while (await timer.WaitForNextTickAsync(ct))
-            _progress.SetStatus(parentId, AnalysisProgressStatus.Running);
+            runProgress.Refresh();
     }
 
     // ── Planning ────────────────────────────────────────────────────────────────────────────────────────

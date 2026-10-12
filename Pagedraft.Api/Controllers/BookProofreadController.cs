@@ -67,7 +67,9 @@ public class BookProofreadController : ControllerBase
 
     /// <summary>
     /// Poll the run's PARENT job. Same <see cref="AnalysisProgressDto"/> shape as the review build; chunks are
-    /// planned chapters. Serves ONLY Book-scope Proofread jobs, so no other progress route's ids cross over.
+    /// planned chapters, while EstimatedCompletionPercent is word-weighted and EstimatedRemainingSeconds carries
+    /// the server's ETA (both published by the run itself, never computed here). Serves ONLY Book-scope Proofread
+    /// jobs, so no other progress route's ids cross over.
     /// </summary>
     [HttpGet("progress/{jobId:guid}")]
     public ActionResult<AnalysisProgressDto> GetProgress(Guid bookId, Guid jobId)
@@ -91,7 +93,8 @@ public class BookProofreadController : ControllerBase
             snapshot.TotalChunks,
             snapshot.CompletedChunks,
             snapshot.Message,
-            snapshot.EstimatedCompletionPercent));
+            snapshot.EstimatedCompletionPercent,
+            EstimatedRemainingSeconds: snapshot.EstimatedRemainingSeconds));
     }
 
     /// <summary>Coverage, staleness and the in-flight run id for a language (book language when omitted).</summary>

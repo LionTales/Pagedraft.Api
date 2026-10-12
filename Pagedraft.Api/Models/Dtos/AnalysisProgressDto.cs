@@ -22,5 +22,10 @@ public record AnalysisProgressDto(
     //    carry (it reports these as 0/false). ──
     int? BookReviewWindowCount = null,
     bool? BookReviewRanContinuityReduce = null,
-    int? BookReviewFailedWindows = null);
+    int? BookReviewFailedWindows = null,
+    // ── Whole-book PROOFREAD parent (c10). Seconds the server expects are left, from the plan's word counts and
+    //    the observed pace (BookProofreadRunProgress). Non-null ONLY on that parent's progress route, where
+    //    EstimatedCompletionPercent is also WORD-weighted while the chunk fields stay CHAPTERS. Null everywhere
+    //    else, so existing consumers are unaffected. ──
+    int? EstimatedRemainingSeconds = null);
 

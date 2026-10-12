@@ -39,8 +39,24 @@ public sealed class AnalysisProgressSnapshot
     public AnalysisProgressStatus Status { get; init; }
     public string Message { get; init; } = string.Empty;
     public DateTimeOffset LastUpdatedUtc { get; init; }
+
+    /// <summary>
+    /// The chunk ratio, unless the job's owner published a better-weighted percent through
+    /// <see cref="AnalysisProgressTracker.SetRunEstimate"/> (only the whole-book proofread parent does, weighting
+    /// by words because its "chunks" are chapters of wildly different length).
+    /// </summary>
     public int EstimatedCompletionPercent =>
-        TotalChunks <= 0 ? 0 : (int)Math.Ceiling(100.0 * CompletedChunks / TotalChunks);
+        WeightedCompletionPercent
+        ?? (TotalChunks <= 0 ? 0 : (int)Math.Ceiling(100.0 * CompletedChunks / TotalChunks));
+
+    /// <summary>The owner-published percent behind <see cref="EstimatedCompletionPercent"/>; null for every job that publishes none.</summary>
+    public int? WeightedCompletionPercent { get; init; }
+
+    /// <summary>
+    /// Server-computed seconds left, published through <see cref="AnalysisProgressTracker.SetRunEstimate"/>. Null for
+    /// every job kind except the whole-book proofread parent.
+    /// </summary>
+    public int? EstimatedRemainingSeconds { get; init; }
 
     // ── Whole-book REVIEW build-shape (wb4-c06). The TRANSIENT per-build window/continuity/failed-window
     //    provenance the BookReview build stamps at its terminal so the FE's LIVE progress poll can render the
@@ -80,6 +96,10 @@ internal sealed class AnalysisProgressState
     public AnalysisProgressStatus Status { get; set; } = AnalysisProgressStatus.Pending;
     public string Message { get; set; } = string.Empty;
     public DateTimeOffset LastUpdatedUtc { get; set; } = DateTimeOffset.UtcNow;
+
+    // Owner-published run estimate (see AnalysisProgressSnapshot). Null until SetRunEstimate is called.
+    public int? WeightedCompletionPercent { get; set; }
+    public int? EstimatedRemainingSeconds { get; set; }
 
     // Whole-book REVIEW build-shape (see AnalysisProgressSnapshot). Null until the review build stamps them.
     public int? BookReviewWindowCount { get; set; }
@@ -287,6 +307,25 @@ public class AnalysisProgressTracker
     }
 
     /// <summary>
+    /// Publish a job owner's own estimate: a completion percent that replaces the chunk ratio in
+    /// <see cref="AnalysisProgressSnapshot.EstimatedCompletionPercent"/>, and the seconds it expects are left. Only
+    /// the whole-book proofread parent calls this (<see cref="BookProofreadRunProgress"/>), whose chunks are chapters
+    /// and so say nothing about time. Status, counts and message are untouched; LastUpdatedUtc moves, which is also
+    /// what keeps that parent alive under its poller while one long chapter runs. No-op when the job is unknown.
+    /// </summary>
+    public void SetRunEstimate(Guid jobId, int completionPercent, int remainingSeconds)
+    {
+        if (!_jobs.TryGetValue(jobId, out var state)) return;
+        lock (state.SyncRoot)
+        {
+            state.WeightedCompletionPercent = Math.Clamp(completionPercent, 0, 100);
+            state.EstimatedRemainingSeconds = Math.Max(0, remainingSeconds);
+            state.LastUpdatedUtc = _timeProvider.GetUtcNow();
+        }
+        PruneExpired();
+    }
+
+    /// <summary>
     /// Snapshot one job. The copy is taken under the entry lock, so the returned values are all from the
     /// SAME update — Completed/Total/Current can never be spliced across two concurrent chunk reports.
     /// </summary>
@@ -314,6 +353,8 @@ public class AnalysisProgressTracker
                     Status = state.Status,
                     Message = state.Message,
                     LastUpdatedUtc = state.LastUpdatedUtc,
+                    WeightedCompletionPercent = state.WeightedCompletionPercent,
+                    EstimatedRemainingSeconds = state.EstimatedRemainingSeconds,
                     BookReviewWindowCount = state.BookReviewWindowCount,
                     BookReviewRanContinuityReduce = state.BookReviewRanContinuityReduce,
                     BookReviewFailedWindows = state.BookReviewFailedWindows

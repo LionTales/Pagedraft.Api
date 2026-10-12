@@ -48,7 +48,8 @@ public class BookProofreadServiceTests
         /// <summary>Called inside the model call with the request's input text; may throw to fail that unit.</summary>
         public Action<string>? OnModelCall;
 
-        public Harness()
+        /// <param name="clock">Registered for the service's ETA clock when given (c10); the system clock otherwise.</param>
+        public Harness(TimeProvider? clock = null)
         {
             var dbName = Guid.NewGuid().ToString();
             var router = new Mock<IAiRouter>();
@@ -104,6 +105,7 @@ public class BookProofreadServiceTests
                 new AnalysisRepairService(new Mock<IAiRouter>().Object, NullLogger<AnalysisRepairService>.Instance),
                 new DynamicTermRepairService(new Mock<IAiRouter>().Object, NullLogger<DynamicTermRepairService>.Instance),
                 new StubBookEntityProvider()));
+            if (clock != null) services.AddSingleton(clock);
             services.AddScoped<BookProofreadService>();
             Provider = services.BuildServiceProvider();
 
