@@ -151,7 +151,7 @@ public static class RepairableFields
     }
 
     /// <summary>
-    /// LineEdit (Dicta-3.0): overallFeedback, suggestions[].reason. NOT:
+    /// LineEdit (routed by Ai:FeatureModels:LineEdit; DictaLM-3.0 until 2026-10-13): overallFeedback, suggestions[].reason. NOT:
     /// suggestions[].original / suggested (verbatim anchors) or category (enum).
     /// </summary>
     public static IReadOnlyList<RepairableField> For(LineEditResult result)
@@ -355,7 +355,7 @@ public static class RepairableFields
     }
 
     /// <summary>
-    /// Proofread (Dicta-3.0): NONE. The routing table says "none (leave entirely)":
+    /// Proofread (any model; DictaLM-3.0 until 2026-07-29): NONE. The routing table says "none (leave entirely)":
     /// every field of AnalysisSuggestion is either an anchor
     /// (OriginalText / SuggestedText / StartOffset / EndOffset) or Proofread
     /// metadata that the repair layer does not touch. Returns an empty list so
