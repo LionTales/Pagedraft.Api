@@ -12,7 +12,7 @@ public class HebrewNormalizeEngine : INormalizeEngine
             return Task.FromResult(inputText);
 
         var normalized = inputText;
-        var isHebrew = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHebrew = LanguageTags.IsHebrew(language);
 
         // Always: whitespace and zero-width cleanup (safe for all languages)
         normalized = NormalizeWhitespace(normalized);

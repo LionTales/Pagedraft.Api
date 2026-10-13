@@ -115,7 +115,7 @@ public partial class BookExportService
     ///
     /// READ BY THE CLIENT in <c>src/app/core/services/export.service.ts</c>, which is also the only other
     /// response-header read in the product. Like <c>Content-Disposition</c>, this header is NOT
-    /// CORS-safelisted, so it is listed in the CORS policy's <c>WithExposedHeaders</c> in <c>Program.cs</c>;
+    /// CORS-safelisted, so it is listed in the CORS policy's <c>WithExposedHeaders</c> in <c>CorsPolicyConfiguration</c>;
     /// without that entry the read returns null cross-origin and the author is silently never told.
     /// </summary>
     public const string SkippedCountHeader = "X-Export-Skipped-Count";
@@ -263,7 +263,11 @@ public partial class BookExportService
 
         var chapterIds = chapters.Select(c => c.Id).ToList();
         var scenesByChapter = await LoadScenesAsync(chapterIds, ct);
-        var annotation = proofread ? await StartAnnotationAsync(chapterIds, book.Language, unreliable, ct) : null;
+        // Resolved ONCE, by the normalization the status and the result filter key on (null or blank = the
+        // default, Hebrew), so the conversion, the result filter and the annotation strings of this export all
+        // read the same language (be-c09; Hebrew-ness: LanguageTags.IsHebrew of this value).
+        var bookLanguage = Analysis.BaselineLanguageResolver.Normalize(book.Language);
+        var annotation = proofread ? await StartAnnotationAsync(chapterIds, bookLanguage, unreliable, ct) : null;
 
         var buffers = new List<byte[]>(chapters.Count);
         var skipped = new List<ExportSkippedChapter>();
@@ -280,7 +284,7 @@ public partial class BookExportService
             // nothing inserted between them: scenes are contiguous prose inside one chapter, and the split
             // deleted whatever break marker the author had written, so inventing one would be writing into
             // their manuscript.
-            foreach (var unit in units) buffers.Add(Render(unit, book.Language, annotation));
+            foreach (var unit in units) buffers.Add(Render(unit, bookLanguage, annotation));
         }
 
         // Every chapter skipped: the assembler WOULD produce a valid empty document here, and that is exactly
@@ -329,13 +333,14 @@ public partial class BookExportService
         if (units.Count == 0) return BookExportResult.NothingWritten();
 
         // The book's language (the chapter row does not carry one) decides the Hebrew export fidelity in
-        // ConvertSfdtToDocx and the annotation's strings. The chapter row above is book-scoped, so the book
-        // exists; a missing language falls back to no stamping rather than failing the export.
-        var bookLanguage = await _db.Books
+        // ConvertSfdtToDocx, the result filter and the annotation's strings, resolved ONCE so all three read the
+        // same value: null or blank (no language stored, or the book vanished after the book-scoped chapter
+        // lookup) is the product default, Hebrew, as on the book path (be-c09; Hebrew-ness: LanguageTags).
+        var bookLanguage = Analysis.BaselineLanguageResolver.Normalize(await _db.Books
             .AsNoTracking()
             .Where(b => b.Id == bookId)
             .Select(b => b.Language)
-            .FirstOrDefaultAsync(ct);
+            .FirstOrDefaultAsync(ct));
 
         var annotation = proofread
             ? await StartAnnotationAsync(new[] { chapter.Id }, bookLanguage, unreliable, ct)

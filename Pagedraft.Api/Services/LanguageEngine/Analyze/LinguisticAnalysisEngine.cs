@@ -51,7 +51,7 @@ public class LinguisticAnalysisEngine : IAnalyzeEngine
 
     private static string BuildLinguisticPrompt(string text, string language)
     {
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? $@"אתה מומחה לניתוח לשוני. נתח את הטקסט הבא מבחינה לשונית וחזור בתשובה בפורמט JSON.
 
 פורמט התשובה:

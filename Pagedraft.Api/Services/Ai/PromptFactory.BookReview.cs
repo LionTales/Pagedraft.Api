@@ -43,7 +43,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildBookReviewPrompt(string dimension, string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         return (dimension?.Trim().ToLowerInvariant()) switch
         {
             "character"  => isHe ? BookReviewCharacterHe  : BookReviewCharacterEn,
@@ -83,7 +83,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildBookReviewCombinedPrompt(string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         return isHe ? BookReviewCombinedHe : BookReviewCombinedEn;
     }
 
@@ -153,7 +153,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildChapterAnchorAllowlistRule(string language, IReadOnlyCollection<int> allowedOrders)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         var orders = (allowedOrders ?? Array.Empty<int>()).Distinct().OrderBy(o => o).ToList();
 
         if (orders.Count == 0)

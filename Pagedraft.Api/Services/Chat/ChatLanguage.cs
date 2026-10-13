@@ -70,12 +70,15 @@ public static class ChatLanguage
         return Normalize(clientHint) ?? Default;
     }
 
-    /// <summary>Maps a language tag ("he", "he-IL", "EN-GB") to this module's two values, or null.</summary>
+    /// <summary>
+    /// Maps a language tag ("he", "he-IL", "EN-GB") to this module's two values, or null. The tag is the
+    /// client's hint, a request value, so it is matched by BCP-47 subtag (<see cref="LanguageTags"/>, be-c09):
+    /// <c>help</c> or <c>english</c> is no language at all here, not Hebrew or English.
+    /// </summary>
     public static string? Normalize(string? tag)
     {
-        if (string.IsNullOrWhiteSpace(tag)) return null;
-        if (tag.StartsWith("he", StringComparison.OrdinalIgnoreCase)) return Hebrew;
-        if (tag.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return English;
+        if (LanguageTags.IsHebrew(tag)) return Hebrew;
+        if (LanguageTags.IsTagFor(tag, English)) return English;
         return null;
     }
 

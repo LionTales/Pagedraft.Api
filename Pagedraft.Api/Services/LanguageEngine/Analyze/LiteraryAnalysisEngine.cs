@@ -51,7 +51,7 @@ public class LiteraryAnalysisEngine : IAnalyzeEngine
 
     private static string BuildLiteraryPrompt(string text, string language)
     {
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? $@"אתה מומחה לניתוח ספרותי. נתח את הטקסט הבא מבחינה ספרותית וחזור בתשובה בפורמט JSON.
 
 פורמט התשובה:

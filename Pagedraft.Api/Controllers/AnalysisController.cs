@@ -171,7 +171,7 @@ public class AnalysisController : ControllerBase
         // Prefer request language; when not set, use the book's language so English books get "en" and the right model/prompts.
         var language = !string.IsNullOrEmpty(req.Language)
             ? req.Language
-            : NormalizeLanguageForAnalysis(chapter?.Book?.Language) ?? "he";
+            : BaselineLanguageResolver.Normalize(chapter?.Book?.Language);
 
         // Type picker: client sends AnalysisType string (e.g. "LinguisticAnalysis")
         if (!string.IsNullOrWhiteSpace(req.AnalysisType) && TryParseAnalysisType(req.AnalysisType, out var parsedType))
@@ -212,16 +212,6 @@ public class AnalysisController : ControllerBase
             "Custom" => AnalysisType.Custom,
             _ => AnalysisType.Proofread
         };
-    }
-
-    /// <summary>Normalize book language (e.g. "en-US") to analysis code "en" or "he" for prompts and model selection.</summary>
-    private static string? NormalizeLanguageForAnalysis(string? bookLanguage)
-    {
-        if (string.IsNullOrWhiteSpace(bookLanguage)) return null;
-        var lang = bookLanguage.Trim();
-        if (lang.StartsWith("he", StringComparison.OrdinalIgnoreCase)) return "he";
-        if (lang.StartsWith("en", StringComparison.OrdinalIgnoreCase)) return "en";
-        return lang.Length <= 5 ? lang : lang[..2];
     }
 
     [HttpGet("analyses")]

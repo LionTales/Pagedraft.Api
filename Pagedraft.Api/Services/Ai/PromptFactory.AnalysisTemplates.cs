@@ -158,7 +158,7 @@ public partial class PromptFactory
     /// </summary>
     public string GetCharacterExtractionPrompt(string language)
     {
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? CharacterExtractionPromptHe
             : CharacterExtractionPromptEn;
     }
@@ -169,7 +169,7 @@ public partial class PromptFactory
     /// </summary>
     public string GetExplainSuggestionPrompt(string originalText, string suggestedText, string? reason, string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         if (isHe)
         {
             return
