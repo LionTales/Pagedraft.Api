@@ -18,7 +18,7 @@ namespace Pagedraft.Api.Controllers;
 /// | start    | POST .../proofread?language=&amp;force=&amp;onlyFailed= | <see cref="StartBookProofreadResponse"/> |
 /// | progress | GET  .../proofread/progress/{jobId}           | <see cref="AnalysisProgressDto"/> (review shape) |
 /// | status   | GET  .../proofread/status?language=           | <see cref="BookProofreadStatusDto"/> |
-/// | cancel   | POST .../proofread/cancel?jobId={jobId}       | 200, empty body accepted             |
+/// | cancel   | POST .../proofread/cancel?jobId={jobId}       | 200 {canceled[,status]}; 404 unknown |
 ///
 /// SECURITY DEBT, same posture as <c>GET active-analysis-jobs</c>: no ownership check on {bookId} under the
 /// current single-user deployment.
@@ -115,8 +115,10 @@ public class BookProofreadController : ControllerBase
     }
 
     /// <summary>
-    /// Stop the run before its next chapter; finished chapters keep their results. Idempotent: a job that has
-    /// already reached a terminal status answers 200 with canceled=false. 404 when the job is unknown.
+    /// Stop the run before its next chapter; finished chapters keep their results. 200 {canceled=true} when the
+    /// run accepted it. A run that has already taken its last chapter (finishing or terminal) refuses it and
+    /// answers 200 {canceled=false, status} with the job's current status, which the cancel never changes
+    /// (be-c04). 404 when the job is unknown.
     /// </summary>
     [HttpPost("cancel")]
     public IActionResult Cancel(Guid bookId, [FromQuery] Guid jobId)

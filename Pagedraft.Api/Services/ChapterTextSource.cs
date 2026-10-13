@@ -45,5 +45,17 @@ public static class ChapterTextSource
     /// <c>WarnIfBothCopiesLookWritten</c> makes it visible.
     /// </summary>
     public static bool ScenesHoldTheChaptersCurrentText(IReadOnlyList<Scene>? scenes)
-        => scenes is { Count: > 0 } && scenes.Any(s => s.UpdatedAt > s.CreatedAt);
+        => scenes is { Count: > 0 }
+           && StampsHoldTheChaptersCurrentText(scenes.Select(s => new SceneStamp(s.CreatedAt, s.UpdatedAt)).ToList());
+
+    /// <summary>A scene's two timestamps: all <see cref="ScenesHoldTheChaptersCurrentText"/> reads of it.</summary>
+    public readonly record struct SceneStamp(DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+
+    /// <summary>
+    /// THE rule, over the projected shape, so a caller that has not loaded the scene bodies (the whole-book
+    /// proofread's status load) asks the same question as <see cref="ScenesHoldTheChaptersCurrentText"/>, which
+    /// delegates here. One body, so the two cannot drift.
+    /// </summary>
+    public static bool StampsHoldTheChaptersCurrentText(IReadOnlyList<SceneStamp>? stamps)
+        => stamps is { Count: > 0 } && stamps.Any(s => s.UpdatedAt > s.CreatedAt);
 }

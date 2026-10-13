@@ -15,6 +15,7 @@ using Pagedraft.Api.Hubs;
 using Pagedraft.Api.Models;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai.Contracts;
+using Pagedraft.Api.Services.Export;
 using Syncfusion.DocIO;
 using Syncfusion.DocIO.DLS;
 using Xunit;
@@ -84,6 +85,34 @@ public class ExportAnnotatedFidelityTests
         Assert.All(untagged, r => Assert.NotEqual("he-IL", EffectiveBidiLanguage(docx, r)));
     }
 
+    /// <summary>
+    /// be-c09: one export reads ONE language. The layout (the conversion's Hebrew rule), the revision author (the
+    /// comment strings' rule) and the result filter used to decide separately: a blank stored language laid the
+    /// file out left-to-right in English while the filter keyed it as Hebrew, and <c>help</c> was Hebrew to all of
+    /// them by prefix. Now the export normalizes the book's language once (blank = the default, Hebrew) and every
+    /// consumer classifies that value with <c>LanguageTags.IsHebrew</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("book", "", true)]
+    [InlineData("chapter", "", true)]
+    [InlineData("book", "  ", true)]
+    [InlineData("chapter", "HE-il", true)]
+    [InlineData("book", "help", false)]
+    [InlineData("chapter", "help", false)]
+    public async Task One_export_reads_one_language_for_layout_and_revision_author(string path, string language, bool hebrew)
+    {
+        var docx = await ExportAnnotatedAsync(language, path);
+
+        var document = Part(docx, "word/document.xml");
+        var authors = document.Descendants()
+            .Where(e => e.Name == W + "ins" || e.Name == W + "del")
+            .Select(e => e.Attribute(W + "author")?.Value)
+            .Distinct()
+            .ToList();
+        Assert.Equal(new[] { ProofreadAnnotationStrings.Author(hebrew ? "he" : "en") }, authors);
+        Assert.Equal(hebrew, IsOn(DefaultParagraphStyle(docx).Element(W + "pPr")?.Element(W + "bidi")));
+    }
+
     // ---- fixtures and helpers -----------------------------------------------------------------------------
 
     /// <summary>A two-chapter book, each chapter holding one pending, placeable Active Proofread suggestion.</summary>
@@ -95,8 +124,8 @@ public class ExportAnnotatedFidelityTests
         var first = NewChapter(book.Id, 0);
         var second = NewChapter(book.Id, 1);
         db.Chapters.AddRange(first, second);
-        SeedResult(db, first);
-        SeedResult(db, second);
+        SeedResult(db, first, language);
+        SeedResult(db, second, language);
         await db.SaveChangesAsync();
 
         var result = path == "book"
@@ -108,7 +137,8 @@ public class ExportAnnotatedFidelityTests
         return result.Content!;
     }
 
-    private static void SeedResult(AppDbContext db, Chapter chapter)
+    /// <summary>Stored in the book's language, as a real run is: the annotated export reads only those (be-c05).</summary>
+    private static void SeedResult(AppDbContext db, Chapter chapter, string language)
     {
         var result = new AnalysisResult
         {
@@ -120,6 +150,7 @@ public class ExportAnnotatedFidelityTests
             Type = nameof(AnalysisType.Proofread),
             Status = AnalysisStatus.Active,
             CreatedAt = DateTimeOffset.UtcNow,
+            Language = language,
         };
         result.Suggestions.Add(new AnalysisSuggestion
         {

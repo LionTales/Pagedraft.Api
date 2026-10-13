@@ -20,7 +20,9 @@ which the change itself already shows. Most suggestions therefore carry no comme
 
 An explanation is model output, so before it is written it is trimmed, every whitespace run (line breaks
 included) becomes one space, control characters are dropped, and it is capped at 500 characters plus an
-ellipsis. One that holds no letter or digit, or is the stored "No explanation could be generated"
+ellipsis. Characters a Word file cannot hold (U+FFFE, U+FFFF, half of a surrogate pair) are removed from
+the explanation and from the suggested text before either is written; one such character used to fail the
+whole export. One that holds no letter or digit, or is the stored "No explanation could be generated"
 placeholder, counts as absent.
 
 The author's own comments and tracked changes already in the chapters pass through untouched.
@@ -56,7 +58,13 @@ The author's own comments and tracked changes already in the chapters pass throu
   first; only when that still cannot be placed is all of the original's edge whitespace taken off, so a
   word deleted together with its following space inside a paragraph still takes the space with it.
 - Some suggestions cannot be placed: the original text is not found, is ambiguous even with its
-  context, crosses a paragraph boundary, or overlaps a suggestion already placed. They are not guessed at.
+  context, crosses a paragraph boundary, touches non-plain text (a field result, an existing tracked
+  change, a tab or line break, a footnote reference), would cut an emoji (a surrogate pair) in two, or
+  overlaps a suggestion already placed (an insertion touching a replacement's edge included). They are not
+  guessed at. If the annotator fails on
+  one chapter or scene outright, that unit ships as plain text, the failure is logged with ids only, and its
+  pending suggestions count as unanchored (whitespace-only ones as whitespace-skipped); the rest of the
+  book is still annotated.
   The count is returned in the `X-Export-Unanchored-Count` header and shown in the download notice.
   `X-Export-Annotation-Count` counts placed suggestions (tracked changes), not comments. Placed plus
   unanchored plus whitespace-skipped equals the pending total; on the book above that was 666 + 1 + 4,009
@@ -68,8 +76,16 @@ The author's own comments and tracked changes already in the chapters pass throu
   text, its suggestions are neither placed nor counted as unanchored, and the
   `X-Export-Unreliable-Skipped-Count` header reports how many chapters were left unannotated (0 on
   include). The chapters to ask about come from `GET /api/books/{bookId}/proofread/status`
-  (`unreliableChapters`). A non-forced re-run of the whole-book proofread also replaces an unreliable
-  result, since it counts as stale.
+  (`unreliableChapters`). The status and the export decide which result is a unit's and whether it is
+  unreliable through one rule (`ProofreadUnitResults`), so on a whole-book export with `skip` the header
+  equals the number of chapters the dialog listed: a result that belongs to no exported unit (the frozen
+  chapter row's result on a chapter that exports through its scenes) is neither listed nor skipped. A
+  non-forced re-run of the whole-book proofread also replaces an unreliable result; the status counts such
+  a chapter in `chaptersUnreliable`, not in `chaptersEdited` or in the proofread coverage.
+- Only results in the book's language are written. The export has no language parameter, so it reads
+  the book's language the way the status does; a unit whose only proofread is in another language (the
+  book's language changed after it ran) ships as plain text, and the status reports that chapter as not
+  proofread. The chapter view, which shows every Active result, still lists those suggestions.
 - Pasting the annotated file back into the editor drops comments and revisions (the editor import has no
   comments part today); use the file for the author's review in Word, not as the next manuscript.
 
@@ -82,6 +98,16 @@ comment rule and the explanation floor live in `ProofreadAnnotationStrings.Comme
 is by text plus context into a normalized paragraph view, never by raw offset. The whitespace rules
 (whitespace-only skip, common-edge trim, boundary-edge fallback) live in `ProofreadWhitespace`, whose
 whitespace set is pinned code unit by code unit against JavaScript's `trim` (it is not .NET's
-`char.IsWhiteSpace`: U+FEFF is whitespace there, U+0085 is not). Note the client applies its hide rule
-only to suggestions it diffs itself; stored server suggestions reach the chapter view unfiltered. Annotation happens on each
+`char.IsWhiteSpace`: U+FEFF is whitespace there, U+0085 is not). The client applies the same hide rule
+(`isWhitespaceOnlySuggestion`) to stored server suggestions too, in the analysis panel and the history tab, so the
+chapter view hides the rows this export skips. Annotation happens on each
 unit's buffer before book assembly, which was premise-tested to keep all revisions and comments.
+
+Model text reaches the XML only through `XmlSafeText.Clean` (the suggested text where a candidate is built,
+the explanation in `SanitizeExplanation`); the original is matched against the document and is never
+cleaned. New revision ids start past the highest `w:id` in EVERY XML part of the package (footnotes,
+endnotes, headers and footers carry their own revisions), the parts other than the body and comments being
+streamed, not loaded. Every cloned `w:rPr` goes through `CloneRunProperties`, which renumbers a
+`w:rPrChange` id rather than copying it into each split fragment. `ProofreadDocxAnnotatorTests.Branches.cs`
+pins each placement branch with an Open XML SDK fixture, OpenXmlValidator (0 errors on input and output)
+and a DocIO accept-all reload.

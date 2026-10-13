@@ -23,8 +23,8 @@ public record AnalysisProgressDto(
     int? BookReviewWindowCount = null,
     bool? BookReviewRanContinuityReduce = null,
     int? BookReviewFailedWindows = null,
-    // ── Whole-book PROOFREAD parent (c10). Seconds the server expects are left, from the plan's word counts and
-    //    the observed pace (BookProofreadRunProgress). Non-null ONLY on that parent's progress route, where
+    // ── Whole-book PROOFREAD parent (c10). Seconds the server expects are left, from the plan's word counts: the
+    //    start estimate counted down, then blended with the observed pace (BookProofreadRunProgress, be-c07). Non-null ONLY on that parent's progress route, where
     //    EstimatedCompletionPercent is also WORD-weighted while the chunk fields stay CHAPTERS. Null everywhere
     //    else, so existing consumers are unaffected. ──
     int? EstimatedRemainingSeconds = null);

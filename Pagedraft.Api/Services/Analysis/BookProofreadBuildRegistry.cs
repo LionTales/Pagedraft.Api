@@ -10,13 +10,30 @@ namespace Pagedraft.Api.Services.Analysis;
 /// scope while status/cancel requests run on their own scopes. <see cref="TryStart"/> is the atomic
 /// compare-and-set; only one active run per key.
 ///
-/// It also keeps the FAILED-CHAPTERS record (c20, <see cref="RecordChapterOutcome"/>): a chapter that fails keeps
-/// its previous Active result, which the freshness rule counts as fresh, so without this record a normal start
-/// plans nothing for it and the only recourse is forcing every chapter.
+/// It also keeps the FAILED-CHAPTERS record (c20, <see cref="RecordChapterOutcome"/>): a chapter whose attempt
+/// THREW keeps its previous Active result, which the freshness rule still counts as fresh when it is reliable and
+/// newer than the last edit, so without this record a normal start plans nothing for it and the only recourse is
+/// forcing every chapter. (A chapter that came back unreliable archived its previous result and is never fresh, so
+/// a normal start re-plans it; the record lists it too.)
+///
+/// CANCEL INTAKE (be-c04). A run stays registered until its background task's <c>finally</c> calls
+/// <see cref="Complete"/>, which is AFTER it wrote its terminal status. A cancel in that gap used to be
+/// accepted (and its "Stopping" status overwrote the terminal one). So the run closes the intake with
+/// <see cref="CloseCancelIntake"/> the moment its workers are done, before it decides the terminal status;
+/// from then on a cancel is refused. Both happen under the entry's lock, so a cancel is either fully
+/// delivered (the token's callbacks, which write "Stopping", have run) before the intake closes, or refused.
 /// </summary>
 public sealed class BookProofreadBuildRegistry
 {
-    private sealed record Entry(Guid JobId, CancellationTokenSource Cts);
+    private sealed class Entry
+    {
+        public Entry(Guid jobId, CancellationTokenSource cts) { JobId = jobId; Cts = cts; }
+        public Guid JobId { get; }
+        public CancellationTokenSource Cts { get; }
+        public object Gate { get; } = new();
+        /// <summary>Set by <see cref="CloseCancelIntake"/>, read by <see cref="Cancel(Entry)"/>, both under <see cref="Gate"/>.</summary>
+        public bool IntakeClosed { get; set; }
+    }
 
     private readonly ConcurrentDictionary<(Guid BookId, string Language), Entry> _active = new();
 
@@ -52,14 +69,20 @@ public sealed class BookProofreadBuildRegistry
     public Guid? TryGetActive(Guid bookId, string language) =>
         _active.TryGetValue((bookId, Normalize(language)), out var e) ? e.JobId : null;
 
-    /// <summary>Requests cancellation of the active run for (bookId, language). False when none is active.</summary>
+    /// <summary>
+    /// Requests cancellation of the active run for (bookId, language). False when none is active or the run has
+    /// closed its cancel intake (it is finishing).
+    /// </summary>
     public bool TryCancel(Guid bookId, string language)
     {
         if (!_active.TryGetValue((bookId, Normalize(language)), out var e)) return false;
         return Cancel(e);
     }
 
-    /// <summary>Requests cancellation of the active run of <paramref name="bookId"/> with this jobId (any language).</summary>
+    /// <summary>
+    /// Requests cancellation of the active run of <paramref name="bookId"/> with this jobId (any language). False
+    /// when none matches or the run has closed its cancel intake (it is finishing).
+    /// </summary>
     public bool TryCancel(Guid bookId, Guid jobId)
     {
         foreach (var kv in _active)
@@ -67,10 +90,25 @@ public sealed class BookProofreadBuildRegistry
         return false;
     }
 
+    /// <summary>
+    /// The run with this jobId will take no more chapters and is about to write its terminal status: refuse every
+    /// cancel from now on. Returns once any cancel already being delivered has finished (its token callbacks ran).
+    /// No-op when no entry for (bookId, language) carries this jobId. Idempotent.
+    /// </summary>
+    public void CloseCancelIntake(Guid bookId, string language, Guid jobId)
+    {
+        if (!_active.TryGetValue((bookId, Normalize(language)), out var e) || e.JobId != jobId) return;
+        lock (e.Gate) e.IntakeClosed = true;
+    }
+
     private static bool Cancel(Entry e)
     {
-        try { e.Cts.Cancel(); return true; }
-        catch (ObjectDisposedException) { return false; } // run completed between lookup and cancel
+        lock (e.Gate)
+        {
+            if (e.IntakeClosed) return false;
+            try { e.Cts.Cancel(); return true; }
+            catch (ObjectDisposedException) { return false; } // run completed between lookup and cancel
+        }
     }
 
     // ── The failed-chapters record (c20) ────────────────────────────────────────────────────────────
@@ -87,7 +125,8 @@ public sealed class BookProofreadBuildRegistry
     /// Records how one chapter's attempt in a whole-book run ended. A failed (or unreliable) attempt is recorded
     /// with <paramref name="attemptStartedAt"/>; a clean one removes the chapter, which is how a retry that
     /// succeeds clears it. Chapters a run did not attempt keep whatever an earlier run recorded, so a later
-    /// normal run that skips a failed chapter (its old result still counts as fresh) cannot hide the failure.
+    /// normal run that skips a chapter whose attempt threw (its old reliable result can still count as fresh) cannot
+    /// hide the failure.
     /// </summary>
     public void RecordChapterOutcome(Guid bookId, string language, Guid chapterId, bool succeeded, DateTimeOffset attemptStartedAt)
     {

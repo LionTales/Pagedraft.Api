@@ -40,7 +40,7 @@ public class BookProofreadServiceTests
     {
         public readonly Guid BookId = Guid.NewGuid();
         public readonly ServiceProvider Provider;
-        public readonly AnalysisProgressTracker Tracker = new();
+        public readonly AnalysisProgressTracker Tracker;
         public readonly BookProofreadBuildRegistry Registry = new();
         public readonly ConcurrentQueue<string> RouterInputs = new();
         public readonly ConcurrentDictionary<Guid, (string Text, Guid ChapterId, Guid? SceneId)> Targets = new();
@@ -51,24 +51,34 @@ public class BookProofreadServiceTests
         /// <summary>When set, the model's answer for the request's input text (c20: an unreliable output).</summary>
         public Func<string, string?>? Respond;
 
+        /// <summary>
+        /// Awaited inside the model call after <see cref="OnModelCall"/> (be-c11): a test holds a unit in flight on a
+        /// gate (a TaskCompletionSource it releases), no sleeps; it may throw to fail that unit.
+        /// </summary>
+        public Func<string, Task>? ModelGate;
+
         /// <param name="clock">Registered for the service's ETA clock when given (c10); the system clock otherwise.</param>
-        public Harness(TimeProvider? clock = null)
+        /// <param name="tracker">The singleton tracker (be-c04: an observing subclass); a plain one otherwise.</param>
+        /// <param name="configure">Runs after the defaults (be-c11), e.g. to set or bind <see cref="AiOptions"/>.</param>
+        public Harness(TimeProvider? clock = null, AnalysisProgressTracker? tracker = null, Action<IServiceCollection>? configure = null)
         {
+            Tracker = tracker ?? new AnalysisProgressTracker();
             var dbName = Guid.NewGuid().ToString();
             var router = new Mock<IAiRouter>();
             router
                 .Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
-                .Returns<AiRequest, CancellationToken>((req, _) =>
+                .Returns<AiRequest, CancellationToken>(async (req, _) =>
                 {
                     RouterInputs.Enqueue(req.InputText);
                     OnModelCall?.Invoke(req.InputText);
+                    if (ModelGate != null) await ModelGate(req.InputText);
                     // A one-word correction, so the diff yields a pending suggestion and the run is not "unrelated".
-                    return Task.FromResult(new AiResponse
+                    return new AiResponse
                     {
-                        Content = Respond?.Invoke(req.InputText) ?? req.InputText.Replace("×”×‘×™×ª", "×”×‘×™×ª×”"),
+                        Content = Respond?.Invoke(req.InputText) ?? req.InputText.Replace("הבית", "הביתה"),
                         Provider = "test-provider",
                         Model = "test-model"
-                    });
+                    };
                 });
 
             var context = new Mock<IAnalysisContextService>();
@@ -110,11 +120,12 @@ public class BookProofreadServiceTests
                 new StubBookEntityProvider()));
             if (clock != null) services.AddSingleton(clock);
             services.AddScoped<BookProofreadService>();
+            configure?.Invoke(services);
             Provider = services.BuildServiceProvider();
 
             using var scope = Provider.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-            db.Books.Add(new Book { Id = BookId, Title = "×¡×¤×¨", Language = "he" });
+            db.Books.Add(new Book { Id = BookId, Title = "ספר", Language = "he" });
             db.SaveChanges();
         }
 
@@ -126,7 +137,7 @@ public class BookProofreadServiceTests
         public Guid AddChapter(int order, string marker, int? wordCount = null)
         {
             var id = Guid.NewGuid();
-            var text = $"×”×™×œ×“ {marker} ×”×œ×š ××œ ×”×‘×™×ª ×©×œ×• ×‘×‘×•×§×¨ ×•×”×™×” ×©×ž×— ×ž××•×“ ×œ×¨××•×ª ××ª ××ž×.";
+            var text = $"הילד {marker} הלך אל הבית שלו בבוקר והיה שמח מאוד לראות את אמא.";
             using var db = Db();
             db.Chapters.Add(new Chapter
             {
@@ -141,7 +152,7 @@ public class BookProofreadServiceTests
         public Guid AddScene(Guid chapterId, int order, string marker, bool written, string? sfdt = null)
         {
             var id = Guid.NewGuid();
-            var text = $"×”×¡×¦× ×” {marker} × ×’×ž×¨×” ×œ×™×“ ×”×‘×™×ª ×”×™×©×Ÿ ×©×œ ×¡×‘×ª×.";
+            var text = $"הסצנה {marker} נגמרה ליד הבית הישן של סבתא.";
             using var db = Db();
             db.Scenes.Add(new Scene
             {
@@ -192,14 +203,14 @@ public class BookProofreadServiceTests
         return response;
     }
 
-    // â”€â”€ Planning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Planning ──────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task FreshChaptersAreSkipped_AndForceRunsThemAnyway()
     {
         using var h = new Harness();
-        var fresh = h.AddChapter(0, "×¨××©×•×Ÿ");
-        var stale = h.AddChapter(1, "×©× ×™");
+        var fresh = h.AddChapter(0, "ראשון");
+        var stale = h.AddChapter(1, "שני");
         h.AddActiveResult(fresh, null, Edited.AddMinutes(1));   // newer than the last edit
         h.AddActiveResult(stale, null, Edited.AddMinutes(-1));  // older than the last edit
 
@@ -209,7 +220,7 @@ public class BookProofreadServiceTests
         Assert.Equal(1, first.SkippedFresh);
         Assert.Equal(1, first.PlannedChapters);
         Assert.Single(h.RouterInputs);
-        Assert.Contains("×©× ×™", h.RouterInputs.Single());
+        Assert.Contains("שני", h.RouterInputs.Single());
 
         var forced = await StartAndFinish(h, h.Service(), force: true);
 
@@ -220,16 +231,37 @@ public class BookProofreadServiceTests
     }
 
     [Fact]
+    public async Task HebrewChapterTextAndTitle_FlowThroughIntact()
+    {
+        using var h = new Harness();
+        var id = h.AddChapter(0, "ראשון");
+
+        await StartAndFinish(h, h.Service());
+
+        // The router received the real Hebrew-script chapter text (not mojibake) ...
+        var input = Assert.Single(h.RouterInputs);
+        Assert.Contains("הילד ראשון הלך אל הבית שלו", input);
+        Assert.All(input, c => Assert.True(c < 0x80 || (c >= 0x05D0 && c <= 0x05EA) || c == '־', $"unexpected U+{(int)c:X4}"));
+        // ... and the stored title round-trips as Hebrew letters.
+        using var db = h.Db();
+        Assert.Equal("ראשון", db.Chapters.Single(c => c.Id == id).Title);
+    }
+
+    [Fact]
     public async Task AnUnreliableResultIsStale_SoANonForceRunReplacesIt()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¨××©×•×Ÿ");
+        var chapter = h.AddChapter(0, "ראשון");
         // Newer than the edit, so the time rule alone would call it fresh: only the flag makes it stale.
         h.AddActiveResult(chapter, null, Edited.AddMinutes(1), unreliable: true);
 
+        // be-c05: an unreliable result is not coverage, and it is not "edited since": it is its own count.
         var status = await h.Service().GetStatusAsync(h.BookId, "he", CancellationToken.None);
-        Assert.Equal(1, status.ChaptersWithActiveProofread);
-        Assert.Equal(1, status.ChaptersStale);
+        Assert.Equal(0, status.ChaptersWithActiveProofread);
+        Assert.Equal(0, status.ChaptersEdited);
+        Assert.Equal(1, status.ChaptersUnreliable);
+        Assert.Equal(1, status.ChaptersStale); // kept for older clients: edited + unreliable
+        Assert.Null(status.LastRunAt);         // the only result is the unreliable one
 
         var run = await StartAndFinish(h, h.Service());
 
@@ -239,14 +271,15 @@ public class BookProofreadServiceTests
         var active = Assert.Single(h.ActiveProofreads());
         Assert.False(active.ProofreadResultUnreliable);
         Assert.NotEqual(Edited.AddMinutes(1), active.CreatedAt);
-        Assert.Equal(0, (await h.Service().GetStatusAsync(h.BookId, "he", CancellationToken.None)).ChaptersStale);
+        var after = await h.Service().GetStatusAsync(h.BookId, "he", CancellationToken.None);
+        Assert.Equal((1, 0, 0, 0), (after.ChaptersWithActiveProofread, after.ChaptersEdited, after.ChaptersUnreliable, after.ChaptersStale));
     }
 
     [Fact]
     public async Task AResultInAnotherLanguageIsNotFresh()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¨××©×•×Ÿ");
+        var chapter = h.AddChapter(0, "ראשון");
         h.AddActiveResult(chapter, null, Edited.AddMinutes(1), language: "en");
 
         var run = await StartAndFinish(h, h.Service());
@@ -259,7 +292,7 @@ public class BookProofreadServiceTests
     public async Task NothingToRun_ReturnsNotStarted_WithNoJob()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¨××©×•×Ÿ");
+        var chapter = h.AddChapter(0, "ראשון");
         h.AddActiveResult(chapter, null, Edited.AddMinutes(1));
         var svc = h.Service();
 
@@ -278,8 +311,8 @@ public class BookProofreadServiceTests
     public async Task ChaptersWithoutTextAreNeitherPlannedNorCounted()
     {
         using var h = new Harness();
-        h.AddChapter(0, "×¨××©×•×Ÿ");
-        h.AddChapter(1, "×¨×™×§", wordCount: 0);
+        h.AddChapter(0, "ראשון");
+        h.AddChapter(1, "ריק", wordCount: 0);
 
         var status = await h.Service().GetStatusAsync(h.BookId, "he", CancellationToken.None);
         var run = await StartAndFinish(h, h.Service());
@@ -293,7 +326,7 @@ public class BookProofreadServiceTests
     public async Task ASecondStartWhileRunning_ReturnsTheActiveJob()
     {
         using var h = new Harness();
-        h.AddChapter(0, "×¨××©×•×Ÿ");
+        h.AddChapter(0, "ראשון");
         var active = Guid.NewGuid();
         Assert.True(h.Registry.TryStart(h.BookId, "he", active, out _));
         var svc = h.Service();
@@ -306,14 +339,14 @@ public class BookProofreadServiceTests
         Assert.Empty(h.RouterInputs);
     }
 
-    // â”€â”€ Parent and child jobs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Parent and child jobs ─────────────────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task ParentCountsChapters_AndEachChapterRunsAsAPlainChildProofreadJob()
     {
         using var h = new Harness();
-        var a = h.AddChapter(0, "×¨××©×•×Ÿ");
-        var b = h.AddChapter(1, "×©× ×™");
+        var a = h.AddChapter(0, "ראשון");
+        var b = h.AddChapter(1, "שני");
         var seenDuringRun = new ConcurrentBag<AnalysisProgressSnapshot>();
         h.OnModelCall = _ => { foreach (var j in h.Tracker.GetActiveJobsByBook(h.BookId)) seenDuringRun.Add(j); };
 
@@ -351,25 +384,25 @@ public class BookProofreadServiceTests
     public async Task ChaptersRunInReadingOrder()
     {
         using var h = new Harness();
-        h.AddChapter(2, "×©×œ×™×©×™");
-        h.AddChapter(0, "×¨××©×•×Ÿ");
-        h.AddChapter(1, "×©× ×™");
+        h.AddChapter(2, "שלישי");
+        h.AddChapter(0, "ראשון");
+        h.AddChapter(1, "שני");
 
         await StartAndFinish(h, h.Service());
 
         var order = h.RouterInputs.ToList();
-        Assert.Contains("×¨××©×•×Ÿ", order[0]);
-        Assert.Contains("×©× ×™", order[1]);
-        Assert.Contains("×©×œ×™×©×™", order[2]);
+        Assert.Contains("ראשון", order[0]);
+        Assert.Contains("שני", order[1]);
+        Assert.Contains("שלישי", order[2]);
     }
 
     [Fact]
     public async Task AFailedChapterDoesNotAbortTheRun_AndTheParentReportsPartial()
     {
         using var h = new Harness();
-        var bad = h.AddChapter(0, "×©×‘×•×¨");
-        var good = h.AddChapter(1, "×ª×§×™×Ÿ");
-        h.OnModelCall = input => { if (input.Contains("×©×‘×•×¨")) throw new InvalidOperationException("model down"); };
+        var bad = h.AddChapter(0, "שבור");
+        var good = h.AddChapter(1, "תקין");
+        h.OnModelCall = input => { if (input.Contains("שבור")) throw new InvalidOperationException("model down"); };
 
         var response = await StartAndFinish(h, h.Service());
 
@@ -388,8 +421,8 @@ public class BookProofreadServiceTests
     public async Task EveryChapterFailing_FailsTheParent_AndMarksEachChildFailed()
     {
         using var h = new Harness();
-        h.AddChapter(0, "×¨××©×•×Ÿ");
-        h.AddChapter(1, "×©× ×™");
+        h.AddChapter(0, "ראשון");
+        h.AddChapter(1, "שני");
         var children = new ConcurrentBag<Guid>();
         h.OnModelCall = _ =>
         {
@@ -409,14 +442,14 @@ public class BookProofreadServiceTests
     public async Task CancelStopsBeforeTheNextChapter_AndKeepsTheFinishedOne()
     {
         using var h = new Harness();
-        var first = h.AddChapter(0, "×¨××©×•×Ÿ");
-        h.AddChapter(1, "×©× ×™");
-        h.AddChapter(2, "×©×œ×™×©×™");
+        var first = h.AddChapter(0, "ראשון");
+        h.AddChapter(1, "שני");
+        h.AddChapter(2, "שלישי");
         BookProofreadService? svc = null;
         h.OnModelCall = input =>
         {
             // The author presses stop while chapter 1 is in the model.
-            if (input.Contains("×¨××©×•×Ÿ"))
+            if (input.Contains("ראשון"))
                 Assert.True(svc!.Cancel(h.BookId, h.Registry.TryGetActive(h.BookId, "he")!.Value));
         };
         svc = h.Service();
@@ -434,16 +467,16 @@ public class BookProofreadServiceTests
         Assert.False(svc.Cancel(h.BookId, response.JobId)); // nothing left to cancel
     }
 
-    // â”€â”€ Scenes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Scenes ────────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task WrittenScenesAreProofreadOneByOne_AndTheChapterCountsOnce()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¤×¨×§");
-        var s1 = h.AddScene(chapter, 0, "××—×ª", written: true);
-        var s2 = h.AddScene(chapter, 1, "×©×ª×™×™×", written: false);
-        h.AddScene(chapter, 2, "×¨×™×§×”", written: false, sfdt: "{\"sections\":[{\"blocks\":[]}]}");
+        var chapter = h.AddChapter(0, "פרק");
+        var s1 = h.AddScene(chapter, 0, "אחת", written: true);
+        var s2 = h.AddScene(chapter, 1, "שתיים", written: false);
+        h.AddScene(chapter, 2, "ריקה", written: false, sfdt: "{\"sections\":[{\"blocks\":[]}]}");
 
         var response = await StartAndFinish(h, h.Service());
 
@@ -456,7 +489,7 @@ public class BookProofreadServiceTests
         Assert.Equal(2, results.Count);
         Assert.All(results, r => Assert.Equal(AnalysisScope.Scene, r.Scope));
         Assert.Equal(new[] { s1, s2 }.OrderBy(x => x), results.Select(r => r.SceneId!.Value).OrderBy(x => x));
-        Assert.DoesNotContain(h.RouterInputs, i => i.Contains("×”×™×œ×“")); // the frozen chapter row was not run
+        Assert.DoesNotContain(h.RouterInputs, i => i.Contains("הילד")); // the frozen chapter row was not run
 
         // Both scenes now hold fresh results, so the chapter is fresh.
         var again = await h.Service().StartAsync(h.BookId, "he", force: false, CancellationToken.None);
@@ -468,8 +501,8 @@ public class BookProofreadServiceTests
     public async Task UnwrittenScenes_LeaveTheChapterRowAsTheText()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¤×¨×§");
-        h.AddScene(chapter, 0, "××—×ª", written: false);
+        var chapter = h.AddChapter(0, "פרק");
+        h.AddScene(chapter, 0, "אחת", written: false);
 
         await StartAndFinish(h, h.Service());
 
@@ -478,16 +511,16 @@ public class BookProofreadServiceTests
         Assert.Null(result.SceneId);
     }
 
-    // â”€â”€ Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Status ────────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task StatusCountsTextCoverageStalenessAndTheNewestRun()
     {
         using var h = new Harness();
-        var fresh = h.AddChapter(0, "×¨××©×•×Ÿ");
-        var stale = h.AddChapter(1, "×©× ×™");
-        h.AddChapter(2, "×©×œ×™×©×™");          // never proofread: not stale, just missing
-        h.AddChapter(3, "×¨×™×§", wordCount: 0);
+        var fresh = h.AddChapter(0, "ראשון");
+        var stale = h.AddChapter(1, "שני");
+        h.AddChapter(2, "שלישי");          // never proofread: not stale, just missing
+        h.AddChapter(3, "ריק", wordCount: 0);
         h.AddActiveResult(fresh, null, Edited.AddMinutes(3));
         h.AddActiveResult(stale, null, Edited.AddMinutes(-3));
 
@@ -497,6 +530,8 @@ public class BookProofreadServiceTests
         Assert.Equal(3, status.ChaptersWithText);
         Assert.Equal(2, status.ChaptersWithActiveProofread);
         Assert.Equal(1, status.ChaptersStale);
+        Assert.Equal(1, status.ChaptersEdited);     // be-c05: the stale one is EDITED since its proofread ...
+        Assert.Equal(0, status.ChaptersUnreliable); // ... not unreliable
         Assert.Equal(Edited.AddMinutes(3), status.LastRunAt);
     }
 
@@ -504,7 +539,7 @@ public class BookProofreadServiceTests
     public async Task StatusCarriesTheActiveRunId()
     {
         using var h = new Harness();
-        h.AddChapter(0, "×¨××©×•×Ÿ");
+        h.AddChapter(0, "ראשון");
         var active = Guid.NewGuid();
         Assert.True(h.Registry.TryStart(h.BookId, "he", active, out _));
 
@@ -514,14 +549,14 @@ public class BookProofreadServiceTests
         Assert.Null(status.LastRunAt);
     }
 
-    // â”€â”€ Estimate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Estimate ──────────────────────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task TheEstimateIsCeilWordsOverTheRealChunkTarget_TimesSecondsPerChunk()
+    public async Task TheEstimateIsCeilWordsOverTheRealChunkTarget_TimesSecondsPerChunk_PlusTheOverheadPerUnit()
     {
         using var h = new Harness();
-        h.AddChapter(0, "×¨××©×•×Ÿ", wordCount: 600);
-        h.AddChapter(1, "×©× ×™", wordCount: 100);
+        h.AddChapter(0, "ראשון", wordCount: 600);
+        h.AddChapter(1, "שני", wordCount: 100);
         var opts = new AiOptions();
         // THE accessor RunAsync chunks at; if either side changes sizing the two cannot drift silently.
         var target = UnifiedAnalysisService.ProofreadChunkTargetWordsFor(opts, "he", AiTier.Fast);
@@ -531,7 +566,32 @@ public class BookProofreadServiceTests
         var response = await StartAndFinish(h, h.Service());
 
         Assert.Equal(expectedChunks, response.EstimatedChunks);
-        Assert.Equal(expectedChunks * opts.ProofreadSecondsPerChunkEstimate, response.EstimatedSeconds);
+        // be-c07: two chapter-row units, each its own run with its own time outside the chunk stage.
+        Assert.Equal(2 * opts.ProofreadSecondsPerUnitOverhead + expectedChunks * opts.ProofreadSecondsPerChunkEstimate,
+            response.EstimatedSeconds);
+    }
+
+    [Fact]
+    public void AShortBooksEstimate_PaysTheOverheadOncePerUnit()
+    {
+        // The review's live case (be-c07): an English book of five short chapters, one chunk each, was promised
+        // 5 chunks x the per-chunk constant ("less than a minute") for a run that takes several times that,
+        // because every chapter is its own run with its own time outside the chunk stage.
+        var opts = new AiOptions();
+        var target = UnifiedAnalysisService.ProofreadChunkTargetWordsFor(opts, "en", AiTier.Fast);
+        var words = Math.Max(1, target / 3);
+        var planned = Enumerable.Range(0, 5)
+            .Select(i => new BookProofreadService.ChapterProofreadState(
+                Guid.NewGuid(), i, WordCount: words,
+                new[] { new BookProofreadService.ProofreadUnit(null, Edited) },
+                IsCovered: false, IsFresh: false, NewestReliableAt: null))
+            .ToList();
+
+        var (chunks, seconds) = BookProofreadService.Estimate(planned, opts, "en", AiTier.Fast);
+
+        Assert.Equal(5, chunks);
+        Assert.Equal(5 * opts.ProofreadSecondsPerUnitOverhead + 5 * opts.ProofreadSecondsPerChunkEstimate, seconds);
+        Assert.True(opts.ProofreadSecondsPerUnitOverhead > 0, "the shipped default must carry the per-unit overhead");
     }
 
     [Fact]
@@ -545,15 +605,16 @@ public class BookProofreadServiceTests
             new BookProofreadService.ProofreadUnit(Guid.NewGuid(), Edited)
         };
         var chapter = new BookProofreadService.ChapterProofreadState(
-            Guid.NewGuid(), 0, WordCount: 30, units, HasActiveResult: false, IsFresh: false, NewestResultAt: null);
+            Guid.NewGuid(), 0, WordCount: 30, units, IsCovered: false, IsFresh: false, NewestReliableAt: null);
 
         var (chunks, seconds) = BookProofreadService.Estimate(new[] { chapter }, opts, "he", AiTier.Fast);
 
         Assert.Equal(3, chunks);
-        Assert.Equal(3 * opts.ProofreadSecondsPerChunkEstimate, seconds);
+        // Three scene units: three runs, three overheads (be-c07).
+        Assert.Equal(3 * opts.ProofreadSecondsPerUnitOverhead + 3 * opts.ProofreadSecondsPerChunkEstimate, seconds);
     }
 
-    // â”€â”€ Controller â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Controller ────────────────────────────────────────────────────────────────────────────────────
 
     private static BookProofreadController Controller(Harness h)
     {
@@ -577,7 +638,7 @@ public class BookProofreadServiceTests
     public async Task Controller_StatusDefaultsToTheBookLanguage()
     {
         using var h = new Harness();
-        var chapter = h.AddChapter(0, "×¨××©×•×Ÿ");
+        var chapter = h.AddChapter(0, "ראשון");
         h.AddActiveResult(chapter, null, Edited.AddMinutes(1));
 
         var ok = Assert.IsType<OkObjectResult>((await Controller(h).GetStatus(h.BookId, null, CancellationToken.None)).Result);
@@ -612,22 +673,5 @@ public class BookProofreadServiceTests
         Assert.IsType<NotFoundResult>(controller.GetProgress(h.BookId, Guid.NewGuid()).Result);
     }
 
-    [Fact]
-    public void Controller_CancelIs200ForTheActiveRun_200ForAFinishedOne_404Otherwise()
-    {
-        using var h = new Harness();
-        var active = Guid.NewGuid();
-        Assert.True(h.Registry.TryStart(h.BookId, "he", active, out var cts));
-        h.Tracker.StartJob(active, AnalysisScope.Book, AnalysisType.Proofread, h.BookId, null, null);
-        var finished = Guid.NewGuid();
-        h.Tracker.StartJob(finished, AnalysisScope.Book, AnalysisType.Proofread, h.BookId, null, null);
-        h.Tracker.SetStatus(finished, AnalysisProgressStatus.Succeeded);
-        var controller = Controller(h);
-
-        Assert.IsType<OkObjectResult>(controller.Cancel(h.BookId, active));
-        Assert.True(cts!.IsCancellationRequested);
-        Assert.IsType<OkObjectResult>(controller.Cancel(h.BookId, finished));
-        Assert.IsType<NotFoundResult>(controller.Cancel(h.BookId, Guid.NewGuid()));
-        Assert.IsType<NotFoundResult>(controller.Cancel(Guid.NewGuid(), finished));
-    }
+    // The cancel route's bodies are pinned in BookProofreadCancelRaceTests (be-c11 moved the route test there).
 }

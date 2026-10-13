@@ -24,8 +24,10 @@ using Harness = Pagedraft.Api.Tests.BookProofreadServiceTests.Harness;
 namespace Pagedraft.Api.Tests;
 
 /// <summary>
-/// Plan todo c20: after a whole-book run, a chapter that FAILED (or came back unreliable) keeps its previous Active
-/// result, which the freshness rule counts as fresh, so a normal start plans nothing for it. The registry now keeps
+/// Plan todo c20: after a whole-book run, a chapter whose attempt THREW keeps its previous Active result, which the
+/// freshness rule still counts as fresh when it is reliable and newer than the last edit, so a normal start plans
+/// nothing for it (an unreliable result archives the previous one and is never fresh, so a normal start re-plans
+/// that chapter; it is still listed as failed). The registry now keeps
 /// a failed-chapters record (in memory), the status lists it with its own estimate, and
 /// <c>POST .../proofread?onlyFailed=true</c> plans exactly those chapters and clears them on success. Also pins the
 /// TEST-ONLY fault seam used by the live gate (inert outside Development).
@@ -350,18 +352,17 @@ public class BookProofreadRetryFailedTests
         Assert.Equal(0, BookProofreadFaultInjection.None.ArmedCount);
     }
 
+    // Located from this source file, not AppContext.BaseDirectory: the build output may be redirected
+    // (-p:BaseOutputPath), which breaks any walk-up from the binaries.
+    private static string ApiProjectDir([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+        => System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(thisFile)!, "..", "Pagedraft.Api"));
+
     [Fact]
     public void FaultSeam_NoShippedConfigurationCarriesTheKey()
     {
-        var dir = AppContext.BaseDirectory;
-        string? apiDir = null;
-        for (var d = new System.IO.DirectoryInfo(dir); d != null; d = d.Parent)
-        {
-            var candidate = System.IO.Path.Combine(d.FullName, "Pagedraft.Api", "appsettings.json");
-            if (System.IO.File.Exists(candidate)) { apiDir = System.IO.Path.GetDirectoryName(candidate); break; }
-        }
-        Assert.NotNull(apiDir);
-        var files = System.IO.Directory.GetFiles(apiDir!, "appsettings*.json");
+        var apiDir = ApiProjectDir();
+        Assert.True(System.IO.File.Exists(System.IO.Path.Combine(apiDir, "appsettings.json")), apiDir);
+        var files = System.IO.Directory.GetFiles(apiDir, "appsettings*.json");
         Assert.NotEmpty(files);
         foreach (var f in files)
             Assert.DoesNotContain("FailChapterIdsOnce", System.IO.File.ReadAllText(f));

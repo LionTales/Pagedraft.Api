@@ -13,7 +13,7 @@ namespace Pagedraft.Api.Services.Analysis;
 
 /// <summary>
 /// The whole-book proofread run: one ordinary Proofread analysis per chapter, in reading order, behind a
-/// single book-scope PARENT job. Routes are on <c>BooksController</c> under <c>api/books/{bookId}/proofread</c>.
+/// single book-scope PARENT job. Routes are on <c>BookProofreadController</c> under <c>api/books/{bookId}/proofread</c>.
 /// </summary>
 public interface IBookProofreadService
 {
@@ -37,7 +37,11 @@ public interface IBookProofreadService
     /// </summary>
     Task<BookProofreadStatusDto> GetStatusAsync(Guid bookId, string language, CancellationToken ct);
 
-    /// <summary>Asks the active run with this job id to stop before its next chapter. False when none matches.</summary>
+    /// <summary>
+    /// Asks the active run with this job id to stop before its next chapter. False when none matches, or when the
+    /// run has already taken its last chapter and is finishing (be-c04): a cancel never changes a run that is
+    /// writing, or has written, its terminal status.
+    /// </summary>
     bool Cancel(Guid bookId, Guid jobId);
 }
 
@@ -54,7 +58,9 @@ public interface IBookProofreadService
 /// previous one. RunAsync's own chunk sizing is untouched (memory pagedraft-chunk-threshold-contract).</para>
 ///
 /// <para>CANCEL BETWEEN CHAPTERS. The registry's token source stops the run before its NEXT chapter; the
-/// chapter in flight finishes and keeps its result. Only application shutdown aborts a chapter mid-run.
+/// chapter in flight finishes and keeps its result. Only application shutdown aborts a chapter mid-run. The run
+/// is the ONLY writer of the parent's status: <see cref="Cancel"/> just cancels the token, and the run's own token
+/// registration writes the "Stopping" note (be-c04).
 /// Finished chapters are durable, which is also the restart story: re-running after an API restart skips
 /// the fresh ones.</para>
 ///
@@ -68,8 +74,12 @@ public interface IBookProofreadService
 /// pace, both published by <see cref="BookProofreadRunProgress"/> (formula in its remarks); the chunk fields above
 /// stay chapters.</para>
 ///
-/// <para>RETRY THE FAILED CHAPTERS (c20). A chapter that fails (or comes back unreliable) keeps its previous Active
-/// result, which counts as fresh, so a normal start skips it. Every attempt's outcome goes to the registry's
+/// <para>RETRY THE FAILED CHAPTERS (c20). A chapter whose model call THROWS persists nothing, so it keeps its
+/// previous Active result; when that result is reliable and newer than the chapter's last edit it still counts as
+/// covered and fresh, so a normal start skips it. A chapter that comes back UNRELIABLE is different (be-c01, be-c05):
+/// its new result archives the previous Active row (<c>UnifiedAnalysisService.ArchivePreviousActiveAsync</c>, which
+/// marks that row's pending suggestions Superseded; restoring them is a recorded open gap) and, being flagged, is
+/// never covered or fresh, so a normal start re-plans it. Every attempt's outcome goes to the registry's
 /// in-memory failed-chapters record; the status lists what is still uncovered (<see cref="FailedStates"/>) and
 /// <see cref="StartFailedAsync"/> plans exactly that, forced. Lost on API restart (then: force, as before).</para>
 /// </summary>
@@ -153,13 +163,27 @@ public sealed class BookProofreadService : IBookProofreadService
             return winner is Guid w ? Response(w, started: true) : Response(Guid.Empty, started: false);
         }
 
-        // Registered BEFORE the id is returned so the first poll cannot 404.
-        _progress.StartJob(parentId, AnalysisScope.Book, AnalysisType.Proofread, bookId, null, null,
-            $"Queued whole-book proofread of {planned.Count} chapters");
-        _progress.SetTotalChunks(parentId, planned.Count);
-        // The first ETA the poll sees is the one this response returns (c10).
-        var runProgress = new BookProofreadRunProgress(_progress, parentId, planned, plan.EstimatedSeconds, _clock);
-        runProgress.Refresh();
+        // be-c04: from TryStart on, every path either hands the entry to the background run (whose finally calls
+        // Complete) or completes it here. A throw left outside both used to leave the book "running" forever, its
+        // phantom job id returned to every later start.
+        BookProofreadRunProgress runProgress;
+        try
+        {
+            // Registered BEFORE the id is returned so the first poll cannot 404.
+            _progress.StartJob(parentId, AnalysisScope.Book, AnalysisType.Proofread, bookId, null, null,
+                $"Queued whole-book proofread of {planned.Count} chapters");
+            _progress.SetTotalChunks(parentId, planned.Count);
+            // The first ETA the poll sees is the one this response returns (c10).
+            runProgress = new BookProofreadRunProgress(_progress, parentId, planned, plan.EstimatedSeconds, _clock);
+            runProgress.Refresh();
+        }
+        catch
+        {
+            _registry.Complete(bookId, lang);
+            // The id never reaches a caller, but the job may already be tracked: do not leave it Running.
+            try { _progress.SetStatus(parentId, AnalysisProgressStatus.Failed, "Whole-book proofread failed to start."); } catch { }
+            throw;
+        }
 
         RunTask = Task.Run(async () =>
         {
@@ -196,9 +220,10 @@ public sealed class BookProofreadService : IBookProofreadService
         return new BookProofreadStatusDto(
             ActiveJobId: _registry.TryGetActive(bookId, lang),
             ChaptersWithText: states.Count,
-            ChaptersWithActiveProofread: states.Count(s => s.HasActiveResult),
-            ChaptersStale: states.Count(s => s.HasActiveResult && !s.IsFresh),
-            LastRunAt: states.Select(s => s.NewestResultAt).Where(d => d.HasValue).Max(),
+            ChaptersWithActiveProofread: states.Count(s => s.IsCovered),
+            // Edited is a subset of covered and unreliable is disjoint from it, so the sum counts no chapter twice.
+            ChaptersStale: states.Count(s => s.IsEdited) + states.Count(s => s.HasUnreliableResult),
+            LastRunAt: states.Select(s => s.NewestReliableAt).Where(d => d.HasValue).Max(),
             PlannedChapters: normal.Planned.Count,
             EstimatedChunks: normal.EstimatedChunks,
             EstimatedSeconds: normal.EstimatedSeconds,
@@ -213,7 +238,9 @@ public sealed class BookProofreadService : IBookProofreadService
                 .Select(s => new BookProofreadFailedChapterDto(s.ChapterId, s.Title, s.Order))
                 .ToList(),
             FailedEstimatedChunks: failed.EstimatedChunks,
-            FailedEstimatedSeconds: failed.EstimatedSeconds);
+            FailedEstimatedSeconds: failed.EstimatedSeconds,
+            ChaptersEdited: states.Count(s => s.IsEdited),
+            ChaptersUnreliable: states.Count(s => s.HasUnreliableResult));
     }
 
     /// <summary>
@@ -245,12 +272,17 @@ public sealed class BookProofreadService : IBookProofreadService
         return (states, tier);
     }
 
-    public bool Cancel(Guid bookId, Guid jobId)
-    {
-        if (!_registry.TryCancel(bookId, jobId)) return false;
-        _progress.SetStatus(jobId, AnalysisProgressStatus.Running, "Stopping after the current chapter");
-        return true;
-    }
+    /// <summary>
+    /// Only cancels the run's token source; it writes NOTHING to the parent job (be-c04). The parent's status has
+    /// one writer, the run: it registers the "Stopping" note on its own token (<see cref="RunAsync"/>) and closes
+    /// the registry's cancel intake before deciding its terminal status, so a cancel that arrives as the run
+    /// finishes is refused here (false: the controller then answers canceled=false with the job's status) instead
+    /// of overwriting a terminal status with Running.
+    /// </summary>
+    public bool Cancel(Guid bookId, Guid jobId) => _registry.TryCancel(bookId, jobId);
+
+    /// <summary>The parent's message while a canceled run finishes the chapter in flight.</summary>
+    internal const string StoppingMessage = "Stopping after the current chapter";
 
     // ── The run ─────────────────────────────────────────────────────────────────────────────────────────
 
@@ -309,7 +341,25 @@ public sealed class BookProofreadService : IBookProofreadService
             }
         }
 
-        await Task.WhenAll(Enumerable.Range(0, maxParallel).Select(_ => Worker()));
+        // be-c04: the run is the ONLY writer of the parent's status. A cancel reaches it through the token, and the
+        // note runs synchronously inside the canceller's Cancel() (shutdown is not an author's stop: no note).
+        var stoppingNote = cancelToken.Register(() =>
+        {
+            if (!stoppingToken.IsCancellationRequested)
+                _progress.SetStatus(parentId, AnalysisProgressStatus.Running, StoppingMessage);
+        });
+        try
+        {
+            await Task.WhenAll(Enumerable.Range(0, maxParallel).Select(_ => Worker()));
+        }
+        finally
+        {
+            // Close the intake (waits out a cancel being delivered under the registry's lock), then drop the note
+            // (Dispose waits for a callback running on another thread), BEFORE any terminal status is written, so
+            // no "Stopping" can land after it. Also on the throw path: the caller writes Failed after this.
+            _registry.CloseCancelIntake(bookId, language, parentId);
+            stoppingNote.Dispose();
+        }
 
         AnalysisProgressStatus status;
         string message;
@@ -360,6 +410,8 @@ public sealed class BookProofreadService : IBookProofreadService
         {
             var unit = chapter.Units[unitIndex];
             var childId = Guid.NewGuid();
+            var unitFailed = false;
+            var unitUnreliable = false;
             var scope = unit.SceneId.HasValue ? AnalysisScope.Scene : AnalysisScope.Chapter;
             _progress.StartJob(childId, scope, AnalysisType.Proofread, bookId, chapter.ChapterId, unit.SceneId,
                 "Queued Proofread job (whole-book run)");
@@ -387,6 +439,7 @@ public sealed class BookProofreadService : IBookProofreadService
 
                 if (result.ProofreadResultUnreliable)
                 {
+                    unitUnreliable = true;
                     _logger.LogWarning(
                         "Whole-book proofread {JobId}: chapter {ChapterId} scene {SceneId} produced an UNRELIABLE result {ResultId}; counted as not proofread",
                         parentId, chapter.ChapterId, unit.SceneId, result.Id);
@@ -396,6 +449,7 @@ public sealed class BookProofreadService : IBookProofreadService
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 _progress.SetStatus(childId, AnalysisProgressStatus.Canceled, "Proofread canceled due to application shutdown.");
+                unitFailed = true;
                 throw;
             }
             catch (Exception ex)
@@ -405,13 +459,21 @@ public sealed class BookProofreadService : IBookProofreadService
                     parentId, chapter.ChapterId, unit.SceneId);
                 _progress.SetStatus(childId, AnalysisProgressStatus.Failed, ex.Message);
                 allOk = false;
+                unitFailed = true;
             }
             finally
             {
                 heartbeatStop.Cancel();
                 try { await heartbeat; } catch (OperationCanceledException) { }
-                // Any outcome: the unit's words are processed (the time was spent).
-                runProgress.UnitFinished(chapterIndex, unitIndex);
+                // Any outcome: the unit's words are processed (the percent counts them). A unit that produced no
+                // result, OR an unreliable one, is no evidence of the pace, so its words leave the ETA's rate
+                // (be-c07, final-r02). Since be-c01 a chunked chapter whose chunks all failed fast (an Ollama 500,
+                // a dead provider, a local timeout: one attempt each) does not throw: it persists an unreliable
+                // result in ~0 s for all its words, which counted as pace collapsed the ETA toward 0 again. The
+                // flag cannot say WHICH chunks fell back (that is only in the run log), so every unreliable unit
+                // leaves the rate, a slow-but-real one (unrelated output, dropped content) included: its time stays
+                // in the clock, so the cost is an ETA that errs long, never one that collapses.
+                runProgress.UnitFinished(chapterIndex, unitIndex, failed: unitFailed || unitUnreliable);
             }
         }
         return allOk;
@@ -431,23 +493,33 @@ public sealed class BookProofreadService : IBookProofreadService
     internal sealed record ProofreadUnit(Guid? SceneId, DateTimeOffset UpdatedAt);
 
     /// <summary>
-    /// A chapter with text, the units a run would proofread, and whether its results are fresh.
-    /// <paramref name="HasUnreliableResult"/>: ANY Active Proofread result on the chapter (Chapter or Scene scope)
-    /// in the planning language is flagged unreliable, which is what the status's UnreliableChapters lists.
-    /// <paramref name="ReliableThrough"/> (c20): the OLDEST of the units' newest reliable Active results in the
-    /// planning language, i.e. every unit has a reliable result at least this new; null when any unit has none.
+    /// A chapter with text, the units a run would proofread, and what their current results say. Every flag is
+    /// read off each unit's CURRENT result in the planning language through the shared
+    /// <see cref="ProofreadUnitResults"/> rule the annotated export also calls (be-c05):
+    /// <paramref name="IsCovered"/>: every unit's current result is reliable (the status's coverage).
+    /// <paramref name="IsFresh"/>: covered, and each of those results is at least as new as its unit's last edit.
+    /// <see cref="IsEdited"/>: covered but not fresh (the status's ChaptersEdited).
+    /// <paramref name="HasUnreliableResult"/>: some unit's current result is flagged unreliable (UnreliableChapters,
+    /// ChaptersUnreliable; exactly the chapters <c>?unreliable=skip</c> skips). Disjoint from covered.
+    /// <paramref name="NewestReliableAt"/>: the newest of those results when covered (LastRunAt), else null.
+    /// <paramref name="ReliableThrough"/> (c20): the OLDEST of them when covered, i.e. every unit has a reliable
+    /// result at least this new; null when any unit has none.
     /// </summary>
     internal sealed record ChapterProofreadState(
         Guid ChapterId,
         int Order,
         int WordCount,
         IReadOnlyList<ProofreadUnit> Units,
-        bool HasActiveResult,
+        bool IsCovered,
         bool IsFresh,
-        DateTimeOffset? NewestResultAt,
+        DateTimeOffset? NewestReliableAt,
         string Title = "",
         bool HasUnreliableResult = false,
-        DateTimeOffset? ReliableThrough = null);
+        DateTimeOffset? ReliableThrough = null)
+    {
+        /// <summary>Every unit has a reliable result, and at least one of them predates its unit's last edit.</summary>
+        public bool IsEdited => IsCovered && !IsFresh;
+    }
 
     /// <summary>What a run with this <c>force</c> would do: the chapters it proofreads, the fresh ones it skips, its ETA.</summary>
     internal sealed record ProofreadPlan(
@@ -471,13 +543,29 @@ public sealed class BookProofreadService : IBookProofreadService
         return new ProofreadPlan(planned, candidates.Count - planned.Count, chunks, seconds);
     }
 
+    /// <summary>The scene layer WITHOUT its bodies: ids, order and the two timestamps the unit rule reads.</summary>
+    internal static IQueryable<SceneStampRow> SceneStampsQuery(AppDbContext db, IReadOnlyCollection<Guid> chapterIds)
+        => db.Scenes.AsNoTracking()
+            .Where(s => chapterIds.Contains(s.ChapterId))
+            .OrderBy(s => s.Order)
+            .Select(s => new SceneStampRow(s.Id, s.ChapterId, s.Order, s.CreatedAt, s.UpdatedAt));
+
+    /// <summary>The SFDT of the given chapters' scenes (never <c>ContentText</c>), for the renderable check.</summary>
+    internal static IQueryable<SceneBodyRow> SceneBodiesQuery(AppDbContext db, IReadOnlyCollection<Guid> chapterIds)
+        => db.Scenes.AsNoTracking()
+            .Where(s => chapterIds.Contains(s.ChapterId))
+            .Select(s => new SceneBodyRow(s.Id, s.ContentSfdt));
+
+    internal sealed record SceneStampRow(Guid Id, Guid ChapterId, int Order, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+    internal sealed record SceneBodyRow(Guid Id, string? ContentSfdt);
+
     /// <summary>
     /// Every chapter with text (<see cref="ChapterTextPredicate.HasText"/>) in reading order, with its units and
-    /// freshness. A unit is FRESH when its Active Proofread result (Chapter scope keyed by chapter with SceneId
-    /// null, or Scene scope keyed by scene) was created at or after the unit's last edit, in this language, and
-    /// is NOT flagged <see cref="AnalysisResult.ProofreadResultUnreliable"/>: an unreliable run is a failed run
-    /// the author should not be told is done, so a non-force run replaces it. A chapter is fresh when all its
-    /// units are.
+    /// freshness. A unit is FRESH when its current Active Proofread result (<see cref="ProofreadUnitResults"/>:
+    /// Chapter scope keyed by chapter with SceneId null, or Scene scope keyed by scene, newest in this language)
+    /// was created at or after the unit's last edit and is NOT flagged
+    /// <see cref="AnalysisResult.ProofreadResultUnreliable"/>: an unreliable run is a failed run the author should
+    /// not be told is done, so a non-force run replaces it. A chapter is fresh when all its units are.
     /// </summary>
     internal static async Task<List<ChapterProofreadState>> LoadChapterStatesAsync(
         AppDbContext db, Guid bookId, string language, CancellationToken ct)
@@ -491,28 +579,47 @@ public sealed class BookProofreadService : IBookProofreadService
         if (chapters.Count == 0) return new List<ChapterProofreadState>();
 
         var chapterIds = chapters.Select(c => c.Id).ToList();
-        var scenes = await db.Scenes.AsNoTracking()
-            .Where(s => chapterIds.Contains(s.ChapterId))
-            .OrderBy(s => s.Order)
-            .ToListAsync(ct);
+        // Bodies stay in the database for the layer as a whole: this load runs on every status and start call.
+        var scenes = await SceneStampsQuery(db, chapterIds).ToListAsync(ct);
+
+        // The renderable-unit rule parses the SFDT (BookExportService.HasRenderableContent), which SQL cannot
+        // do, so the body is read ONLY for the scenes of chapters whose scene layer holds the current text.
+        var writtenChapterIds = scenes.GroupBy(s => s.ChapterId)
+            .Where(g => ChapterTextSource.StampsHoldTheChaptersCurrentText(
+                g.Select(s => new ChapterTextSource.SceneStamp(s.CreatedAt, s.UpdatedAt)).ToList()))
+            .Select(g => g.Key)
+            .ToList();
+        var renderableSceneIds = new HashSet<Guid>();
+        if (writtenChapterIds.Count > 0)
+        {
+            var bodies = await SceneBodiesQuery(db, writtenChapterIds).ToListAsync(ct);
+            foreach (var b in bodies)
+                if (BookExportService.HasRenderableContent(b.ContentSfdt)) renderableSceneIds.Add(b.Id);
+        }
 
         var results = await db.AnalysisResults.AsNoTracking()
             .Where(a => a.ChapterId != null && chapterIds.Contains(a.ChapterId.Value)
                 && a.AnalysisType == AnalysisType.Proofread
                 && a.Status == AnalysisStatus.Active
                 && (a.Scope == AnalysisScope.Chapter || a.Scope == AnalysisScope.Scene))
-            .Select(a => new { a.ChapterId, a.SceneId, a.Scope, a.CreatedAt, a.Language, a.ProofreadResultUnreliable })
+            .OrderBy(a => a.Id)
+            .Select(a => new ProofreadUnitResults.ResultFacts(
+                a.ChapterId!.Value, a.SceneId, a.Scope, a.CreatedAt, a.Language, a.ProofreadResultUnreliable))
             .ToListAsync(ct);
+        // be-c05: THE unit predicate the annotated export also calls, so the status and the file agree on which
+        // result is a unit's (unit key + language) and whether it is unreliable.
+        var current = ProofreadUnitResults.CurrentByUnit(results, language, r => r);
 
         var states = new List<ChapterProofreadState>(chapters.Count);
         foreach (var c in chapters)
         {
             var chapterScenes = scenes.Where(s => s.ChapterId == c.Id).ToList();
             List<ProofreadUnit> units;
-            if (ChapterTextSource.ScenesHoldTheChaptersCurrentText(chapterScenes))
+            if (ChapterTextSource.StampsHoldTheChaptersCurrentText(
+                    chapterScenes.Select(s => new ChapterTextSource.SceneStamp(s.CreatedAt, s.UpdatedAt)).ToList()))
             {
                 units = chapterScenes
-                    .Where(s => BookExportService.HasRenderableContent(s.ContentSfdt))
+                    .Where(s => renderableSceneIds.Contains(s.Id))
                     .Select(s => new ProofreadUnit(s.Id, s.UpdatedAt))
                     .ToList();
             }
@@ -521,45 +628,28 @@ public sealed class BookProofreadService : IBookProofreadService
                 units = new List<ProofreadUnit> { new(null, c.UpdatedAt) };
             }
 
-            var unitResults = units
-                .Select(u => results.Where(r => u.SceneId.HasValue
-                        ? r.Scope == AnalysisScope.Scene && r.SceneId == u.SceneId
-                        : r.Scope == AnalysisScope.Chapter && r.SceneId == null && r.ChapterId == c.Id)
-                    .ToList())
+            var unitCurrent = units
+                .Select(u => current.TryGetValue(new ProofreadUnitResults.UnitKey(c.Id, u.SceneId), out var r)
+                    ? r : (ProofreadUnitResults.ResultFacts?)null)
                 .ToList();
+            var verdicts = unitCurrent.Select(ProofreadUnitResults.VerdictOf).ToList();
 
-            var all = unitResults.SelectMany(r => r).ToList();
-            var isFresh = units.Count > 0 && units.Select((u, i) => unitResults[i].Any(r =>
-                    r.CreatedAt >= u.UpdatedAt
-                    && !r.ProofreadResultUnreliable
-                    && BaselineLanguageResolver.Normalize(r.Language) == language))
-                .All(fresh => fresh);
-
-            // Deliberately ANY of the chapter's Active results, not only the units' own: the status lists the
-            // chapter whenever the system flagged a proofread of it, and the export's skip decides per unit.
-            var hasUnreliable = results.Any(r => r.ChapterId == c.Id
-                && r.ProofreadResultUnreliable
-                && BaselineLanguageResolver.Normalize(r.Language) == language);
-
-            // c20: per unit, its newest reliable result in this language; the chapter is covered through the oldest.
-            var newestReliablePerUnit = unitResults
-                .Select(rs => rs
-                    .Where(r => !r.ProofreadResultUnreliable && BaselineLanguageResolver.Normalize(r.Language) == language)
-                    .Select(r => (DateTimeOffset?)r.CreatedAt)
-                    .Max())
-                .ToList();
-            DateTimeOffset? reliableThrough = units.Count > 0 && newestReliablePerUnit.All(d => d.HasValue)
-                ? newestReliablePerUnit.Min()
-                : null;
+            // Covered: every unit's current result is reliable. Fresh: covered AND each one is at least as new as
+            // its unit's last edit. Unreliable: some unit's current result is flagged. A result keyed to no unit
+            // (the frozen chapter row's on a scene-split chapter) is not in the file and counts for neither.
+            var covered = units.Count > 0 && verdicts.All(v => v == ProofreadUnitResults.Verdict.Reliable);
+            var isFresh = covered && units.Select((u, i) => unitCurrent[i]!.Value.CreatedAt >= u.UpdatedAt).All(f => f);
+            var unreliable = verdicts.Any(v => v == ProofreadUnitResults.Verdict.Unreliable);
 
             states.Add(new ChapterProofreadState(
                 c.Id, c.Order, c.WordCount, units,
-                HasActiveResult: all.Count > 0,
+                IsCovered: covered,
                 IsFresh: isFresh,
-                NewestResultAt: all.Count > 0 ? all.Max(r => r.CreatedAt) : null,
+                NewestReliableAt: covered ? unitCurrent.Max(r => r!.Value.CreatedAt) : null,
                 Title: c.Title ?? "",
-                HasUnreliableResult: hasUnreliable,
-                ReliableThrough: reliableThrough));
+                HasUnreliableResult: unreliable,
+                // c20: every unit has a reliable result at least this new.
+                ReliableThrough: covered ? unitCurrent.Min(r => r!.Value.CreatedAt) : null));
         }
         return states;
     }
@@ -568,7 +658,11 @@ public sealed class BookProofreadService : IBookProofreadService
     /// The consent gate's ETA. Chunks per chapter = ceil(words / the target RunAsync actually chunks at), via
     /// the SAME accessor (<see cref="UnifiedAnalysisService.ProofreadChunkTargetWordsFor"/>) so the estimate
     /// cannot drift from the real sizing; a scene-split chapter is at least one chunk per scene, since each scene
-    /// is its own run. Seconds = chunks x <see cref="AiOptions.ProofreadSecondsPerChunkEstimate"/>.
+    /// is its own run. Seconds = units x <see cref="AiOptions.ProofreadSecondsPerUnitOverhead"/> + chunks x
+    /// <see cref="AiOptions.ProofreadSecondsPerChunkEstimate"/> (be-c07): every unit is its own
+    /// UnifiedAnalysisService.RunAsync call and pays its time outside the chunk stage once, which a per-chunk
+    /// constant alone spread over the chunks and so under-promised a book of many short chapters 4-5x. Both
+    /// constants and their derivation are on <see cref="AiOptions"/>.
     /// </summary>
     internal static (int Chunks, int Seconds) Estimate(
         IReadOnlyList<ChapterProofreadState> planned, AiOptions opts, string language, AiTier tier)
@@ -577,6 +671,9 @@ public sealed class BookProofreadService : IBookProofreadService
         var chunks = planned.Sum(c => Math.Max(
             c.Units.Count,
             (int)Math.Ceiling(Math.Max(0, c.WordCount) / (double)target)));
-        return (chunks, chunks * Math.Max(0, opts.ProofreadSecondsPerChunkEstimate));
+        var units = planned.Sum(c => c.Units.Count);
+        var seconds = (long)units * Math.Max(0, opts.ProofreadSecondsPerUnitOverhead)
+                      + (long)chunks * Math.Max(0, opts.ProofreadSecondsPerChunkEstimate);
+        return (chunks, (int)Math.Min(int.MaxValue, seconds));
     }
 }

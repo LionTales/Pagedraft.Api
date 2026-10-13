@@ -74,8 +74,13 @@ public class BookProofreadStatusPlanTests
         var normalChunks = Ceil(100) + Ceil(300) + Math.Max(2, Ceil(40));
         Assert.Equal(normalChunks, status.EstimatedChunks);
         Assert.Equal(normalChunks + Ceil(600), status.ForceEstimatedChunks);
-        Assert.Equal(status.EstimatedChunks * opts.ProofreadSecondsPerChunkEstimate, status.EstimatedSeconds);
-        Assert.Equal(status.ForceEstimatedChunks * opts.ProofreadSecondsPerChunkEstimate, status.ForceEstimatedSeconds);
+        // Units (be-c07: one overhead each): stale + never-proofread chapter rows + the split chapter's 2 scenes;
+        // forced adds the fresh chapter's row.
+        const int normalUnits = 1 + 1 + 2, forcedUnits = normalUnits + 1;
+        Assert.Equal(normalUnits * opts.ProofreadSecondsPerUnitOverhead
+                     + status.EstimatedChunks * opts.ProofreadSecondsPerChunkEstimate, status.EstimatedSeconds);
+        Assert.Equal(forcedUnits * opts.ProofreadSecondsPerUnitOverhead
+                     + status.ForceEstimatedChunks * opts.ProofreadSecondsPerChunkEstimate, status.ForceEstimatedSeconds);
     }
 
     [Fact]
@@ -104,7 +109,7 @@ public class BookProofreadStatusPlanTests
         BookProofreadService.ChapterProofreadState State(int order, bool fresh, bool withUnits = true) =>
             new(Guid.NewGuid(), order, WordCount: 50,
                 withUnits ? units : Array.Empty<BookProofreadService.ProofreadUnit>(),
-                HasActiveResult: fresh, IsFresh: fresh, NewestResultAt: null);
+                IsCovered: fresh, IsFresh: fresh, NewestReliableAt: null);
         var states = new[] { State(0, fresh: true), State(1, fresh: false), State(2, fresh: false, withUnits: false) };
         var opts = new AiOptions();
 
@@ -132,7 +137,10 @@ public class BookProofreadStatusPlanTests
         var archived = h.AddChapter(4, "בארכיון");
         h.AddActiveResult(reliable, null, Edited.AddMinutes(1));
         h.AddActiveResult(chapterScoped, null, Edited.AddMinutes(1), unreliable: true);
-        h.AddActiveResult(sceneScoped, Guid.NewGuid(), Edited.AddMinutes(1), unreliable: true);
+        // be-c05: the scene must be an exported UNIT (a written scene) for its result to count; a Scene-scope row
+        // of a scene that is not a unit belongs to nothing the export renders.
+        var scene = h.AddScene(sceneScoped, 0, "סצנה", written: true);
+        h.AddActiveResult(sceneScoped, scene, Edited.AddMinutes(6), unreliable: true);
         h.AddActiveResult(otherLanguage, null, Edited.AddMinutes(1), unreliable: true, language: "en");
         using (var db = h.Db())
         {
@@ -185,9 +193,14 @@ public class BookProofreadStatusPlanTests
                  {
                      "activeJobId", "chaptersWithText", "chaptersWithActiveProofread", "chaptersStale", "lastRunAt",
                      "plannedChapters", "estimatedChunks", "estimatedSeconds",
-                     "forcePlannedChapters", "forceEstimatedChunks", "forceEstimatedSeconds", "unreliableChapters"
+                     "forcePlannedChapters", "forceEstimatedChunks", "forceEstimatedSeconds", "unreliableChapters",
+                     "chaptersEdited", "chaptersUnreliable" // be-c05, consumed by client todo c02
                  })
             Assert.True(json.TryGetProperty(name, out _), $"missing {name}");
+        // be-c05: the one unreliable chapter is unreliable, not edited and not covered.
+        Assert.Equal(0, json.GetProperty("chaptersEdited").GetInt32());
+        Assert.Equal(1, json.GetProperty("chaptersUnreliable").GetInt32());
+        Assert.Equal(0, json.GetProperty("chaptersWithActiveProofread").GetInt32());
 
         var unreliable = Assert.Single(json.GetProperty("unreliableChapters").EnumerateArray().ToList());
         Assert.Equal(chapter, unreliable.GetProperty("chapterId").GetGuid());

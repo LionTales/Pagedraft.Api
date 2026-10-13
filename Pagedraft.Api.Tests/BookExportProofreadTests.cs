@@ -17,6 +17,8 @@ using Pagedraft.Api.Models;
 using Pagedraft.Api.Models.Dtos;
 using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai.Contracts;
+using Pagedraft.Api.Services.Export;
+using Microsoft.Extensions.Logging;
 using Syncfusion.DocIO;
 using Syncfusion.DocIO.DLS;
 using Xunit;
@@ -120,7 +122,8 @@ public class BookExportProofreadTests
     {
         var (controller, db, _) = Build();
         var (book, chapter) = await SeedChapterAsync(db, "en", "Chapter One", "The cat sat on teh mat.\nIt was a sunny day.");
-        SeedResult(db, chapter, sceneId: null, Sug("teh", "the", explanation: "Typo."));
+        // An English book's run stores "en" (the entity defaults to "he"); be-c05's export reads the book's language.
+        SeedResult(db, chapter, sceneId: null, Sug("teh", "the", explanation: "Typo.")).Language = "en";
         await db.SaveChangesAsync();
 
         var file = Assert.IsType<FileContentResult>(
@@ -219,6 +222,39 @@ public class BookExportProofreadTests
         using var reloaded = Reload(file);
         Assert.Equal(1, reloaded.Comments.Count); // the explained one, carried through assembly
         Assert.Equal(5, reloaded.Revisions.Count); // (del + ins) x2 + del
+    }
+
+    [Fact]
+    public async Task ExportBookProofread_AUnitTheAnnotatorThrowsOn_ShipsPlain_TheOthersAnnotated_CountsStillAddUp()
+    {
+        // Seam (be-c06): the annotator's logger throws, so Annotate throws on a unit that logs (it has an
+        // unplaceable or a whitespace-only suggestion) and returns normally on one whose suggestions all place.
+        var (controller, db, _) = Build(annotator: new ProofreadDocxAnnotator(new ThrowingLogger<ProofreadDocxAnnotator>()));
+        var (book, one) = await SeedChapterAsync(db, "he", "אחד", ChapterText, bookTitle: "ספר");
+        var two = NewChapter(book.Id, 1, "שניים", "הוא הלך הביתה ואמר שלום לכולם.\nבערב ירד גשם חזק על העיר.");
+        db.Chapters.Add(two);
+        SeedResult(db, one, sceneId: null, Sug("לבית הספר", "לביה\"ס"), Sug("לא קיים כאן", "y"), Sug(" ", ""));
+        SeedResult(db, two, sceneId: null, Sug("שלום", "שלומות"));
+        await db.SaveChangesAsync();
+
+        var file = Assert.IsType<FileContentResult>(await controller.ExportBookProofread(book.Id, null, CancellationToken.None));
+
+        // 4 pending = 1 placed (chapter two) + 2 not placed + 1 whitespace-only (chapter one, shipped plain).
+        Assert.Equal("1", Header(controller, BookExportService.AnnotationCountHeader));
+        Assert.Equal("2", Header(controller, BookExportService.UnanchoredCountHeader));
+        Assert.Equal("1", Header(controller, BookExportService.WhitespaceSkippedCountHeader));
+        using var reloaded = Reload(file);
+        Assert.Equal(2, reloaded.Revisions.Count); // chapter two's del + ins only
+        Assert.Contains(ParagraphOne, SyncfusionWatermarkStripper.StripSyncfusionWatermark(reloaded.GetText()));
+    }
+
+    private sealed class ThrowingLogger<T> : ILogger<T>
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => throw new InvalidOperationException("annotator failure injected by the test");
     }
 
     [Fact]
@@ -464,7 +500,8 @@ public class BookExportProofreadTests
         return zip.GetEntry(name);
     }
 
-    private static (DocumentController Controller, AppDbContext Db, SceneService Scenes) Build(AppDbContext? existing = null)
+    private static (DocumentController Controller, AppDbContext Db, SceneService Scenes) Build(
+        AppDbContext? existing = null, ProofreadDocxAnnotator? annotator = null)
     {
         var db = existing ?? new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
@@ -474,7 +511,7 @@ public class BookExportProofreadTests
         var sfdt = new SfdtConversionService();
         var chapters = new ChapterService(db, hub, sfdt);
         var assembly = new BookAssemblyService();
-        var export = new BookExportService(db, chapters, sfdt, assembly);
+        var export = new BookExportService(db, chapters, sfdt, assembly, proofreadAnnotator: annotator);
 
         var controller = new DocumentController(new DocxParserService(), sfdt, chapters, assembly, export)
         {

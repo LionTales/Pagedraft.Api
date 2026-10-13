@@ -37,4 +37,26 @@ public class BookProofreadBuildRegistryTests
         reg.Complete(book, "he");                                // idempotent
         Assert.True(reg.TryStart(book, "he", Guid.NewGuid(), out _)); // key reusable after Complete
     }
+
+    [Fact]
+    public void A_closed_cancel_intake_refuses_every_cancel_and_leaves_the_token_alone()
+    {
+        var reg = new BookProofreadBuildRegistry();
+        var book = Guid.NewGuid();
+        var job = Guid.NewGuid();
+        Assert.True(reg.TryStart(book, "he", job, out var cts));
+
+        var other = Guid.NewGuid();
+        Assert.True(reg.TryStart(book, "en", other, out var otherCts));
+        reg.CloseCancelIntake(book, "en", Guid.NewGuid()); // another job's id: no-op
+        reg.CloseCancelIntake(book, "fr", other);          // another key: no-op
+        Assert.True(reg.TryCancel(book, other));
+        Assert.True(otherCts!.IsCancellationRequested);
+
+        reg.CloseCancelIntake(book, "he", job);
+        Assert.False(reg.TryCancel(book, job));
+        Assert.False(reg.TryCancel(book, "he"));
+        Assert.False(cts!.IsCancellationRequested);
+        Assert.Equal(job, reg.TryGetActive(book, "he")); // still registered until Complete
+    }
 }

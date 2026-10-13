@@ -10,7 +10,8 @@ namespace Pagedraft.Api.Services;
 /// <summary>
 /// What an annotated export wrote: <paramref name="Placed"/> pending suggestions became tracked change(s)
 /// (a Word comment too only when there was a label or an explanation to add); <paramref name="Unanchored"/> could
-/// not be placed (no match, ambiguous, crossing a paragraph, or overlapping a placed one);
+/// not be placed (no match, ambiguous, crossing a paragraph, or overlapping a placed one), every non-whitespace one
+/// of a unit the annotator threw on included (that unit ships unannotated; be-c06);
 /// <paramref name="WhitespaceSkipped"/> changed whitespace only and were deliberately not written (plan c16, the
 /// client diff's own hide rule). <c>Placed + Unanchored + WhitespaceSkipped</c> is the number of pending
 /// suggestions on the Active Proofread results of the units in the file, minus those of skipped units:
@@ -47,14 +48,18 @@ internal sealed record RenderableUnit(string Sfdt, Guid ChapterId, Guid? SceneId
 /// <para>WHICH RESULT, PER UNIT. The unit rule is the plain export's (<see cref="RenderableUnitSourcesOf"/>),
 /// so a unit is either the chapter row, whose suggestions live on the Active Chapter-scope result keyed by
 /// <c>ChapterId</c> with <c>SceneId</c> null, or one scene, whose suggestions live on that scene's Active
-/// Scene-scope result. A unit with no Active result annotates nothing and ships exactly as the plain export
-/// would. Only <c>Outcome == null</c> suggestions are loaded: an Accepted one is already in the text, a
+/// Scene-scope result, in the BOOK'S language (be-c05; why: <see cref="StartAnnotationAsync"/>). Which result is
+/// a unit's, and whether it is unreliable, is <see cref="ProofreadUnitResults"/>, the rule the whole-book
+/// proofread status also reads. A unit with no such result annotates nothing and ships exactly as the plain
+/// export would. Only <c>Outcome == null</c> suggestions are loaded: an Accepted one is already in the text, a
 /// Dismissed / Reverted / Superseded one is not a proposal any more.</para>
 ///
 /// <para>UNRELIABLE RESULTS (owner decision 2026-10-12). Everything is annotated by default, a result flagged
 /// <see cref="AnalysisResult.ProofreadResultUnreliable"/> included. The client reads the status's
 /// UnreliableChapters first and, when any are relevant, asks the author; <c>?unreliable=skip</c> then leaves
-/// each such unit as plain text and reports the chapters in <see cref="UnreliableSkippedCountHeader"/>.</para>
+/// each such unit as plain text and reports the chapters in <see cref="UnreliableSkippedCountHeader"/>. Both
+/// sides decide per exported unit through the one rule, so for the whole book that header equals the status's
+/// UnreliableChapters count in the book's language.</para>
 ///
 /// <para>ANNOTATE BEFORE ASSEMBLY. Each unit's buffer is annotated on its own (its suggestions are anchored
 /// in its own text) and then assembled. DocIO's <c>ImportContent</c> carries the hand-written revisions and
@@ -126,7 +131,7 @@ public partial class BookExportService
     /// <see cref="SfdtConversionService.ConvertSfdtToDocx"/>), and an annotated export converted without it
     /// was laid out left-to-right. Pinned by <c>ExportAnnotatedFidelityTests</c>.
     /// </summary>
-    private byte[] Render(RenderableUnit unit, string? bookLanguage, AnnotationSession? annotation)
+    private byte[] Render(RenderableUnit unit, string bookLanguage, AnnotationSession? annotation)
     {
         var docx = _sfdtConversion.ConvertSfdtToDocx(unit.Sfdt, bookLanguage);
         return annotation == null ? docx : annotation.Annotate(unit, docx);
@@ -134,25 +139,27 @@ public partial class BookExportService
 
     /// <summary>
     /// Loads, in ONE query, the pending suggestions of every Active Proofread result (Chapter or Scene scope)
-    /// on the given chapters, keyed by the unit they belong to. When a key somehow holds more than one Active
-    /// row (archiving is not transactional with the insert), the newest wins, as it does in the chapter view.
+    /// on the given chapters, and keeps each unit's CURRENT result through <see cref="ProofreadUnitResults"/>,
+    /// the rule the whole-book proofread status also calls (be-c05): keyed to the unit, in the book's language,
+    /// the newest when a key somehow holds more than one Active row (archiving is not transactional with the
+    /// insert).
+    ///
+    /// <para>WHY THE EXPORT FILTERS BY LANGUAGE (be-c05). The status the client reads before the dialog is keyed
+    /// by a language (the client sends the book's), so a unit whose result is in another language is "not
+    /// proofread" there and is never listed as unreliable. Before be-c05 the export read every language, so it
+    /// skipped such a flagged unit without the dialog ever naming it, and annotated a proofread the status said
+    /// did not exist. This endpoint has no language parameter, so it uses the book's language, normalized by the
+    /// same <c>BaselineLanguageResolver.Normalize</c> the status call applies: the file now holds exactly the
+    /// proofread the status describes. The cost: a unit whose only Active result predates a change of the book's
+    /// language ships unannotated, although the (language-blind) chapter view still shows those suggestions;
+    /// the status reports that chapter as not proofread, and the next whole-book run replaces the result.</para>
     /// </summary>
     private async Task<AnnotationSession> StartAnnotationAsync(
-        IReadOnlyCollection<Guid> chapterIds, string? language, UnreliableProofreadMode unreliable, CancellationToken ct)
+        IReadOnlyCollection<Guid> chapterIds, string language, UnreliableProofreadMode unreliable, CancellationToken ct)
     {
         var results = await ActiveProofreadUnitsQuery(_db, chapterIds).ToListAsync(ct);
-
-        var byUnit = new Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow>();
-        foreach (var result in results.OrderBy(r => r.CreatedAt))
-        {
-            // A Chapter-scope row with a SceneId, or a Scene-scope row without one, is not either unit's.
-            var sceneId = result.Scope == AnalysisScope.Scene ? result.SceneId : null;
-            if (result.Scope == AnalysisScope.Scene && sceneId == null) continue;
-            if (result.Scope == AnalysisScope.Chapter && result.SceneId != null) continue;
-            byUnit[(result.ChapterId, sceneId)] = result; // ascending, so the newest is written last
-        }
-
-        return new AnnotationSession(this, language ?? "he", byUnit, unreliable);
+        var byUnit = ProofreadUnitResults.CurrentByUnit(results, language, r => r.Facts);
+        return new AnnotationSession(this, language, byUnit, unreliable);
     }
 
     /// <summary>
@@ -181,22 +188,29 @@ public partial class BookExportService
                 a.SceneId,
                 a.Scope,
                 a.CreatedAt,
+                a.Language,
                 a.ProofreadResultUnreliable,
                 a.Suggestions.Where(s => s.Outcome == null).ToList()));
     }
 
     /// <summary>
     /// What the annotated export needs of one Active Proofread result: which unit it belongs to, its age (newest
-    /// wins), its unreliable flag and its PENDING suggestions. Deliberately not the entity: see
-    /// <see cref="ActiveProofreadUnitsQuery"/>.
+    /// wins), its language and unreliable flag (both read by <see cref="ProofreadUnitResults"/>) and its PENDING
+    /// suggestions. Deliberately not the entity: see <see cref="ActiveProofreadUnitsQuery"/>.
     /// </summary>
     internal sealed record ProofreadUnitRow(
         Guid ChapterId,
         Guid? SceneId,
         AnalysisScope Scope,
         DateTimeOffset CreatedAt,
+        string? Language,
         bool ProofreadResultUnreliable,
-        List<AnalysisSuggestion> Suggestions);
+        List<AnalysisSuggestion> Suggestions)
+    {
+        /// <summary>This row as the shared unit rule reads it.</summary>
+        public ProofreadUnitResults.ResultFacts Facts =>
+            new(ChapterId, SceneId, Scope, CreatedAt, Language, ProofreadResultUnreliable);
+    }
 
     /// <summary>
     /// One annotated export in progress: the per-unit results, one timestamp for every comment and revision in
@@ -206,7 +220,7 @@ public partial class BookExportService
     {
         private readonly BookExportService _owner;
         private readonly string _language;
-        private readonly Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow> _byUnit;
+        private readonly Dictionary<ProofreadUnitResults.UnitKey, ProofreadUnitRow> _byUnit;
         private readonly UnreliableProofreadMode _unreliable;
         private readonly DateTime _stamp = DateTime.UtcNow;
         private readonly HashSet<Guid> _unreliableSkippedChapters = new();
@@ -215,9 +229,10 @@ public partial class BookExportService
         private int _whitespaceSkipped;
         private int _unitsWithResult;
         private int _unitsSkipped;
+        private int _unitsFailed;
 
         public AnnotationSession(
-            BookExportService owner, string language, Dictionary<(Guid ChapterId, Guid? SceneId), ProofreadUnitRow> byUnit,
+            BookExportService owner, string language, Dictionary<ProofreadUnitResults.UnitKey, ProofreadUnitRow> byUnit,
             UnreliableProofreadMode unreliable)
         {
             _owner = owner;
@@ -230,11 +245,14 @@ public partial class BookExportService
 
         public byte[] Annotate(RenderableUnit unit, byte[] docx)
         {
-            if (!_byUnit.TryGetValue((unit.ChapterId, unit.SceneId), out var result)) return docx;
+            if (!_byUnit.TryGetValue(new ProofreadUnitResults.UnitKey(unit.ChapterId, unit.SceneId), out var result))
+                return docx;
 
             // Skip = the unit ships as plain text and its suggestions are neither placed nor unanchored: the
-            // author chose not to receive a proofread the system itself flagged as broken.
-            if (_unreliable == UnreliableProofreadMode.Skip && result.ProofreadResultUnreliable)
+            // author chose not to receive a proofread the system itself flagged as broken. The verdict is the
+            // status's own (ProofreadUnitResults), so the skipped chapters are the status's UnreliableChapters.
+            if (_unreliable == UnreliableProofreadMode.Skip
+                && ProofreadUnitResults.VerdictOf(result.Facts) == ProofreadUnitResults.Verdict.Unreliable)
             {
                 _unitsSkipped++;
                 _unreliableSkippedChapters.Add(unit.ChapterId);
@@ -242,7 +260,33 @@ public partial class BookExportService
             }
 
             _unitsWithResult++;
-            var outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions, _language, _stamp);
+            ProofreadAnnotationResult outcome;
+            try
+            {
+                outcome = _owner._proofreadAnnotator.Annotate(docx, result.Suggestions, _language, _stamp);
+            }
+            catch (Exception ex)
+            {
+                // ISOLATED PER UNIT (be-c06): one unit the annotator cannot write (an XML-illegal character in
+                // model text 500ed the whole export before XmlSafeText) must not cost the author the other
+                // chapters. The unit ships as its plain buffer (Annotate writes into a copy, so docx is untouched)
+                // and its pending suggestions are counted by the annotator's own split, so
+                // Placed + Unanchored + WhitespaceSkipped = pending still holds: the whitespace-only ones would
+                // never have been written, every other one is "could not be placed". Ids only in the log, never
+                // text: the exception message can quote the author's prose or the model's.
+                var pending = result.Suggestions.Where(s => s.Outcome == null).ToList();
+                var whitespace = pending.Count(s => ProofreadWhitespace.IsWhitespaceOnlyChange(s.OriginalText, s.SuggestedText));
+                _unitsFailed++;
+                _unanchored += pending.Count - whitespace;
+                _whitespaceSkipped += whitespace;
+                _owner._logger?.LogError(
+                    "Proofread annotation failed for chapter {ChapterId} scene {SceneId} ({ExceptionType}); the unit " +
+                    "ships unannotated and its {Pending} pending suggestion(s) count as not placed " +
+                    "({WhitespaceSkipped} whitespace-only). {StackTrace}",
+                    unit.ChapterId, unit.SceneId?.ToString() ?? "none", ex.GetType().FullName, pending.Count,
+                    whitespace, ex.StackTrace);
+                return docx;
+            }
             _placed += outcome.Placed;
             _unanchored += outcome.Unanchored;
             _whitespaceSkipped += outcome.WhitespaceSkipped;
@@ -255,9 +299,10 @@ public partial class BookExportService
                 "Proofread-annotated export of book {BookId} (chapter {ChapterId}): {Placed} suggestions placed, " +
                 "{Unanchored} not placed, {WhitespaceSkipped} whitespace-only skipped, from {UnitsWithResult} unit(s) " +
                 "with an Active proofread result; " +
-                "unreliable={Unreliable}, {UnitsSkipped} unreliable unit(s) skipped in {ChaptersSkipped} chapter(s).",
+                "unreliable={Unreliable}, {UnitsSkipped} unreliable unit(s) skipped in {ChaptersSkipped} chapter(s); " +
+                "{UnitsFailed} unit(s) the annotator failed on shipped unannotated.",
                 bookId, chapterId?.ToString() ?? "all", _placed, _unanchored, _whitespaceSkipped, _unitsWithResult,
-                _unreliable, _unitsSkipped, _unreliableSkippedChapters.Count);
+                _unreliable, _unitsSkipped, _unreliableSkippedChapters.Count, _unitsFailed);
             return new ExportAnnotationCounts(_placed, _unanchored, _whitespaceSkipped, _unreliableSkippedChapters.Count);
         }
     }
