@@ -20,7 +20,8 @@ namespace Pagedraft.Api.Services;
 /// body and all six headers/footers, recursively through paragraphs (their paragraph-mark format too), tables,
 /// content controls, text boxes, shapes, comments and footnotes. Each text range, field, symbol and field mark
 /// is cleaned. DocIO's public surface exposes <c>FontName</c> and <c>FontNameBidi</c>; setting
-/// <c>FontName</c> rewrites the ASCII, high-ANSI and East Asian slots together.
+/// <c>FontName</c> rewrites the ASCII, high-ANSI and East Asian slots together. Then the document's font
+/// substitution table (the SFDT <c>"fst"</c> map, which becomes <c>word/fontTable.xml</c>) is cleaned too.
 /// </para>
 /// <para>
 /// <see cref="ApplyRightToLeftDefaults"/> is the paragraph-direction half of the same Hebrew-book export rule
@@ -68,7 +69,47 @@ internal static class ExportBidiFontNormalizer
             }
         }
 
-        return walker.Changed;
+        return walker.Changed + CleanFontSubstitutionTable(document.FontSubstitutionTable);
+    }
+
+    /// <summary>
+    /// Removes every charset-variant name from the document's font substitution table and returns how many
+    /// entries changed. The table is the SFDT's <c>"fst"</c> map: the RTF reader records
+    /// <c>"Calibri (Hebrew)" -&gt; "Calibri"</c> for the name it could not resolve, and DocIO writes every key
+    /// into <c>word/fontTable.xml</c> as a <c>w:font</c> of its own even after the walk renamed every run, so
+    /// the export kept declaring the font no machine has (be-c09, measured on the real pre-fix paste
+    /// response). A key renames to its real face; the entry is dropped when that face maps to itself (the
+    /// paste's shape) or already has an entry of its own, and kept, renamed, when it names a different
+    /// alternate. A pseudo VALUE is renamed the same way.
+    /// </summary>
+    private static int CleanFontSubstitutionTable(Dictionary<string, string>? table)
+    {
+        if (table == null || table.Count == 0) return 0;
+        var changed = 0;
+
+        foreach (var key in table.Keys.ToList())
+        {
+            var value = table[key];
+            var realValue = PseudoBidiFontNames.Strip(value) ?? value;
+            if (!PseudoBidiFontNames.IsPseudo(key))
+            {
+                if (!ReferenceEquals(realValue, value))
+                {
+                    table[key] = realValue;
+                    changed++;
+                }
+
+                continue;
+            }
+
+            var realKey = PseudoBidiFontNames.Strip(key)!;
+            table.Remove(key);
+            changed++;
+            if (!string.Equals(realKey, realValue, StringComparison.Ordinal) && !table.ContainsKey(realKey))
+                table[realKey] = realValue;
+        }
+
+        return changed;
     }
 
     /// <summary>

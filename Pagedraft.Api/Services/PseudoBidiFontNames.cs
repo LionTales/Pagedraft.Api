@@ -1,10 +1,15 @@
 using System.Text.RegularExpressions;
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Wordprocessing;
 
 namespace Pagedraft.Api.Services;
 
 /// <summary>
 /// Word's charset-variant font names, such as <c>"Calibri (Hebrew)"</c> or <c>"Times New Roman (Arabic)"</c>, and
-/// the two places PageDraft removes them: the RTF font table of a paste, and the DOCX it exports.
+/// the three places PageDraft removes them: the RTF font table of a paste
+/// (<see cref="StripFromRtfFontTable"/>), the body of an imported DOCX (<see cref="StripFromRunFonts"/>, called by
+/// <see cref="SfdtConversionService.ConvertToSfdt"/>), and the DOCX it exports (<see cref="ExportBidiFontNormalizer"/>:
+/// every character format and the document's font substitution table).
 /// <para>
 /// <b>What they are.</b> When desktop Word writes RTF (every copy to the clipboard) its font table lists each
 /// font once per character set, for example <c>{\f1407\fbidi \fswiss\fcharset177\fprq2 Calibri (Hebrew);}</c>,
@@ -20,9 +25,10 @@ namespace Pagedraft.Api.Services;
 /// returns the face the author actually used, which Word resolves and declares with the right charset.
 /// </para>
 /// <para>
-/// Only the parenthesised script suffixes are stripped. Word's other variants (<c>" CE"</c>, <c>" Cyr"</c>,
-/// <c>" Greek"</c>, <c>" Tur"</c>, <c>" Baltic"</c>) are bare words that real font families also end with,
-/// and none of them carries a right-to-left script.
+/// Only the right-to-left parenthesised suffixes (<c>" (Hebrew)"</c>, <c>" (Arabic)"</c>) are stripped. Word's
+/// other variants are left alone: <c>" CE"</c>, <c>" Cyr"</c>, <c>" Greek"</c>, <c>" Tur"</c>, <c>" Baltic"</c>
+/// are bare words that real font families also end with, the parenthesised <c>" (Vietnamese)"</c> is kept
+/// deliberately (pinned by the tests), and none of them carries a right-to-left script.
 /// </para>
 /// </summary>
 internal static class PseudoBidiFontNames
@@ -81,6 +87,36 @@ internal static class PseudoBidiFontNames
 
         renamedEntries = count;
         return string.Concat(rtf.AsSpan(0, start), renamed, rtf.AsSpan(end + 1));
+    }
+
+    /// <summary>
+    /// Renames, in place, every charset-variant name in the <c>w:rFonts</c> elements under (and including)
+    /// <paramref name="root"/>: the ASCII, high-ANSI, East Asian and complex-script slots of run properties,
+    /// paragraph-mark run properties and tracked formatting changes alike. Returns how many attributes changed
+    /// (0 means nothing was touched). Theme-font attributes (<c>w:cstheme</c> and the like) name a theme slot,
+    /// not a face, and are left alone.
+    /// </summary>
+    internal static int StripFromRunFonts(OpenXmlElement root)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+        var renamed = 0;
+        var fonts = root is RunFonts self ? new[] { self } : root.Descendants<RunFonts>();
+        foreach (var runFonts in fonts)
+        {
+            renamed += Rename(runFonts.Ascii);
+            renamed += Rename(runFonts.HighAnsi);
+            renamed += Rename(runFonts.EastAsia);
+            renamed += Rename(runFonts.ComplexScript);
+        }
+
+        return renamed;
+
+        static int Rename(StringValue? slot)
+        {
+            if (slot?.Value is not { } name || !IsPseudo(name)) return 0;
+            slot.Value = Strip(name);
+            return 1;
+        }
     }
 
     /// <summary>Index of the '}' closing the group that opens at <paramref name="openBrace"/>, or -1.</summary>

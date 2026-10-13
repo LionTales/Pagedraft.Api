@@ -10,6 +10,7 @@ using Newtonsoft.Json.Linq;
 using Pagedraft.Api.Controllers;
 using Pagedraft.Api.Services;
 using Xunit;
+using static Pagedraft.Api.Tests.RtfClipboardTestKit;
 
 namespace Pagedraft.Api.Tests;
 
@@ -26,9 +27,6 @@ public class DocumentEditorClipboardTests
 {
     // Invented for this test; never the author's prose.
     private const string HebrewSentence = "השמש זרחה מעל הגבעות.";
-
-    private static readonly Encoding Cp1255 = CodePagesEncodingProvider.Instance.GetEncoding(1255)!;
-    private static readonly Encoding Cp1252 = CodePagesEncodingProvider.Instance.GetEncoding(1252)!;
 
     // ---- the real Word shape, through the endpoint ------------------------------------------------------
 
@@ -122,12 +120,12 @@ public class DocumentEditorClipboardTests
     [Fact]
     public void Plain_resets_the_run_language_to_the_header_default()
     {
-        // \lang1037 then \plain inside the same group: the bytes after \plain fall back to \ansicpg1252,
-        // because \plain drops the run's language.
+        // \rtlch\lang1037 then \plain inside the same group: the bytes after \plain fall back to \ansicpg1252,
+        // because \plain drops the run's language (and its direction).
         var rtf = SmallDocument(
             header: @"\ansi\ansicpg1252\deff0",
             fonts: @"{\f0\fnil\fcharset0 Arial;}",
-            body: @"{\lang1037 " + Escapes(Cp1255, "א") + @"\plain " + Escapes(Cp1252, "é") + @"}\par");
+            body: @"{\rtlch\lang1037 " + Escapes(Cp1255, "א") + @"\plain " + Escapes(Cp1252, "é") + @"}\par");
 
         var normalized = RtfCodepageNormalizer.Normalize(rtf);
 
@@ -173,7 +171,7 @@ public class DocumentEditorClipboardTests
         var rtf = SmallDocument(
             header: @"\ansi\ansicpg0\uc1\deff0",
             fonts: @"{\f0\fnil\fcharset0 Arial;}",
-            body: @"{\lang1037 \u1513\'f9\'ee\'f9}\par");
+            body: @"{\rtlch\lang1037 \u1513\'f9\'ee\'f9}\par");
 
         var normalized = RtfCodepageNormalizer.Normalize(rtf, out var rewritten);
         var text = PasteThroughEndpoint(rtf);
@@ -184,13 +182,34 @@ public class DocumentEditorClipboardTests
     }
 
     [Fact]
-    public void Emitted_fallback_count_follows_the_current_uc()
+    public void Emitted_escape_is_self_contained_whatever_the_current_uc()
     {
-        var uc2 = RtfCodepageNormalizer.Normalize(@"{\rtf1\ansi\uc2{\lang1037 \'e0}}");
-        var uc0 = RtfCodepageNormalizer.Normalize(@"{\rtf1\ansi\uc0{\lang1037 \'e0x}}");
+        // DocIO skips exactly one fallback character after \uN whatever \ucN says, so the emitted escape carries
+        // its own \uc1 unless the scope already declares it (where the bare form avoids one SFDT run per letter).
+        var uc2 = RtfCodepageNormalizer.Normalize(@"{\rtf1\ansi\uc2{\rtlch\lang1037 \'e0}}");
+        var uc0 = RtfCodepageNormalizer.Normalize(@"{\rtf1\ansi\uc0{\rtlch\lang1037 \'e0x}}");
+        var uc1 = RtfCodepageNormalizer.Normalize(@"{\rtf1\ansi\uc1{\rtlch\lang1037 \'e0x}}");
 
-        Assert.Equal(@"{\rtf1\ansi\uc2{\lang1037 \u1488??}}", uc2);
-        Assert.Equal(@"{\rtf1\ansi\uc0{\lang1037 \u1488 x}}", uc0);
+        Assert.Equal(@"{\rtf1\ansi\uc2{\rtlch\lang1037 {\uc1\u1488?}}}", uc2);
+        Assert.Equal(@"{\rtf1\ansi\uc0{\rtlch\lang1037 {\uc1\u1488?}x}}", uc0);
+        Assert.Equal(@"{\rtf1\ansi\uc1{\rtlch\lang1037 \u1488?x}}", uc1);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void Hebrew_pastes_exactly_under_any_uc(int uc)
+    {
+        // Before the fix: \uc2 pasted a stray '?' after every letter and \uc0 dropped letters and ate the spaces.
+        var rtf = SmallDocument(
+            header: @"\ansi\ansicpg1252\uc" + uc + @"\deff0",
+            fonts: @"{\f0\fnil\fcharset0 Arial;}",
+            body: @"{\rtlch\f0\lang1037 " + Escapes(Cp1255, "אב ג") + @" x}\par");
+
+        var text = PasteThroughEndpoint(rtf);
+
+        Assert.Equal("U+05D0 U+05D1 U+0020 U+05D2 U+0020 U+0078", CodePoints(text));
     }
 
     [Fact]
@@ -200,7 +219,7 @@ public class DocumentEditorClipboardTests
         var rtf = SmallDocument(
             header: @"\ansi\ansicpg0\deff0",
             fonts: @"{\f0\fnil\fcharset0 Arial;}" + hebrewFontName,
-            body: @"{\f2\lang1037 " + Escapes(Cp1255, HebrewSentence) + @"}\par");
+            body: @"{\rtlch\f2\lang1037 " + Escapes(Cp1255, HebrewSentence) + @"}\par");
 
         var normalized = RtfCodepageNormalizer.Normalize(rtf);
         var text = PasteThroughEndpoint(rtf);
@@ -220,7 +239,7 @@ public class DocumentEditorClipboardTests
         var rtf = SmallDocument(
             header: @"\ansi\ansicpg0\deff0",
             fonts: @"{\f0\fnil\fcharset0 Arial;}",
-            body: pict + @"{\field" + fieldInstruction + @"{\fldrslt{\lang1037 \'e0}}}" + bin + @"{\lang1037 \'e1}\par");
+            body: pict + @"{\field" + fieldInstruction + @"{\fldrslt{\rtlch\lang1037 \'e0}}}" + bin + @"{\rtlch\lang1037 \'e1}\par");
 
         var normalized = RtfCodepageNormalizer.Normalize(rtf, out var rewritten);
 
@@ -228,8 +247,8 @@ public class DocumentEditorClipboardTests
         Assert.Contains(pict, normalized);
         Assert.Contains(fieldInstruction, normalized);
         Assert.Contains(bin, normalized);
-        Assert.Contains(@"{\fldrslt{\lang1037 \u1488?}}", normalized);
-        Assert.Contains(@"{\lang1037 \u1489?}", normalized);
+        Assert.Contains(@"{\fldrslt{\rtlch\lang1037 \u1488?}}", normalized);
+        Assert.Contains(@"{\rtlch\lang1037 \u1489?}", normalized);
     }
 
     [Fact]
@@ -325,97 +344,6 @@ public class DocumentEditorClipboardTests
 
     // ---- helpers ------------------------------------------------------------------------------------------
 
-    private static string LangDrivenHebrewRun(string sentence) =>
-        // The exact paragraph + run control words Word wrote for a Hebrew run in the captured clipboard.
-        @"\pard\plain \rtlpar\qj \li0\ri0\sl276\slmult1\widctlpar\wrapdefault\aspalpha\aspnum\faauto\adjustright\rin0\lin0\itap0 "
-        + @"\ltrch\fcs1 \af37\afs22\alang4096 \rtlch\fcs0 \f37\fs22\lang1037\cgrid\langnp4096\langfenp4096 "
-        + @"{\ltrch\fcs1 \afs24\alang1033 \rtlch\fcs0 \f45\fs24\lang1037\langnp1033\langfenp1033 "
-        + Escapes(Cp1255, sentence)
-        + @"}\par";
-
-    private static string RealHeaderDocument(string body)
-    {
-        var path = Path.Combine(AppContext.BaseDirectory, "TestData", "word-clipboard-header.rtf");
-        var header = File.ReadAllText(path, Encoding.ASCII);
-        // Non-vacuity: a missing or swapped fixture must fail here, not read as a pass.
-        Assert.StartsWith(@"{\rtf1\adeflang1037\ansi\ansicpg0", header);
-        Assert.Contains(@"{\f45\fbidi \froman\fcharset0", header);
-        Assert.Contains("Calibri (Hebrew)", header);
-        Assert.EndsWith("}}", header);
-        return header + body + "}";
-    }
-
-    private static string SmallDocument(string header, string fonts, string body) =>
-        @"{\rtf1" + header + @"{\fonttbl" + fonts + @"}\pard\plain " + body + "}";
-
-    private static string Escapes(Encoding encoding, string text)
-    {
-        var sb = new StringBuilder();
-        foreach (var b in encoding.GetBytes(text))
-        {
-            if (b < 0x80) sb.Append((char)b);
-            else sb.Append(@"\'").Append(b.ToString("x2"));
-        }
-
-        return sb.ToString();
-    }
-
-    private static string PasteThroughEndpoint(string rtf)
-    {
-        var controller = new DocumentEditorController(NullLogger<DocumentEditorController>.Instance);
-        var result = controller.SystemClipboard(new SystemClipboardRequest { Content = rtf, Type = ".rtf" });
-        var content = Assert.IsType<ContentResult>(result);
-        Assert.Equal("application/json", content.ContentType);
-        return TextOf(content.Content!);
-    }
-
-    private static string TextOf(Syncfusion.EJ2.DocumentEditor.WordDocument document)
-    {
-        try
-        {
-            return TextOf(Newtonsoft.Json.JsonConvert.SerializeObject(document));
-        }
-        finally
-        {
-            document.Dispose();
-        }
-    }
-
-    /// <summary>Inflates the base64 zip the endpoint returns and joins every text run of the SFDT.</summary>
-    private static string TextOf(string endpointJson)
-    {
-        var wrapper = JObject.Parse(endpointJson);
-        using var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String((string)wrapper["sfdt"]!)));
-        using var reader = new StreamReader(zip.Entries[0].Open());
-        var sfdt = JToken.Parse(reader.ReadToEnd());
-
-        var runs = new List<string>();
-        void Walk(JToken token)
-        {
-            if (token is JObject obj)
-            {
-                foreach (var property in obj.Properties())
-                {
-                    if ((property.Name == "text" || property.Name == "tlp") && property.Value.Type == JTokenType.String)
-                    {
-                        var value = (string)property.Value!;
-                        if (!value.Contains("Syncfusion", StringComparison.Ordinal) && !value.Contains("valid key", StringComparison.Ordinal))
-                            runs.Add(value);
-                    }
-
-                    Walk(property.Value);
-                }
-            }
-            else if (token is JArray array)
-            {
-                foreach (var item in array) Walk(item);
-            }
-        }
-
-        Walk(sfdt);
-        return string.Concat(runs);
-    }
-
     /// <summary>Every font-name value in the SFDT the endpoint returns, keyed by its SFDT property name.</summary>
     private static List<KeyValuePair<string, string>> FontValuesOf(string endpointJson)
     {
@@ -424,10 +352,7 @@ public class DocumentEditorClipboardTests
             "ff", "ffbi", "ffa", "ffnfe", "fffe",
             "fontFamily", "fontFamilyBidi", "fontFamilyAscii", "fontFamilyNonFarEast", "fontFamilyFarEast",
         };
-        var wrapper = JObject.Parse(endpointJson);
-        using var zip = new ZipArchive(new MemoryStream(Convert.FromBase64String((string)wrapper["sfdt"]!)));
-        using var reader = new StreamReader(zip.Entries[0].Open());
-        var sfdt = JToken.Parse(reader.ReadToEnd());
+        var sfdt = SfdtOf(endpointJson);
 
         var found = new List<KeyValuePair<string, string>>();
         void Walk(JToken token)
@@ -457,15 +382,5 @@ public class DocumentEditorClipboardTests
         for (var i = text.IndexOf(needle, StringComparison.Ordinal); i >= 0; i = text.IndexOf(needle, i + 1, StringComparison.Ordinal))
             count++;
         return count;
-    }
-
-    private static bool HasHebrew(string text) => text.Any(c => c is >= '\u05D0' and <= '\u05EA');
-
-    private static bool HasLatin1Accented(string text) => text.Any(c => c is >= '\u00E0' and <= '\u00FA');
-
-    private static void AssertCleanHebrew(string text)
-    {
-        Assert.True(HasHebrew(text), $"expected Hebrew letters, got [{text}]");
-        Assert.False(HasLatin1Accented(text), $"expected no Latin-1 mojibake, got [{text}]");
     }
 }

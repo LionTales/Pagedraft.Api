@@ -189,6 +189,57 @@ public class ExportBidiFontNormalizerTests
             r => r.Element(W + "rPr")?.Element(W + "rFonts")?.Attribute(W + "cs")?.Value == "Calibri");
     }
 
+    // ---- the font table: the SFDT's own "fst" substitution map (be-c09) ------------------------------------
+
+    [Fact]
+    public void Premise_an_sfdt_fst_entry_reaches_the_font_table_without_the_cleanup()
+    {
+        // Pins the defect: DocIO writes every key of the SFDT's "fst" map into word/fontTable.xml as a
+        // w:font of its own, even when no run still names it. If Syncfusion stops doing that, re-measure.
+        using var document = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(PasteResponseShapedSfdt(withFontSubstitution: true));
+        using var stream = new MemoryStream();
+        document.Save(stream, FormatType.Docx);
+
+        Assert.Contains(Pseudo, FontTableNames(stream.ToArray()));
+    }
+
+    [Theory]
+    [MemberData(nameof(PasteResponseShapes))]
+    public void Font_table_names_no_charset_variant_font_when_the_sfdt_maps_one(string shape, bool wrapped, string? language)
+    {
+        var sfdt = PasteResponseShapedSfdt(withFontSubstitution: true);
+        var docx = new SfdtConversionService().ConvertSfdtToDocx(wrapped ? WrapAsServerResponse(sfdt) : sfdt, language);
+
+        var names = FontTableNames(docx);
+        Assert.False(names.Any(PseudoBidiFontNames.IsPseudo),
+            $"[{shape}] fontTable.xml still names a charset-variant font: {string.Join(", ", names)}");
+
+        // The control is the same document without the "fst" map: with the pseudo key gone, the font table is
+        // exactly what an export that never had the map writes (DocIO 32.1.24 then writes no fontTable.xml).
+        var control = new SfdtConversionService().ConvertSfdtToDocx(PasteResponseShapedSfdt(withFontSubstitution: false), language);
+        Assert.Equal(FontTableNames(control), names);
+        AssertNoPseudoFontAnywhere(docx, shape);
+    }
+
+    [Fact]
+    public void Font_table_cleanup_renames_pseudo_keys_and_values_and_keeps_real_entries()
+    {
+        using var document = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(PasteResponseShapedSfdt(withFontSubstitution: true));
+        document.FontSubstitutionTable["David"] = "Arial";
+        document.FontSubstitutionTable["Calibri"] = "Calibri";
+        document.FontSubstitutionTable["Arial (Arabic)"] = "Tahoma";
+        document.FontSubstitutionTable["Miriam"] = "Times New Roman (Hebrew)";
+
+        ExportBidiFontNormalizer.Apply(document, stampHebrewLocale: true);
+
+        var table = document.FontSubstitutionTable;
+        Assert.False(table.Keys.Any(PseudoBidiFontNames.IsPseudo), string.Join(", ", table.Keys));
+        Assert.Equal("Arial", table["David"]);
+        Assert.Equal("Calibri", table["Calibri"]);
+        Assert.Equal("Tahoma", table["Arial"]);
+        Assert.Equal("Times New Roman", table["Miriam"]);
+    }
+
     // ---- the export service threads the book's language ---------------------------------------------------
 
     [Theory]
@@ -288,6 +339,97 @@ public class ExportBidiFontNormalizerTests
             loaded.Dispose();
         }
     }
+
+    public static IEnumerable<object?[]> PasteResponseShapes()
+    {
+        yield return new object?[] { "paste-optimized he", false, "he" };
+        yield return new object?[] { "paste-optimized en", false, "en" };
+        yield return new object?[] { "paste-wrapped he", true, "he" };
+    }
+
+    /// <summary>
+    /// The SHAPE of the real pre-fix paste response (measurement folder paste-gibberish-2026-10-11,
+    /// systemclipboard.network-response): the compact SFDT (<c>"optimizeSfdt":true</c>) whose Hebrew runs name
+    /// <c>"Calibri (Hebrew)"</c> in all five font slots with he-IL as the complex-script language, paragraph marks
+    /// in plain Calibri, an RTL Normal style, and the document-level <c>"fst":{"Calibri (Hebrew)":"Calibri"}</c>
+    /// map the RTF reader recorded for the unresolvable name. Key names and values are copied from that
+    /// response; the text is invented for this test and none of the response's text is used.
+    /// <paramref name="withFontSubstitution"/> false leaves out the <c>"fst"</c> map (the control).
+    /// </summary>
+    private static string PasteResponseShapedSfdt(bool withFontSubstitution)
+    {
+        static JObject Cf(string font, double size) => new()
+        {
+            ["b"] = 0, ["i"] = 0, ["u"] = 0, ["st"] = 0, ["fsz"] = size, ["ff"] = font, ["bi"] = 1, ["bbi"] = 0,
+            ["ibi"] = 0, ["fszbi"] = size, ["ffbi"] = font, ["ffa"] = font, ["fffe"] = font, ["ffnfe"] = font,
+            ["ac"] = 0, ["id"] = 1033, ["idfe"] = 1033, ["idbi"] = 1037, ["cs"] = 0, ["sc"] = 100.0
+        };
+
+        static JObject Paragraph(string text, double firstLineIndent) => new()
+        {
+            ["cf"] = Cf("Calibri", 12.0),
+            ["pf"] = new JObject
+            {
+                ["lin"] = 0.0, ["rin"] = 0.0, ["fin"] = firstLineIndent, ["bs"] = 0.0, ["as"] = 0.0, ["sba"] = 0,
+                ["saa"] = 0, ["ls"] = 1.15, ["lst"] = 0, ["ol"] = 0, ["ta"] = 3, ["kwn"] = 0, ["klt"] = 0, ["wc"] = 1,
+                ["bi"] = 1, ["cs"] = 0
+            },
+            ["i"] = new JArray(new JObject { ["tlp"] = text, ["cf"] = Cf(Pseudo, 12.0) })
+        };
+
+        var sfdt = new JObject
+        {
+            ["optimizeSfdt"] = true,
+            ["sec"] = new JArray(new JObject
+            {
+                ["b"] = new JArray(Paragraph(FirstSentence, 0.0), Paragraph(SecondSentence, 14.2)),
+                ["hf"] = new JObject(),
+                ["secpr"] = new JObject
+                {
+                    ["hd"] = 36.0, ["fd"] = 36.0, ["pw"] = 612.0, ["ph"] = 792.0, ["lm"] = 72.0, ["rm"] = 72.0,
+                    ["tm"] = 72.0, ["bm"] = 72.0, ["dfp"] = 0, ["doep"] = 0, ["bi"] = 0, ["rpn"] = 0, ["psn"] = 0,
+                    ["enf"] = 2, ["fnf"] = 0, ["rif"] = 0, ["rie"] = 0, ["pgns"] = "Arabic", ["bc"] = "NewPage"
+                }
+            }),
+            ["fst"] = new JObject { [Pseudo] = "Calibri" },
+            ["pf"] = new JObject { ["lin"] = 0.0, ["rin"] = 0.0, ["ta"] = 0, ["wc"] = 1, ["bi"] = 1 },
+            ["bg"] = new JObject { ["c"] = "#FFFFFFFF" },
+            ["sty"] = new JArray(
+                new JObject
+                {
+                    ["t"] = 0, ["n"] = "Normal", ["nx"] = "Normal",
+                    ["cf"] = Cf("Calibri", 11.0),
+                    ["pf"] = new JObject { ["lin"] = 0.0, ["rin"] = 0.0, ["ta"] = 0, ["wc"] = 1, ["bi"] = 1 }
+                },
+                new JObject { ["t"] = 1, ["n"] = "Default Paragraph Font" }),
+            ["dtw"] = 36.0, ["fmt"] = 0, ["tc"] = 0, ["pt"] = 0, ["enf"] = 0, ["dhtml"] = 0, ["atrr"] = 0, ["ffs"] = 1,
+            ["lpmc"] = 1, ["comp"] = 2, ["stytbl"] = 0
+        };
+
+        if (!withFontSubstitution) sfdt.Remove("fst");
+        return sfdt.ToString(Formatting.None);
+    }
+
+    /// <summary>The paste endpoint's wire form of <paramref name="optimizedSfdt"/>: <c>{"sfdt": base64 zip}</c>.</summary>
+    private static string WrapAsServerResponse(string optimizedSfdt)
+    {
+        using var buffer = new MemoryStream();
+        using (var zip = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        using (var writer = new StreamWriter(zip.CreateEntry("sfdt").Open()))
+        {
+            writer.Write(optimizedSfdt);
+        }
+
+        return new JObject { ["sfdt"] = Convert.ToBase64String(buffer.ToArray()) }.ToString(Formatting.None);
+    }
+
+    /// <summary>The <c>w:font/@w:name</c> list of <c>word/fontTable.xml</c>; empty when the package has no font table.</summary>
+    private static List<string> FontTableNames(byte[] docx) =>
+        PartNames(docx).Contains("word/fontTable.xml")
+            ? Part(docx, "word/fontTable.xml").Descendants(W + "font")
+                .Select(f => f.Attribute(W + "name")?.Value ?? string.Empty)
+                .ToList()
+            : new List<string>();
 
     private static void AssertNoPseudoFontAnywhere(byte[] docx, string label)
     {

@@ -18,32 +18,58 @@ namespace Pagedraft.Api.Services;
 /// our exports. Evidence: <c>src/docs/measurements/paste-gibberish-2026-10-11/</c> (outside git).
 /// </para>
 /// <para>
-/// <b>Code page precedence</b>, first match wins, for an escape in visible text:
+/// <b>Code page precedence</b>, first match wins, for an escape in visible text. The current font is the
+/// group's <c>\fN</c>, else the header's <c>\deffN</c>.
 /// <list type="number">
 /// <item>The current font declares <c>\fcharset2</c> (symbol): left untouched, the byte is a glyph index.</item>
+/// <item>The current font's <c>\fcharsetN</c> when it names a code page (177 -&gt; 1255, 178 -&gt; 1256,
+/// 204 -&gt; 1251, 161 -&gt; 1253, 238 -&gt; 1250, ...). A font that declares a real charset is exactly what DocIO
+/// already decodes by, so a run tag can never turn such a paste into a broken one: <c>\lang1025</c> (Arabic,
+/// the complex-script default of Word's en-US Normal.dotm) on a <c>\fcharset177</c> run stays Hebrew.
+/// <c>\fcharset0</c> (ANSI) and <c>\fcharset1</c> (DEFAULT) name no code page and fall through, which is the
+/// shape of the bug: Word declares a font it cannot resolve ("Calibri (Hebrew)") <c>\fcharset0</c>.</item>
 /// <item>The current <c>\langN</c> names a non-Western script (1037 Hebrew -&gt; 1255, Arabic -&gt; 1256,
 /// Cyrillic -&gt; 1251, 1032 Greek -&gt; 1253, Turkish -&gt; 1254, Central European -&gt; 1250, Baltic -&gt; 1257,
-/// 1066 Vietnamese -&gt; 1258, 1054 Thai -&gt; 874, ...). This is the step that fixes the bug.</item>
-/// <item>The current font's <c>\fcharsetN</c> when it names a code page (177 -&gt; 1255, 178 -&gt; 1256,
-/// 204 -&gt; 1251, ...). The current font is the group's <c>\fN</c>, else the header's <c>\deffN</c>.</item>
-/// <item>Any other current <c>\langN</c> (a Western language such as 1033 or 1036) -&gt; 1252. It ranks BELOW the
-/// font charset on purpose: a Western language tag on a run whose font declares a Hebrew charset is a shape
-/// DocIO already decodes correctly today, and the pre-pass must never turn a working paste into a broken one.</item>
+/// 1066 Vietnamese -&gt; 1258, 1054 Thai -&gt; 874, ...). This is the step that fixes the bug. A right-to-left
+/// script tag (Hebrew, Arabic, Urdu, Persian) decides only on a run whose active direction is <c>\rtlch</c>:
+/// Word writes every Hebrew or Arabic run with <c>\rtlch</c> as its last direction word (the committed
+/// <c>TestData/word-clipboard-header.rtf</c> run shape and the captured clipboard both do), so a Hebrew tag on
+/// a run that is not right-to-left is a stale tag on Latin text (<c>caf\'e9</c> must stay <c>café</c>) and is
+/// treated as no tag at all (the header steps decide). Left-to-right scripts (Cyrillic, Greek, ...) carry no
+/// such direction signal, so their tag decides on any run.</item>
+/// <item>Any other real <c>\langN</c> (a Western language such as 1033 or 1036) -&gt; 1252.</item>
 /// <item>The header's <c>\ansicpgN</c> when N &gt; 0 (Word writes <c>\ansicpg0</c> when it has no ANSI page).</item>
-/// <item>The header's <c>\adeflangN</c>, then <c>\deflangN</c>, mapped as in step 2.</item>
+/// <item>The header's <c>\adeflangN</c>, then <c>\deflangN</c>, mapped as in step 3 (no direction gate: they
+/// are document defaults, not a run's tag).</item>
 /// <item>1252.</item>
 /// </list>
 /// A double-byte code page (932, 936, 949, 950) or a byte the chosen code page leaves undefined keeps the
-/// original escape, so DocIO's own behaviour is unchanged for those.
+/// original escape, so DocIO's own behaviour is unchanged for those. <see cref="ResolveCodePage"/> is the one
+/// place a code page is chosen; <see cref="TryDecode"/> only adds the symbol and double-byte exits.
 /// </para>
 /// <para>
 /// <b>Left byte-identical:</b> everything that is not an 8-bit escape in visible text. Escapes inside ignorable
 /// <c>\*</c> destinations and inside the <see cref="SkippedDestinations"/> (font table names, pictures,
 /// field instructions, ...) are copied as-is, <c>\binN</c> payloads are copied raw, and the fallback characters
 /// that follow an existing <c>\uN</c> (the next <c>\ucN</c> characters) are copied as-is so the reader still
-/// skips them. An RTF with no 8-bit escape at all is returned unchanged. Every emitted <c>\uN</c> is a signed
-/// 16-bit value followed by as many <c>?</c> fallbacks as the current <c>\ucN</c> declares (a delimiting space
-/// when <c>\uc0</c>).
+/// skips them. An RTF with no 8-bit escape at all is returned unchanged.
+/// </para>
+/// <para>
+/// <b>Text inside an ignorable destination.</b> Two <c>\*</c> destinations carry run text DocIO reads and
+/// shows, measured on 32.1.24: <c>{\*\annotation ...}</c> (a comment body; DocIO DROPS its <c>\'xx</c>
+/// characters outright, so <c>caf\'e9</c> reads <c>caf</c>) and the <c>{\shptxt ...}</c> text box inside
+/// <c>{\*\shpinst ...}</c> (decoded by font charset like body text). Both read <c>\uN</c> correctly, so their
+/// escapes are rewritten like body text. Everything else in those groups stays skipped: nested <c>\*</c>
+/// groups (<c>\atnref</c>, <c>\atndate</c>, ...), the shape's <c>{\sp{\sn}{\sv}}</c> property values and its
+/// pictures. The comment author (<c>{\*\atnauthor}</c>, its own group) stays skipped too: DocIO drops a
+/// non-ASCII author whether written as <c>\'xx</c> or <c>\uN</c>, so rewriting it gains nothing.
+/// </para>
+/// <para>
+/// <b>Emitted form.</b> Under <c>\uc1</c> (Word's default) each rewritten escape becomes <c>\uN?</c>. Under any
+/// other <c>\ucN</c> it becomes the self-contained group <c>{\uc1\uN?}</c>: DocIO skips exactly one fallback
+/// character after <c>\uN</c> whatever <c>\ucN</c> says, so <c>\uc2</c>'s two <c>?</c> printed a stray
+/// <c>?</c> after every letter and <c>\uc0</c>'s none swallowed the next real character. The group is not
+/// used under <c>\uc1</c> because DocIO makes a separate SFDT run of every group.
 /// </para>
 /// </summary>
 internal static class RtfCodepageNormalizer
@@ -89,6 +115,8 @@ internal static class RtfCodepageNormalizer
         var stack = new Stack<GroupState>();
         var state = GroupState.Initial;
         var groupJustOpened = false;
+        // Set by "{\*": the skip state of the enclosing group, held until the destination word decides.
+        bool? ignorableParentSkipped = null;
         var fallbackCharsToCopy = 0;
         var i = 0;
 
@@ -102,6 +130,7 @@ internal static class RtfCodepageNormalizer
                 output.Append(ch);
                 i++;
                 groupJustOpened = true;
+                ignorableParentSkipped = null;
                 fallbackCharsToCopy = 0;
                 continue;
             }
@@ -112,6 +141,7 @@ internal static class RtfCodepageNormalizer
                 output.Append(ch);
                 i++;
                 groupJustOpened = false;
+                ignorableParentSkipped = null;
                 fallbackCharsToCopy = 0;
                 continue;
             }
@@ -122,7 +152,12 @@ internal static class RtfCodepageNormalizer
                 i++;
                 if (ch is '\r' or '\n') continue;
                 if (fallbackCharsToCopy > 0) fallbackCharsToCopy--;
-                if (!char.IsWhiteSpace(ch)) groupJustOpened = false;
+                if (!char.IsWhiteSpace(ch))
+                {
+                    groupJustOpened = false;
+                    ignorableParentSkipped = null;
+                }
+
                 continue;
             }
 
@@ -148,12 +183,18 @@ internal static class RtfCodepageNormalizer
                 if (fallbackCharsToCopy > 0) fallbackCharsToCopy--;
                 i += escapeLength;
                 groupJustOpened = false;
+                ignorableParentSkipped = null;
                 continue;
             }
 
             if (next == '*')
             {
-                if (groupJustOpened) state.IsSkipped = true;
+                if (groupJustOpened)
+                {
+                    ignorableParentSkipped = state.IsSkipped;
+                    state.IsSkipped = true;
+                }
+
                 output.Append("\\*");
                 i += 2;
                 continue;
@@ -166,6 +207,7 @@ internal static class RtfCodepageNormalizer
                 i += 2;
                 if (fallbackCharsToCopy > 0) fallbackCharsToCopy--;
                 groupJustOpened = false;
+                ignorableParentSkipped = null;
                 continue;
             }
 
@@ -179,11 +221,13 @@ internal static class RtfCodepageNormalizer
                 output.Append(rtf, i, payload);
                 i += payload;
                 groupJustOpened = false;
+                ignorableParentSkipped = null;
                 continue;
             }
 
-            if (groupJustOpened && SkippedDestinations.Contains(word)) state.IsSkipped = true;
+            if (groupJustOpened) EnterDestination(word, ignorableParentSkipped, ref state);
             groupJustOpened = false;
+            ignorableParentSkipped = null;
 
             if (fallbackCharsToCopy > 0)
             {
@@ -196,6 +240,31 @@ internal static class RtfCodepageNormalizer
         }
 
         return rewrittenEscapes == 0 ? rtf : output.ToString();
+    }
+
+    /// <summary>
+    /// Decides whether the group that <paramref name="word"/> opens is skipped. <paramref name="ignorableParentSkipped"/>
+    /// is non-null for a <c>{\*\word</c> group and holds the enclosing group's skip state.
+    /// </summary>
+    private static void EnterDestination(string word, bool? ignorableParentSkipped, ref GroupState state)
+    {
+        if (word == "shptxt" && state.ShapeTextSkipped is { } outsideShape)
+        {
+            // The text box of a shape: run text again, unless the shape itself sits in skipped content.
+            state.IsSkipped = outsideShape;
+            state.ShapeTextSkipped = null;
+            return;
+        }
+
+        if (ignorableParentSkipped is { } parentSkipped)
+        {
+            if (word == "annotation") state.IsSkipped = parentSkipped;
+            // \shpinst itself stays skipped (its \sp property values are not run text); only \shptxt re-enters.
+            else if (word == "shpinst") state.ShapeTextSkipped = parentSkipped;
+            return;
+        }
+
+        if (SkippedDestinations.Contains(word)) state.IsSkipped = true;
     }
 
     private static void ApplyControlWord(
@@ -218,6 +287,13 @@ internal static class RtfCodepageNormalizer
             case "plain":
                 state.FontId = -1;
                 state.Lang = 0;
+                state.IsRightToLeftRun = false;
+                break;
+            case "rtlch":
+                state.IsRightToLeftRun = true;
+                break;
+            case "ltrch":
+                state.IsRightToLeftRun = false;
                 break;
             case "uc" when parameter is >= 0:
                 state.UnicodeFallbackCount = parameter.Value;
@@ -245,7 +321,7 @@ internal static class RtfCodepageNormalizer
         var fontCharset = fontId >= 0 && fontCharsets.TryGetValue(fontId, out var cs) ? cs : -1;
         if (fontCharset == SymbolCharset) return false;
 
-        var codePage = ResolveCodePage(state.Lang, fontCharset, header);
+        var codePage = ResolveCodePage(state.Lang, state.IsRightToLeftRun, fontCharset, header);
         if (codePage is 932 or 936 or 949 or 950) return false;
 
         var encoding = GetEncoding(codePage);
@@ -258,11 +334,20 @@ internal static class RtfCodepageNormalizer
         return true;
     }
 
-    private static int ResolveCodePage(int lang, int fontCharset, HeaderDefaults header)
+    /// <summary>The code page precedence of the class docblock, steps 2 to 7 (step 1 is in <see cref="TryDecode"/>).</summary>
+    private static int ResolveCodePage(int lang, bool isRightToLeftRun, int fontCharset, HeaderDefaults header)
     {
-        if (NonWesternCodePageByLang.TryGetValue(lang, out var byLang)) return byLang;
         if (CodePageByCharset.TryGetValue(fontCharset, out var byCharset)) return byCharset;
-        if (IsRealLanguage(lang)) return Western;
+        if (NonWesternCodePageByLang.TryGetValue(lang, out var byLang))
+        {
+            if (isRightToLeftRun || !IsRightToLeftScript(byLang)) return byLang;
+            // A Hebrew/Arabic tag on a run that is not right-to-left is treated as no tag: fall to the header.
+        }
+        else if (IsRealLanguage(lang))
+        {
+            return Western;
+        }
+
         if (header.AnsiCodePage > 0) return header.AnsiCodePage;
         if (NonWesternCodePageByLang.TryGetValue(header.AssociatedDefaultLang, out var byAdefLang)) return byAdefLang;
         if (NonWesternCodePageByLang.TryGetValue(header.DefaultLang, out var byDefLang)) return byDefLang;
@@ -271,6 +356,9 @@ internal static class RtfCodepageNormalizer
 
     /// <summary>0, 1024 (LANG_NEUTRAL / "no proofing") and 4096 (LOCALE_CUSTOM_UNSPECIFIED) carry no script.</summary>
     private static bool IsRealLanguage(int lang) => lang > 0 && lang != 1024 && lang != 4096;
+
+    /// <summary>The code pages of the right-to-left scripts in the language map (Hebrew; Arabic, Urdu, Persian).</summary>
+    private static bool IsRightToLeftScript(int codePage) => codePage is 1255 or 1256;
 
     private static Encoding? GetEncoding(int codePage) => EncodingCache.GetOrAdd(codePage, CreateEncoding);
 
@@ -293,16 +381,16 @@ internal static class RtfCodepageNormalizer
     }
 
 
-    private static void AppendUnicodeEscape(StringBuilder output, char value, int fallbackCount)
+    /// <summary>
+    /// Writes <c>\uN?</c>, wrapped as <c>{\uc1\uN?}</c> unless the current <c>\ucN</c> is already 1 (see the class
+    /// docblock: DocIO skips exactly one fallback character whatever <c>\ucN</c> declares).
+    /// </summary>
+    private static void AppendUnicodeEscape(StringBuilder output, char value, int currentFallbackCount)
     {
-        output.Append("\\u").Append(((short)value).ToString(CultureInfo.InvariantCulture));
-        if (fallbackCount <= 0)
-        {
-            output.Append(' ');
-            return;
-        }
-
-        output.Append('?', fallbackCount);
+        var selfContained = currentFallbackCount != 1;
+        if (selfContained) output.Append("{\\uc1");
+        output.Append("\\u").Append(((short)value).ToString(CultureInfo.InvariantCulture)).Append('?');
+        if (selfContained) output.Append('}');
     }
 
     private static bool TryReadHexByte(string rtf, int start, out int value)
@@ -380,6 +468,14 @@ internal static class RtfCodepageNormalizer
         public int UnicodeFallbackCount;
         public bool IsSkipped;
         public bool InFontTable;
+
+        /// <summary>The last of <c>\rtlch</c> / <c>\ltrch</c> in scope was <c>\rtlch</c> (<c>\plain</c> resets it).</summary>
+        public bool IsRightToLeftRun;
+
+        /// <summary>
+        /// Non-null inside <c>{\*\shpinst</c>: the skip state a nested <c>{\shptxt</c> text box restores.
+        /// </summary>
+        public bool? ShapeTextSkipped;
 
         public static GroupState Initial => new() { FontId = -1, UnicodeFallbackCount = 1 };
     }
