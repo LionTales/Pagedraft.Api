@@ -162,7 +162,7 @@ public class AnalysisSuggestionLoadEqualityTests
 
         // SQL Server returned the include ordered by result id (pinned by the query-shape test); InMemory does not
         // order at all, so the reference states the order the shipped endpoint actually had.
-        var items = query.ToList().OrderBy(a => a.Id).OrderByDescending(a => a.CreatedAt).ToList();
+        var items = query.ToList().OrderByDescending(a => a.CreatedAt).ThenBy(a => a.Id).ToList();
         return Json(items.Select(a => AnalysisController.ToDto(a)).ToList());
     }
 
