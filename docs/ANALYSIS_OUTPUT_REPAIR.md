@@ -114,9 +114,10 @@ repaired `overallFeedback` after both stages run (mirrors the pre-repair
 `MaybeReplaceLineEditResultText` call).
 
 **Model choice:** gemma4:12b is the repair model for Stage 2. The diagnostic's prototype showed
-Dicta-3.0 (the Proofread/LineEdit model) over-rewrites when asked to repair prose - it drifted "the
+Dicta-3.0 (then the Proofread/LineEdit model) over-rewrites when asked to repair prose - it drifted "the
 passage is in first person" into an in-character "I am the main character" - so it was rejected as
-the repair model even though it is the correct model for Proofread/LineEdit's own primary task.
+the repair model even though it was then the model for Proofread/LineEdit's own primary task. Both have
+since moved to gemma4:12b (Proofread 2026-07-29, LineEdit 2026-10-13), so neither now runs on Dicta.
 
 ## 3. Repairable-vs-structural field map
 
@@ -129,8 +130,8 @@ nothing else is ever exposed to either repair stage.
 | Summarization | Summarization | qwen3.5:9b | Entire `ResultText` (`RepairableFields.ForPlainText`) | analysis seam |
 | LiteraryAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `tone`, `toneDescription`, `narrativeVoice`(+`Description`), `themes[].name`/`description`, `rhetoricalDevices[].name`/`example`/`effect`, `moodProgression` | analysis seam |
 | LinguisticAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `deviations[].note`, `consistencyIssues[].description` | analysis seam |
-| Proofread | Proofread | Dicta-3.0-Nemotron-12B | **None** - `RepairableFields.For(AnalysisSuggestion)` returns an empty list; never repaired | n/a (never repaired) |
-| LineEdit | LineEdit | Dicta-3.0-Nemotron-12B | `overallFeedback`, `suggestions[].reason` | analysis seam |
+| Proofread | Proofread | gemma4:12b (Dicta-3.0 until 2026-07-29) | **None** - `RepairableFields.For(AnalysisSuggestion)` returns an empty list; never repaired | n/a (never repaired) |
+| LineEdit | LineEdit | gemma4:12b (Dicta-3.0 until 2026-10-13) | `overallFeedback`, `suggestions[].reason` | analysis seam |
 | BookOverview | LinguisticAnalysis | gemma4:12b | `summary` only | analysis seam |
 | CharacterAnalysis | LinguisticAnalysis | gemma4:12b | `summary`, `characters[].description`/`arc`, `relationships[].relationship` | analysis seam |
 | StoryAnalysis | LinguisticAnalysis | gemma4:12b | `plotStructure.{setup,risingAction,climax,fallingAction,resolution}`, `pacing`, `conflicts[].description`, `summary` | analysis seam |
@@ -840,9 +841,9 @@ against the **local-small tier** on 3 real Hebrew manuscript passages (P1 narrat
 | Type (local tier) | Model | P1 | P2 | P3 | Verdict |
 |---|---|---|---|---|---|
 | BookOverview / CharacterAnalysis / StoryAnalysis / QA / BookReview | gemma4:12b (QA: qwen3.5:9b) | clean | clean | clean | CONTENT-clean 3/3 |
-| Summarization / LinguisticAnalysis / LineEdit | qwen3.5:9b / gemma4:12b / Dicta-3.0 | clean | clean | clean | structural-only (keys/enums) |
+| Summarization / LinguisticAnalysis / LineEdit | qwen3.5:9b / gemma4:12b / Dicta-3.0 (measured then; LineEdit runs gemma4:12b since 2026-10-13, not re-measured here) | clean | clean | clean | structural-only (keys/enums) |
 | **LiteraryAnalysis** | gemma4:12b | clean | **LEAK "confusion" in `narrativeVoiceDescription`** | clean | **1 real prose leak / 3** |
-| Proofread | Dicta-3.0 | clean | clean | instruction-echo of `[TEXT_TO_CORRECT]` scaffold (prompt-bleed, NOT a leak; never repaired) | n/a |
+| Proofread | Dicta-3.0 (measured then; Proofread runs gemma4:12b since 2026-07-29) | clean | clean | instruction-echo of `[TEXT_TO_CORRECT]` scaffold (prompt-bleed, NOT a leak; never repaired) | n/a |
 
 **Why the 5 new types were wired despite measuring 3/3 clean.** LiteraryAnalysis - a `gemma4:12b`
 structured-Hebrew-prose type, the SAME model + output shape as BookOverview/Character/Story/BookReview -
@@ -1626,7 +1627,8 @@ REAL `appsettings.json` and asserts the bound `Mode` drives the stage predicates
 
 TermRepair routes to `Ai:FeatureModels:TermRepair` (gemma4:12b, section 13), the same model LinguisticAnalysis
 and BookReview already use. Three of the OTHER repairable task types route elsewhere (section 3's table):
-Summarization/QA/GenericChat -> qwen3.5:9b, LineEdit -> DictaLM-3.0-Nemotron-12B. On a single-GPU host with
+Summarization/QA/GenericChat -> qwen3.5:9b, LineEdit -> DictaLM-3.0-Nemotron-12B (LineEdit's route when this
+was measured; it moved to gemma4:12b on 2026-10-13, see the be-c08 note in 19.4). On a single-GPU host with
 `OLLAMA_MAX_LOADED_MODELS=1` (the standing tuning, memory `pagedraft-ollama-8gb-tuning`), a repair that fires
 on one of those three EVICTS the task model and LOADS gemma4:12b, and the user's next same-type action then
 evicts it back. This section records what was measured, not guessed (plan
@@ -1671,8 +1673,8 @@ why bounding it does not cost swaps in practice). Verified live against the real
 mix-up, and no dropped chapter (full per-assertion evidence in the plan's `## s3 quality-gate results`).
 
 **Residual, worth knowing:** batching moves the swap-back OUT of the `/summarize` operation, it does not
-eliminate it globally. gemma4:12b is left resident when the call returns, so the user's NEXT qwen/Dicta-routed
-action (not this one) pays that load. That residual single-swap-per-analysis cost is what 19.4 addresses.
+eliminate it globally. gemma4:12b is left resident when the call returns, so the user's NEXT qwen-routed (then also
+Dicta-routed) action (not this one) pays that load. That residual single-swap-per-analysis cost is what 19.4 addresses.
 
 **The batch is WINDOWED, not whole-book (be-c03, 2026-07-28).** As first shipped, the restructure had a single
 `SaveChanges` at the very end of the pass, which removed monotonic progress: an abort, a client disconnect, or
@@ -1699,6 +1701,15 @@ book's chapter count reproduces the original single-commit behaviour exactly.
 s4 evaluated four options for the remaining "one swap per leaking Line Edit or Summarize" cost and recommended
 **(a) ACCEPT - no routing change, nothing built.** Full evidence and the three rejected alternatives are in the
 plan's `## s4 decision`; the load-bearing reasons:
+
+> **be-c08 update (2026-10-13): the cross-MODEL count is now 1 of 6 (Summarize, qwen).** Line Edit moved
+> from Dicta to gemma4:12b, the TermRepair model, so a leaking Line Edit no longer evicts its task model.
+> It still pays a RELOAD: `Ollama_LineEdit` sets no NumCtx, so Line Edit sends num_ctx 4096 (the class
+> default; `ProviderTuningResolver.Resolve` is object-level), while `Ollama_TermRepair` sends 16384, and
+> Ollama reloads a resident model whose num_ctx changes. Measured 2026-10-13 against the Ollama API on
+> gemma4:12b: same num_ctx again 11-18 ms load, 4096 -> 16384 19,977 ms, 16384 -> 4096 18,315 ms. So a
+> leaking Line Edit still costs roughly one ~38 s out-and-back, now as two same-model reloads instead of
+> two model swaps; the ACCEPT reasoning below is unchanged. The bullet below is the 2026-07 record.
 
 - **Only 2 of the 6 editor analysis types can trigger a TermRepair swap at all - Line Edit (Dicta) and
   Summarize (qwen).** This count is UNCHANGED, and it was explicitly RE-EXAMINED rather than merely

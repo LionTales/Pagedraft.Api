@@ -46,7 +46,7 @@ public class LlmDetectEngine : IDetectEngine
 
     private static string BuildDetectionPrompt(string text, string language)
     {
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? @"אתה מומחה לזיהוי שגיאות בעברית. זהה את כל השגיאות בטקסט הבא וחזור בתשובה בפורמט JSON.
 
 פורמט התשובה:

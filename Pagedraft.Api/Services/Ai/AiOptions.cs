@@ -36,6 +36,48 @@ public class AiOptions
     /// <summary>Max concurrent LLM requests when proofreading in chunks.</summary>
     public int MaxParallelProofreadChunks { get; set; } = 2;
 
+    /// <summary>Chapters proofread concurrently in a whole-book run. 1: the 8GB card is single-slot and chunks inside one chapter already run <see cref="MaxParallelProofreadChunks"/> wide.</summary>
+    public int MaxParallelBookProofreadChapters { get; set; } = 1;
+
+    /// <summary>
+    /// The CHUNK half of the whole-book proofread ETA: seconds = planned units x
+    /// <see cref="ProofreadSecondsPerUnitOverhead"/> + planned chunks x this (BookProofreadService.Estimate, the
+    /// ONE formula the consent, the status and the run's first ETA share).
+    ///
+    /// <para>DERIVATION (be-c07, 2026-10-13, read-only from the dev database's AnalysisRunLogs). The long run of
+    /// 2026-10-12: one Hebrew book, 55 chapters (one Chapter-scope unit each), 107,161 words, 458 chunks, local
+    /// gemma4:12b, chapters sequential, chunks 2-wide, about 4,700 s wall-clock (first to last log 3,660 s +
+    /// chapter 0's logged 1,011 s + its inferred ~29 s). Its logged chunk stages (each run log's TotalDurationMs,
+    /// the chunk loop only) sum to 3,081 s = 6.73 s/chunk (chapter 0 alone 1,011 s / 155 chunks = 6.5; the other
+    /// 54 2,070 s / 303 = 6.8, so the rate is flat across chapter sizes), rounded to 7. The remaining
+    /// 4,700 - 3,081 = 1,619 s is per-unit time outside the chunk stage (see the overhead option). Check:
+    /// 55 x 29 + 458 x 7 = 4,801 s, +2 % on the measured 4,700.</para>
+    ///
+    /// <para>History: 40 (a cold 42.2 min / 64-chunk run), then 10 on 2026-10-12 (the same long run's wall-clock
+    /// divided by its chunks, 10.3 s, which folded the per-chapter overhead into every chunk: a 5-chapter
+    /// one-chunk-each book was promised 50 s for a run that measured 4-5x that).</para>
+    /// </summary>
+    public int ProofreadSecondsPerChunkEstimate { get; set; } = 7;
+
+    /// <summary>
+    /// The UNIT half of the whole-book proofread ETA: seconds per proofread unit (a chapter row or one scene, each
+    /// its own UnifiedAnalysisService.RunAsync call) spent OUTSIDE the chunk stage: context assembly, the repair
+    /// stage, persistence and archiving, and any model reload between them. Added once per planned unit by
+    /// BookProofreadService.Estimate.
+    ///
+    /// <para>DERIVATION (be-c07, 2026-10-13, read-only from the dev database's AnalysisRunLogs). Overhead of a unit
+    /// = the time between the previous unit's log and its own, minus its own logged chunk stage. On the
+    /// 55-chapter, 107,161-word, 458-chunk run of 2026-10-12: 54 measurable gaps sum to 1,590 s = 29.4 s per unit
+    /// (median ~27 s, range 11-81 s), so 29. Fit seconds = units x 29 + chunks x 7 (the per-chunk option):
+    /// 55 x 29 + 458 x 7 = 4,801 s vs 4,700 measured. Short runs on record (2 Hebrew chapters, 4 chunks, so the
+    /// formula says 2 x 29 + 4 x 7 = 86 s): warm 43 s (2026-10-12), cold 286 s, ~252 s and ~198 s
+    /// (2026-10-11/12). Their between-unit overhead was bimodal, ~0 s or 17-41 s (the two latest: 34 s and 29 s),
+    /// consistent with 29; what the cold runs add is a slower CHUNK stage (85-113 s logged per 2-chunk chapter
+    /// vs 7-45 s warm), a model-state regime no per-unit constant can predict. The running ETA
+    /// (BookProofreadRunProgress) blends this prior with the observed pace as the run proceeds.</para>
+    /// </summary>
+    public int ProofreadSecondsPerUnitOverhead { get; set; } = 29;
+
     /// <summary>LineEdit chunking: when text exceeds ChunkTargetWords, split and run in parallel. Default 500.</summary>
     public int LineEditChunkTargetWords { get; set; } = DefaultLineEditChunkTargetWords;
 
@@ -597,7 +639,7 @@ public class AnalysisRepairOptions
     /// chapters) either way. Raising this to a value at or above the book's chapter count reproduces the
     /// original single-commit behaviour exactly. A non-positive value is treated as
     /// <see cref="DefaultSummaryBatchWindowChapters"/> rather than as "no windowing", mirroring the
-    /// Ollama TimeoutMinutes idiom in Program.cs - "unwindowed" is expressible as a large number, whereas a
+    /// Ollama TimeoutMinutes idiom (ProviderTimeoutResolver, wired in Program.cs) - "unwindowed" is expressible as a large number, whereas a
     /// stray 0 must not silently restore the defect this setting exists to fix.
     ///
     /// KEEP IN SYNC with the appsettings "Ai:AnalysisRepair.SummaryBatchWindowChapters" value in BOTH

@@ -11,6 +11,7 @@ using Xunit;
 // deterministic suite excludes that namespace outright; the narrow filter never names it). An alias
 // binds the two CLASSES without importing the namespace, so nothing here drifts back into it and this
 // file's own FullyQualifiedName stays at the assembly root where the filters reach.
+using LineEditHarness = Pagedraft.Api.Tests.LanguageEngine.LineEditCloudSpotCheckTests;
 using LinguisticHarness = Pagedraft.Api.Tests.LanguageEngine.LinguisticQualityTests;
 using ProofreadHarness = Pagedraft.Api.Tests.LanguageEngine.ProofreadQualityTests;
 
@@ -26,7 +27,9 @@ namespace Pagedraft.Api.Tests;
 ///   2. <c>ProofreadQualityTests.BuildHarnessProviderSettings</c> restates
 ///      <c>Ai:ProviderSettings:Ollama_Proofread</c> and its <c>OpenRouter_Proofread</c> mirror;
 ///   3. <c>LinguisticQualityTests.LinguisticTuningDefaults</c> / <c>BuildHarnessProviderSettings</c> restate
-///      <c>Ai:ProviderSettings:Ollama_LinguisticAnalysis</c> and its <c>OpenRouter_LinguisticAnalysis</c> mirror.
+///      <c>Ai:ProviderSettings:Ollama_LinguisticAnalysis</c> and its <c>OpenRouter_LinguisticAnalysis</c> mirror;
+///   4. (be-c08) <c>LineEditCloudSpotCheckTests.LocalBaselineModel</c> restates <c>Ai:FeatureModels:LineEdit:Model</c>
+///      and its <c>BuildHarnessProviderSettings</c> restates <c>Ollama_LineEdit</c> / <c>OpenRouter_LineEdit</c>.
 /// Each of those restatements sits under a comment that ASSERTS the two sides agree ("byte-identical",
 /// "identical to the values written here"). Until this class existed, nothing checked it: a model swap or a
 /// tuning edit that touched only the shipped file left the harness silently measuring a DIFFERENT
@@ -160,6 +163,50 @@ public class HarnessConfigParityTests
             "LinguisticQualityTests.BuildHarnessProviderSettings");
 
     /// <summary>
+    /// (5a) The LineEdit spot-check's LOCAL baseline model (be-c08). <c>LineEditCloudSpotCheckTests</c> runs
+    /// <c>LocalBaselineModel</c> under PROVIDER=Ollama and its header calls that the shipped LineEdit model; the
+    /// header used to name DictaLM-3.0 after LineEdit had moved off it. Read from the shipped file, never from a
+    /// literal here, so the next model swap fails this pin instead of leaving the harness documenting a model
+    /// nothing routes to. Ordinal: an Ollama tag is case-sensitive on the wire.
+    /// </summary>
+    [Fact]
+    public void TheLineEditHarnessLocalBaseline_EqualsTheShippedLineEditFeatureModel()
+    {
+        var features = ProviderTuningConfigParityTests.LoadShippedAiOptions().FeatureModels;
+        Assert.True(features is { Count: > 0 }, "Ai:FeatureModels bound empty from the shipped appsettings.json.");
+        Assert.True(features!.TryGetValue("LineEdit", out var lineEdit) && lineEdit != null,
+            "Ai:FeatureModels:LineEdit is gone from the shipped appsettings.json, but the LineEdit spot-check still " +
+            "names a local baseline for it.");
+
+        Assert.True(string.Equals(lineEdit!.Model, LineEditHarness.LocalBaselineModel, StringComparison.Ordinal),
+            $"Ai:FeatureModels:LineEdit:Model is '{lineEdit.Model}' but LineEditCloudSpotCheckTests.LocalBaselineModel " +
+            $"is '{LineEditHarness.LocalBaselineModel}'. The spot-check's local side-by-side and its header describe " +
+            "that constant as the shipped LineEdit model; move it with the shipped value.");
+    }
+
+    /// <summary>
+    /// (5b) The LOCAL LineEdit tuning (be-c08). Shipped <c>Ollama_LineEdit</c> carries the RepeatPenalty the
+    /// be-c08 measurement set; the spot-check restates the entry in <c>BuildHarnessProviderSettings</c>.
+    /// </summary>
+    [Fact]
+    public void TheLineEditHarnessOllamaTuning_ResolvesWhatTheShippedOllama_LineEditEntryResolves()
+        => AssertResolvedTuningAgrees(
+            "Ollama", AiTaskType.LineEdit,
+            LineEditHarness.BuildHarnessProviderSettings(),
+            "LineEditCloudSpotCheckTests.BuildHarnessProviderSettings");
+
+    /// <summary>
+    /// (5c) The CLOUD LineEdit mirror. Shipped <c>OpenRouter_LineEdit</c> is
+    /// { Temperature 0.2, MaxTokens 5120, NumCtx 4096 }.
+    /// </summary>
+    [Fact]
+    public void TheLineEditHarnessCloudMirror_ResolvesWhatTheShippedOpenRouter_LineEditEntryResolves()
+        => AssertResolvedTuningAgrees(
+            "OpenRouter", AiTaskType.LineEdit,
+            LineEditHarness.BuildHarnessProviderSettings(),
+            "LineEditCloudSpotCheckTests.BuildHarnessProviderSettings");
+
+    /// <summary>
     /// (6) THE RECORDED EXCEPTION. RepeatPenalty is the one field the cloud mirrors do NOT carry, and that is
     /// a decision, not an oversight: the OpenAI-compatible payload has no such field (p1-3), so writing one
     /// would be dead config that reads as configured. Asserted on BOTH sides so the absence is pinned rather
@@ -172,7 +219,7 @@ public class HarnessConfigParityTests
     public void TheCloudTuningMirrors_OmitRepeatPenalty_OnBothTheShippedAndTheHarnessSide()
     {
         var config = ProviderTuningConfigParityTests.LoadShippedConfiguration();
-        foreach (var key in new[] { "OpenRouter_Proofread", "OpenRouter_LinguisticAnalysis" })
+        foreach (var key in new[] { "OpenRouter_Proofread", "OpenRouter_LinguisticAnalysis", "OpenRouter_LineEdit" })
         {
             Assert.True(config[$"Ai:ProviderSettings:{key}:RepeatPenalty"] is null,
                 $"Ai:ProviderSettings:{key} now carries a RepeatPenalty. The OpenAI-compatible payload has no " +
@@ -193,6 +240,10 @@ public class HarnessConfigParityTests
         Assert.True(Math.Abs(linguisticMirror.RepeatPenalty - classDefault) < 1e-9,
             "LinguisticQualityTests' cloud mirror now sets RepeatPenalty - same reason as above. Note the LOCAL " +
             "linguistic entry legitimately carries 1.2; it is only the cloud mirror that must leave it unset.");
+
+        var lineEditMirror = LineEditHarness.BuildHarnessProviderSettings()["OpenRouter_LineEdit"];
+        Assert.True(Math.Abs(lineEditMirror.RepeatPenalty - classDefault) < 1e-9,
+            "LineEditCloudSpotCheckTests' cloud mirror now sets RepeatPenalty - same reason as above.");
 
         // The contrast that makes the exception readable: the OLLAMA linguistic entry DOES carry RepeatPenalty,
         // so the cloud omission is a per-family decision and not a blanket "we never tune repeat_penalty".

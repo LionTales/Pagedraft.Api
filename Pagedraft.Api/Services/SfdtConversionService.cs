@@ -59,10 +59,40 @@ public class SfdtConversionService
 
     /// <summary>
     /// Converts SFDT JSON back to DOCX bytes for export.
+    /// <para>
+    /// Before saving, <see cref="ExportBidiFontNormalizer"/> replaces Word's charset-variant font names
+    /// (<c>"Calibri (Hebrew)"</c>, which a paste from Word stores in the SFDT) with the real face, and on a
+    /// Hebrew book (<see cref="LanguageTags.IsHebrew"/> of <paramref name="bookLanguage"/>) stamps he-IL as the
+    /// complex-script language of every run that has none. Without it the export names a font no machine has,
+    /// and copying the file out of Word and pasting it back turned the Hebrew into Latin-1.
+    /// </para>
+    /// <para>
+    /// A null <paramref name="bookLanguage"/> means "no language given" and is not Hebrew. The export never passes
+    /// one: it resolves the book's language once with <see cref="Analysis.BaselineLanguageResolver.Normalize"/> (null or
+    /// blank is the product default, Hebrew) and hands the same value to this conversion and to the proofread
+    /// annotation's strings.
+    /// </para>
+    /// <para>
+    /// On a Hebrew book it also makes right-to-left the default paragraph direction (Normal style and every
+    /// section, <see cref="ExportBidiFontNormalizer.ApplyRightToLeftDefaults"/>). The stored SFDT carries no
+    /// paragraph direction for imported prose, so without it Word laid the whole export out left-to-right.
+    /// Any other language is exported exactly as before.
+    /// </para>
     /// </summary>
-    public byte[] ConvertSfdtToDocx(string sfdtJson)
+    public byte[] ConvertSfdtToDocx(string sfdtJson, string? bookLanguage = null)
     {
         using var docIoDocument = Syncfusion.EJ2.DocumentEditor.WordDocument.Save(sfdtJson);
+        var hebrew = LanguageTags.IsHebrew(bookLanguage);
+        var changedFormats = ExportBidiFontNormalizer.Apply(docIoDocument, hebrew);
+        var changedDirections = hebrew ? ExportBidiFontNormalizer.ApplyRightToLeftDefaults(docIoDocument) : 0;
+        if (changedFormats > 0 || changedDirections > 0)
+        {
+            _logger?.LogDebug(
+                "ConvertSfdtToDocx cleaned complex-script font data on {ChangedFormats} character formats and set right-to-left on {ChangedDirections} style/section defaults",
+                changedFormats,
+                changedDirections);
+        }
+
         using var outStream = new MemoryStream();
         docIoDocument.Save(outStream, Syncfusion.DocIO.FormatType.Docx);
         return outStream.ToArray();
@@ -106,6 +136,10 @@ public class SfdtConversionService
                 .Where(e => e is not SectionProperties)
                 .Select(e => (OpenXmlElement)e.CloneNode(true))
                 .ToArray();
+            // Word's charset-variant names ("Calibri (Hebrew)") in the manuscript's run fonts would be stored in
+            // the chapter SFDT verbatim, the same name the paste pre-pass and the export cleanup remove (be-c09).
+            // The clones are renamed, never the caller's elements.
+            foreach (var element in safeElements) PseudoBidiFontNames.StripFromRunFonts(element);
             mainPart.Document = new DocumentFormat.OpenXml.Wordprocessing.Document(
                 new Body(safeElements)
             );

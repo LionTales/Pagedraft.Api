@@ -60,27 +60,17 @@ public static class GuidesCatalog
     /// <c>en-*</c> are English; EVERYTHING ELSE, including a tag that merely begins with those two
     /// letters, falls through to itself and therefore to a 404. The corpus ships only these two
     /// languages, so there is no third code to add a rung for; a future one adds a case here and
-    /// nowhere else, because this is the only place a requested tag is interpreted.</para>
+    /// nowhere else, because this is the only place a requested GUIDE tag is interpreted. The subtag
+    /// match itself is <see cref="LanguageTags.IsTagFor"/>, the API's one Hebrew-ness rule (be-c09).</para>
     /// </summary>
     public static string? NormalizeLanguage(string? requested)
     {
         var value = (requested ?? string.Empty).Trim().ToLowerInvariant();
         if (value.Length == 0) return null;
-        if (IsTagFor(value, "he")) return "he";
-        if (IsTagFor(value, "en")) return "en";
+        if (LanguageTags.IsHebrew(value)) return "he";
+        if (LanguageTags.IsTagFor(value, "en")) return "en";
         return value;
     }
-
-    /// <summary>
-    /// True when <paramref name="value"/> is exactly <paramref name="code"/> or is a BCP-47 tag whose
-    /// primary subtag is <paramref name="code"/> (<c>he</c>, <c>he-il</c>). Both arguments are already
-    /// lower-cased by the caller, which is why the comparison is ordinal.
-    /// </summary>
-    private static bool IsTagFor(string value, string code)
-        => string.Equals(value, code, StringComparison.Ordinal) ||
-           (value.Length > code.Length &&
-            value[code.Length] == '-' &&
-            value.AsSpan(0, code.Length).SequenceEqual(code.AsSpan()));
 
     /// <summary>
     /// THE ONLY WAY A REQUEST REACHES A DOCUMENT, and the reason path traversal is not a risk on this

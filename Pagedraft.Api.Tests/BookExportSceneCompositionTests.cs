@@ -197,11 +197,11 @@ public class BookExportSceneCompositionTests
     {
         var born = DateTimeOffset.UtcNow;
 
-        Assert.False(BookExportService.ScenesHoldTheChaptersCurrentText(null));
-        Assert.False(BookExportService.ScenesHoldTheChaptersCurrentText(Array.Empty<Scene>()));
+        Assert.False(ChapterTextSource.ScenesHoldTheChaptersCurrentText(null));
+        Assert.False(ChapterTextSource.ScenesHoldTheChaptersCurrentText(Array.Empty<Scene>()));
         // Exactly what SplitScenesFromChapterAsync leaves behind: added in one SaveChanges, so the override
         // (AppDbContext.cs) stamps CreatedAt and UpdatedAt equal.
-        Assert.False(BookExportService.ScenesHoldTheChaptersCurrentText(new[]
+        Assert.False(ChapterTextSource.ScenesHoldTheChaptersCurrentText(new[]
         {
             new Scene { CreatedAt = born, UpdatedAt = born },
             new Scene { CreatedAt = born, UpdatedAt = born }
@@ -213,7 +213,7 @@ public class BookExportSceneCompositionTests
     {
         var born = DateTimeOffset.UtcNow;
 
-        Assert.True(BookExportService.ScenesHoldTheChaptersCurrentText(new[]
+        Assert.True(ChapterTextSource.ScenesHoldTheChaptersCurrentText(new[]
         {
             new Scene { CreatedAt = born, UpdatedAt = born },
             new Scene { CreatedAt = born, UpdatedAt = born.AddSeconds(1) }

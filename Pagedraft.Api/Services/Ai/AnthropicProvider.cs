@@ -33,12 +33,13 @@ public class AnthropicProvider : IAiAnalysisProvider
 
         var payload = BuildPayload(model, request, tuning);
 
-        var client = _httpFactory.CreateClient();
+        // c19: the NAMED client carries Ai:Providers:Anthropic:TimeoutSeconds; the unnamed one timed out at 100 s.
+        var client = _httpFactory.CreateClient(AiProviderHttpClients.ClientName("Anthropic"));
         client.DefaultRequestHeaders.Add("x-api-key", apiKey);
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
         var response = await client.PostAsJsonAsync("https://api.anthropic.com/v1/messages", payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, "Anthropic"); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var contentEl = json.GetProperty("content");

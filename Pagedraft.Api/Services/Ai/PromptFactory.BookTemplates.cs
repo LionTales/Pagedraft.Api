@@ -28,7 +28,7 @@ public partial class PromptFactory
     /// </summary>
     public string GetStructuredChapterBriefPrompt(string language)
     {
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? StructuredChapterBriefHe
             : StructuredChapterBriefEn;
     }
@@ -48,7 +48,7 @@ public partial class PromptFactory
         var trimmed = (userSummary ?? string.Empty).Trim();
         if (trimmed.Length == 0) return basePrompt;
 
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         var seedBlock = isHe
             ? $"""
                להלן סיכום הפרק כפי שכתב אותו המחבר. זהו ההבנה הסמכותית של הפרק — התבסס עליו כמקור האמת לגבי

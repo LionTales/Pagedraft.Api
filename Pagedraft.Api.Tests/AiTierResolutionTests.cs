@@ -552,8 +552,9 @@ public class AiTierConfigParityTests
             "provider=Ollama and never registers OpenRouter, so no cloud-routed BookReview has ever been run. " +
             "Close that harness gap and run one end to end before adding it.");
         Assert.False(AiTierPolicy.IsTiered(AiTaskType.LineEdit),
-            "LineEdit is unmeasured against cloud and has its own decoding quirk (Ollama_LineEdit RepeatPenalty " +
-            "1.3 exists because Dicta fell into a 335s repetition loop). It needs its own bake-off.");
+            "LineEdit is unmeasured against cloud and has its own decoding tuning (Ollama_LineEdit RepeatPenalty " +
+            "1.3: set for Dicta's 335s repetition loop, re-measured on gemma4:12b in be-c08, and the OpenAI-compatible " +
+            "payload has no such field). It needs its own bake-off.");
     }
 
     /// <summary>

@@ -46,7 +46,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildBookReviewWindowPrompt(string language, int windowIndex, int windowCount, int firstOrder, int lastOrder)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         var body = BuildBookReviewCombinedPrompt(language);
         string frame = isHe
             // HEBREW DRAFT - REQUIRES NATIVE SPEAKER VALIDATION
@@ -77,7 +77,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildBookReviewSynthesisPrompt(string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         return isHe ? BookReviewSynthesisHe : BookReviewSynthesisEn;
     }
 
@@ -92,7 +92,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildBookReviewContinuityReducePrompt(string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         return isHe ? BookReviewContinuityReduceHe : BookReviewContinuityReduceEn;
     }
 

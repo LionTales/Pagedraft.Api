@@ -66,7 +66,7 @@ public class KtivMaleChecker
             return result;
         if (string.IsNullOrWhiteSpace(originalText))
             return result;
-        if (language == null || !language.StartsWith("he", StringComparison.OrdinalIgnoreCase))
+        if (!LanguageTags.IsHebrew(language))
             return result;
 
         var text = TextNormalization.NormalizeTextForAnalysis(originalText);

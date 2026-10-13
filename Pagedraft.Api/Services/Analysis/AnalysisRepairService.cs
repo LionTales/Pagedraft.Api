@@ -228,8 +228,7 @@ public class AnalysisRepairService
     {
         // Hebrew-gate: the repair model targets Hebrew literary prose (same convention as GlossaryRepairPass).
         // On a non-Hebrew book it is a strict no-op (all counters 0).
-        if (string.IsNullOrWhiteSpace(language) ||
-            !language.StartsWith("he", StringComparison.OrdinalIgnoreCase))
+        if (!LanguageTags.IsHebrew(language))
         {
             return new AnalysisRepairResult { StructuredJson = structuredJson, CleanContent = cleanContent };
         }

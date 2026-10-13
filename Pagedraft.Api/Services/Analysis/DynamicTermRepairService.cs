@@ -159,7 +159,7 @@ public class DynamicTermRepairService
     /// axis of the d1 detector; other scripts are out of scope.
     /// </summary>
     public static ExpectedScript ExpectedScriptForLanguage(string? language)
-        => !string.IsNullOrWhiteSpace(language) && language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        => LanguageTags.IsHebrew(language)
             ? ExpectedScript.Hebrew
             : ExpectedScript.Latin;
 

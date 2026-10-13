@@ -22,8 +22,10 @@ model intended to replace the local-first default today.
 > **VERDICT: SWITCHED to `gemma4:12b` for Hebrew Proofread.** Honest limits, the recall regression and
 > the chunking caveat are recorded in `Ai:FeatureModels:_comment_ProofreadModel`
 > (`Pagedraft.Api/appsettings.json`) and in the `## p2 measurement results` -> `p2-3` section of
-> `src/.cursor/plans/_todo/model-tier-fast-thinking-2026-07-28.plan.md`. **LineEdit still routes to
-> DictaLM-3.0 and is NOT covered by this gold** - it needs its own bake-off.
+> `src/.cursor/plans/_todo/model-tier-fast-thinking-2026-07-28.plan.md`. **LineEdit routed to
+> DictaLM-3.0 at the time and is NOT covered by this gold** - it needs its own bake-off. It has run on
+> `gemma4:12b` since 2026-10-13 (owner-authorized after the 2026-09-10 spot-check, where the owner kept 0 of
+> Dicta's 8 suggestions); that move is a judgment on one passage, still not a gold score.
 
 > **[2026-07-27, SUPERSEDED BY THE 2026-07-29 BANNER ABOVE] STABILITY EVIDENCE SINCE THIS BAKE-OFF.**
 > Two identical full-gold runs (93 cases, same prompt/settings/
@@ -78,7 +80,7 @@ note below):
 |---|---|---|---|---|---|
 | qwen3.5:9b (prior live-failure model) | 13% | 75% | 70% | overreached | WORST; the live ktiv smoke test caught it meaning-changing (עצמה→עוצמת רגשות, עתון→עתונות) |
 | gemma4:12b | 24% | 70% | 33% | — | |
-| **DictaLM-3.0-Nemotron-12B (current local default)** | **26%** | **75%** | **33%** | 0 on forbidden cases (post prompt-tighten) | WINNER of the local set; fastest; wired as `Ai:FeatureModels:Proofread` |
+| **DictaLM-3.0-Nemotron-12B (local default at the time)** | **26%** | **75%** | **33%** | 0 on forbidden cases (post prompt-tighten) | WINNER of the local set; fastest; wired as `Ai:FeatureModels:Proofread` |
 
 > Post switch+tighten single-model verify (full gold, local Dicta-3.0): fp-rate 70%→29%, recall held
 > 75%, 0 overreach on the forbidden-edit cases.
@@ -131,11 +133,18 @@ natural Hebrew, author voice respected** — low overreach. This is on par with 
 with no regression vs local Dicta-3.0 — but it does not show a *clear win* over Dicta-3.0 that would
 justify changing the local default.
 
-> Re-run a live local side-by-side any time with `LINEEDIT_SPOTCHECK_PROVIDER=Ollama` +
-> `LINEEDIT_SPOTCHECK_MODEL=hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest`. It was not
-> auto-run here (no-local-rerun + ask-before-GPU; Dicta-12B CPU-spills to minutes/case locally).
+> Re-run a live local side-by-side any time with `LINEEDIT_SPOTCHECK_PROVIDER=Ollama`; the model defaults
+> to the shipped LineEdit model (`LineEditCloudSpotCheckTests.LocalBaselineModel`, pinned to
+> `Ai:FeatureModels:LineEdit` by `HarnessConfigParityTests`) and `LINEEDIT_SPOTCHECK_MODEL` overrides it.
+> It was not auto-run here at the time (no-local-rerun + ask-before-GPU; Dicta-12B CPU-spills to
+> minutes/case locally).
 
 ## Recommendation (each tied to the precision gate)
+
+> **Status as of 2026-10-13: both Dicta rows below are SUPERSEDED.** Local Hebrew Proofread runs
+> `gemma4:12b` since 2026-07-29 (banner at the top) and local LineEdit runs `gemma4:12b` since
+> 2026-10-13 (owner-authorized). No shipped route uses DictaLM-3.0 any more. The table is kept as the
+> 2026-06-20 record.
 
 | Task | Recommendation | Why |
 |---|---|---|
@@ -145,8 +154,8 @@ justify changing the local default.
 
 ### Wiring done (config + test only, reversible)
 
-Mirrors the `_comment_LinguisticAnalysis` pattern: the **active** Proofread value stays
-`Ollama / DictaLM-3.0-Nemotron-12B`; a breadcrumb in `appsettings.json` documents the cloud
+Mirrors the `_comment_LinguisticAnalysis` pattern: the **active** Proofread value stayed
+`Ollama / DictaLM-3.0-Nemotron-12B` at the time (it is `gemma4:12b` since 2026-07-29); a breadcrumb in `appsettings.json` documents the cloud
 max-quality target. **No model was switched**, so `ProofreadQualityTests.ProofreadModel` (the
 keep-in-sync const) is unchanged. To ship the cloud winner later, set
 `Ai:FeatureModels:Proofread = { Provider: "OpenRouter", Model: "google/gemma-4-31b-it" }` and update
@@ -154,11 +163,11 @@ that const to match.
 
 ## Deployment note
 
-The active local Proofread model (DictaLM-3.0-Nemotron-12B) and gemma4:12b (used for Proofread_en and LinguisticAnalysis) must be pulled on every Ollama host before starting the API. If either model is absent, OllamaProvider's 404-retry-with-default silently falls back to the `DefaultModel` (`qwen3.5:9b`) with no error surfaced. For Proofread, `qwen3.5:9b` is the overreaching model this work replaced (precision 13%, known meaning-changing edits such as `עצמה` to `עוצמת רגשות`). To avoid this silent regression, pull both models on every deployment host:
+`gemma4:12b` (local Proofread, Proofread_en, LineEdit, LinguisticAnalysis, BookReview and the repair passes) must be pulled on every Ollama host before starting the API. If it is absent, OllamaProvider's 404-retry-with-default silently falls back to the `DefaultModel` (`qwen3.5:9b`) with no error surfaced. For Proofread, `qwen3.5:9b` is the overreaching model this work replaced (precision 13%, known meaning-changing edits such as `עצמה` to `עוצמת רגשות`). `qwen3.5:9b` is itself a shipped route (Summarization, chat), so pull both on every deployment host. DictaLM-3.0 is no longer needed by any shipped route (it was the Proofread model until 2026-07-29 and the LineEdit model until 2026-10-13):
 
 ```powershell
-ollama pull hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest
 ollama pull gemma4:12b
+ollama pull qwen3.5:9b
 ```
 
 ## How to reproduce

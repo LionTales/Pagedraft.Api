@@ -102,7 +102,7 @@ public partial class PromptFactory
     /// <summary>Returns (systemMessage, instruction) for the correction pipeline.</summary>
     public (string SystemMessage, string Instruction) GetPrompt(AiTaskType taskType, string language)
     {
-        var isHebrew = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHebrew = LanguageTags.IsHebrew(language);
 
         if (taskType == AiTaskType.Proofread)
         {
@@ -176,7 +176,7 @@ public partial class PromptFactory
     /// The system message is resolved by the router via AiTaskType mapping.</summary>
     public string GetAnalysisPrompt(AnalysisType analysisType, string language)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         return analysisType switch
         {
             AnalysisType.Proofread      => isHe ? ProofreadHe : ProofreadEn,
@@ -233,7 +233,7 @@ public partial class PromptFactory
     /// </summary>
     public string BuildProofreadChunkPrompt(string language, CharacterRegister? characters, string? overlapPrefix)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         var basePrompt = ProofreadChunkBody(isHe);
 
         var sb = new StringBuilder();
@@ -271,7 +271,7 @@ public partial class PromptFactory
         bool isFirstChunk,
         bool isLastChunk)
     {
-        var isHe = language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
+        var isHe = LanguageTags.IsHebrew(language);
         var basePrompt = isHe ? LineEditHe : LineEditEn;
 
         var sb = new StringBuilder();

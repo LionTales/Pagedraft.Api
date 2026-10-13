@@ -62,7 +62,7 @@ public class LlmRewriteEngine : IRewriteEngine
                 $"{idx + 1}. [{issue.StartOffset}-{issue.EndOffset}] {issue.Message}"))
             : "No specific issues identified";
 
-        return language.StartsWith("he", StringComparison.OrdinalIgnoreCase)
+        return LanguageTags.IsHebrew(language)
             ? $@"אתה מומחה לעריכה לשונית בעברית. תקן את הטקסט הבא בהתאם לשגיאות שזוהו.
 
 שגיאות שזוהו:

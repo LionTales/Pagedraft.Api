@@ -428,8 +428,7 @@ public class LinguisticDecompProbeTests
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(config);
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
 
         services.Configure<AiOptions>(opts =>
         {

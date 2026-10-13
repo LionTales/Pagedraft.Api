@@ -875,10 +875,7 @@ public class LinguisticQualityTests
         // and does NOT bind that key, so the timeout must be set here directly. The default 2-minute timeout
         // caused cold-start/CPU-spill models to hit HttpClient.Timeout on a single slow case. Raise to 10
         // minutes for the harness ONLY (production wiring in Program.cs is untouched).
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
-        // Cloud / OpenAI-compatible providers resolve their HttpClient via the DEFAULT, unnamed
-        // _httpFactory.CreateClient() — register it with the same generous timeout.
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
 
         // Resolve the per-sweep tuning from env vars (or production appsettings defaults) so the
         // harness measures the same Ollama options that the real API path would use.

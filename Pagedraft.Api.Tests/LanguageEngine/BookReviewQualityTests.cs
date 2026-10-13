@@ -742,8 +742,7 @@ public class BookReviewQualityTests
         // Whole-book review prompts are long (full book context + six dimensions) and gemma4:12b may
         // CPU-spill on the 8 GB dev GPU, so a single dimension call can take minutes. Raise the Ollama
         // client timeout to 10 minutes for the harness ONLY (production wiring in Program.cs is untouched).
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
 
         services.Configure<AiOptions>(opts =>
         {

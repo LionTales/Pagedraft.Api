@@ -66,7 +66,8 @@ public class OpenAiCompatibleProvider : IAiAnalysisProvider
 
         var endpointUrl = baseUrl.TrimEnd('/') + "/chat/completions";
 
-        var client = _httpFactory.CreateClient();
+        // c19: the NAMED client carries Ai:Providers:{name}:TimeoutSeconds; the unnamed one timed out at 100 s.
+        var client = _httpFactory.CreateClient(AiProviderHttpClients.ClientName(_providerName));
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
@@ -79,7 +80,7 @@ public class OpenAiCompatibleProvider : IAiAnalysisProvider
         }
 
         var response = await client.PostAsJsonAsync(endpointUrl, payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, _providerName); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var content = json.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";

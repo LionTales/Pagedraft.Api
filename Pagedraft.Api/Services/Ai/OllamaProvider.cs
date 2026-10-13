@@ -44,7 +44,25 @@ public class OllamaProvider : IAiAnalysisProvider, IStreamingAiAnalysisProvider
         _logger = logger ?? NullLogger<OllamaProvider>.Instance;
     }
 
+    /// <summary>
+    /// One completion. A timeout of THIS client (<c>Ai:Providers:Ollama:TimeoutMinutes</c>, the caller's token still
+    /// live) leaves as a <see cref="LocalModelTimeoutException"/> rather than HttpClient's bare
+    /// <see cref="TaskCanceledException"/>, so <c>ModelCallRetry</c> can refuse to re-send into a wedged local runner
+    /// (be-c03). A caller cancellation propagates untouched. The streaming path is not wrapped: nothing retries it.
+    /// </summary>
     public async Task<AiResponse> CompleteAsync(ResolvedAiRequest request, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await CompleteCoreAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && ex is not LocalModelTimeoutException)
+        {
+            throw new LocalModelTimeoutException(ex);
+        }
+    }
+
+    private async Task<AiResponse> CompleteCoreAsync(ResolvedAiRequest request, CancellationToken cancellationToken)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var baseUrl = _config["Ai:Providers:Ollama:BaseUrl"] ?? _config["Ai:Ollama:BaseUrl"] ?? "http://localhost:11434";

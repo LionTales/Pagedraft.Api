@@ -20,6 +20,10 @@ var builder = WebApplication.CreateBuilder(args);
 // TODO: Move this trial key to a secure location (user secrets / env var) before committing.
 SyncfusionLicenseProvider.RegisterLicense("Ngo9BigBOggjHTQxAR8/V1JGaF5cXGpCf1FpRmJGdld5fUVHYVZUTXxaS00DNHVRdkdlWX1feHVQRGheUUF+WUtWYEs=");
 
+// Windows code pages (1255 Hebrew, 1256 Arabic, ...) are not built into .NET; the clipboard RTF pre-pass
+// (RtfCodepageNormalizer) and any Encoding.GetEncoding(<code page>) need the provider registered once.
+System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
 var dbProvider = builder.Configuration.GetValue<string>("DatabaseProvider") ?? "SqlServer";
 if (dbProvider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase))
     throw new InvalidOperationException("DatabaseProvider=Sqlite is no longer supported. The current EF Core model and migrations target SQL Server only.");
@@ -43,6 +47,10 @@ builder.Services.AddScoped<SfdtConversionService>();
 builder.Services.AddScoped<ChapterService>();
 builder.Services.AddScoped<SceneService>();
 builder.Services.AddScoped<BookAssemblyService>();
+// Stateless Open XML writer for the proofread-annotated exports (tracked changes, comments only where
+// they add information); only
+// BookExportService uses it, so it is scoped alongside.
+builder.Services.AddScoped<Pagedraft.Api.Services.Export.ProofreadDocxAnnotator>();
 builder.Services.AddScoped<BookExportService>();
 builder.Services.AddScoped<AiAnalysisService>();
 builder.Services.AddScoped<UnifiedAnalysisService>();
@@ -107,6 +115,14 @@ builder.Services.AddSingleton<BookSummaryBuildRegistry>();
 // In-progress whole-book review build registry — singleton for the SAME reason. Separate from the summary
 // registry so a running summary build never blocks a review build (and vice versa) for the same book.
 builder.Services.AddSingleton<BookReviewBuildRegistry>();
+// In-progress whole-book proofread run registry (with per-job cancellation) - singleton for the SAME reason.
+builder.Services.AddSingleton<BookProofreadBuildRegistry>();
+// TEST-ONLY fault seam (c20): inert unless the environment is Development AND Testing:BookProofread:
+// FailChapterIdsOnce is set (no appsettings file carries it). See BookProofreadFaultInjection.
+builder.Services.AddSingleton(sp => BookProofreadFaultInjection.FromConfiguration(
+    sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IHostEnvironment>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger<BookProofreadFaultInjection>()));
+builder.Services.AddScoped<IBookProofreadService, BookProofreadService>();
 // Book-profile refresh: single-flight guard + its scope-creating runner (be-c03). Singleton for the SAME
 // reason as the three registries above (one shared map across request scopes), and the runner is stateless.
 // Unlike them this one keys by BookId ALONE - BookProfile is one row per BOOK, so two languages contend for
@@ -181,10 +197,14 @@ builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
 builder.Services.AddHttpClient("Ollama", (sp, client) =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
-    var timeoutMinutes = config.GetValue<int?>("Ai:Providers:Ollama:TimeoutMinutes") ?? 30;
-    if (timeoutMinutes <= 0) timeoutMinutes = 30;
-    client.Timeout = TimeSpan.FromMinutes(timeoutMinutes);
+    client.Timeout = Pagedraft.Api.Services.Ai.ProviderTimeoutResolver.ResolveAndLog(
+        config, "Ai:Providers:Ollama:TimeoutMinutes", TimeSpan.FromMinutes(1), 30,
+        sp.GetService<ILoggerFactory>()?.CreateLogger("ProviderTimeout"));
 });
+// The cloud providers' named clients, same idiom: "Ai:Providers:{provider}:TimeoutSeconds" (default 300).
+// Before c19 they sent through the unnamed client and inherited .NET's 100 s default, which a thinking-tier
+// model exceeds on one proofread chunk. See AiProviderHttpClients.
+builder.Services.AddCloudAiProviderHttpClients();
 builder.Services.AddHttpClient("LanguageTool", (sp, client) =>
 {
     var config = sp.GetRequiredService<IConfiguration>();

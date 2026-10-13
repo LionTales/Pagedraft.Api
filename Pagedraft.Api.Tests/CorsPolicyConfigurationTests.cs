@@ -27,4 +27,44 @@ public class CorsPolicyConfigurationTests
         Assert.Contains(BookExportService.SkippedCountHeader, policy.ExposedHeaders);
         Assert.Contains(BookExportService.SkippedChaptersHeader, policy.ExposedHeaders);
     }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheTwoAnnotationHeaders_UnderTheNamesTheClientReads()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        // Literal names, mirrored in pagedraft-client core/models/export.ts: a rename on either side breaks the read.
+        Assert.Equal("X-Export-Annotation-Count", BookExportService.AnnotationCountHeader);
+        Assert.Equal("X-Export-Unanchored-Count", BookExportService.UnanchoredCountHeader);
+        Assert.Contains(BookExportService.AnnotationCountHeader, policy.ExposedHeaders);
+        Assert.Contains(BookExportService.UnanchoredCountHeader, policy.ExposedHeaders);
+    }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheUnreliableSkippedHeader_UnderTheNameTheClientReads()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        Assert.Equal("X-Export-Unreliable-Skipped-Count", BookExportService.UnreliableSkippedCountHeader);
+        Assert.Contains(BookExportService.UnreliableSkippedCountHeader, policy.ExposedHeaders);
+    }
+
+    [Fact]
+    public void ConfigureDefault_ExposesTheWhitespaceSkippedHeader_UnderItsLiteralName()
+    {
+        var builder = new CorsPolicyBuilder();
+
+        CorsPolicyConfiguration.ConfigureDefault(builder);
+        var policy = builder.Build();
+
+        // Plan c16: Placed + Unanchored + WhitespaceSkipped = pending, readable cross-origin like the other three.
+        Assert.Equal("X-Export-Whitespace-Skipped-Count", BookExportService.WhitespaceSkippedCountHeader);
+        Assert.Contains(BookExportService.WhitespaceSkippedCountHeader, policy.ExposedHeaders);
+    }
 }

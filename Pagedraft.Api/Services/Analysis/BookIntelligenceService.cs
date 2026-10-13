@@ -272,7 +272,7 @@ public class BookIntelligenceService
     /// <see cref="AnalysisRepairOptions.SummaryBatchWindowChapters"/>, falling back to the class default when
     /// the whole <c>Ai:AnalysisRepair</c> section is absent (which is the shape every programmatic/test
     /// construction takes). A non-positive configured value is CLAMPED to the default rather than treated as
-    /// "no windowing" - mirroring the Ollama TimeoutMinutes idiom in Program.cs - because "unwindowed" is
+    /// "no windowing" - mirroring the Ollama TimeoutMinutes idiom (ProviderTimeoutResolver, wired in Program.cs) - because "unwindowed" is
     /// expressible as a large number, whereas a stray 0 must not silently restore the all-or-nothing persist
     /// this setting exists to bound.
     /// </summary>

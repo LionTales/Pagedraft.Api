@@ -122,8 +122,7 @@ public static class GlossaryRepairPass
     {
         // Hebrew-book gate: the glossary is English -> Hebrew. On a non-Hebrew book it would
         // translate legitimate English prose, so it must be a strict no-op there.
-        if (string.IsNullOrWhiteSpace(language) ||
-            !language.StartsWith("he", StringComparison.OrdinalIgnoreCase))
+        if (!LanguageTags.IsHebrew(language))
         {
             return NoOp(structuredJson, cleanContent);
         }
@@ -198,8 +197,7 @@ public static class GlossaryRepairPass
         // Hebrew-book gate (same contract as Apply): English -> Hebrew glossary must never fire on a
         // non-Hebrew book, or it would translate legitimate English prose.
         if (fields is null || fields.Count == 0 ||
-            string.IsNullOrWhiteSpace(language) ||
-            !language.StartsWith("he", StringComparison.OrdinalIgnoreCase))
+            !LanguageTags.IsHebrew(language))
         {
             return 0;
         }

@@ -369,7 +369,7 @@ public class AnalysisContextService : IAnalysisContextService
 
             return profile;
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Preserve cooperative cancellation so the outer analysis can stop immediately.
             throw;
@@ -596,7 +596,7 @@ public class AnalysisContextService : IAnalysisContextService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             throw;
         }
@@ -618,6 +618,10 @@ public class AnalysisContextService : IAnalysisContextService
         var json = UnifiedAnalysisService.ExtractJson(raw);
         if (string.IsNullOrWhiteSpace(json))
             return null;
+
+        // Same JSON-mode request as the user-facing path, so the same stringified-array repair (be-c08):
+        // a `"deviations":"[...]"` reply would otherwise throw here and leave the baseline unbuilt.
+        json = StringifiedArrayFields.Unwrap<LinguisticAnalysisResult>(json, _logger);
 
         try
         {
@@ -1101,7 +1105,7 @@ public class AnalysisContextService : IAnalysisContextService
 
             return CharacterRegisterMerge.ForAnalysis(final);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Preserve cooperative cancellation so the outer analysis can stop immediately.
             throw;
@@ -1190,7 +1194,7 @@ public class AnalysisContextService : IAnalysisContextService
         {
             response = await _router.CompleteAsync(request, ct);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) // c19: a timeout is a failed call, not a cancel
         {
             // Let cancellation propagate to the caller.
             throw;
