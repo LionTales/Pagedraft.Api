@@ -9,7 +9,10 @@ namespace Pagedraft.Api.Services.Export;
 /// <summary>
 /// Author-facing text the proofread DOCX annotator writes into Word comments and revision metadata.
 /// Hebrew for a Hebrew book, English otherwise (the book's language, not the UI's: the file goes back to
-/// the author). No em-dash in any string (house rule for user-facing text).
+/// the author). No em-dash in any string (house rule for user-facing text). Hebrew-ness is
+/// <see cref="LanguageTags.IsHebrew"/>, so a null language reads English here exactly as it reads not-Hebrew in
+/// the DOCX conversion; the export passes the book's language already resolved by
+/// <see cref="Analysis.BaselineLanguageResolver.Normalize"/>, so neither ever sees a null from it.
 ///
 /// <para>A suggestion is a tracked change ONLY; a comment is written only when it carries something the
 /// change does not show (owner decision 2026-10-12: a comment that repeated the change cost the author a
@@ -27,12 +30,9 @@ internal static class ProofreadAnnotationStrings
     /// <summary>Longest explanation written into a comment, before the ellipsis.</summary>
     public const int MaxExplanationLength = 500;
 
-    public static bool IsHebrew(string? language) =>
-        !string.IsNullOrEmpty(language) && language.StartsWith("he", StringComparison.OrdinalIgnoreCase);
-
     /// <summary>The <c>w:author</c> of every comment and revision.</summary>
     public static string Author(string? language) =>
-        IsHebrew(language)
+        LanguageTags.IsHebrew(language)
             ? "PageDraft הגהה" // DRAFT he - needs native review
             : "PageDraft Proofreader";
 
@@ -41,7 +41,7 @@ internal static class ProofreadAnnotationStrings
     /// annotated file never lands on top of the clean one in the author's downloads folder.
     /// </summary>
     public static string FileNameSuffix(string? language) =>
-        IsHebrew(language)
+        LanguageTags.IsHebrew(language)
             ? " - הגהה" // DRAFT he - needs native review
             : " - proofread";
 
@@ -49,7 +49,7 @@ internal static class ProofreadAnnotationStrings
     public static string? CategoryLine(string? language, string? category)
     {
         if (!string.Equals(category, KtivMaleCategory, StringComparison.Ordinal)) return null;
-        return IsHebrew(language)
+        return LanguageTags.IsHebrew(language)
             ? "כתיב מלא לפי האקדמיה" // DRAFT he - needs native review
             : "Academy full spelling";
     }
@@ -71,9 +71,12 @@ internal static class ProofreadAnnotationStrings
 
     /// <summary>
     /// An explanation is model output, so it is cleaned before it reaches the author's Word file:
+    /// every character an XML part cannot carry is removed first (<see cref="XmlSafeText.Clean"/>: U+FFFE/U+FFFF
+    /// and unpaired surrogates as well as C0 controls; be-c06, where one such character 500ed the export);
     /// every whitespace run (line breaks and tabs included) becomes one space and the ends are trimmed;
-    /// other control characters are dropped (they are not legal in the XML part); the result is capped at
-    /// <see cref="MaxExplanationLength"/> characters plus an ellipsis, never splitting a surrogate pair.
+    /// other control characters (C1 and DEL, legal in XML but invisible noise in a comment) are dropped; the
+    /// result is capped at <see cref="MaxExplanationLength"/> characters plus an ellipsis, never splitting a
+    /// surrogate pair (after the clean every surrogate left is half of a valid pair).
     /// It is ABSENT (null) when it holds no letter or digit (whitespace-only and punctuation-only both
     /// say nothing) or when it is <see cref="UnifiedAnalysisService.NoExplanationFallback"/>, the
     /// placeholder stored when the model returned nothing. Everything else, bidi marks included, is kept
@@ -81,11 +84,12 @@ internal static class ProofreadAnnotationStrings
     /// </summary>
     public static string? SanitizeExplanation(string? explanation)
     {
-        if (string.IsNullOrEmpty(explanation)) return null;
+        var legal = XmlSafeText.Clean(explanation);
+        if (string.IsNullOrEmpty(legal)) return null;
 
-        var builder = new StringBuilder(explanation.Length);
+        var builder = new StringBuilder(legal.Length);
         var pendingSpace = false;
-        foreach (var c in explanation)
+        foreach (var c in legal)
         {
             if (char.IsWhiteSpace(c))
             {

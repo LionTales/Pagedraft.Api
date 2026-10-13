@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Xml;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using Microsoft.Extensions.Logging;
@@ -19,7 +20,9 @@ namespace Pagedraft.Api.Services.Export;
 /// <param name="Unanchored">
 /// Pending suggestions that could not be placed: no match, an ambiguous match the contexts do not settle,
 /// a span crossing a paragraph or touching text that is not plain body text (a field result, an existing
-/// tracked insertion, a tab or break), or a span overlapping one placed before it.
+/// tracked insertion, a tab or break), a span or point that would cut a surrogate pair in two, a pure insertion
+/// whose text is empty once made legal for XML (<see cref="XmlSafeText"/>), or a span overlapping one placed
+/// before it.
 /// </param>
 /// <param name="WhitespaceSkipped">
 /// Pending suggestions that change whitespace only (or nothing), by the client's own hide rule
@@ -142,7 +145,8 @@ public sealed partial class ProofreadDocxAnnotator
     // ---------------------------------------------------------------- resolution
 
     /// <summary>
-    /// A pending, not whitespace-only suggestion as it is located, its original on the normalized axis, in up to
+    /// A pending, not whitespace-only suggestion as it is located, its original on the normalized axis and its
+    /// suggested text through <see cref="XmlSafeText.Clean"/>, in up to
     /// two forms: <see cref="Original"/>/<see cref="Suggested"/> with the edge whitespace both sides share taken off
     /// (<see cref="ProofreadWhitespace.TrimCommonEdges"/>), tried first; and, when it differs, a fallback with ALL of
     /// the original's edge whitespace off (<see cref="ProofreadWhitespace.TrimBoundaryEdges"/>), tried only when the
@@ -156,7 +160,10 @@ public sealed partial class ProofreadDocxAnnotator
         public static Candidate Of(AnalysisSuggestion s)
         {
             var normalized = TextNormalization.NormalizeTextForAnalysis(s.OriginalText ?? string.Empty) ?? string.Empty;
-            var raw = s.SuggestedText ?? string.Empty;
+            // The suggested text is model output that is only ever WRITTEN (never matched), so it is made legal for
+            // the XML part here, where it enters (be-c06): every later decision (an insertion that cleans to nothing
+            // is "empty", unanchored) sees exactly what would be written. The original is matched, so it is not.
+            var raw = XmlSafeText.Clean(s.SuggestedText) ?? string.Empty;
             var (original, suggested, _) = ProofreadWhitespace.TrimCommonEdges(normalized, raw);
             var (boundaryOriginal, boundarySuggested, lead) = ProofreadWhitespace.TrimBoundaryEdges(normalized, raw);
             var start = s.StartOffset is int at ? at + lead : int.MaxValue;
@@ -359,22 +366,23 @@ public sealed partial class ProofreadDocxAnnotator
 
         var existingCommentMax = commentsPart != null ? MaxWordId(commentsPart.Comments!) : -1;
         var nextCommentId = existingCommentMax + 1;
-        var nextRevisionId = Math.Max(MaxWordId(main.Document!), existingCommentMax) + 1;
+        var revisionIds = new WordIds(MaxWordId(main, commentsPart) + 1);
 
         // Ids are handed out in document order so comment 1 is the first one the author meets.
         foreach (var edit in edits.OrderBy(e => e.RawStart))
         {
-            if (edit.Original.Length > 0) edit.DeletionId = nextRevisionId++;
-            if (edit.Suggested.Length > 0) edit.InsertionId = nextRevisionId++;
+            if (edit.Original.Length > 0) edit.DeletionId = revisionIds.Next();
+            if (edit.Suggested.Length > 0) edit.InsertionId = revisionIds.Next();
             if (edit.CommentLines.Count == 0) continue;
             edit.CommentId = nextCommentId++;
             commentsPart!.Comments!.Append(BuildComment(edit, language, author, stamp));
         }
 
         // Placed right to left: splitting a w:t keeps the ORIGINAL node as the left fragment, so every
-        // character reference held by an edit further left is still valid when its turn comes.
+        // character reference held by an edit further left is still valid when its turn comes. The same
+        // counter renumbers any w:id inside a cloned w:rPr (a w:rPrChange), see CloneRunProperties.
         foreach (var edit in edits.OrderByDescending(e => e.RawStart))
-            Place(text, edit, author, stamp);
+            Place(text, edit, author, stamp, revisionIds);
 
         main.Document!.Save();
         commentsPart?.Comments!.Save();
@@ -383,7 +391,7 @@ public sealed partial class ProofreadDocxAnnotator
     private static W.Comment BuildComment(Edit edit, string language, string author, DateTime stamp)
     {
         var lines = edit.CommentLines;
-        var rtl = ProofreadAnnotationStrings.IsHebrew(language);
+        var rtl = LanguageTags.IsHebrew(language);
         var comment = new W.Comment
         {
             Id = edit.CommentId!.Value.ToString(),
@@ -405,21 +413,91 @@ public sealed partial class ProofreadDocxAnnotator
         return comment;
     }
 
+    private const string WordNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+
+    /// <summary>
+    /// Highest numeric <c>w:id</c> in EVERY XML part of the package, or -1 (be-c06). A revision or annotation id
+    /// must be unique across the document, and the parts that can hold one are not only the body and the
+    /// comments: footnotes, endnotes, headers and footers carry their own <c>w:ins</c>/<c>w:del</c>, and styles or
+    /// numbering a <c>w:rPrChange</c>. Scanning only document.xml and comments.xml handed a footnote's revision
+    /// ids 3 and 4 to the body's new revisions (probe, 2026-10-13). The body and the comments are read from
+    /// their loaded DOM; every other part is STREAMED (never loaded, so the SDK does not re-serialize a part
+    /// this pass does not change).
+    /// </summary>
+    private static int MaxWordId(MainDocumentPart main, WordprocessingCommentsPart? commentsPart)
+    {
+        var max = MaxWordId(main.Document!);
+        if (commentsPart?.Comments != null) max = Math.Max(max, MaxWordId(commentsPart.Comments));
+        foreach (var part in main.OpenXmlPackage.GetAllParts())
+        {
+            if (ReferenceEquals(part, main) || ReferenceEquals(part, commentsPart)) continue;
+            if (!IsXmlContentType(part.ContentType)) continue;
+            try
+            {
+                max = Math.Max(max, MaxWordIdStreamed(part));
+            }
+            catch (XmlException)
+            {
+                // A part that does not parse cannot hold an id this pass could collide with: skip it, as the
+                // pre-be-c06 scan (body and comments only) did, rather than lose the unit's annotation.
+            }
+        }
+        return max;
+    }
+
+    /// <summary>
+    /// An XML part by its content type: <c>+xml</c> (every WordprocessingML/DrawingML/package part) or plain
+    /// <c>application/xml</c> / <c>text/xml</c> (custom XML). NOT a bare "contains xml": every OOXML type does
+    /// ("openxmlformats"), binary ones included (an embedded workbook, an OLE object, an obfuscated font).
+    /// </summary>
+    private static bool IsXmlContentType(string contentType)
+    {
+        var type = contentType.Split(';')[0].Trim();
+        return type.EndsWith("+xml", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("application/xml", StringComparison.OrdinalIgnoreCase)
+            || type.Equals("text/xml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int MaxWordIdStreamed(OpenXmlPart part)
+    {
+        using var stream = part.GetStream(FileMode.Open, FileAccess.Read);
+        if (stream.Length == 0) return -1;
+        var settings = new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+        using var reader = XmlReader.Create(stream, settings);
+        var max = -1;
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element) continue;
+            var value = reader.GetAttribute("id", WordNamespace);
+            if (value != null && int.TryParse(value, out var id) && id > max) max = id;
+        }
+        return max;
+    }
+
     /// <summary>Highest numeric <c>w:id</c> anywhere under <paramref name="root"/>, or -1.</summary>
     private static int MaxWordId(OpenXmlElement root)
     {
-        const string wordNs = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
         var max = -1;
         foreach (var element in root.Descendants())
         {
             foreach (var attribute in element.GetAttributes())
             {
-                if (attribute.LocalName == "id" && attribute.NamespaceUri == wordNs
+                if (attribute.LocalName == "id" && attribute.NamespaceUri == WordNamespace
                     && int.TryParse(attribute.Value, out var id) && id > max)
                     max = id;
             }
         }
         return max;
+    }
+
+    /// <summary>Hands out <c>w:id</c> values upward from the first one past every id the package held.</summary>
+    private sealed class WordIds
+    {
+        private int _next;
+
+        public WordIds(int first) => _next = first;
+
+        public int Next() => _next++;
     }
 
     /// <summary>One suggestion resolved to a raw span (or, for a pure insertion, a raw point).</summary>

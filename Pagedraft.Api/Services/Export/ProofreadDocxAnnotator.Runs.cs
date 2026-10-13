@@ -118,6 +118,7 @@ public sealed partial class ProofreadDocxAnnotator
         public bool IsPlaceableSpan(int rawStart, int rawEnd)
         {
             if (rawStart < 0 || rawEnd > Chars.Count || rawStart >= rawEnd) return false;
+            if (SplitsSurrogatePair(rawStart) || SplitsSurrogatePair(rawEnd)) return false;
             var paragraph = Chars[rawStart].Paragraph;
             var spanNodes = new HashSet<W.Text>();
             for (var i = rawStart; i < rawEnd; i++)
@@ -156,7 +157,21 @@ public sealed partial class ProofreadDocxAnnotator
         }
 
         /// <summary>A pure insertion needs an editable neighbour in a paragraph to attach to.</summary>
-        public bool IsPlaceablePoint(int rawPoint) => InsertionAnchor(rawPoint) != null;
+        public bool IsPlaceablePoint(int rawPoint) => !SplitsSurrogatePair(rawPoint) && InsertionAnchor(rawPoint) != null;
+
+        /// <summary>
+        /// True when <paramref name="rawPoint"/> falls between the two halves of one surrogate pair in one
+        /// <c>w:t</c> (an original or a context that begins or ends with a lone half can match there). A cut
+        /// there leaves an unpaired surrogate in each fragment, which the XML writer refuses at <c>Save</c>
+        /// (be-c06), so such a span or point is not placeable: counted unanchored, the author's text untouched.
+        /// </summary>
+        private bool SplitsSurrogatePair(int rawPoint)
+        {
+            if (rawPoint <= 0 || rawPoint >= Chars.Count) return false;
+            var (before, at) = (Chars[rawPoint - 1], Chars[rawPoint]);
+            return at.Node != null && ReferenceEquals(before.Node, at.Node)
+                && char.IsHighSurrogate(at.Node.Text[before.Offset]) && char.IsLowSurrogate(at.Node.Text[at.Offset]);
+        }
 
         /// <summary>
         /// The character an insertion at <paramref name="rawPoint"/> attaches to: the one before it when that
@@ -178,7 +193,7 @@ public sealed partial class ProofreadDocxAnnotator
 
     // ---------------------------------------------------------------- placement
 
-    private static void Place(DocumentText text, Edit edit, string author, DateTime stamp)
+    private static void Place(DocumentText text, Edit edit, string author, DateTime stamp, WordIds ids)
     {
         OpenXmlElement first;
         OpenXmlElement last;
@@ -187,17 +202,17 @@ public sealed partial class ProofreadDocxAnnotator
         {
             var (anchor, after) = text.InsertionAnchor(edit.RawStart)!.Value;
             var node = anchor.Node!;
-            var run = Detach(node);
+            var run = Detach(node, ids);
             var properties = run.RunProperties;
-            var insertion = BuildInsertion(properties, edit.Suggested, edit.InsertionId, author, stamp);
+            var insertion = BuildInsertion(properties, edit.Suggested, edit.InsertionId, author, stamp, ids);
             if (after)
             {
-                if (anchor.Offset + 1 < node.Text.Length) SplitTextRun(node, anchor.Offset + 1);
+                if (anchor.Offset + 1 < node.Text.Length) SplitTextRun(node, anchor.Offset + 1, ids);
                 run.InsertAfterSelf(insertion);
             }
             else
             {
-                var target = anchor.Offset > 0 ? SplitTextRun(node, anchor.Offset) : run;
+                var target = anchor.Offset > 0 ? SplitTextRun(node, anchor.Offset, ids) : run;
                 target.InsertBeforeSelf(insertion);
             }
             first = last = insertion;
@@ -206,11 +221,12 @@ public sealed partial class ProofreadDocxAnnotator
         {
             var spanRuns = new List<W.Run>();
             foreach (var (node, from, to) in Segments(text, edit.RawStart, edit.RawEnd))
-                spanRuns.Add(Isolate(node, from, to));
+                spanRuns.Add(Isolate(node, from, to, ids));
 
             var firstRun = spanRuns[0];
             var lastRun = spanRuns[^1];
-            var properties = firstRun.RunProperties?.CloneNode(true) as W.RunProperties;
+            // The insertion's formatting template, only read (BuildInsertion writes a renumbered clone of it).
+            var properties = firstRun.RunProperties;
 
             var swallowed = new List<OpenXmlElement>();
             for (OpenXmlElement? cursor = firstRun; cursor != null; cursor = cursor.NextSibling())
@@ -240,7 +256,7 @@ public sealed partial class ProofreadDocxAnnotator
             first = last = deletion;
             if (edit.Suggested.Length > 0)
             {
-                var insertion = BuildInsertion(properties, edit.Suggested, edit.InsertionId, author, stamp);
+                var insertion = BuildInsertion(properties, edit.Suggested, edit.InsertionId, author, stamp, ids);
                 deletion.InsertAfterSelf(insertion);
                 last = insertion;
             }
@@ -255,10 +271,10 @@ public sealed partial class ProofreadDocxAnnotator
     }
 
     private static W.InsertedRun BuildInsertion(
-        W.RunProperties? properties, string value, int id, string author, DateTime stamp)
+        W.RunProperties? properties, string value, int id, string author, DateTime stamp, WordIds ids)
     {
         var run = new W.Run();
-        if (properties != null) run.Append(properties.CloneNode(true));
+        if (properties != null) run.Append(CloneRunProperties(properties, ids));
         run.Append(new W.Text(value) { Space = SpaceProcessingModeValues.Preserve });
         return new W.InsertedRun(run)
         {
@@ -288,11 +304,11 @@ public sealed partial class ProofreadDocxAnnotator
     /// that run. The ORIGINAL node object always stays the leftmost fragment (it keeps <c>[0, from)</c> when
     /// <paramref name="from"/> is past 0), which is what makes right-to-left placement safe.
     /// </summary>
-    private static W.Run Isolate(W.Text node, int from, int to)
+    private static W.Run Isolate(W.Text node, int from, int to, WordIds ids)
     {
-        var run = Detach(node);
-        if (to < node.Text.Length) SplitTextRun(node, to);
-        return from > 0 ? SplitTextRun(node, from) : run;
+        var run = Detach(node, ids);
+        if (to < node.Text.Length) SplitTextRun(node, to, ids);
+        return from > 0 ? SplitTextRun(node, from, ids) : run;
     }
 
     /// <summary>
@@ -300,14 +316,14 @@ public sealed partial class ProofreadDocxAnnotator
     /// same <c>w:rPr</c>), so the run holds only this <c>w:t</c>. Children are MOVED, not cloned, so character
     /// references into them stay valid.
     /// </summary>
-    private static W.Run Detach(W.Text node)
+    private static W.Run Detach(W.Text node, WordIds ids)
     {
         var run = (W.Run)node.Parent!;
         var content = run.ChildElements.Where(c => c is not W.RunProperties).ToList();
         var index = content.IndexOf(node);
         if (index > 0)
         {
-            var left = NewRunLike(run);
+            var left = NewRunLike(run, ids);
             foreach (var child in content.Take(index))
             {
                 child.Remove();
@@ -317,7 +333,7 @@ public sealed partial class ProofreadDocxAnnotator
         }
         if (index < content.Count - 1)
         {
-            var right = NewRunLike(run);
+            var right = NewRunLike(run, ids);
             foreach (var child in content.Skip(index + 1))
             {
                 child.Remove();
@@ -332,22 +348,43 @@ public sealed partial class ProofreadDocxAnnotator
     /// Splits a run that holds only <paramref name="node"/> at <paramref name="offset"/>: the node keeps
     /// <c>[0, offset)</c>, a new run right after it holds the rest. Returns the new run.
     /// </summary>
-    private static W.Run SplitTextRun(W.Text node, int offset)
+    private static W.Run SplitTextRun(W.Text node, int offset, WordIds ids)
     {
         var run = (W.Run)node.Parent!;
         var value = node.Text;
         node.Text = value[..offset];
         node.Space = SpaceProcessingModeValues.Preserve;
-        var right = NewRunLike(run);
+        var right = NewRunLike(run, ids);
         right.Append(new W.Text(value[offset..]) { Space = SpaceProcessingModeValues.Preserve });
         run.InsertAfterSelf(right);
         return right;
     }
 
-    private static W.Run NewRunLike(W.Run template)
+    private static W.Run NewRunLike(W.Run template, WordIds ids)
     {
         var run = new W.Run();
-        if (template.RunProperties != null) run.Append(template.RunProperties.CloneNode(true));
+        if (template.RunProperties != null) run.Append(CloneRunProperties(template.RunProperties, ids));
         return run;
+    }
+
+    /// <summary>
+    /// A deep copy of <paramref name="properties"/> with every <c>w:id</c> inside it RENUMBERED from
+    /// <paramref name="ids"/> (be-c06). A run's <c>w:rPr</c> can hold a tracked formatting change
+    /// (<c>w:rPrChange w:id</c>); a plain clone copied that id into every split fragment and into the insertion,
+    /// and OpenXmlValidator reported "w:id should have unique value". Renumbered rather than stripped: each
+    /// fragment is text the author's formatting change covered, so it keeps the change (Word does the same
+    /// when it splits such a run), and the inserted replacement keeps it too, so rejecting the formatting
+    /// change leaves the replacement formatted like its neighbours. Every <c>w:rPr</c> clone the annotator
+    /// writes goes through here.
+    /// </summary>
+    private static W.RunProperties CloneRunProperties(W.RunProperties properties, WordIds ids)
+    {
+        var clone = (W.RunProperties)properties.CloneNode(true);
+        foreach (var element in clone.Descendants().ToList())
+        {
+            if (element.GetAttributes().Any(a => a.LocalName == "id" && a.NamespaceUri == WordNamespace))
+                element.SetAttribute(new OpenXmlAttribute("w", "id", WordNamespace, ids.Next().ToString()));
+        }
+        return clone;
     }
 }

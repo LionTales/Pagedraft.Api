@@ -16,10 +16,10 @@ namespace Pagedraft.Api.Services.Export;
 /// the 25 code units <c>String.prototype.trim</c> removes, enumerated over the whole BMP on node v22.13.1
 /// (2026-10-12) and pinned by <c>ProofreadWhitespaceTests</c>.</para>
 ///
-/// <para>CAVEAT (measured 2026-10-12): that client filter runs only on suggestions the client diffs itself (no
-/// stored rows). Stored server suggestions reach the chapter view through <c>analysis-panel.component.ts</c>
-/// <c>mapDtoSuggestions</c>, which applies no whitespace filter, so the app may still list rows this export
-/// skips. The export follows the client's stated rule; making the chapter view match is a separate decision.</para>
+/// <para>THE CHAPTER VIEW AGREES. The rule lives once on the client as <c>isWhitespaceOnlySuggestion</c>
+/// (<c>proofread-diff.ts</c>); the diff path, the analysis panel's stored-row mapping
+/// (<c>mapDtoSuggestions</c>) and the history tab all call it, so a row this export skips as whitespace-only is
+/// hidden in the app too.</para>
 /// </summary>
 internal static class ProofreadWhitespace
 {

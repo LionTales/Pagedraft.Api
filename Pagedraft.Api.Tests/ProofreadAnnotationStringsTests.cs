@@ -131,4 +131,55 @@ public class ProofreadAnnotationStringsTests
         Assert.Equal(new string('a', max - 1) + "…", capped);
         Assert.DoesNotContain(capped, char.IsSurrogate);
     }
+
+    // ------------------------------------------------------------------ XML legality (be-c06)
+    // Lone surrogates cannot ride in an attribute argument (metadata strings are UTF-8, they arrive as U+FFFD),
+    // so the cases are code, not InlineData.
+
+    [Fact]
+    public void XmlSafeText_removes_exactly_what_an_xml_part_cannot_carry()
+    {
+        var cases = new (string Input, string Expected)[]
+        {
+            ("a\uFFFFb", "ab"),
+            ("a\uFFFEb", "ab"),
+            ("a\uD800b", "ab"),                          // lone high surrogate
+            ("a\uDC00b", "ab"),                          // lone low surrogate
+            ("a\uD800", "a"),                            // lone high at the end
+            ("\uDE00\uD83Da", "a"),                      // a pair in the wrong order is two lone halves
+            ("\uD83D\uD83D\uDE00", "\U0001F600"),          // the first high is lone, the second is paired
+            ("\u0001\u0008a\u000B\u000C\u001F", "a"),
+            ("tab\tlf\ncr\r", "tab\tlf\ncr\r"),
+            ("\U0001F600 \u200Fמילה\u200F \u0085", "\U0001F600 \u200Fמילה\u200F \u0085"),
+            ("", ""),
+        };
+        foreach (var (input, expected) in cases)
+            Assert.Equal(expected, XmlSafeText.Clean(input));
+    }
+
+    [Fact]
+    public void XmlSafeText_returns_legal_text_and_null_as_they_are()
+    {
+        var legal = "שלום \U0001F600 world";
+        Assert.Same(legal, XmlSafeText.Clean(legal));
+        Assert.Null(XmlSafeText.Clean(null));
+    }
+
+    [Fact]
+    public void An_explanation_loses_its_xml_illegal_characters()
+    {
+        Assert.Equal("bad char", ProofreadAnnotationStrings.SanitizeExplanation("bad \uFFFF char"));
+        Assert.Equal("ab c", ProofreadAnnotationStrings.SanitizeExplanation("a\uD800b c"));
+        Assert.Null(ProofreadAnnotationStrings.SanitizeExplanation("\uFFFF\uDC00"));
+    }
+
+    [Fact]
+    public void A_lone_low_surrogate_at_the_cap_never_reaches_the_comment()
+    {
+        var max = ProofreadAnnotationStrings.MaxExplanationLength;
+        // Before be-c06 the cut kept text[max - 1] = U+DC00 (not a HIGH surrogate, so not stepped over).
+        var capped = ProofreadAnnotationStrings.SanitizeExplanation(new string('a', max - 1) + "\uDC00" + "tail")!;
+        Assert.DoesNotContain(capped, char.IsSurrogate);
+        Assert.Equal(new string('a', max - 1) + "t…", capped);
+    }
 }
