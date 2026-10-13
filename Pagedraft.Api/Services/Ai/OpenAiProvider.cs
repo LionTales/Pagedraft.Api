@@ -38,7 +38,7 @@ public class OpenAiProvider : IAiAnalysisProvider
         client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
         var response = await client.PostAsJsonAsync("https://api.openai.com/v1/chat/completions", payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, "OpenAI"); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var content = json.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";

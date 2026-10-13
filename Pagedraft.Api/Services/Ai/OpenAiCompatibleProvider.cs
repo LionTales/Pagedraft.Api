@@ -80,7 +80,7 @@ public class OpenAiCompatibleProvider : IAiAnalysisProvider
         }
 
         var response = await client.PostAsJsonAsync(endpointUrl, payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, _providerName); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var content = json.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";

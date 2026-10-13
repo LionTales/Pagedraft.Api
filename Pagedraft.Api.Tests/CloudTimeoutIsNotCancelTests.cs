@@ -136,7 +136,14 @@ public class CloudTimeoutIsNotCancelTests
     {
         new object[] { new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing."), true },
         new object[] { new HttpRequestException("bad gateway", null, HttpStatusCode.BadGateway), true },
-        new object[] { new HttpRequestException("busy", null, HttpStatusCode.TooManyRequests), true },
+        // be-c03: a 429 is retried only when the provider said how long to wait, and that wait is within the cap.
+        new object[] { new HttpRequestException("busy", null, HttpStatusCode.TooManyRequests), false },
+        new object[] { new ModelRateLimitedException("busy", null), false },
+        new object[] { new ModelRateLimitedException("busy", TimeSpan.FromSeconds(2)), true },
+        new object[] { new ModelRateLimitedException("busy", ModelCallRetry.MaxRateLimitWait), true },
+        new object[] { new ModelRateLimitedException("busy", ModelCallRetry.MaxRateLimitWait + TimeSpan.FromSeconds(1)), false },
+        // be-c03: a LOCAL (Ollama) timeout is never retried; a bare cloud timeout (first case) still is.
+        new object[] { new LocalModelTimeoutException(new TaskCanceledException("HttpClient.Timeout of 1800 seconds elapsing.")), false },
         new object[] { new HttpRequestException("timeout", null, HttpStatusCode.RequestTimeout), true },
         new object[] { new HttpRequestException(HttpRequestError.ConnectionError, "refused"), true },
         new object[] { new IOException("connection reset"), true },
@@ -346,6 +353,35 @@ public class CloudTimeoutIsNotCancelTests
         Assert.All(outcomes.Where(o => o != failed), o => Assert.Equal("Succeeded", o.Outcome));
         // The slow chunk kept its source text, so the merged result is the source (the fake echoes the rest).
         Assert.Contains(SlowMarker, result.ResultText);
+    }
+
+    [Fact]
+    public async Task ProofreadChunk_LocalModelTimeout_IsNotRetried_AndTheChunkFallsBack()
+    {
+        // be-c03: a wedged local runner. One call for the slow chunk, never a second 30-minute wait.
+        await using var db = NewDb();
+        var slowCalls = 0;
+        var router = new Mock<IAiRouter>();
+        router.Setup(r => r.CompleteAsync(It.IsAny<AiRequest>(), It.IsAny<CancellationToken>()))
+            .Returns((AiRequest req, CancellationToken _) =>
+            {
+                var text = Unwrap(req.InputText ?? "", "[TEXT_TO_CORRECT]", "[/TEXT_TO_CORRECT]");
+                if (text.Contains(SlowMarker))
+                {
+                    Interlocked.Increment(ref slowCalls);
+                    throw new LocalModelTimeoutException(new TaskCanceledException(
+                        "The request was canceled due to the configured HttpClient.Timeout of 1800 seconds elapsing."));
+                }
+                return Task.FromResult(Ok(text));
+            });
+
+        var result = await InvokeChunked(Service(db, router.Object), "RunProofreadChunkedAsync", AnalysisType.Proofread, ThreeParagraphs(), CancellationToken.None);
+
+        Assert.Equal(1, slowCalls);
+        var (log, outcomes) = await RunLogOf(db, result);
+        Assert.Equal(1, log.FallbackChunks);
+        var failed = Assert.Single(outcomes, o => o.Outcome == "FallbackError");
+        Assert.StartsWith("Local model (Ollama) timed out", failed.Note); // no "retried once" prefix
     }
 
     [Fact]

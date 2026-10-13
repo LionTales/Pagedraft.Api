@@ -197,9 +197,9 @@ builder.Services.AddScoped<IEmbeddingStore, StubEmbeddingStore>();
 builder.Services.AddHttpClient("Ollama", (sp, client) =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
-    var timeoutMinutes = config.GetValue<int?>("Ai:Providers:Ollama:TimeoutMinutes") ?? 30;
-    if (timeoutMinutes <= 0) timeoutMinutes = 30;
-    client.Timeout = TimeSpan.FromMinutes(timeoutMinutes);
+    client.Timeout = Pagedraft.Api.Services.Ai.ProviderTimeoutResolver.ResolveAndLog(
+        config, "Ai:Providers:Ollama:TimeoutMinutes", TimeSpan.FromMinutes(1), 30,
+        sp.GetService<ILoggerFactory>()?.CreateLogger("ProviderTimeout"));
 });
 // The cloud providers' named clients, same idiom: "Ai:Providers:{provider}:TimeoutSeconds" (default 300).
 // Before c19 they sent through the unnamed client and inherited .NET's 100 s default, which a thinking-tier

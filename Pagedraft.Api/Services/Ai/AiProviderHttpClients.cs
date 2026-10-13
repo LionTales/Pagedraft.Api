@@ -34,22 +34,11 @@ public static class AiProviderHttpClients
 
     /// <summary>
     /// The configured ceiling for <paramref name="providerName"/>: <c>Ai:Providers:{provider}:TimeoutSeconds</c>,
-    /// or <see cref="DefaultCloudTimeoutSeconds"/> when it is absent, unparsable or not positive.
+    /// or <see cref="DefaultCloudTimeoutSeconds"/> when it is unparsable or not positive (see <see cref="ProviderTimeoutResolver"/> for the shared policy and clamp).
     /// </summary>
-    public static TimeSpan ResolveTimeout(IConfiguration config, string providerName)
-    {
-        int? seconds = null;
-        try
-        {
-            seconds = config.GetValue<int?>($"Ai:Providers:{providerName}:TimeoutSeconds");
-        }
-        catch (InvalidOperationException)
-        {
-            // A non-numeric value: fall back to the default rather than failing every request of this provider.
-        }
-
-        return TimeSpan.FromSeconds(seconds is > 0 ? seconds.Value : DefaultCloudTimeoutSeconds);
-    }
+    public static TimeSpan ResolveTimeout(IConfiguration config, string providerName, ILogger? logger = null)
+        => ProviderTimeoutResolver.ResolveAndLog(
+            config, $"Ai:Providers:{providerName}:TimeoutSeconds", TimeSpan.FromSeconds(1), DefaultCloudTimeoutSeconds, logger);
 
     /// <summary>Registers one named client per <see cref="CloudProviderNames"/> entry with its configured timeout.</summary>
     public static IServiceCollection AddCloudAiProviderHttpClients(this IServiceCollection services)
@@ -58,7 +47,8 @@ public static class AiProviderHttpClients
         {
             var name = providerName; // captured per iteration
             services.AddHttpClient(ClientName(name), (sp, client) =>
-                client.Timeout = ResolveTimeout(sp.GetRequiredService<IConfiguration>(), name));
+                client.Timeout = ResolveTimeout(sp.GetRequiredService<IConfiguration>(), name,
+                sp.GetService<ILoggerFactory>()?.CreateLogger("ProviderTimeout")));
         }
 
         return services;

@@ -39,7 +39,7 @@ public class AnthropicProvider : IAiAnalysisProvider
         client.DefaultRequestHeaders.Add("anthropic-version", "2023-06-01");
 
         var response = await client.PostAsJsonAsync("https://api.anthropic.com/v1/messages", payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, "Anthropic"); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var contentEl = json.GetProperty("content");

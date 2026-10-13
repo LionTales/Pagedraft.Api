@@ -52,7 +52,7 @@ public class AzureOpenAiProvider : IAiAnalysisProvider
 
         var url = baseUrl + "/chat/completions?api-version=2024-02-15-preview";
         var response = await client.PostAsJsonAsync(url, payload, cancellationToken).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        ProviderResponse.EnsureSuccess(response, "Azure"); // be-c03: a 429 keeps its Retry-After
 
         var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken).ConfigureAwait(false);
         var content = json.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
