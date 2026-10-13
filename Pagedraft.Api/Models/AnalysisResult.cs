@@ -41,7 +41,10 @@ public class AnalysisResult
 
     /// <summary>
     /// True when a Proofread result must NOT be trusted as a clean pass: the model returned empty/blank
-    /// output, or content unrelated to the input (so it was discarded and the input echoed back). Distinct
+    /// output, or content unrelated to the input (so it was discarded and the input echoed back), the
+    /// output dropped content the input held, or, on the chunked path, ANY chunk fell back to its original
+    /// text (a failed or timed-out call, empty, unrelated or repeating output; be-c01,
+    /// <c>UnifiedAnalysisService.ChunkedProofreadIsUnreliable</c>). Distinct
     /// from <see cref="ProofreadNoChangesHint"/>, which is true for a genuinely-clean no-change result too.
     /// Now PERSISTED (mapped column, default false) so the History tab reflects whether a reloaded run was
     /// unreliable, consistent with the live run.

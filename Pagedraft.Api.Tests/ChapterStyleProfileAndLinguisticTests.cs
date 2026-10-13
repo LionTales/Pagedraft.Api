@@ -230,6 +230,50 @@ public class ChapterStyleProfileAndLinguisticTests
         Assert.Equal(1, count);
     }
 
+    // ─── 1c. JSON-mode reply with an array INSIDE a string: baseline still builds (be-c08) ─────
+    // The baseline build sends JsonMode like the user-facing LinguisticAnalysis run, so it shares that path's
+    // exposure to `"deviations":"[...]"` (measured on LineEdit, 2 of 6 cloud replies, 2026-09-10). Without the
+    // shared StringifiedArrayFields repair the typed deserialize throws and the profile is never built.
+
+    [Fact]
+    public async Task LoadOrBuildChapterStyleProfileAsync_StringifiedArrayField_StillBuildsProfile()
+    {
+        const string llmResponse = """
+            {
+              "syntaxMetrics": { "sentenceCount": 8, "averageSentenceLength": 15.0 },
+              "morphologyMetrics": { "wordCount": 120, "uniqueWords": 90, "averageWordLength": 4.5, "lexicalDensity": 0.75 },
+              "styleMetrics": { "formality": "literary", "readability": 0.8, "voiceBalance": "active" },
+              "grammaticalityScore": 0.95,
+              "summary": "ניתוח תקין.",
+              "deviations": "[{\"metric\":\"sentenceLength\",\"sceneValue\":22,\"chapterBaseline\":14,\"note\":\"x\"}]",
+              "consistencyIssues": []
+            }
+            """;
+
+        using var provider = BuildServiceProvider(out _, llmResponse: llmResponse);
+        var db = provider.GetRequiredService<AppDbContext>();
+
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        db.Books.Add(new Book { Id = bookId, Title = "Stringified Book" });
+        db.Chapters.Add(new Chapter
+        {
+            Id = chapterId,
+            BookId = bookId,
+            Title = "Chapter",
+            ContentText = "זהו פרק עם תוכן מספיק לניתוח לשוני."
+        });
+        await db.SaveChangesAsync();
+
+        var result = await provider.GetRequiredService<IAnalysisContextService>()
+            .LoadOrBuildChapterStyleProfileAsync(bookId, chapterId, "he");
+
+        Assert.NotNull(result);
+        var parsed = JsonSerializer.Deserialize<LinguisticAnalysisResult>(result!.MetricsJson, DeserializeOpts);
+        Assert.NotNull(parsed);
+        Assert.Equal(0.95, parsed!.GrammaticalityScore, precision: 5);
+    }
+
     // ─── 2. Graceful degradation: missing chapter → null, no throw, no row ──────────────────
 
     [Fact]

@@ -619,6 +619,10 @@ public class AnalysisContextService : IAnalysisContextService
         if (string.IsNullOrWhiteSpace(json))
             return null;
 
+        // Same JSON-mode request as the user-facing path, so the same stringified-array repair (be-c08):
+        // a `"deviations":"[...]"` reply would otherwise throw here and leave the baseline unbuilt.
+        json = StringifiedArrayFields.Unwrap<LinguisticAnalysisResult>(json, _logger);
+
         try
         {
             var metrics = JsonSerializer.Deserialize<LinguisticAnalysisResult>(json, JsonOpts);

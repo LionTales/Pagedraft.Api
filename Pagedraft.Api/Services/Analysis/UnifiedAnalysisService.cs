@@ -254,11 +254,15 @@ public class UnifiedAnalysisService
         string inputText,
         string outputText,
         long durationMs,
-        bool noChangesHint)
+        bool noChangesHint,
+        AnalysisChunkOutcome? runNote = null)
     {
         var outcomesList = chunkOutcomes
             .OrderBy(c => c.ChunkIndex)
             .ToList();
+        // A run-level note (ChunkIndex -1, e.g. the merge fail-safe) rides in the same JSON, first, and is
+        // excluded from the chunk counts below: it is not a chunk.
+        var details = runNote is null ? outcomesList : outcomesList.Prepend(runNote).ToList();
 
         var runLog = new AnalysisRunLog
         {
@@ -274,7 +278,7 @@ public class UnifiedAnalysisService
             Language = language,
             TotalChunks = totalChunks,
             SucceededChunks = outcomesList.Count(c => c.Outcome == "Succeeded"),
-            FallbackChunks = outcomesList.Count(c => c.Outcome != "Succeeded"),
+            FallbackChunks = CountFallbackChunks(outcomesList),
             InputWordCount = WordCount(inputText),
             InputCharCount = inputText.Length,
             OutputCharCount = outputText.Length,
@@ -282,12 +286,81 @@ public class UnifiedAnalysisService
             SuppressedSuggestionCount = result.SuppressedImpossibleSuggestionCount,
             TotalDurationMs = durationMs,
             NoChangesHint = noChangesHint,
-            ChunkDetailsJson = JsonSerializer.Serialize(outcomesList, JsonOpts),
+            ChunkDetailsJson = JsonSerializer.Serialize(details, JsonOpts),
             CreatedAt = DateTimeOffset.UtcNow
         };
 
         _db.AnalysisRunLogs.Add(runLog);
     }
+
+    /// <summary>The <see cref="AnalysisChunkOutcome.ChunkIndex"/> of a run-level note in <c>ChunkDetailsJson</c>: not a chunk.</summary>
+    internal const int RunNoteChunkIndex = -1;
+
+    /// <summary>The outcome of the run-level note written when <see cref="ProofreadChunkMerge"/> used its fail-safe.</summary>
+    internal const string MergeFallbackOutcome = "MergeFallback";
+
+    /// <summary>
+    /// The number of chunks whose model output was NOT used (every outcome but <c>Succeeded</c>: FallbackError,
+    /// FallbackEmpty, FallbackUnrelated, FallbackRepetition), run-level notes excluded. ONE definition, read by
+    /// both <see cref="AnalysisRunLog.FallbackChunks"/> and the chunked-Proofread reliability rule
+    /// (<see cref="ChunkedProofreadIsUnreliable"/>), so the run log and the flag cannot disagree.
+    /// </summary>
+    internal static int CountFallbackChunks(IEnumerable<AnalysisChunkOutcome> chunkOutcomes)
+        => chunkOutcomes.Count(c => c.ChunkIndex != RunNoteChunkIndex && c.Outcome != "Succeeded");
+
+    /// <summary>
+    /// THE chunked-Proofread reliability rule (be-c01): a chunked Proofread result is UNRELIABLE when ANY chunk
+    /// fell back (<see cref="CountFallbackChunks"/> &gt; 0) or the merged output dropped a span of the input
+    /// (<see cref="ProofreadDroppedContent"/>).
+    ///
+    /// <para>WHY ANY CHUNK. A fallback chunk keeps its SOURCE text, so the merged result reads as "the model found
+    /// nothing to fix there" when the model never read it. Since c19 every chunk whose model call FAILS is such a
+    /// chunk: a cloud timeout, 5xx or transport error after <see cref="ModelCallRetry"/>'s one retry, and a LOCAL
+    /// timeout or an Ollama 500 after its ONE attempt (never retried, be-c03). So a provider that is down or slow on
+    /// every chunk persisted ResultText == source, 0 suggestions, Succeeded and not flagged: the whole-book run
+    /// counted the chapter proofread, <c>Plan</c> counted it fresh, the retry-failed record never listed it, and the
+    /// export did not skip it. A flagged result reaches every one of those consumers through the flag they already
+    /// read. It does NOT undo the supersede: <c>ArchivePreviousActiveAsync</c> still archives the previous Active
+    /// result and marks its pending suggestions Superseded before this result is saved, and they stay Superseded
+    /// (recorded open gap; the chapter is visibly failed and retryable, but the old suggestions are not restored).</para>
+    ///
+    /// <para>WHY NOT A FRACTION. Measured on the dev DB (2026-10-13, every chunked Proofread run log): 179 runs,
+    /// 1,284 chunks, 15 fallback chunks in 5 runs. All 5 were real failures (a repetition loop 89% longer than its
+    /// input, two unrelated outputs at word similarity 0.00, an Ollama 500 run with 5 of 7 chunks lost, one with 7
+    /// of 7 lost and persisted reliable), so "any" flags 5 of 179 (2.8%) with no false positive seen, and any
+    /// threshold above one chunk would have passed the three runs that lost exactly one chunk (1 of 8, 1 of 3,
+    /// 1 of 2). A chapter that is only partly proofread is not proofread: the author is told so and can retry it.</para>
+    ///
+    /// <para>NOT a fallback: a whitespace-only chunk (Succeeded, nothing to proofread), and the merge fail-safe
+    /// (<see cref="MergeFallbackOutcome"/>): it keeps every chunk's output and only re-joins them, so it is
+    /// recorded as a run-log note, not as unreliability.</para>
+    /// </summary>
+    internal static bool ChunkedProofreadIsUnreliable(int fallbackChunks, bool droppedContent)
+        => fallbackChunks > 0 || droppedContent;
+
+    /// <summary>
+    /// The run-level note recorded in <see cref="AnalysisRunLog.ChunkDetailsJson"/> when
+    /// <see cref="ProofreadChunkMerge"/> fell back to joining the chunk outputs with their separators (be-c01);
+    /// null when the merge aligned to the source. Before this the fail-safe only logged a Warning to stdout, so a
+    /// run log could not tell a merged-by-replay result from a merged-by-join one.
+    /// </summary>
+    internal static AnalysisChunkOutcome? MergeFailSafeNote(bool alignedToSource, int chunkCount)
+        => alignedToSource
+            ? null
+            : new AnalysisChunkOutcome
+            {
+                ChunkIndex = RunNoteChunkIndex,
+                Outcome = MergeFallbackOutcome,
+                Note = $"merge fail-safe: the {chunkCount} chunks do not align with the source text; the chunk outputs were joined with their separators, so trimmed edge whitespace may surface as whitespace-only suggestions"
+            };
+
+    /// <summary>
+    /// TEST-ONLY seam (be-c01): replaces <see cref="ProofreadChunkMerge.Merge"/>'s result in
+    /// <see cref="RunProofreadChunkedAsync"/>. The fail-safe is unreachable from the real chunker (its chunks are
+    /// always the source's characters), so this is the only way a test can drive the fail-safe's run-log note
+    /// through the runner. Null in production; nothing outside the test assembly sets it.
+    /// </summary>
+    internal Func<ProofreadChunkMerge.Result, ProofreadChunkMerge.Result>? ProofreadMergeResultForTest { get; set; }
 
     /// <summary>
     /// PERSIST, THEN SIGNAL — the read-after-write contract for every async-job seam, as ONE call so it
@@ -458,7 +531,25 @@ public class UnifiedAnalysisService
             _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Running, $"Running {analysisType}…");
 
         var llmSw = Stopwatch.StartNew();
-        var response = await _router.CompleteAsync(request, ct);
+        // be-c03, scoped by final-r02: ONLY Proofread and LineEdit are WRAPPED by ModelCallRetry, the same policy as
+        // one chunk of their chunked loops, so a chapter short enough to run single-shot and a long one that chunks
+        // meet a cloud timeout, a 5xx or a 429 the same way (one retry where the policy allows it; a local timeout or
+        // an Ollama 500 never retried). A failure that survives the retry still throws here and fails the job, as
+        // before. The retry touches the job first so a second full timeout cannot outlive the tracker's 30-minute
+        // expiry. Every OTHER type (Linguistic, Literary, Summarization, Custom, chapter QA, the book-level types)
+        // calls the router directly, as before be-c03: none of them chunks, so there is no chunk policy to match, and
+        // on sync /analyze an author is waiting (the reason Q&A and Explain stay unwrapped), where one retry would
+        // double a 300 s cloud timeout.
+        var response = analysisType is AnalysisType.Proofread or AnalysisType.LineEdit
+            ? await ModelCallRetry.CompleteWithOneRetryAsync(
+                _router, request, _logger, analysisType.ToString(), 1, 1,
+                _ =>
+                {
+                    if (jobId.HasValue)
+                        _progress.SetStatus(jobId.Value, AnalysisProgressStatus.Running);
+                },
+                ct)
+            : await _router.CompleteAsync(request, ct);
         llmSw.Stop();
 
         if (analysisType == AnalysisType.Proofread && _logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug))
@@ -628,6 +719,9 @@ public class UnifiedAnalysisService
 
         _logger.LogInformation("Running {Scope}/{Type} with provided input", scope, analysisType);
         var llmSw = Stopwatch.StartNew();
+        // be-c03: NOT wrapped by ModelCallRetry. Its one caller is Book-scope Q&A (BookIntelligenceService.AskAsync),
+        // an author waiting on a question with no chunked twin, so there is no short/long inconsistency to remove,
+        // and a retry would double the wait behind the spinner; the author re-asks instead.
         var response = await _router.CompleteAsync(request, ct);
         llmSw.Stop();
 
@@ -803,6 +897,8 @@ public class UnifiedAnalysisService
 
         var sb = new StringBuilder();
         var streamSw = new Stopwatch();
+        // be-c03: NOT wrapped by ModelCallRetry: tokens are yielded to the client as they arrive, so a failure after
+        // the first token cannot be re-sent without duplicating text the author already saw.
         await using (var streamEnumerator = _router.StreamCompleteAsync(request, ct).GetAsyncEnumerator(ct))
         {
             while (true)
@@ -1009,6 +1105,12 @@ public class UnifiedAnalysisService
             JsonMode = analysisType is AnalysisType.LineEdit or AnalysisType.LinguisticAnalysis
         };
 
+        // be-c03: NOT wrapped by ModelCallRetry (this is also RunRawAsync's model call). The callers are
+        // BookIntelligenceService's summarization and book-profile builds, never Proofread / LineEdit, so no
+        // chunked twin exists to be consistent with; they own their failure semantics (a failed summarize call
+        // aborts its window while windows already committed stay committed and are skipped as fresh next time;
+        // the profile's four calls run in parallel, so a retry there would re-send four calls into one 429).
+        // Changing that is outside this policy's scope.
         var response = await _router.CompleteAsync(request, ct);
         var sanitized = SanitizeResponse(response.Content);
 
@@ -1936,9 +2038,16 @@ public class UnifiedAnalysisService
                     JsonMode = true
                 };
 
+                // be-c03: the retry re-marks the chunk started, which touches the job, so a retried cloud timeout
+                // cannot run the child past the tracker's expiry with no update in between.
                 var response = await ModelCallRetry.CompleteWithOneRetryAsync(
                     _router, request, _logger, "LineEdit", chunkNumber, chunks.Count,
-                    ex => retryNote = $"retried once after {ModelCallRetry.Describe(ex)}", ct);
+                    ex =>
+                    {
+                        retryNote = $"retried once after {ModelCallRetry.Describe(ex)}";
+                        _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+                    },
+                    ct);
                 var raw = response.Content ?? string.Empty;
                 _logger.LogDebug(
                     "LineEdit chunk {Index}/{Total} raw response: length={Len}, preview={Preview}",
@@ -2006,7 +2115,8 @@ public class UnifiedAnalysisService
             {
                 // ONLY the caller's cancellation aborts the run (c19). An HttpClient timeout is also an
                 // OperationCanceledException, but with OUR token live it is a failed call: it falls through to the
-                // fail-safe below (after ModelCallRetry's one retry) so this chunk degrades, not the whole chapter.
+                // fail-safe below so this chunk degrades, not the whole chapter (a cloud timeout after
+                // ModelCallRetry's one retry; a LOCAL timeout after its one attempt, never retried since be-c03).
                 throw;
             }
             catch (Exception ex)
@@ -2082,6 +2192,11 @@ public class UnifiedAnalysisService
 
         AttachSuggestions(result, inputText, AnalysisType.LineEdit, mergedJson, cleanContent, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false);
 
+        // be-c01 decision: NO LineEdit twin of ChunkedProofreadIsUnreliable, and no new persisted field. A fallback
+        // LineEdit chunk contributes no suggestions, but LineEdit is a discretionary suggestion list: no
+        // whole-book run, freshness plan, retry-failed record or export skip reads a LineEdit result as "done",
+        // so there is no consumer a flag would correct. The lost chunks stay visible in the run log
+        // (FallbackChunks + ChunkDetailsJson). Add a flag the day such a consumer exists.
         _db.AnalysisResults.Add(result);
 
         PersistChunkedRunLog(
@@ -2234,9 +2349,15 @@ public class UnifiedAnalysisService
                     SourceId = targetId.ToString(),
                     Tier = tier
                 };
+                // be-c03: the retry re-marks the chunk started, which touches the job (see the LineEdit loop).
                 var response = await ModelCallRetry.CompleteWithOneRetryAsync(
                     _router, request, _logger, "Proofread", chunkNumber, chunks.Count,
-                    ex => retryNote = $"retried once after {ModelCallRetry.Describe(ex)}", ct);
+                    ex =>
+                    {
+                        retryNote = $"retried once after {ModelCallRetry.Describe(ex)}";
+                        _progress.ChunkStarted(jobId, chunkNumber, chunks.Count);
+                    },
+                    ct);
                 var raw = response.Content ?? "";
                 var clean = SanitizeResponse(raw);
                 if (string.IsNullOrWhiteSpace(clean) && !string.IsNullOrEmpty(raw))
@@ -2303,8 +2424,10 @@ public class UnifiedAnalysisService
             {
                 // ONLY the caller's cancellation aborts the run (c19). Before this filter an HttpClient TIMEOUT
                 // (TaskCanceledException, our token live) was rethrown here and killed the whole chapter: 10 of 55
-                // chapters of one whole-book run. Now it reaches the fail-safe below after ModelCallRetry's one
-                // retry, and this chunk keeps its original text (FallbackError) while the chapter completes.
+                // chapters of one whole-book run. Now it reaches the fail-safe below (a cloud timeout after
+                // ModelCallRetry's one retry; a LOCAL timeout after its one attempt, never retried since be-c03) and
+                // this chunk keeps its original text (FallbackError): the chapter completes, but since be-c01 its
+                // result is flagged unreliable (ChunkedProofreadIsUnreliable), so it is a failed, retryable chapter.
                 throw;
             }
             catch (Exception ex)
@@ -2340,6 +2463,10 @@ public class UnifiedAnalysisService
             chunks.Select(c => c.Text).ToList(),
             chunks.Select(c => c.SeparatorAfter).ToList(),
             corrected);
+        if (ProofreadMergeResultForTest is { } overrideMerge)
+            merge = overrideMerge(merge);
+        // be-c01: the fail-safe is ALSO recorded in the run log (a structured ChunkIndex -1 note), not only logged.
+        var mergeNote = MergeFailSafeNote(merge.AlignedToSource, chunks.Count);
         if (!merge.AlignedToSource)
             _logger.LogWarning(
                 "Proofread merge: chunks do not align with the source text ({ChunkCount} chunks); fell back to joining the chunk outputs with their separators, so trimmed edge whitespace may surface as whitespace-only suggestions.",
@@ -2373,24 +2500,23 @@ public class UnifiedAnalysisService
             // (visibleModelName in visible-model-name.ts); a rename here must be mirrored FE-side.
             ModelName = "chunked",
             ProofreadNoChangesHint = noChangesHint,
-            // ProofreadResultUnreliable is set below, AFTER AttachSuggestions populates result.Suggestions,
-            // from the only meaningful merged-level failure signal: dropped content. It is deliberately NOT
+            // ProofreadResultUnreliable is set below, AFTER AttachSuggestions populates result.Suggestions, by
+            // ChunkedProofreadIsUnreliable (any fallback chunk, or dropped content). It is deliberately NOT
             // driven by noChangesHint - a nearly-identical merged output is the EXPECTED shape of a genuinely
-            // clean long chapter, not a failure. (Per-chunk unrelated/empty chunks already fall back to the
-            // original chunk text, so they never surface as a merged-level anomaly; a repetition loop yields
-            // LONGER/garbled output, which is not nearly-identical, so noChangesHint would not catch it anyway.)
+            // clean long chapter, not a failure.
             JobId = jobId,
             SourceTextSnapshot = TextNormalization.NormalizeTextForAnalysis(inputText)
         };
 
         AttachSuggestions(result, inputText, AnalysisType.Proofread, structuredJson: null, cleanContent: mergedResultText, isStreaming: false, isRunWithInput: false, applyProofreadHeuristics: false, language: language);
 
-        // Chunked-path unreliable signal: the model DROPPED a span of the input (an omission). Suggestions
-        // are now populated (AttachSuggestions ran), so the merged input/output/suggestions are all in scope.
-        // A nearly-identical / clean merged output is NOT unreliable (it is the normal shape of a clean long
-        // chapter); only dropped content is. Empty/unrelated chunks already fell back to original text per
-        // chunk, so the meaningful merged-level failure is dropped content.
-        result.ProofreadResultUnreliable = ProofreadDroppedContent(inputText, mergedResultText, result.Suggestions);
+        // Chunked-path unreliable signal (be-c01, see ChunkedProofreadIsUnreliable for the rule and its data):
+        // ANY chunk that fell back to its source text (error/timeout, empty, unrelated, repetition), or a merged
+        // output that DROPPED a span of the input. Suggestions are populated (AttachSuggestions ran), so the
+        // dropped-content check sees them. A nearly-identical / clean merged output is NOT unreliable.
+        result.ProofreadResultUnreliable = ChunkedProofreadIsUnreliable(
+            CountFallbackChunks(chunkOutcomes),
+            ProofreadDroppedContent(inputText, mergedResultText, result.Suggestions));
 
         _db.AnalysisResults.Add(result);
 
@@ -2408,7 +2534,8 @@ public class UnifiedAnalysisService
             inputText: inputText,
             outputText: mergedResultText,
             durationMs: overallSw.ElapsedMilliseconds,
-            noChangesHint: result.ProofreadNoChangesHint);
+            noChangesHint: result.ProofreadNoChangesHint,
+            runNote: mergeNote);
 
         // Persist, THEN signal Succeeded — the FE GETs analysis-jobs/{jobId} the moment it sees Succeeded, so
         // the row has to be committed first. See PersistThenMarkJobSucceededAsync.
@@ -2520,6 +2647,8 @@ public class UnifiedAnalysisService
 
             var json = ExtractJsonByBraceMatching(stripped);
             if (json == null) return null;
+
+            json = StringifiedArrayFields.Unwrap<LineEditResult>(json, _logger);
 
             var parsed = JsonSerializer.Deserialize<LineEditResult>(json, JsonOpts);
             if (parsed == null) return null;
@@ -2642,6 +2771,9 @@ public class UnifiedAnalysisService
             // KEY NAMES only, never values/enum values; fail-safe (bad input -> unchanged). See
             // p4-key-tolerance in analysis-output-repair-2026-07-03.plan.md.
             json = RepairNearMissKeys<T>(json, logger);
+
+            // An expected array delivered as a STRING holding the array (JSON-mode replies, be-c08).
+            json = StringifiedArrayFields.Unwrap<T>(json, logger);
 
             var parsed = JsonSerializer.Deserialize<T>(json, JsonOpts);
             if (parsed == null) return null;
@@ -2866,6 +2998,9 @@ public class UnifiedAnalysisService
             }
 
             preview = TruncateForAudit(json, 200);
+
+            // `{"suggestions":"[...]"}`: 2 of 6 JSON-mode replies in the 2026-09-10 spot-check (be-c08).
+            json = StringifiedArrayFields.Unwrap<T>(json, _logger);
 
             var parsed = JsonSerializer.Deserialize<T>(json, JsonOpts);
             if (parsed == null)
@@ -3931,6 +4066,10 @@ public class UnifiedAnalysisService
             SourceId = suggestion.Id.ToString()
         };
 
+        // be-c03: NOT wrapped by ModelCallRetry. This is the interactive "Why?" on ONE suggestion (AnalysisController,
+        // the request's own token), the same call whatever the chapter's length, so there is no short/long split to
+        // reconcile; a retry would double the wait in front of the author, who can simply ask again. Nothing is
+        // cached on failure, so asking again re-runs it.
         var response = await _router.CompleteAsync(request, ct);
         var explanation = (response.Content ?? string.Empty).Trim();
         if (string.IsNullOrEmpty(explanation))
