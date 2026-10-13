@@ -12,6 +12,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Pagedraft.Api.Services;
 using Pagedraft.Api.Services.Ai;
 using Pagedraft.Api.Services.Ai.Contracts;
 using Xunit;
@@ -39,17 +40,18 @@ namespace Pagedraft.Api.Tests.LanguageEngine;
 ///
 /// PURPOSE: the cloud model (default google/gemma-4-31b-it, a ~31B model that does NOT fit the 8 GB dev
 /// GPU) is a PROXY for the bigger models we could host on a future GPU server for customers — i.e. it
-/// measures the LineEdit quality ceiling beyond what the local 8 GB laptop can run. Compare its output
-/// against the recorded local Dicta-3.0 baseline (minimal, voice-preserving) from the prior rubric
-/// spot-check, or re-run this test with PROVIDER=Ollama / MODEL=&lt;dicta&gt; for a live side-by-side.
+/// measures the LineEdit quality ceiling beyond what the local 8 GB laptop can run. The LOCAL baseline is
+/// the shipped LineEdit model, <see cref="LocalBaselineModel"/> (pinned to <c>Ai:FeatureModels:LineEdit</c>
+/// by HarnessConfigParityTests); re-run with PROVIDER=Ollama for a live side-by-side. History: LineEdit ran
+/// on DictaLM-3.0 until 2026-10-13, and the 2026-09-10 owner verdicts on that model were 0 kept of 8.
 ///
 /// GATING — SKIP-BY-DEFAULT (CI stays green): the default provider is OpenRouter, which needs an API key
 /// (env AI_OPENROUTER_APIKEY); if absent the test writes a message and returns. With PROVIDER=Ollama it
 /// gates on Ollama reachability instead. Mirrors ProofreadQualityTests / LinguisticQualityTests gating.
 ///
 /// Run cloud (default):  dotnet test --filter "FullyQualifiedName~LineEditCloudSpotCheck"
-/// Run local Dicta:      set LINEEDIT_SPOTCHECK_PROVIDER=Ollama and
-///                       LINEEDIT_SPOTCHECK_MODEL=hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest
+/// Run local baseline:   set LINEEDIT_SPOTCHECK_PROVIDER=Ollama (the model defaults to
+///                       <see cref="LocalBaselineModel"/>; LINEEDIT_SPOTCHECK_MODEL overrides it)
 /// </summary>
 public class LineEditCloudSpotCheckTests
 {
@@ -65,11 +67,20 @@ public class LineEditCloudSpotCheckTests
 
     // Env knobs (no recompile). Defaults run the cloud big-model proxy on three short clean Hebrew passages.
     private const string ProviderEnvVar = "LINEEDIT_SPOTCHECK_PROVIDER"; // default OpenRouter
-    private const string ModelEnvVar = "LINEEDIT_SPOTCHECK_MODEL";       // default google/gemma-4-31b-it
+    private const string ModelEnvVar = "LINEEDIT_SPOTCHECK_MODEL";       // default: DefaultModel (cloud) or LocalBaselineModel (Ollama)
     private const string CaseIdsEnvVar = "LINEEDIT_SPOTCHECK_CASE_IDS";  // default clean-he-01,clean-he-02,clean-he-03
+    // Path to a UTF-8 text file run as ONE passage instead of the gold ids (an author's own manuscript
+    // excerpt stays on disk and never enters the repo). Normalized with NormalizeTextForStorage, the same
+    // transform Chapter.ContentText gets, so the model sees what production would read from the DB.
+    private const string InputFileEnvVar = "LINEEDIT_SPOTCHECK_INPUT_FILE";
 
     private const string DefaultProvider = "OpenRouter";
     private const string DefaultModel = "google/gemma-4-31b-it";
+
+    /// <summary>The LOCAL LineEdit baseline this harness runs under PROVIDER=Ollama: the shipped
+    /// <c>Ai:FeatureModels:LineEdit:Model</c>. The harness cannot read appsettings at run time, so this restates
+    /// it; HarnessConfigParityTests pins the two equal (be-c08).</summary>
+    internal const string LocalBaselineModel = "gemma4:12b";
     // Short, clean literary Hebrew passages reused from linguistic-gold.json (narration, narration,
     // dialogue) — clean text is the sharpest overreach test for a line editor.
     private static readonly string[] DefaultCaseIds = { "clean-he-01", "clean-he-02", "clean-he-03" };
@@ -85,7 +96,9 @@ public class LineEditCloudSpotCheckTests
     public async Task LineEditCloudSpotCheck_RunShortHebrewPassages_PrintForRubricReview()
     {
         var provider = Environment.GetEnvironmentVariable(ProviderEnvVar) is { Length: > 0 } p ? p.Trim() : DefaultProvider;
-        var model = Environment.GetEnvironmentVariable(ModelEnvVar) is { Length: > 0 } m ? m.Trim() : DefaultModel;
+        var model = Environment.GetEnvironmentVariable(ModelEnvVar) is { Length: > 0 } m
+            ? m.Trim()
+            : provider.Equals("Ollama", StringComparison.OrdinalIgnoreCase) ? LocalBaselineModel : DefaultModel;
 
         // Skip-gate by provider (CI stays green when the model is unreachable).
         if (provider.Equals("OpenRouter", StringComparison.OrdinalIgnoreCase))
@@ -111,14 +124,34 @@ public class LineEditCloudSpotCheckTests
             return;
         }
 
-        var wantedIds = Environment.GetEnvironmentVariable(CaseIdsEnvVar) is { Length: > 0 } raw
-            ? raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            : DefaultCaseIds;
-        var passages = LoadPassages(wantedIds);
-        if (passages.Length == 0)
+        GoldPassage[] passages;
+        if (Environment.GetEnvironmentVariable(InputFileEnvVar) is { Length: > 0 } inputFile)
         {
-            _output.WriteLine("No matching passages found in linguistic-gold.json for ids: " + string.Join(", ", wantedIds));
-            return;
+            if (!File.Exists(inputFile.Trim()))
+            {
+                _output.WriteLine($"{InputFileEnvVar} points at a missing file: {inputFile}");
+                return;
+            }
+            passages = new[]
+            {
+                new GoldPassage
+                {
+                    Id = Path.GetFileNameWithoutExtension(inputFile.Trim()),
+                    Input = TextNormalization.NormalizeTextForStorage(File.ReadAllText(inputFile.Trim())).Trim()
+                }
+            };
+        }
+        else
+        {
+            var wantedIds = Environment.GetEnvironmentVariable(CaseIdsEnvVar) is { Length: > 0 } raw
+                ? raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                : DefaultCaseIds;
+            passages = LoadPassages(wantedIds);
+            if (passages.Length == 0)
+            {
+                _output.WriteLine("No matching passages found in linguistic-gold.json for ids: " + string.Join(", ", wantedIds));
+                return;
+            }
         }
 
         var router = CreateRouter(provider, model);
@@ -251,6 +284,23 @@ public class LineEditCloudSpotCheckTests
 
     private static readonly PromptFactory _promptFactory = new();
 
+    /// <summary>
+    /// The LineEdit tuning this harness installs, restating appsettings <c>Ai:ProviderSettings</c>
+    /// <c>Ollama_LineEdit</c> / <c>OpenRouter_LineEdit</c> (the harness cannot read the file at run time).
+    /// HarnessConfigParityTests resolves both sides and pins them equal, so a tuning edit to either side that
+    /// skips the other goes red instead of silently measuring a configuration nothing ships. The flat
+    /// <c>OpenRouter</c> entry is kept so a non-LineEdit call through this router does not fall to the bare
+    /// 2048 output default. Without <c>Ollama_LineEdit</c> the local side would run NumPredict 2048 +
+    /// RepeatPenalty 1.1, i.e. not what production sends.
+    /// </summary>
+    internal static Dictionary<string, ProviderTuningOptions> BuildHarnessProviderSettings() =>
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["OpenRouter"] = new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 5120 },
+            ["OpenRouter_LineEdit"] = new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 5120, NumCtx = 4096 },
+            ["Ollama_LineEdit"] = new ProviderTuningOptions { Temperature = 0.2, NumPredict = 5120, RepeatPenalty = 1.3 }
+        };
+
     private static IAiRouter CreateRouter(string provider, string model)
     {
         // Route the LineEdit task to provider/model. DefaultModel == model so OllamaProvider's
@@ -271,9 +321,9 @@ public class LineEditCloudSpotCheckTests
         var services = new ServiceCollection();
         services.AddSingleton<IConfiguration>(config);
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
-        // Generous timeouts: cloud big models and CPU-spilled local models can be slow on a single call.
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+        // Generous timeouts (10 min): registers Ollama, the unnamed client AND the four named cloud clients
+        // (AiProvider:<name>) that the cloud providers actually resolve since c19; see HarnessHttpClients.
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
         services.Configure<AiOptions>(opts =>
         {
             opts.DefaultProvider = provider;
@@ -282,12 +332,7 @@ public class LineEditCloudSpotCheckTests
             {
                 ["LineEdit"] = new FeatureModelOptions { Provider = provider, Model = model }
             };
-            // Match production OpenRouter tuning (appsettings Ai:ProviderSettings:OpenRouter MaxTokens=5120)
-            // so the JSON line-edit output is not truncated by the provider's bare 2048 fallback.
-            opts.ProviderSettings = new Dictionary<string, ProviderTuningOptions>(StringComparer.OrdinalIgnoreCase)
-            {
-                ["OpenRouter"] = new ProviderTuningOptions { Temperature = 0.2, MaxTokens = 5120 }
-            };
+            opts.ProviderSettings = BuildHarnessProviderSettings();
         });
         services.AddSingleton<PromptFactory>();
         services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(sp =>

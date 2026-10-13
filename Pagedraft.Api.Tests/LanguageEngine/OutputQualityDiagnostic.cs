@@ -2723,8 +2723,7 @@ public class OutputQualityDiagnostic
         var services = new ServiceCollection();
         services.AddSingleton(config);
         services.AddLogging(b => b.AddProvider(NullLoggerProvider.Instance));
-        services.AddHttpClient("Ollama", c => c.Timeout = TimeSpan.FromMinutes(10));
-        services.AddHttpClient(string.Empty, c => c.Timeout = TimeSpan.FromMinutes(10));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
         services.Configure<AiOptions>(config.GetSection("Ai"));
         services.AddSingleton<PromptFactory>();
         services.AddSingleton<IReadOnlyDictionary<string, IAiAnalysisProvider>>(sp =>

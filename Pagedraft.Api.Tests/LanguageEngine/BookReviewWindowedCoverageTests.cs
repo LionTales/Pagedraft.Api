@@ -430,8 +430,7 @@ public class BookReviewWindowedCoverageTests
 
         // Long timeout: a windowed review over a 48-chapter book issues several window + reduce calls, each of
         // which can CPU-spill on the 8 GB dev GPU. 30 minutes total headroom for the harness ONLY.
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(30));
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(30));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(30));
 
         services.Configure<AiOptions>(opts =>
         {

@@ -117,8 +117,9 @@ public class ProofreadQualityTests
 
     // Default bake-off shortlist: models actually pulled on the RTX 4070 laptop (~8 GB VRAM).
     // gemma4:12b (see ProofreadModel above) is the production default. DictaLM-3.0-12B
-    // (hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest) is no longer the Proofread model but
-    // is still the LineEdit model, so it stays in the shortlist as a comparator. DictaLM tag is :latest
+    // (hf.co/dicta-il/DictaLM-3.0-Nemotron-12B-Instruct-GGUF:latest) is no longer the Proofread model
+    // (since 2026-07-29) nor the LineEdit model (since 2026-10-13); it stays in the shortlist as the
+    // comparator it was measured against when it was the incumbent for both. DictaLM tag is :latest
     // (the locally pulled tag). 24B models are intentionally EXCLUDED because they won't fit in 8 GB VRAM.
     private static readonly string[] DefaultBakeoffModels =
     {
@@ -1338,8 +1339,8 @@ public class ProofreadQualityTests
     /// the class defaults (4096 / 1.1) that the un-wired harness already used, and Temperature 0.2
     /// equals the class default too. num_predict is a STOP CONDITION, so raising it can only change
     /// a generation that would otherwise have been truncated at 2048 tokens. It matters for exactly
-    /// one case class, which is why production fidelity was chosen: a repetition loop (the known
-    /// Dicta failure mode behind Ollama_LineEdit's RepeatPenalty 1.3) runs to 4096 in production, so
+    /// one case class, which is why production fidelity was chosen: a repetition loop (the
+    /// DictaLM-3.0 failure mode that first set Ollama_LineEdit's RepeatPenalty 1.3) runs to 4096 in production, so
     /// measuring at 2048 would UNDER-report that instability.
     /// </summary>
     internal static Dictionary<string, ProviderTuningOptions> BuildHarnessProviderSettings(string provider)
@@ -1406,11 +1407,7 @@ public class ProofreadQualityTests
         // The default 2-minute timeout caused cold-start/CPU-spill models (DictaLM-12B, qwen2.5:14b) to hit
         // HttpClient.Timeout on a single slow case and fail the whole model row. Raise to 10 minutes
         // for the test harness ONLY (production wiring in Program.cs is untouched).
-        services.AddHttpClient("Ollama", client => client.Timeout = TimeSpan.FromMinutes(10));
-        // The cloud providers (Anthropic, OpenAI) resolve their HttpClient via the DEFAULT, unnamed
-        // _httpFactory.CreateClient() — register it with the same generous timeout so a slow cloud
-        // call doesn't hit the 2-minute default.
-        services.AddHttpClient(string.Empty, client => client.Timeout = TimeSpan.FromMinutes(10));
+        services.AddHarnessHttpClients(TimeSpan.FromMinutes(10));
         services.Configure<AiOptions>(opts =>
         {
             opts.DefaultProvider = provider;
