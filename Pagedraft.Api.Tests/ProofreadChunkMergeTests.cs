@@ -235,6 +235,69 @@ public class ProofreadChunkMergeTests
         Assert.Empty(run.NewSuggestions);
     }
 
+    // ── paragraph JOIN and SPLIT are re-spacing too (be-c10, the decision is in RespacedRunBlocks' xmldoc) ───────
+
+    /// <summary>
+    /// What the model's version would have surfaced had the merge KEPT it: the chunk diffed against the raw output on
+    /// the production suggestion axis. That axis (<c>TextNormalization.NormalizeTextForAnalysis</c>, mirrored by the
+    /// client's <c>proofreadDiff</c>) maps every CR and LF to a space, so a break-for-one-space swap is no diff at all
+    /// and a break-for-a-wider-run swap is a whitespace-only row the client hides and the annotator skips.
+    /// </summary>
+    private static List<AnalysisSuggestion> SuggestionsHadTheMergeKeptIt(Run run) =>
+        Diff.ComputeProofreadSuggestions(run.Texts.Single(), run.Outputs.Single());
+
+    [Fact]
+    public void ModelJoiningTwoParagraphs_IsRevertedToTheSourceBreak()
+    {
+        // A line break the model turned into a space: two paragraphs became one. Reverted, the source's break stays.
+        var source = "הוא הלך הביתה.\nהיא נשארה בחוץ עוד קצת.";
+        var run = Chunked(source, 100, t => t.Replace('\n', ' '));
+        Assert.Equal(source, run.Texts.Single()); // the chunk is the source here, so the output differs by the join only
+        Assert.Equal("הוא הלך הביתה. היא נשארה בחוץ עוד קצת.", run.Outputs.Single());
+
+        Assert.True(run.Merged.AlignedToSource);
+        Assert.Equal(source, run.Merged.Text);
+        Assert.Empty(run.NewSuggestions);
+        // Kept, it would have been NO suggestion: an invisible paragraph-structure change riding in ResultText.
+        Assert.Empty(SuggestionsHadTheMergeKeptIt(run));
+    }
+
+    [Theory]
+    [InlineData("הוא הלך הביתה. היא נשארה בחוץ עוד קצת.", ". ", false)]   // a single space
+    [InlineData("הוא הלך הביתה.  היא נשארה בחוץ עוד קצת.", ".  ", true)] // a double space after a full stop
+    public void ModelSplittingAParagraph_IsRevertedToTheSourceSpace(string source, string splitAt, bool keptWouldSurfaceARow)
+    {
+        // A space the model turned into a line break: one paragraph became two. Reverted, the source's space stays.
+        var run = Chunked(source, 100, t => t.Replace(splitAt, ".\n"));
+        Assert.Equal(source, run.Texts.Single());
+        Assert.Equal("הוא הלך הביתה.\nהיא נשארה בחוץ עוד קצת.", run.Outputs.Single());
+
+        Assert.True(run.Merged.AlignedToSource);
+        Assert.Equal(source, run.Merged.Text);
+        Assert.Empty(run.NewSuggestions);
+
+        // Kept, it would have been nothing (single space) or a whitespace-only "  " -> " " row every surface hides.
+        var kept = SuggestionsHadTheMergeKeptIt(run);
+        Assert.Equal(keptWouldSurfaceARow, kept.Count > 0);
+        Assert.All(kept, s => Assert.True(IsWhitespaceOnly(s), $"'{s.OriginalText}' -> '{s.SuggestedText}'"));
+    }
+
+    [Fact]
+    public void JoinFusedWithARealEdit_KeepsTheEdit()
+    {
+        // The model joins two paragraphs AND adds a comma at the join. Only a block that is whitespace on BOTH sides is
+        // re-spacing; this one inserts a comma, so it is an edit, widened to the whole run, and the join rides with it.
+        // The author sees the comma only (the suggestion axis cannot see the break), and accepting it adds the comma.
+        var source = "הוא הלך הביתה\nהיא נשארה בחוץ עוד קצת.";
+        var run = Chunked(source, 100, t => t.Replace("הביתה\n", "הביתה, "));
+
+        Assert.True(run.Merged.AlignedToSource);
+        Assert.Equal("הוא הלך הביתה, היא נשארה בחוץ עוד קצת.", run.Merged.Text);
+        var s = Assert.Single(run.NewSuggestions);
+        Assert.Equal("הביתה", s.OriginalText);
+        Assert.Equal("הביתה,", s.SuggestedText);
+    }
+
     [Fact]
     public void EditReachingIntoABlankLineRun_ReplacesTheWholeSourceRun()
     {
@@ -326,7 +389,12 @@ public class ProofreadChunkMergeTests
 
     // ── wiring: the production chunked path uses the merge ───────────────────────────────────────────────────────
 
-    private static async Task<AnalysisResult> RunChunkedProofreadAsync(string inputText, Func<string, string> model)
+    /// <summary>
+    /// Drives the PRODUCTION <c>RunProofreadChunkedAsync</c> (chunker, per-chunk sanitizer and fallback heuristics,
+    /// merge, diff) with <paramref name="model"/> standing in for the router. Shared with
+    /// <see cref="ProofreadChunkMergeRealProseTests"/>.
+    /// </summary>
+    internal static async Task<AnalysisResult> RunChunkedProofreadAsync(string inputText, Func<string, string> model, int targetWords = 3)
     {
         var options = new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options;
         await using var db = new AppDbContext(options);
@@ -350,7 +418,7 @@ public class ProofreadChunkMergeTests
         return await (Task<AnalysisResult>)method!.Invoke(svc, new object?[]
         {
             inputText, null, null, null, AnalysisScope.Chapter, Guid.NewGuid(), null, "he",
-            3, 1, AiTier.Fast, Guid.NewGuid(), context, CancellationToken.None,
+            targetWords, 1, AiTier.Fast, Guid.NewGuid(), context, CancellationToken.None,
         })!;
     }
 

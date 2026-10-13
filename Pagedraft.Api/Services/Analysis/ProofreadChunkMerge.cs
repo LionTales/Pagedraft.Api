@@ -22,8 +22,8 @@ namespace Pagedraft.Api.Services.Analysis;
 /// edited spans carry the model's text. An edit that touches one of the chunker's whitespace runs replaces the
 /// source's whole run (the model saw the canonical run, so its version of that run is the one to keep); a pure
 /// insertion BESIDE a run leaves the run alone. A change that only RE-SPACES a run (whitespace for whitespace, the
-/// words still apart: what <c>SanitizeResponse</c> does to every reply, NO-BREAK SPACE to space, 3+ line breaks to
-/// 2) is not an edit, so the source's run stays. The text between chunks, before the first and after the last, is
+/// words still apart, line breaks included: see <see cref="RespacedRunBlocks"/>) is not an edit, so the source's run
+/// stays. The text between chunks, before the first and after the last, is
 /// the source's own. An identity model therefore reproduces the source byte for byte, with or without the
 /// sanitizer.</para>
 ///
@@ -225,12 +225,30 @@ internal static class ProofreadChunkMerge
 
     /// <summary>
     /// The diff blocks that only RE-SPACE a whitespace run of the chunk: every block touching the run swaps
-    /// whitespace for whitespace, and the run is still there afterwards (the words on either side stay apart). Those
-    /// are dropped, so the source's own run is kept. <c>SanitizeResponse</c> makes exactly these changes to every
-    /// response (each horizontal run, NO-BREAK SPACE included, becomes one space; three or more line breaks become
-    /// two), and a CR, a NO-BREAK SPACE or a double space the model normalizes is no proofreading edit an author can
-    /// see once the client trims it. A run the output DELETES (two words joined) is kept as an edit, and so is a
-    /// space inserted where the chunk had none (a word split).
+    /// whitespace for whitespace (<see cref="char.IsWhiteSpace(char)"/> on both sides, so a line break counts like
+    /// any other whitespace), and the run is still there afterwards (the words on either side stay apart). Those are
+    /// dropped, so the source's own run is kept. A block that carries any other character is an edit, whole.
+    ///
+    /// <para>WHAT THAT COVERS, precisely. (1) Everything <c>UnifiedAnalysisService.SanitizeResponse</c> does to
+    /// every reply's whitespace: each run of CR/LF becomes ONE LF (so a blank line collapses to a plain break), each
+    /// horizontal run (NO-BREAK SPACE, tab, double space) becomes one space, and the edges are trimmed. (2) The
+    /// same changes made by the model itself. (3) A paragraph JOIN: a line-break run turned into spaces. (4) A
+    /// paragraph SPLIT: a space run turned into line breaks. Kept as edits: a run the output DELETES (two words
+    /// joined), a space inserted where the chunk had none (a word split), and a join or split that arrives in the
+    /// same diff block as a real edit (<c>"הביתה\n" -&gt; "הביתה, "</c>: the comma is the edit, the join rides with
+    /// it).</para>
+    ///
+    /// <para>WHY JOIN AND SPLIT ARE REVERTED, not surfaced (be-c10, decided 2026-10-13). A proofreading pass does not
+    /// own paragraph structure, and every surface that could show the change is blind to it: the suggestion axis
+    /// (<c>TextNormalization.NormalizeTextForAnalysis</c> server-side, <c>proofreadDiff</c> client-side, which is how
+    /// a ResultText is ever read) maps each CR and LF to a space, so a break-for-one-space swap diffs to NO
+    /// suggestion, and a break for a wider run diffs to a whitespace-only row that the chapter view hides and the
+    /// annotated DOCX skips (<c>ProofreadWhitespace</c>); the annotator could not place a cross-paragraph edit as
+    /// a tracked change anyway. Keeping it would therefore change the stored ResultText's paragraphs with nothing
+    /// the author can see, accept or reject. Pinned by <c>ProofreadChunkMergeTests</c>
+    /// (<c>ModelJoiningTwoParagraphs_IsRevertedToTheSourceBreak</c>,
+    /// <c>ModelSplittingAParagraph_IsRevertedToTheSourceSpace</c>, <c>JoinFusedWithARealEdit_KeepsTheEdit</c>).
+    /// Surfacing it would first need a suggestion axis that keeps line breaks, on both server and client.</para>
     /// </summary>
     private static HashSet<DiffPlex.Model.DiffBlock> RespacedRunBlocks(
         string chunk, string output, IReadOnlyList<DiffPlex.Model.DiffBlock> blocks)
