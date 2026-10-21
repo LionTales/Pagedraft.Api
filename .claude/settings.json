@@ -1,0 +1,27 @@
+{
+  "extraKnownMarketplaces": {
+    "liontales": {
+      "source": {
+        "source": "github",
+        "repo": "LionTales/ai-knowledge-kit"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "ai-knowledge-kit@liontales": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ \"$CLAUDE_CODE_REMOTE\" = \"true\" ]; then k=\"$CLAUDE_PROJECT_DIR/../ai-knowledge-kit\"; if [ -f \"$k/MANIFEST.md\" ]; then echo \"ai-knowledge-kit is checked out at $(cd \"$k\" && pwd); start at its MANIFEST.md or skills/kit/SKILL.md\"; else echo \"ai-knowledge-kit is not checked out beside this repo; attach LionTales/ai-knowledge-kit to this session before relying on its conventions\"; fi; fi",
+            "timeout": 5,
+            "statusMessage": "Locating ai-knowledge-kit"
+          }
+        ]
+      }
+    ]
+  }
+}

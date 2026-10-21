@@ -1086,7 +1086,7 @@ so it never reaches the model.
 | 12 | intentional phrase (Title-Case title) | `Brave New World` | 3 / 0 | classifier-gated (LEAVE) | preserved | preserved |
 | 13 | intentional phrase (lowercase code-switch) | `carpe diem` | 2 / 2 | reaches model (2 run) | FP | FP |
 | 14 | url | `example.com` | 2 / 0 | classifier-gated (LEAVE) | preserved | preserved |
-| 15 | email | `info@publisher.com` | 3 / 0 | classifier-gated (LEAVE) | preserved | preserved |
+| 15 | email | `user@example.com` | 3 / 0 | classifier-gated (LEAVE) | preserved | preserved |
 | 16 | hebrew-in-english (name) | `שרה` | 1 / 1 | reaches model (1 run) | preserved | preserved |
 | 17 | hebrew-in-english (name) | `דוד` | 1 / 1 | reaches model (1 run) | preserved | preserved |
 | 18 | hebrew-in-english (entity) | `ירושלים` | 1 / 0 | classifier-gated (LEAVE) | preserved | preserved |
@@ -1306,7 +1306,7 @@ the e1 name-particle rule is still exercised rather than masked.
 All 18 legitimate cases were preserved by the DETERMINISTIC gate with ZERO model calls: `van` / `da` / `de`
 by the e1 name-particle rule (3 runs / 0 repair), `carpe diem` by the e1 quote rule (2 / 0),
 Kafka / Paris / Orwell / Kindle / Photoshop / Google / NASA / PDF / "Brave New World" by the entity /
-Title-Case / allowlist gates, `example.com` / `info@publisher.com` by the URL / email gates, and the
+Title-Case / allowlist gates, `example.com` / `user@example.com` by the URL / email gates, and the
 Hebrew-in-English names שרה / דוד / ירושלים by the supplied book-entity set. Because gating is pure and
 deterministic, **preservation is tier-independent** - LOCAL is 100% precisely because those four
 previously-failing tokens no longer reach the model, which retires the original d6 HALT cause (LOCAL 78% was

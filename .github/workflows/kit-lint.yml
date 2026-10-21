@@ -1,0 +1,92 @@
+# kit-lint: the ai-knowledge-kit budgets and portability checks, run on every PR.
+#
+# Copied from ai-knowledge-kit/tools/templates/kit-lint.yml. kit-lint's `ci` check warns when this
+# file drifts from the template; the placeholders below ({{DEFAULT_BRANCH}}, {{MAX_LESSONS_CHARS}},
+# {{DOCS_RULE_GLOBS}}) are the only lines a repo may change. Comment lines are not compared.
+#
+# A separate workflow on purpose: a repo's main build workflow usually ignores **.md and .claude/**,
+# so a change that only touches CLAUDE.md, a skill or a rule would never reach it.
+#
+# CLAUDE.md is a RATCHET, not a fixed line in the sand. Its ceiling for a PR is the larger of the
+# kit's 60,000-character target and its size on the base branch, so the check fails the moment a
+# change makes CLAUDE.md bigger than it already is, and never fails just because the file is still
+# over target. Every other kit-lint failure (machine paths, identifiers, skill frontmatter, mirror
+# drift) fails as it is. Do not raise the ceiling to make a red run green: shrink the file.
+#
+# The kit repository is private; KIT_DEPLOY_KEY is a read-only deploy key on
+# LionTales/ai-knowledge-kit, used for nothing else.
+#
+# Placeholders: {{DEFAULT_BRANCH}} is the repo's default branch. {{MAX_LESSONS_CHARS}} is the
+# lesson-note ratchet; drop the `--max-lessons-chars` flag when the repo has no knowledge/lessons/.
+# {{DOCS_RULE_GLOBS}} is an optional paths filter (a YAML flow list); drop that line to run on every PR.
+
+name: kit-lint
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kit-lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          fetch-depth: 0
+
+      - name: Check out ai-knowledge-kit
+        uses: actions/checkout@v4
+        with:
+          repository: LionTales/ai-knowledge-kit
+          ssh-key: ${{ secrets.KIT_DEPLOY_KEY }}
+          path: ai-knowledge-kit
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML (kit-lint parses skill frontmatter with it)
+        run: pip install pyyaml
+
+      - name: Run kit-lint (fails on any finding, and on CLAUDE.md growth)
+        working-directory: repo
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref || 'master' }}
+        run: |
+          set -euo pipefail
+          # The base is the PR's own base commit (a manual run uses the branch tip). A base that cannot
+          # be resolved FAILS the job: treating it as an empty CLAUDE.md would drop the ceiling to the
+          # 60,000 target and fail every PR with what looks like a budget miss.
+          if [ -n "${BASE_SHA:-}" ]; then
+            base="${BASE_SHA}"
+            git cat-file -e "${base}^{commit}" 2>/dev/null || git fetch --no-tags origin "${base}" || true
+          else
+            base="origin/${BASE_REF}"
+            git rev-parse --verify --quiet "${base}^{commit}" >/dev/null || git fetch --no-tags origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" || true
+          fi
+          if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+            echo "::error::Cannot resolve the base commit ${base}; refusing to guess the CLAUDE.md ceiling."
+            exit 1
+          fi
+          base_chars=0
+          if git cat-file -e "${base}:CLAUDE.md" 2>/dev/null; then
+            git show "${base}:CLAUDE.md" > "${RUNNER_TEMP}/base-claude.md"
+            base_chars=$(python -c "import sys; print(len(open(sys.argv[1], encoding='utf-8').read()))" "${RUNNER_TEMP}/base-claude.md")
+          else
+            echo "No CLAUDE.md on the base ${base}; the ceiling is the 60,000 target."
+          fi
+          ceiling=$(( base_chars > 60000 ? base_chars : 60000 ))
+          echo "CLAUDE.md on ${BASE_REF} (${base}): ${base_chars} characters. Ceiling for this change: ${ceiling}."
+          # --max-lessons-chars is the lesson-note ratchet: the active knowledge/lessons bodies measured
+          # at the last triage, rounded up to the next 5,000. Raise it only in a commit that says why.
+          python ../ai-knowledge-kit/tools/kit-lint.py --repo . --max-chars "${ceiling}"

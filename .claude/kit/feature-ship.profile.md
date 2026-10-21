@@ -10,7 +10,7 @@ This repo is the PageDraft server side. Its contract partner is `../pagedraft-cl
 
 - Repo: this checkout, remote `LionTales/Pagedraft.Api`, PR base `master` (`master` is the integration branch; `main` is a stub: trust the remote HEAD). The PageDraft root `..` is not a git repo; the superseded legacy copy `../Pagedraft.Api` is untracked and never edited.
 - Branch: one FRESH branch per PR off `origin/master`, slug `api-<feature>` (the client's parallel slug is `<feature>`). Branch reuse was retired 2026-06-18.
-- Plans: the workspace-level `../.cursor/plans/`; reviews in the primary repo's `.cursor/reviews/`. `.cursor/` is gitignored here, so artifacts are never staged.
+- Plans: the workspace-level `../.cursor/plans/`; reviews in the primary repo's top-level `docs/reviews/`, committed with the work. `.cursor/` is gitignored here, so plan artifacts are never staged.
 - Tests: `dotnet build Pagedraft.Api/Pagedraft.Api.csproj` and `dotnet test Pagedraft.Api.Tests/Pagedraft.Api.Tests.csproj --filter "FullyQualifiedName~<Class>"`, with an OR group parenthesised before the GPU exclusion `&FullyQualifiedName!~Pagedraft.Api.Tests.LanguageEngine`. CI: job `Backend tests` (restore, build `-c Release`, test) in `.github/workflows/ci.yml`. Discover the checks per PR with `gh pr checks <pr>`.
 - Commit-message style: plain imperative, no conventional-commit prefix. No ticket convention is recorded for PageDraft: leave a tracker status alone.
 
