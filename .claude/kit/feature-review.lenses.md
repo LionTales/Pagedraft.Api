@@ -30,4 +30,5 @@ This repo is the PageDraft server side (.NET 8 Web API). Its contract partner is
 
 - Repo files to read, by the area the diff touches: `Pagedraft.Api/Services`, `Pagedraft.Api.Tests`, `docs/`.
 - Contract reference lives in the workspace: `../docs/PAGEDRAFT_DESIGN.md` (API contracts, DTOs, SignalR events, config).
+- The PageDraft traps live in the workspace-root `../../CLAUDE.md`: section 4 (Syncfusion SFDT round trip, RTL/Hebrew alignment, the new-persisted-setting checklist) and section 5 (RULE 0: re-produce the artifact and inspect it the way the user sees it). Read the section the diff touches. An AI change closes on a live model run (Phase 4c), not on fixtures alone.
 - No FormatBookWebApi `code-review-lessons` skill applies here. Use the kit's cross-stack review lenses and the kit's engineering lessons and validation discipline; PageDraft's defining bug class is the AI/LLM lens, not the formatting-pipeline or billing lenses.

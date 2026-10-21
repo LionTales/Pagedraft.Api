@@ -16,7 +16,7 @@ This repo is the PageDraft server side. Its contract partner is `../pagedraft-cl
 
 ## Commit batches
 
-- Generated-artifact rule: an EF migration ships in ONE commit with its `*.Designer.cs` AND `Migrations/AppDbContextModelSnapshot.cs`.
+- Generated-artifact rule: an EF migration ships in ONE commit with its `*.Designer.cs` AND `Migrations/AppDbContextModelSnapshot.cs`. Before batching, confirm both are present and consistent, then `dotnet build` and the relevant `dotnet test --filter` to confirm no model drift (this is the repo's whole stale-fixture preflight).
 - Group the rest by concern within the single PR so that each commit builds and its tests pass.
 - Ship order when the feature spans both repos: this server PR first (it is the contract source of truth), the client PR second with a cross-link in its body.
 - The FormatBookWebApi baseline-bucket preflight does not apply: PageDraft has no rendered-output baseline fixtures.
