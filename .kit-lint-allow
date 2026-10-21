@@ -1,0 +1,3 @@
+# kit-lint allowlist: one regex per line, matched against the flagged value (an email, a host, an IP).
+# ops@example\.org
+# ^203\.0\.113\.
