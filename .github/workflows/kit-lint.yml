@@ -89,4 +89,8 @@ jobs:
           echo "CLAUDE.md on ${BASE_REF} (${base}): ${base_chars} characters. Ceiling for this change: ${ceiling}."
           # --max-lessons-chars is the lesson-note ratchet: the active knowledge/lessons bodies measured
           # at the last triage, rounded up to the next 5,000. Raise it only in a commit that says why.
-          python ../ai-knowledge-kit/tools/kit-lint.py --repo . --max-chars "${ceiling}"
+          # --max-customer-lines is the customer-content ratchet: the base commit's count of Hebrew-script lines in
+          # docs/reviews and .cursor/reviews (plans are info only), so a PR may remove such lines and never add one.
+          base_customer=$(python ../ai-knowledge-kit/tools/kit-lint.py --repo . --customer-content-at "${base}")
+          echo "Customer-bearing report lines on ${BASE_REF} (${base}): ${base_customer}."
+          python ../ai-knowledge-kit/tools/kit-lint.py --repo . --max-chars "${ceiling}" --max-customer-lines "${base_customer}"
