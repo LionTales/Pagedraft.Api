@@ -14,7 +14,12 @@
 # drift) fails as it is. Do not raise the ceiling to make a red run green: shrink the file.
 #
 # The kit repository is private; KIT_DEPLOY_KEY is a read-only deploy key on
-# LionTales/ai-knowledge-kit, used for nothing else.
+# LionTales/ai-knowledge-kit, used for nothing else, one per repo. The kit's
+# tools/kit-deploy-key.py creates the key and this secret. The first step FAILS the job when the
+# secret is empty (it never skips: a kit-lint that did not run must not read as green), and says
+# how to fix it; without it the kit checkout fails with a bare "Repository not found". The step
+# reads only whether the secret is empty (`secrets` is not available in a step's `if:`), so the
+# key itself never enters that step's environment.
 #
 # Placeholders: {{DEFAULT_BRANCH}} is the repo's default branch. {{MAX_LESSONS_CHARS}} is the
 # lesson-note ratchet; drop the `--max-lessons-chars` flag when the repo has no knowledge/lessons/.
@@ -36,6 +41,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Require the KIT_DEPLOY_KEY secret (a missing key fails the job, it never skips)
+        env:
+          HAS_KIT_DEPLOY_KEY: ${{ secrets.KIT_DEPLOY_KEY != '' }}
+        run: |
+          if [ "${HAS_KIT_DEPLOY_KEY}" != "true" ]; then
+            echo "::error::KIT_DEPLOY_KEY is not set, so the private kit cannot be checked out. Run: py -3 <kit>/tools/kit-deploy-key.py --repo ${GITHUB_REPOSITORY} (<kit> is the ai-knowledge-kit checkout), then re-run this job. A pull request from a fork or from Dependabot does not receive repository secrets."
+            exit 1
+          fi
+
       - name: Check out this repository
         uses: actions/checkout@v4
         with:
@@ -89,4 +103,8 @@ jobs:
           echo "CLAUDE.md on ${BASE_REF} (${base}): ${base_chars} characters. Ceiling for this change: ${ceiling}."
           # --max-lessons-chars is the lesson-note ratchet: the active knowledge/lessons bodies measured
           # at the last triage, rounded up to the next 5,000. Raise it only in a commit that says why.
-          python ../ai-knowledge-kit/tools/kit-lint.py --repo . --max-chars "${ceiling}"
+          # --max-customer-lines is the customer-content ratchet: the base commit's count of Hebrew-script lines in
+          # docs/reviews and .cursor/reviews (plans are info only), so a PR may remove such lines and never add one.
+          base_customer=$(python ../ai-knowledge-kit/tools/kit-lint.py --repo . --customer-content-at "${base}")
+          echo "Customer-bearing report lines on ${BASE_REF} (${base}): ${base_customer}."
+          python ../ai-knowledge-kit/tools/kit-lint.py --repo . --max-chars "${ceiling}" --max-customer-lines "${base_customer}"
